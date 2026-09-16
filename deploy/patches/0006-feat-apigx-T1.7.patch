@@ -1,0 +1,427 @@
+From 89ee3987d78d993f5a85eeb5e998c41beddaf3d6 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 21:04:29 +0800
+Subject: [PATCH 6/6] =?UTF-8?q?feat(apigx):=20=E5=AE=B9=E9=87=8F=E6=8E=A7?=
+ =?UTF-8?q?=E5=88=B6=E6=8E=A5=E5=85=A5=E8=AF=B7=E6=B1=82=E8=B7=AF=E5=BE=84?=
+ =?UTF-8?q?=EF=BC=88T1.7=20=E7=AC=AC=E4=BA=8C=E9=83=A8=E5=88=86=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- middleware/distributor.go: 在 SetupContextForSelectedChannel 之后、c.Next() 之前
+  接入容量钩子(取租约 + defer 释放), 满载 429+Retry-After, 账本不可用 503
+- apigx/relayhook/capacity_hook.go: Acquire/Lease.Release/长流续租协程/错误码映射
+- apigx/relayhook/capacity_hook_test.go: 6 个用例
+默认关闭(APIGX_CAPACITY_ENABLED), 关闭时既有链路行为完全不变。
+
+验证: relayhook 6/6 + capacity 8/8(真实 Redis); 运行时 A/B —— 关闭 200x3 上游 3 次;
+上限=1 并发 3 -> 200x1 + 429x2 + 上游仅 1 次 + 带 Retry-After; 打完后 Redis 零残留(无泄漏)。
+---
+ apigx/relayhook/capacity_hook.go      | 176 +++++++++++++++++++++++++
+ apigx/relayhook/capacity_hook_test.go | 178 ++++++++++++++++++++++++++
+ middleware/distributor.go             |  14 ++
+ 3 files changed, 368 insertions(+)
+ create mode 100644 apigx/relayhook/capacity_hook.go
+ create mode 100644 apigx/relayhook/capacity_hook_test.go
+
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+new file mode 100644
+index 0000000..4e47a21
+--- /dev/null
++++ b/apigx/relayhook/capacity_hook.go
+@@ -0,0 +1,176 @@
++// Package relayhook 承载 APIGX 与 relay 链路的接线点。
++//
++// 本文件是 T1.7 第二部分：把 apigx/capacity 的容量账本接进请求生命周期。
++//
++// **默认关闭**（`APIGX_CAPACITY_ENABLED` 未设置时为 false），因此不改变既有链路行为；
++// 打开后才对渠道并发做预留与归还。这样做是为了在 `apigx_capacity_policies`（T1.3 的
++// 领域表）接管配置之前，能先把接线本身在真实请求路径上验证清楚。
++package relayhook
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/http"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++)
++
++var (
++	capacityEnabled atomic.Bool
++	// channelLimit 是渠道并发上限。0 表示**未配置**。
++	//
++	// 按 CODE_STYLE 第 11 条，未配置不得解释为「不限」；但在配置体系接好之前，
++	// 未配置只能表示「本开关不施加约束」——因此 0 时直接跳过，并在文档中登记这一过渡行为。
++	channelLimit atomic.Int64
++	// leaseTTL 是容量租约时长，长流由后台协程续租。
++	//
++	// 注意粒度：TTL 以**秒**为单位下发（`ttl/time.Second`），因此小于 1 秒的值会被截断为 0
++	// 并被 Reserve 回退为默认值；配置时必须用整秒，且要明显大于续租间隔（ttl/3）。
++	leaseTTL = 90 * time.Second
++)
++
++func init() {
++	capacityEnabled.Store(common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false))
++	channelLimit.Store(int64(common.GetEnvOrDefault("APIGX_CHANNEL_CONCURRENCY_LIMIT", 0)))
++}
++
++// Configure 设置运行期开关与渠道并发上限（供测试与未来的后台配置使用）。
++func Configure(enabled bool, limit int64) {
++	capacityEnabled.Store(enabled)
++	channelLimit.Store(limit)
++}
++
++// Lease 表示一次请求持有的容量租约。
++type Lease struct {
++	ctrl *capacity.Controller
++	id   string
++	ttl  time.Duration
++	stop chan struct{}
++	once sync.Once
++}
++
++// Acquire 在渠道选定后为其获取容量租约。
++//
++// 参数 channelID 用 int 以匹配底座 `model.Channel.Id` 的类型。
++//
++// 返回 (nil, true)  —— 本开关未启用、渠道无上限或渠道未知：不施加约束；
++// 返回 (nil, false) —— 容量不足或账本不可用：**已经写出错误响应**，调用方必须直接返回；
++// 返回 (l, true)    —— 已持有租约，调用方必须在请求结束时调用 l.Release()。
++func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
++	if !capacityEnabled.Load() || channelID <= 0 {
++		return nil, true
++	}
++	limit := channelLimit.Load()
++	if limit <= 0 {
++		// 未配置渠道并发上限：不施加约束（过渡行为，见包注释）
++		return nil, true
++	}
++
++	ctrl := capacity.New(common.RDB)
++	id := uuid.NewString()
++	dims := []capacity.Dimension{{
++		Key:    capacity.ChannelConcurrency(int64(channelID)),
++		Limit:  limit,
++		Amount: 1,
++	}}
++
++	ctx := context.Background()
++	if c != nil && c.Request != nil {
++		ctx = c.Request.Context()
++	}
++	if err := ctrl.Reserve(ctx, id, dims, leaseTTL); err != nil {
++		abortForError(c, err)
++		return nil, false
++	}
++
++	lease := &Lease{ctrl: ctrl, id: id, ttl: leaseTTL, stop: make(chan struct{})}
++	lease.startRenew()
++	return lease, true
++}
++
++// Release 归还租约并停止续租。幂等：重复调用只释放一次。
++func (l *Lease) Release() {
++	if l == nil {
++		return
++	}
++	l.once.Do(func() {
++		close(l.stop)
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		if err := l.ctrl.Release(ctx, l.id); err != nil {
++			common.SysLog("apigx capacity: release failed: " + err.Error())
++		}
++	})
++}
++
++// startRenew 为长流续租。
++//
++// 计划书 §9.2：同步与流式调用要持有槽位到实际结束，长流必须续租；
++// 续租失败说明租约已被回收，此时**不能假装仍持有**，必须记录并停止。
++func (l *Lease) startRenew() {
++	interval := l.ttl / 3
++	if interval < time.Second {
++		interval = time.Second
++	}
++	go func() {
++		ticker := time.NewTicker(interval)
++		defer ticker.Stop()
++		for {
++			select {
++			case <-l.stop:
++				return
++			case <-ticker.C:
++				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++				ok, err := l.ctrl.Renew(ctx, l.id, l.ttl)
++				cancel()
++				if err != nil {
++					common.SysLog("apigx capacity: renew failed: " + err.Error())
++					return
++				}
++				if !ok {
++					common.SysLog(fmt.Sprintf("apigx capacity: lease %s expired before completion", l.id))
++					return
++				}
++			}
++		}
++	}()
++}
++
++// abortForError 把容量错误映射为对外响应。
++//
++// 对外只给状态码与脱敏信息；内部归因（具体维度）只进日志（计划书 §9.1 的错误码约定）。
++func abortForError(c *gin.Context, err error) {
++	if c == nil {
++		return
++	}
++	var exceeded *capacity.ErrExceeded
++	switch {
++	case errors.As(err, &exceeded):
++		common.SysLog("apigx capacity: exceeded on " + exceeded.Dimension)
++		c.Header("Retry-After", "1")
++		abortJSON(c, http.StatusTooManyRequests, "capacity_exceeded",
++			"channel capacity is temporarily exceeded, please retry later")
++	case errors.Is(err, capacity.ErrRedisUnavailable):
++		// Redis 不可用时必须**拒绝准入**，不能从空计数恢复为「全部空闲」
++		common.SysLog("apigx capacity: ledger unavailable, refusing new admissions")
++		abortJSON(c, http.StatusServiceUnavailable, "capacity_ledger_unavailable",
++			"capacity ledger unavailable, refusing new requests")
++	default:
++		common.SysLog("apigx capacity: reserve failed: " + err.Error())
++		abortJSON(c, http.StatusServiceUnavailable, "capacity_reserve_failed",
++			"unable to reserve capacity, refusing new request")
++	}
++}
++
++func abortJSON(c *gin.Context, status int, code, message string) {
++	c.AbortWithStatusJSON(status, gin.H{
++		"error": gin.H{"message": message, "type": "new_api_error", "code": code},
++	})
++}
+diff --git a/apigx/relayhook/capacity_hook_test.go b/apigx/relayhook/capacity_hook_test.go
+new file mode 100644
+index 0000000..ec8dc2a
+--- /dev/null
++++ b/apigx/relayhook/capacity_hook_test.go
+@@ -0,0 +1,178 @@
++package relayhook
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/gin-gonic/gin"
++	"github.com/go-redis/redis/v8"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// 容量接线测试。
++//
++// 需要真实 Redis（Lua 原子性无法用 mock 证明）：
++//
++//	APIGX_TEST_REDIS_ADDR=127.0.0.1:6379
++//
++// 结构约定：
++//   - setupRedis(t) 每个用例**只调用一次**：它替换 common.RDB 并注册关闭。
++//     如果在同一用例里多次替换客户端，先注册的清理会最后执行，届时客户端已关闭
++//     （首次实测就踩到了这个：清理阶段的 Drop 报 "client is closed"）。
++//   - newCtx() 只造 gin 上下文，可多次调用，不碰连接。
++func setupRedis(t *testing.T) {
++	t.Helper()
++	addr := os.Getenv("APIGX_TEST_REDIS_ADDR")
++	if addr == "" {
++		t.Skip("未设置 APIGX_TEST_REDIS_ADDR：容量接线未在真实 Redis 上验证（不允许当作通过）")
++	}
++	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: 15})
++	require.NoError(t, rdb.Ping(t.Context()).Err(), "连接 Redis 失败")
++	previous := common.RDB
++	common.RDB = rdb
++	// 清理顺序：先恢复指针（最后注册先执行），再关闭客户端
++	t.Cleanup(func() { _ = rdb.Close() })
++	t.Cleanup(func() { common.RDB = previous })
++	gin.SetMode(gin.TestMode)
++}
++
++func newCtx() *gin.Context {
++	rec := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(rec)
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++	return c
++}
++
++// cleanupChannel 清掉用例用的渠道计数；必须在 common.RDB 仍可用时调用，
++// 因此放在用例主体的最后（而不是最早注册的 Cleanup 里）。
++func cleanupChannel(t *testing.T, channelID int) {
++	t.Helper()
++	require.NoError(t, capacity.New(common.RDB).Drop(t.Context(), capacity.ChannelConcurrency(int64(channelID))))
++}
++
++// 默认关闭时不得施加任何约束（这就是「默认不改变既有链路」的保证）。
++func TestAcquireIsNoopWhenDisabled(t *testing.T) {
++	setupRedis(t)
++	t.Cleanup(func() { Configure(false, 0) })
++	Configure(false, 1)
++
++	c := newCtx()
++	lease, ok := Acquire(c, 90001)
++	assert.True(t, ok)
++	assert.Nil(t, lease, "关闭时不应产生租约")
++	assert.False(t, c.IsAborted())
++}
++
++// 未配置上限（0）时不施加约束——过渡行为，接入 capacity_policies 后必须变成显式四态。
++func TestAcquireIsNoopWhenLimitUnset(t *testing.T) {
++	setupRedis(t)
++	t.Cleanup(func() { Configure(false, 0) })
++	Configure(true, 0)
++
++	lease, ok := Acquire(newCtx(), 90002)
++	assert.True(t, ok)
++	assert.Nil(t, lease)
++}
++
++// 启用且配置了上限：第一个请求拿到租约，第二个被 429 拒绝并带 Retry-After。
++func TestAcquireRejectsWhenFull(t *testing.T) {
++	setupRedis(t)
++	const channelID = 90003
++	t.Cleanup(func() { Configure(false, 0) })
++	Configure(true, 1)
++
++	c1 := newCtx()
++	lease1, ok := Acquire(c1, channelID)
++	require.True(t, ok)
++	require.NotNil(t, lease1, "第一个请求应拿到租约")
++
++	c2 := newCtx()
++	lease2, ok := Acquire(c2, channelID)
++	assert.False(t, ok, "满载时必须拒绝")
++	assert.Nil(t, lease2)
++	assert.True(t, c2.IsAborted())
++	assert.Equal(t, http.StatusTooManyRequests, c2.Writer.Status())
++	assert.NotEmpty(t, c2.Writer.Header().Get("Retry-After"), "429 应带 Retry-After")
++
++	// 释放后应能重新获取
++	lease1.Release()
++	c3 := newCtx()
++	lease3, ok := Acquire(c3, channelID)
++	assert.True(t, ok)
++	require.NotNil(t, lease3)
++	lease3.Release()
++
++	cleanupChannel(t, channelID)
++}
++
++// 重复释放必须幂等：计数回到 0 且不会变负。
++func TestReleaseIsIdempotent(t *testing.T) {
++	setupRedis(t)
++	const channelID = 90004
++	t.Cleanup(func() { Configure(false, 0) })
++	Configure(true, 2)
++
++	lease, ok := Acquire(newCtx(), channelID)
++	require.True(t, ok)
++	require.NotNil(t, lease)
++
++	lease.Release()
++	lease.Release()
++	lease.Release()
++
++	usage, err := capacity.New(common.RDB).Usage(t.Context(), capacity.ChannelConcurrency(int64(channelID)))
++	require.NoError(t, err)
++	assert.EqualValues(t, 0, usage, "重复释放不得把计数减成负数")
++
++	cleanupChannel(t, channelID)
++}
++
++// Redis 不可用时必须拒绝准入（503），而不是放行。
++func TestAcquireFailsClosedWhenLedgerUnavailable(t *testing.T) {
++	setupRedis(t)
++	t.Cleanup(func() { Configure(false, 0) })
++	Configure(true, 1)
++
++	previous := common.RDB
++	common.RDB = nil
++	t.Cleanup(func() { common.RDB = previous })
++
++	c := newCtx()
++	lease, ok := Acquire(c, 90005)
++	assert.False(t, ok, "账本不可用时必须拒绝新准入")
++	assert.Nil(t, lease)
++	assert.Equal(t, http.StatusServiceUnavailable, c.Writer.Status())
++}
++
++// 长流续租：租约超过原到期时间后，若续租有效则仍持有槽位。
++//
++// TTL 必须用**整秒**且明显大于续租间隔（ttl/3）：TTL 以秒为单位下发，
++// 亚秒值会被截断，导致租约比续租间隔还短——首次实测踩到过这个。
++func TestRenewKeepsLeaseAlive(t *testing.T) {
++	setupRedis(t)
++	const channelID = 90006
++	t.Cleanup(func() { Configure(false, 0) })
++	Configure(true, 1)
++
++	previousTTL := leaseTTL
++	leaseTTL = 3 * time.Second // 续租间隔 = 1s
++	t.Cleanup(func() { leaseTTL = previousTTL })
++
++	lease, ok := Acquire(newCtx(), channelID)
++	require.True(t, ok)
++	require.NotNil(t, lease)
++
++	time.Sleep(4500 * time.Millisecond) // 超过原租约 1.5 倍
++	usage, err := capacity.New(common.RDB).Usage(t.Context(), capacity.ChannelConcurrency(int64(channelID)))
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, usage, "续租应让长流继续持有槽位")
++
++	lease.Release()
++	cleanupChannel(t, channelID)
++}
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 1f2998e..33c8658 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -9,6 +9,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	taskdto "github.com/QuantumNous/new-api/dto"
+@@ -182,6 +183,19 @@ func Distribute() func(c *gin.Context) {
+ 		}
+ 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+ 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
++		// APIGX 共享容量控制（T1.7）：渠道选定后按共享账本预留并发槽位。
++		// 位置很关键：在 c.Next() 之前注册 defer，因此释放发生在下游（含流式响应）
++		// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
++		// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
++		if channel != nil {
++			lease, ok := relayhook.Acquire(c, channel.Id)
++			if !ok {
++				return
++			}
++			if lease != nil {
++				defer lease.Release()
++			}
++		}
+ 		c.Next()
+ 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
+ 			service.RecordChannelAffinity(c, channel.Id)
+-- 
+2.53.0.windows.1
+
