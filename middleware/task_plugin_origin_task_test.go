@@ -448,3 +448,56 @@ func TestDistributePinViolatingIdentityFilterErrors(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), string(dto.FilterTaskPluginIdentity))
 }
+
+// TD-08 回归：固定来源（pin）不能绕过令牌的「允许模型」硬限制。
+// 修复前本用例会放行（pin 分支不校验模型限制），修复后必须被拒。
+func TestDistributePinnedRequestStillEnforcesTokenModelLimit(t *testing.T) {
+	require.NoError(t, appI18n.Init())
+	setupOriginTaskDB(t)
+	channel := insertOriginTaskChannel(t, common.ChannelStatusEnabled)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/vendor/jobs", strings.NewReader(`{}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("resolved_task_model", "resolved-model")
+	common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, true)
+	common.SetContextKey(c, constant.ContextKeyTokenModelLimit, map[string]bool{"other-model": true})
+	service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
+		ChannelId: channel.Id,
+		Source:    dto.PinSourceOriginTask,
+		Rank:      dto.PinRankOriginTask,
+		RetryMode: dto.PinRetrySameChannel,
+	})
+
+	Distribute()(c)
+
+	assert.True(t, c.IsAborted(), "固定来源请求同样必须受令牌模型限制约束")
+	assert.Equal(t, http.StatusForbidden, c.Writer.Status())
+}
+
+// 反向保护：pin 下请求**已授权**模型仍应正常放行，避免修复过度拦截。
+func TestDistributePinnedRequestAllowsAuthorizedModel(t *testing.T) {
+	require.NoError(t, appI18n.Init())
+	setupOriginTaskDB(t)
+	channel := insertOriginTaskChannel(t, common.ChannelStatusEnabled)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/vendor/jobs", strings.NewReader(`{}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("resolved_task_model", "resolved-model")
+	common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, true)
+	common.SetContextKey(c, constant.ContextKeyTokenModelLimit, map[string]bool{"resolved-model": true})
+	service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
+		ChannelId: channel.Id,
+		Source:    dto.PinSourceOriginTask,
+		Rank:      dto.PinRankOriginTask,
+		RetryMode: dto.PinRetrySameChannel,
+	})
+
+	Distribute()(c)
+
+	assert.False(t, c.IsAborted(), "已授权模型不应被拦截")
+	assert.Equal(t, channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+}

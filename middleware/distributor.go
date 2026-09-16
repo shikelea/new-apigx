@@ -45,6 +45,11 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		// 令牌的「允许模型」是硬限制：指定来源（pin）、原渠道锁定与非 pin 选路必须
+		// 走同一套校验，否则指定来源可以绕过模型限制，扩大授权。
+		if !enforceTokenModelLimit(c, modelRequest.Model) {
+			return
+		}
 		if pin, found, overridden := constraints.ResolvedPin(); found {
 			for _, lost := range overridden {
 				logger.LogWarn(c, fmt.Sprintf(
@@ -78,26 +83,7 @@ func Distribute() func(c *gin.Context) {
 			}
 		} else {
 			// Select a channel for the user
-			// check token model mapping
-			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
-			if modelLimitEnable {
-				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
-				if !ok {
-					// token model limit is empty, all models are not allowed
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
-					return
-				}
-				var tokenModelLimit map[string]bool
-				tokenModelLimit, ok = s.(map[string]bool)
-				if !ok {
-					tokenModelLimit = map[string]bool{}
-				}
-				if !tokenModelLimitAllows(tokenModelLimit, modelRequest.Model) {
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
-					return
-				}
-			}
-
+			// 令牌模型限制已在上面统一校验（pin 与非 pin 共用），此处不再重复。
 			if shouldSelectChannel {
 				if modelRequest.Model == "" {
 					abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorModelNameRequired))
@@ -574,6 +560,34 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 	}
 
 	return &modelRequest, shouldSelectChannel, nil
+}
+
+// enforceTokenModelLimit applies the token's allowed-model hard limit to the
+// requested model and returns false (already having written the error response)
+// when the request must be rejected.
+//
+// It is shared by the pinned path (specific source, origin-task lock) and the
+// unpinned selection path, so that pinning a source can never widen the token's
+// authorization. Tokens without a model limit are unaffected.
+func enforceTokenModelLimit(c *gin.Context, model string) bool {
+	if !common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled) {
+		return true
+	}
+	s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
+	if !ok {
+		// token model limit is empty, all models are not allowed
+		abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+		return false
+	}
+	tokenModelLimit, ok := s.(map[string]bool)
+	if !ok {
+		tokenModelLimit = map[string]bool{}
+	}
+	if !tokenModelLimitAllows(tokenModelLimit, model) {
+		abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": model}))
+		return false
+	}
+	return true
 }
 
 // tokenModelLimitAllows reports whether a token model-limit map authorizes
