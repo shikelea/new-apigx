@@ -44,6 +44,11 @@
   - [x] 测试发现并修掉一个**真实设计缺陷**：`base_channel_id` 上有唯一索引，但新建时它是 0 → **多条未绑定渠道会互相冲突**。已改为强制 `BaseChannelID > 0`（每分享渠道必须绑定一条底座渠道，转发链路也需要它）
   - [x] HTTP 接口层：`apigx/api/share.go` + `apigx/route/route.go`；上游接线 4 行（台账 D-012）；凭据加密 `apigx/secretbox`（AES-256-GCM，主密钥与库分离，缺密钥失败关闭）
 - [ ] T1.5 多 Key 导入与池策略（稳定凭据 ID、逐 Key 状态与统计）
+  - ⚠️ **复用修正（2026-09-16，用户质询后核查）**：底座**已有**完整多 Key 机制，我先前写的选择器属于重复实现，**已删除**。
+    - 底座已有：轮询/随机选择（`model/channel.go` 的 `GetNextEnabledKey`，`constant/multi_key_mode.go`）、逐 Key 禁用状态与原因/时间（`ChannelInfo.MultiKeyStatusList`）、单 Key 故障隔离与「全失效才停渠道」（`handlerMultiKeyUpdate`）、**批量导入**（`controller/channel.go` 渠道新增/编辑路径内联）、逐 Key 管理接口（`ManageMultiKeys`）。
+    - 更重要的是：底座在 `SetupContextForSelectedChannel` 里已完成**唯一的选路决定**（计划书 §9.2）。APIGX 侧再写选择器会制造第二个决定点，并与底座轮询游标互相竞争。**选择一律交给底座。**
+    - 保留的仅剩：`ParseImportedKeys`（底座批量导入是控制器内联逻辑，无法作为库复用；已对齐其「去空白/丢空行」行为，并额外做批内去重与行号回显），以及指纹查重（密文带随机 nonce 不可比对）。
+  - ❓ **待你裁决**：计划书 T1.5 要求「加权 / 剩余容量」选择方式，底座只有轮询与随机。二选一：①阶段 1 只提供轮询/随机，加权与剩余容量推迟到有实际需求时（推荐）；②扩展底座 `MultiKeyMode` 增加这两种方式（属于对上游的额外修改，须登记台账）。
   - [x] **前置：Key 池数据层已就绪**：`CreateUpstreamKey` / `ListUpstreamKeysByChannel` / `AvailableUpstreamKeys`（启用+未到期+不在冷却三条件）/ `UpdateUpstreamKeyStatus` / `SetUpstreamKeyCooldown` / `DeleteUpstreamKey`；Key 归属经渠道传递并强制校验
   - [x] 单把 Key 的增删改查 + 状态/冷却 + 加密落库（端到端 16/16，PG 核对密文与墓碑）`n  - [ ] 待做：批量导入解析、池策略（轮询/随机/加权/剩余容量）、逐 Key 统计、凭据轮换与吊销
 - [x] T1.6 免费计量 `usage_only`（落点在计费会话的**资金来源**维度）
