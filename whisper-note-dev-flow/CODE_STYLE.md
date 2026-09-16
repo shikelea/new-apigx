@@ -52,3 +52,38 @@
 22. **受保护标识只增不改**：`New API` / `QuantumNous` 相关的品牌、署名、模块路径、镜像名、footer/about 等不得修改或删除；APIGX 自身标识只做新增。
 23. **不要往底座文档目录写文件**：禁止在 `new-api/docs/` 下新增文档，禁止在 `new-api/plugins/**` 下生成 README 等文档；我们的设计文档一律放本仓库 `docs/`。
 24. **前端必须复用与 i18n**：改 `web/` 前先读 `web/AGENTS.md` 并检索 `web/src/components/` 与对应 feature，优先复用业务封装而不是重新拼装；面向用户文案必须走 `t()`；测试放模块专属 `__tests__/`；包管理用 Bun。
+
+---
+
+## 25. 二开第一原则：动手前先搜底座（最高优先级）
+
+**这是本项目最容易犯、代价最大的错误**：底座（New API）已经实现了大量通用能力，我们在 `apigx/` 下重写一份，等于制造第二套系统——两套状态会互相竞争，行为不一致，且维护成本翻倍。
+
+### 动手前的强制动作
+
+写任何「通用能力」代码之前，**必须先 grep 底座**（关键词 + 看 `model/`、`service/`、`controller/`、`middleware/`）：
+
+| 你要做的事 | 先在底座搜 | 已确认底座已有（禁止重写） |
+|---|---|---|
+| 多 Key 选择 / 轮询 / 随机 | `MultiKey`、`GetNextEnabledKey` | ✅ `model/channel.go` 的 `GetNextEnabledKey`、`constant/multi_key_mode.go` |
+| 逐 Key 健康 / 禁用 / 冷却 | `MultiKeyStatusList`、`UpdateChannelStatus` | ✅ `model/channel.go` 的 `handlerMultiKeyUpdate` |
+| 批量导入 Key | `IsMultiKey`、`MultiKeySize` | ✅ `controller/channel.go` 渠道新增/编辑路径（内联，不可直接作为库复用） |
+| 渠道选择 / 分组 / 优先级 | `Distribute`、`CacheGetRandomSatisfiedChannel` | ✅ `middleware/distributor.go` |
+| 限流 | `rate-limit`、`RateLimit` | ✅ 用户级窗口限流；**渠道/Key 级并发上限确实没有**（阶段 0 已实测确认，故 `apigx/capacity` 是必要新增） |
+| 计费 / 预扣 / 结算 | `BillingSession`、`FundingSource` | ✅ `service/billing_session.go`、`funding_source.go`（我们的 `usage_only` 是**新增资金来源**，符合 §6 要求，不是重写） |
+| 重试 / 失败转移 | `Retry`、`ShouldRetry` | ✅ `controller/relay.go`、`service/` 相关 |
+| 凭据加密 | `encrypt`、`crypto` | ❌ 底座渠道 Key 是**明文**；计划书 §10.3 要求加密 → `apigx/secretbox` 是必要新增 |
+
+### 判定标准（三条同时成立才允许自己写）
+
+1. 底座**完全没有**该能力（写出 grep 证据，记进文档）；
+2. 或者底座有但**形态不可复用**（例如逻辑内联在控制器里、或绑定了管理员权限模型），且差异是**语义性**的而非风格性的；
+3. 或者是计划书明确要求的**有意偏离**（如加密存储、免费计量模式），且已在台账/技术债中登记。
+
+否则：**改底座**（登记 `docs/stage0/upstream-diff.md` 台账 + 跑三库矩阵），或**直接调用底座**。
+
+### 一个已发生的反面案例（务必记住）
+
+T1.5 初期我按计划书「轮询/随机/加权/剩余容量」写了一整套 `SelectUpstreamKey`。核查后发现：底座不但已有轮询与随机，而且已在 `SetupContextForSelectedChannel` 里完成了**唯一的选路决定**（计划书 §9.2 要求「一个权威决定点」）。我那套代码不只是重复，还会**与底座的轮询游标互相竞争**。已删除。
+
+**教训**：计划书里写着「要做 X」不等于「要自己实现 X」。先问「底座怎么做 X」，再决定是调用、扩展还是新增。

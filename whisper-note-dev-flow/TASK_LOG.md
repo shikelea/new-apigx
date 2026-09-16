@@ -48,7 +48,13 @@
     - 底座已有：轮询/随机选择（`model/channel.go` 的 `GetNextEnabledKey`，`constant/multi_key_mode.go`）、逐 Key 禁用状态与原因/时间（`ChannelInfo.MultiKeyStatusList`）、单 Key 故障隔离与「全失效才停渠道」（`handlerMultiKeyUpdate`）、**批量导入**（`controller/channel.go` 渠道新增/编辑路径内联）、逐 Key 管理接口（`ManageMultiKeys`）。
     - 更重要的是：底座在 `SetupContextForSelectedChannel` 里已完成**唯一的选路决定**（计划书 §9.2）。APIGX 侧再写选择器会制造第二个决定点，并与底座轮询游标互相竞争。**选择一律交给底座。**
     - 保留的仅剩：`ParseImportedKeys`（底座批量导入是控制器内联逻辑，无法作为库复用；已对齐其「去空白/丢空行」行为，并额外做批内去重与行号回显），以及指纹查重（密文带随机 nonce 不可比对）。
-  - ❓ **待你裁决**：计划书 T1.5 要求「加权 / 剩余容量」选择方式，底座只有轮询与随机。二选一：①阶段 1 只提供轮询/随机，加权与剩余容量推迟到有实际需求时（推荐）；②扩展底座 `MultiKeyMode` 增加这两种方式（属于对上游的额外修改，须登记台账）。
+  - ✅ **裁决（用户，2026-09-16）**：采用方案①——**阶段 1 只提供轮询/随机**（直接用底座现成能力），加权与剩余容量推迟到有真实需求时；**不为它扩展底座**。
+  - 🔒 **用户强调并要求记死**：本项目是**二开**，**不造轮子**。已把它写成 `CODE_STYLE.md` 第 25 条（最高优先级）：动手前必须先 grep 底座；列出「底座已有能力」对照表与「三条同时成立才允许自己写」的判定标准；并把本次 T1.5 重复实现作为反面案例永久记录。
+  - 📌 **T1.5 正确实现路径（复用底座，勿再自写）**：
+    - 写入：构造底座 `model.Channel`（`Key` = 解密后按固定顺序换行拼接；`ChannelInfo.IsMultiKey=true`、`MultiKeySize=N`、`MultiKeyMode`）后调用 **`channel.Update()`**（其内部会重算 `MultiKeySize`、裁剪越界的状态表）；
+    - 选择：**`channel.GetNextEnabledKey()`**（轮询游标线程安全，由 `GetChannelPollingLock` 保护）；
+    - 故障隔离：**`model.UpdateChannelStatus()`**（逐 Key 禁用并记录原因/时间，全部失效才停渠道）；
+    - 逐 Key 统计回填：底座把本次使用的 Key 索引写进上下文（`ContextKeyChannelMultiKeyIndex`），我们据此把统计落到对应的 `StableKeyID`。
   - [x] **前置：Key 池数据层已就绪**：`CreateUpstreamKey` / `ListUpstreamKeysByChannel` / `AvailableUpstreamKeys`（启用+未到期+不在冷却三条件）/ `UpdateUpstreamKeyStatus` / `SetUpstreamKeyCooldown` / `DeleteUpstreamKey`；Key 归属经渠道传递并强制校验
   - [x] 单把 Key 的增删改查 + 状态/冷却 + 加密落库（端到端 16/16，PG 核对密文与墓碑）`n  - [ ] 待做：批量导入解析、池策略（轮询/随机/加权/剩余容量）、逐 Key 统计、凭据轮换与吊销
 - [x] T1.6 免费计量 `usage_only`（落点在计费会话的**资金来源**维度）
