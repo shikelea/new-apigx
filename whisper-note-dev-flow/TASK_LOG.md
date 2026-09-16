@@ -40,7 +40,12 @@
   - [x] 接线：底座 `model/main.go` 的 `migrateDB()` 末尾调用 `apigxmodel.Migrate(DB)`（台账 D-003）
   - 记录：`docs/stage1/schema-impl-notes.md`（验证结果、DDL 事实、MySQL 章节、7 条实现期决策、未验证项、环境怪癖）
 - [ ] T1.4 分享者接口（分组 / 渠道 / Key 池 CRUD，受 owner 约束）
+  - [x] **前置：领域仓储层已就绪** → `new-api/apigx/model/{repo_share,repo_upstream}.go`：分组/渠道/上游账户池/上游 Key 的 CRUD 与不变量（软删除墓碑语义、**归属由服务端强制**、Key 池三条件筛选、参数校验）；测试 8/8（另有 5 个迁移用例）
+  - [x] 测试发现并修掉一个**真实设计缺陷**：`base_channel_id` 上有唯一索引，但新建时它是 0 → **多条未绑定渠道会互相冲突**。已改为强制 `BaseChannelID > 0`（每分享渠道必须绑定一条底座渠道，转发链路也需要它）
+  - [ ] 待做：HTTP 接口层（独立路由 + 鉴权中间件，不开放底座既有管理路由）
 - [ ] T1.5 多 Key 导入与池策略（稳定凭据 ID、逐 Key 状态与统计）
+  - [x] **前置：Key 池数据层已就绪**：`CreateUpstreamKey` / `ListUpstreamKeysByChannel` / `AvailableUpstreamKeys`（启用+未到期+不在冷却三条件）/ `UpdateUpstreamKeyStatus` / `SetUpstreamKeyCooldown` / `DeleteUpstreamKey`；Key 归属经渠道传递并强制校验
+  - [ ] 待做：批量导入解析、池策略（轮询/随机/加权/剩余容量）、逐 Key 统计
 - [x] T1.6 免费计量 `usage_only`（落点在计费会话的**资金来源**维度）
   - [x] 实现：`service/apigx_usage_only.go`（模式开关 + `UsageOnlyFunding` + `newUsageOnlySession`）、`service/billing.go`（常量）、`service/billing_session.go`（NewBillingSession 分支 + reserveFunding 接住新资金来源）；台账 D-005/D-006/D-007
   - [x] 单测 4/4：资金源三方法必须空操作、模式开关默认关闭、`reserveFunding` 必须接住新来源、**未知来源仍须报错**（反向保护）
