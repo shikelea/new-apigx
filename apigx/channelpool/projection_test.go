@@ -426,3 +426,42 @@ func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
 	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status, "业务错误不得使凭据失效")
 	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
 }
+
+// **最关键的一条**：失效必须同时落到底座，否则底座会继续使用已失效的凭据。
+//
+// 这条证明的是「我们的统计 → 底座的真实选择行为」这一整条链路：
+// 记一次 401 之后，再问底座要下一把 Key，它必须跳过那一把。
+func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9301
+	const baseChannelID int64 = 7272
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
+	}).Error)
+
+	secrets := []string{"sk-low-aaaaaaaaa", "sk-high-bbbbbbbb"}
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, []int64{1, 5})
+	projection, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	// 投影后索引 0 = 权重更高的 stable-b
+	assert.Equal(t, "stable-b", mustStable(t, projection, 0))
+
+	// 让索引 0 的凭据被上游拒绝
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{
+		AuthFailed: true, ErrorCode: "401_invalid_api_key",
+	}))
+
+	// 底座自己的状态表必须被标记（否则它会继续用这把）
+	base, err := basemodel.GetChannelById(int(baseChannelID), true)
+	require.NoError(t, err)
+	require.Equal(t, common.ChannelStatusAutoDisabled, base.ChannelInfo.MultiKeyStatusList[0],
+		"底座必须把该下标标为不可用，否则 Key 级隔离没有生效")
+
+	// 底座随后提供的必然是另一把凭据（这里就用底座自己的选择函数验证）
+	key, index, apiErr := base.GetNextEnabledKey()
+	require.Nil(t, apiErr)
+	assert.Equal(t, 1, index, "底座必须跳过已失效的索引 0")
+	assert.Equal(t, "sk-low-aaaaaaaaa", key)
+}

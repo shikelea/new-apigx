@@ -6,6 +6,7 @@ import (
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/common"
+	basemodel "github.com/QuantumNous/new-api/model"
 	"gorm.io/gorm"
 )
 
@@ -84,9 +85,26 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
 		updates["cooldown_until"] = now + outcome.CooldownSeconds
 	}
 
-	return db.Model(&apigxmodel.UpstreamKey{}).
+	if err := db.Model(&apigxmodel.UpstreamKey{}).
 		Where("id = ? AND alive_flag = ?", key.ID, apigxmodel.AliveFlagAlive).
-		Updates(updates).Error
+		Updates(updates).Error; err != nil {
+		return err
+	}
+
+	// **必须同时落到底座**：底座是按它自己的、按下标存放的状态表决定跳过与否的。
+	// 只改我们的表，底座会继续使用这把已失效的凭据——Key 级隔离等于没做
+	// （这是本实现初版的真实缺口，做端到端验证前才发现）。
+	//
+	// 复用底座的 `UpdateChannelStatus`：它按凭据字符串换算下标、记录禁用原因与时间，
+	// 并且**只在全部 Key 都不可用时**才停掉整个渠道——正是计划书 §9.2 要求的语义。
+	// 它内部已把 DB 错误与「渠道不存在」记日志处理，返回值仅表示是否找到 Key。
+	if outcome.AuthFailed {
+		if keyValue, ok := projection.IndexToKeyValue[keyIndex]; ok {
+			basemodel.UpdateChannelStatus(baseChannelID, keyValue, common.ChannelStatusAutoDisabled,
+				truncateErrorCode(outcome.ErrorCode))
+		}
+	}
+	return nil
 }
 
 // truncateErrorCode 把失败原因裁剪到列宽（64），避免写入失败。

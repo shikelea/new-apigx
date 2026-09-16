@@ -41,6 +41,14 @@ type Projection struct {
 	// 底座的运行期统计只带索引（上下文 `ContextKeyChannelMultiKeyIndex`），
 	// 需要靠它把统计落回正确的 StableKeyID。
 	IndexToStableKey map[int]string
+	// IndexToKeyValue 是投影时写入底座的**凭据明文**（与该索引一一对应）。
+	//
+	// 存在的唯一理由：底座的 Key 级状态更新函数 `model.UpdateChannelStatus(channelId, usingKey, ...)`
+	// 是按**凭据字符串**定位索引的（它内部再换算成下标）。要让底座真正跳过一把失效的 Key，
+	// 就必须把当时投影用的那串凭据原样交给它。
+	//
+	// **只允许在进程内传递，不得写入日志、审计或任何持久化字段。**
+	IndexToKeyValue map[int]string
 	// KeyCount 是投影到基座的 Key 数量。
 	KeyCount int
 }
@@ -74,6 +82,7 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 
 	secrets := make([]string, 0, len(keys))
 	indexToStable := make(map[int]string, len(keys))
+	indexToKeyValue := make(map[int]string, len(keys))
 	for i := range keys {
 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
 		if err != nil {
@@ -83,6 +92,7 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 			continue
 		}
 		indexToStable[len(secrets)] = keys[i].StableKeyID
+		indexToKeyValue[len(secrets)] = plain
 		secrets = append(secrets, plain)
 	}
 	if len(secrets) == 0 {
@@ -108,7 +118,7 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 	if err := baseChannel.Update(); err != nil {
 		return nil, err
 	}
-	return &Projection{IndexToStableKey: indexToStable, KeyCount: len(secrets)}, nil
+	return &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)}, nil
 }
 
 // baseMultiKeyMode 把分享渠道的池策略映射为底座的选择方式。
