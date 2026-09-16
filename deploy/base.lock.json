@@ -1,0 +1,13 @@
+{
+    "base":  "new-api",
+    "upstream":  "https://github.com/QuantumNous/new-api",
+    "path":  "new-api/",
+    "commit":  "69a50029819a26c53e6babd276d49cfe2f8880ad",
+    "commitSubject":  "feat(channel): per-route pass-through for advanced custom channels (#7386)",
+    "commitDate":  "2026-09-15T14:00:05+08:00",
+    "license":  "AGPLv3（含 NOTICE，见 new-api/LICENSE 与 NOTICE）",
+    "trackedFiles":  2468,
+    "lockedAtUtc":  "2026-09-16T08:41:02Z",
+    "fetchMethod":  "git init -b apigx-base; git config http.https://github.com/.proxy http://127.0.0.1:7897; git remote add origin \u003cupstream\u003e; git fetch --depth 1 origin \u003ccommit\u003e; git checkout --detach FETCH_HEAD",
+    "note":  "本地克隆被 .gitignore 排除；本文件是唯一权威锁定记录，重建或升级一律按此提交复现。阶段 0 后续需补：依赖清单、fork 与上游差异清单、许可与署名义务落实。"
+}
