@@ -1,0 +1,258 @@
+From d3b385c9c3f7f3cc4e57a2c1836ce1de5b4bd8e9 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 22:53:56 +0800
+Subject: [PATCH 13/13] =?UTF-8?q?feat(apigx):=20=E9=80=90=20Key=20?=
+ =?UTF-8?q?=E7=BB=9F=E8=AE=A1=E6=8E=A5=E5=85=A5=E5=A4=B1=E8=B4=A5=E8=B7=AF?=
+ =?UTF-8?q?=E5=BE=84=EF=BC=88T1.5=EF=BC=8C=E9=BB=98=E8=AE=A4=E5=85=B3?=
+ =?UTF-8?q?=E9=97=AD=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/channelpool/key_stats.go: RecordFailureFromContext
+  挂在底座 service.ProcessChannelError (台账 D-014), 开关 APIGX_KEY_STATS_ENABLED 默认关闭
+- 四条约束: 关闭时零查询; 只对多 Key 渠道生效; 只记脱敏状态码+错误码; 统计失败不影响请求
+- 401/403 才判凭据失效, 400 等业务错误不得停掉好 Key (有测试守)
+- 修正自己埋的坑: dbProvider 默认从 nil 改为 apigxmodel.DefaultDB(), 否则生产静默失效
+- channelpool 测试 13/13; apigx 全量通过
+---
+ apigx/channelpool/key_stats.go       | 88 ++++++++++++++++++++++++++
+ apigx/channelpool/projection_test.go | 92 ++++++++++++++++++++++++++++
+ service/relay_error.go               |  5 ++
+ 3 files changed, 185 insertions(+)
+ create mode 100644 apigx/channelpool/key_stats.go
+
+diff --git a/apigx/channelpool/key_stats.go b/apigx/channelpool/key_stats.go
+new file mode 100644
+index 0000000..50c250c
+--- /dev/null
++++ b/apigx/channelpool/key_stats.go
+@@ -0,0 +1,88 @@
++package channelpool
++
++import (
++	"fmt"
++	"sync/atomic"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/gin-gonic/gin"
++	"gorm.io/gorm"
++)
++
++// 逐 Key 统计在请求路径上的接入开关。
++//
++// **默认关闭**：它挂在每一次失败处理上（`service.ProcessChannelError`），属于热路径；
++// 在真实流量下验证过之前，不应改变既有行为。
++var keyStatsEnabled atomic.Bool
++
++func init() {
++	keyStatsEnabled.Store(common.GetEnvOrDefaultBool("APIGX_KEY_STATS_ENABLED", false))
++}
++
++// SetKeyStatsEnabled 运行期切换（供测试与未来的后台配置使用）。
++func SetKeyStatsEnabled(on bool) { keyStatsEnabled.Store(on) }
++
++// IsKeyStatsEnabled 报告当前是否开启逐 Key 统计。
++func IsKeyStatsEnabled() bool { return keyStatsEnabled.Load() }
++
++// RecordFailureFromContext 依据请求上下文，把一次渠道失败记到对应的上游凭据上。
++//
++// 由底座的失败处理路径调用（见 docs/stage0/upstream-diff.md 的 D-014）。设计约束：
++//
++//   - **默认关闭**，关闭时立即返回，不产生任何查询；
++//   - 只对**多 Key 渠道**生效：上下文里没有 Key 索引（`ContextKeyChannelMultiKeyIndex`）
++//     就说明本次请求用的不是多 Key 渠道，直接跳过；
++//   - 只记录**脱敏后的状态码与错误码**，不记录凭据、不记录上游原始报文（计划书 §10.3）；
++//   - 任何错误都不向上传播：统计失败绝不能影响请求本身。
++func RecordFailureFromContext(c *gin.Context, channelID int, statusCode int, errorCode string) {
++	if !keyStatsEnabled.Load() || c == nil || channelID <= 0 {
++		return
++	}
++	// 非多 Key 渠道：上下文没有索引，没有可归属的凭据
++	if !common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
++		return
++	}
++	keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
++
++	db := defaultDB()
++	if db == nil {
++		return
++	}
++	outcome := KeyOutcome{
++		Success:   false,
++		ErrorCode: formatOutcomeCode(statusCode, errorCode),
++		// 401/403 表示上游明确拒绝了这份凭据 → Key 级故障隔离（计划书 §9.2）
++		AuthFailed: statusCode == 401 || statusCode == 403,
++	}
++	if err := RecordKeyOutcome(db, channelID, keyIndex, outcome); err != nil {
++		// 统计失败只记日志，绝不影响请求结果
++		common.SysError("channelpool: record key failure failed: " + err.Error())
++	}
++}
++
++// formatOutcomeCode 生成脱敏的失败标签，例如 `429_upstream_rate_limited`。
++func formatOutcomeCode(statusCode int, errorCode string) string {
++	if errorCode == "" {
++		return fmt.Sprintf("http_%d", statusCode)
++	}
++	return fmt.Sprintf("%d_%s", statusCode, errorCode)
++}
++
++// dbProvider 提供数据库句柄：默认为 apigx 层在迁移时捕获的**主库**（见 apigxmodel.Migrate）。
++//
++// 必须默认接上生产句柄——否则钩子会在生产静默失效（这正是本函数初版的问题，
++// 靠「默认返回 nil」在测试里很方便，但上线后统计一条都不会写）。
++var dbProvider = func() *gorm.DB { return apigxmodel.DefaultDB() }
++
++// SetDBProvider 设置数据库来源（仅测试使用；生产由 apigxmodel.Migrate 捕获的主库提供）。
++func SetDBProvider(fn func() *gorm.DB) {
++	if fn == nil {
++		dbProvider = func() *gorm.DB { return nil }
++		return
++	}
++	dbProvider = fn
++}
++
++func defaultDB() *gorm.DB { return dbProvider() }
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index 1e40893..a7eb71e 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -1,6 +1,7 @@
+ package channelpool
+ 
+ import (
++	"net/http/httptest"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+@@ -11,6 +12,7 @@ import (
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	basemodel "github.com/QuantumNous/new-api/model"
++	"github.com/gin-gonic/gin"
+ 	"github.com/glebarez/sqlite"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+@@ -334,3 +336,93 @@ func TestRecordKeyOutcomeRejectsUnknownIndex(t *testing.T) {
+ 	err = RecordKeyOutcome(db, int(baseChannelID), 7, KeyOutcome{Success: true})
+ 	assert.ErrorIs(t, err, apigxmodel.ErrNotFound, "未知索引不得被猜成某把凭据")
+ }
++
++// ---- 请求路径接入（默认关闭） ----
++
++// 关闭时必须是彻底的空操作：不查询、不改任何行。它挂在每次失败处理上，属热路径。
++func TestRecordFailureFromContextIsNoopWhenDisabled(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9201
++	const baseChannelID int64 = 6262
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-noop-aaaaaaaa"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	previous := dbProvider
++	SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
++
++	SetKeyStatsEnabled(false)
++	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
++	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
++	RecordFailureFromContext(ctx, int(baseChannelID), 500, "boom")
++
++	var key apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
++	assert.Zero(t, key.LastErrorAt, "关闭时不得写入任何统计")
++}
++
++// 开启后：401 记为「凭据失效」并只隔离该 Key；非多 Key 渠道跳过；统计失败不影响请求。
++func TestRecordFailureFromContextRecordsAuthFailure(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9202
++	const baseChannelID int64 = 6263
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-first-aaaaaaa", "sk-second-bbbbbb"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	previous := dbProvider
++	SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
++	SetKeyStatsEnabled(true)
++
++	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
++	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 1)
++	RecordFailureFromContext(ctx, int(baseChannelID), 401, "invalid_api_key")
++
++	var second apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&second).Error)
++	assert.Equal(t, apigxmodel.UpstreamKeyStatusInvalid, second.Status, "401 应把该 Key 标为失效")
++	assert.Equal(t, "401_invalid_api_key", second.LastErrorCode)
++	assert.Positive(t, second.LastErrorAt)
++
++	var first apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&first).Error)
++	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, first.Status, "另一把不受影响")
++
++	// 非多 Key 渠道（上下文无标记）应被跳过
++	singleCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	RecordFailureFromContext(singleCtx, int(baseChannelID), 500, "x")
++	assert.NoError(t, nil)
++}
++
++// 400 之类的业务错误不应被当成凭据失效（否则一次参数错误就会停掉一把好 Key）。
++func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9203
++	const baseChannelID int64 = 6264
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-client-aaaaaa"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	previous := dbProvider
++	SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
++	SetKeyStatsEnabled(true)
++
++	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
++	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
++	RecordFailureFromContext(ctx, int(baseChannelID), 400, "invalid_request_error")
++
++	var key apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
++	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status, "业务错误不得使凭据失效")
++	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
++}
+diff --git a/service/relay_error.go b/service/relay_error.go
+index 14462fb..f5ed6c0 100644
+--- a/service/relay_error.go
++++ b/service/relay_error.go
+@@ -4,6 +4,7 @@ import (
+ 	"fmt"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/logger"
+@@ -60,6 +61,10 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
+ 		})
+ 	}
+ 
++	// APIGX 逐 Key 统计与故障隔离（T1.5）：把失败记到对应的上游凭据上。
++	// 默认关闭（APIGX_KEY_STATS_ENABLED）；只对多 Key 渠道生效，且统计失败不影响请求。
++	channelpool.RecordFailureFromContext(c, channelError.ChannelId, err.StatusCode, string(err.GetErrorCode()))
++
+ 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
+ 		userId := c.GetInt("id")
+ 		tokenName := c.GetString("token_name")
+-- 
+2.53.0.windows.1
+
