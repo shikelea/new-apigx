@@ -21,7 +21,10 @@
 
 | # | 路径 | 类型 | 改动内容 | 原因 / 计划书依据 | 上游升级风险 | 登记日期 | 状态 |
 |---|---|---|---|---|---|---|---|
-| — | — | — | （暂无） | — | — | — | — |
+| D-001 | `new-api/middleware/distributor.go` | 必须修改 | 把 token「允许模型」硬限制的校验从**非 pin 分支内部**提取为共用函数 `enforceTokenModelLimit`，并提前到 pin / 非 pin 分支**之前**执行 | TD-08；计划书 §5.2 第 1 条「不能只删除管理员判断；指定、自动、亲和缓存、重试和任务原渠道锁定都必须经过同一资源授权检查」 | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。该文件在上游属高频改动区，升级时需重新核对 pin 分支与模型限制的相对位置 | 2026-09-16 | 已实施 |
+| D-001-注 | 同上 | — | 仅影响**启用了 token 模型限制**的令牌（`token_model_limit_enabled=true`）；未启用限制的令牌行为完全不变 | 影响面收敛，便于回归 | — | 2026-09-16 | — |
+| D-002 | `new-api/middleware/task_plugin_origin_task_test.go` | 追加 | 追加 2 个回归测试：`TestDistributePinnedRequestStillEnforcesTokenModelLimit`（反例：pin 下未授权模型必须 403）与 `TestDistributePinnedRequestAllowsAuthorizedModel`（正例：pin 下已授权模型仍放行） | D-001 的回归保护；底座 AGENTS.md 要求「扩展既有测试文件，不为小改动散落测试」 | 低：仅追加测试函数，不改上游既有用例 | 2026-09-16 | 已实施 |
+| — | 验证方式 | — | 运行时 A/B/C 回归脚本 `tools/stage1-verify/td08-pin-model-limit.mjs`（修复前 B=200 绕过，修复后 B=403）＋ Go 回归测试（临时禁用修复即 FAIL，证明测试有效） | 双重证据：单测 + 端到端 | — | 2026-09-16 | 通过 |
 
 ## 二、新增文件（不修改上游）
 
