@@ -56,6 +56,19 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+
+		// 存储引擎必须是 InnoDB。这不是洁癖：
+		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
+		//  - MyISAM 的索引长度上限是 1000 字节（InnoDB DYNAMIC 是 3072），底座原生表
+		//    （如 passkey_credentials.credential_id varchar(512) 上的唯一索引）会直接建不出来。
+		// 本机首次接入时就踩到了：phpStudy 的 my.ini 里 default-storage-engine=MyIsam，
+		// 结果 27 张表全部建成 MyISAM、底座自身 FATAL 起不来。此断言用于防止再次静默通过。
+		var engine string
+		row := db.Raw("SELECT engine FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+			TablePrefix+"user_profiles").Row()
+		require.NoError(t, row.Scan(&engine), "读取 MySQL 存储引擎失败")
+		assert.Equal(t, "InnoDB", engine,
+			"APIGX 的表必须使用 InnoDB：MyISAM 无事务（预留/原子扣减会失效）且索引上限仅 1000 字节")
 	})
 }
 
@@ -71,14 +84,16 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 // 同时适用于 PostgreSQL 与 MySQL（SQLite 用 sqlite_master，见 apigxTableNames）。
 func informationSchemaApigxTables(t *testing.T, db *gorm.DB, column string) []string {
 	t.Helper()
-	var names []string
-	// 只查当前库的当前 schema；用参数绑定避免拼接
-	query := "SELECT " + column + " FROM information_schema.tables WHERE table_schema = current_schema() AND substr(" + column + ", 1, 6) = ?"
-	if err := db.Raw(query, TablePrefix).Scan(&names).Error; err != nil {
-		// MySQL 的 current_schema() 等价于 DATABASE()，若上面失败则回退
-		fallback := "SELECT " + column + " FROM information_schema.tables WHERE table_schema = DATABASE() AND substr(" + column + ", 1, 6) = ?"
-		require.NoError(t, db.Raw(fallback, TablePrefix).Scan(&names).Error)
+	// 按方言选择「当前库/schema」表达式：PostgreSQL 是 current_schema()，MySQL 是 DATABASE()。
+	// 不用「先试一个再回退」的写法——那会在日志里留下一条假的错误，掩盖真正的问题。
+	schemaExpr := "current_schema()"
+	if db.Dialector.Name() == "mysql" {
+		schemaExpr = "DATABASE()"
 	}
+	var names []string
+	query := "SELECT " + column + " FROM information_schema.tables WHERE table_schema = " + schemaExpr +
+		" AND substr(" + column + ", 1, 6) = ?"
+	require.NoError(t, db.Raw(query, TablePrefix).Scan(&names).Error)
 	return names
 }
 
