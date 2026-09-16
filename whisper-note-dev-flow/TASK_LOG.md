@@ -55,7 +55,9 @@
   - [x] **逐 Key 统计回填（数据层）**：`apigx/channelpool/outcome.go` 的 `RecordKeyOutcome` —— 底座的运行期只提供 Key **索引**（`ContextKeyChannelMultiKeyIndex`），这里用投影把索引翻译回 `StableKeyID` 再落库（轮换/增删/改权重都会改变索引对应关系，不翻译就会张冠李戴）。实现：成功记 `LastOKAt`；失败记 `LastErrorAt` + 脱敏 `LastErrorCode`；**鉴权失效只把该 Key 标为 invalid（Key 级隔离），不动渠道与其它 Key**；可设 Key 级冷却。测试 5/5（另有投影 5/5，共 10/10）。
   - [x] **请求路径接入（失败路径）**：`apigx/channelpool/key_stats.go` 的 `RecordFailureFromContext`，挂在底座 `service.ProcessChannelError`（台账 D-014）。**默认关闭**（`APIGX_KEY_STATS_ENABLED`）。四条设计约束：关闭时零查询；只对多 Key 渠道生效（上下文无索引即跳过）；只记脱敏状态码+错误码（不记凭据/上游原文）；**统计失败绝不影响请求**。**401/403 才判为凭据失效**——400 之类业务错误不得停掉一把好 Key（有专门测试守这条）。测试 13/13。
   - [x] 修掉一个自己埋的坑：`dbProvider` 初版默认返回 nil（测试里方便），会导致**生产静默失效**；已改为默认接 `apigxmodel.DefaultDB()`（迁移时捕获的主库句柄）。
-  - [ ] 待做：① 成功路径的统计（当前只接失败路径）② 投影映射加进程内缓存（现每次重算投影，阶段 1 接受的成本）③ 端到端运行时验证（开开关 → 让上游返回 401 → 观察该 Key 被隔离、其余不受影响）。
+  - [x] ⚠️ **补掉一个真设计缺口**：`RecordKeyOutcome` 起初**只改我们表里的状态，没有告诉底座**——而底座是按它自己按下标的状态表决定跳过与否的，因此「Key 级隔离」实际**没有生效**（失效的凭据仍会被继续使用）。已改为失效时**同时调用底座的 `UpdateChannelStatus`**（仍是复用：它按凭据字符串换算下标、记录原因与时间，并且**只在全部 Key 都不可用时才停掉整个渠道**）。为此投影新增 `IndexToKeyValue`（只在进程内传递，禁止落日志/持久化）。
+  - [x] **关键验证**（`TestAuthFailureMakesBaseSkipTheFailedKey`）：记一次 401 后，用**底座自己的 `GetNextEnabledKey()`** 查询 → 确实跳过失效索引、返回另一把凭据。这条证明的是「我们的统计 → 底座真实选择行为」的完整链路。
+  - [ ] 待做：① 成功路径的统计（当前只接失败路径）② 投影映射加进程内缓存（现每次重算投影，阶段 1 接受的成本）③ HTTP 层的端到端运行时验证（需要给「投影」加一个触发接口，如 `POST /api/apigx/channels/:id/apply`）。
   - ⚠️ **已知残留风险（有意接受）**：底座 `channels.key` 是明文，投影后凭据会以明文出现在底座表中。我们自己的存储是加密信封；要消除这份明文投影必须改底座 relay 的取键路径，超出阶段 1 范围。
   - 📌 **T1.5 正确实现路径（复用底座，勿再自写）**：
     - 写入：构造底座 `model.Channel`（`Key` = 解密后按固定顺序换行拼接；`ChannelInfo.IsMultiKey=true`、`MultiKeySize=N`、`MultiKeyMode`）后调用 **`channel.Update()`**（其内部会重算 `MultiKeySize`、裁剪越界的状态表）；

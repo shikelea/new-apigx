@@ -1,0 +1,162 @@
+From 7f24e2677bb1fd2c307cc7767e48ed01f0965bba Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 23:05:12 +0800
+Subject: [PATCH 14/14] =?UTF-8?q?fix(apigx):=20Key=20=E7=BA=A7=E9=9A=94?=
+ =?UTF-8?q?=E7=A6=BB=E5=BF=85=E9=A1=BB=E5=90=8C=E6=97=B6=E8=90=BD=E5=88=B0?=
+ =?UTF-8?q?=E5=BA=95=E5=BA=A7=EF=BC=88=E8=A1=A5=E6=8E=89=E8=87=AA=E5=B7=B1?=
+ =?UTF-8?q?=E5=AE=9E=E7=8E=B0=E9=87=8C=E7=9A=84=E7=9C=9F=E7=BC=BA=E5=8F=A3?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+缺口: RecordKeyOutcome 起初只改我们表里的状态, 没告诉底座; 而底座按它自己按下标的状态表
+决定跳过与否 -> 失效凭据仍会被继续使用, Key 级隔离实际没有生效。
+
+修正: 失效时同时调用底座 UpdateChannelStatus(按凭据字符串换算下标、记录原因与时间、
+只在全部 Key 都不可用时才停整个渠道)。投影新增 IndexToKeyValue 供其定位(仅进程内传递)。
+
+验证: 新增 TestAuthFailureMakesBaseSkipTheFailedKey —— 记一次 401 后用底座自己的
+GetNextEnabledKey() 查询, 确实跳过失效索引并返回另一把凭据。
+channelpool 测试 14/14; apigx 全量通过。
+---
+ apigx/channelpool/outcome.go         | 22 ++++++++++++++--
+ apigx/channelpool/projection.go      | 12 ++++++++-
+ apigx/channelpool/projection_test.go | 39 ++++++++++++++++++++++++++++
+ 3 files changed, 70 insertions(+), 3 deletions(-)
+
+diff --git a/apigx/channelpool/outcome.go b/apigx/channelpool/outcome.go
+index 7115520..06b89d5 100644
+--- a/apigx/channelpool/outcome.go
++++ b/apigx/channelpool/outcome.go
+@@ -6,6 +6,7 @@ import (
+ 
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/common"
++	basemodel "github.com/QuantumNous/new-api/model"
+ 	"gorm.io/gorm"
+ )
+ 
+@@ -84,9 +85,26 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
+ 		updates["cooldown_until"] = now + outcome.CooldownSeconds
+ 	}
+ 
+-	return db.Model(&apigxmodel.UpstreamKey{}).
++	if err := db.Model(&apigxmodel.UpstreamKey{}).
+ 		Where("id = ? AND alive_flag = ?", key.ID, apigxmodel.AliveFlagAlive).
+-		Updates(updates).Error
++		Updates(updates).Error; err != nil {
++		return err
++	}
++
++	// **必须同时落到底座**：底座是按它自己的、按下标存放的状态表决定跳过与否的。
++	// 只改我们的表，底座会继续使用这把已失效的凭据——Key 级隔离等于没做
++	// （这是本实现初版的真实缺口，做端到端验证前才发现）。
++	//
++	// 复用底座的 `UpdateChannelStatus`：它按凭据字符串换算下标、记录禁用原因与时间，
++	// 并且**只在全部 Key 都不可用时**才停掉整个渠道——正是计划书 §9.2 要求的语义。
++	// 它内部已把 DB 错误与「渠道不存在」记日志处理，返回值仅表示是否找到 Key。
++	if outcome.AuthFailed {
++		if keyValue, ok := projection.IndexToKeyValue[keyIndex]; ok {
++			basemodel.UpdateChannelStatus(baseChannelID, keyValue, common.ChannelStatusAutoDisabled,
++				truncateErrorCode(outcome.ErrorCode))
++		}
++	}
++	return nil
+ }
+ 
+ // truncateErrorCode 把失败原因裁剪到列宽（64），避免写入失败。
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index bd8ff95..c0fb2eb 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -41,6 +41,14 @@ type Projection struct {
+ 	// 底座的运行期统计只带索引（上下文 `ContextKeyChannelMultiKeyIndex`），
+ 	// 需要靠它把统计落回正确的 StableKeyID。
+ 	IndexToStableKey map[int]string
++	// IndexToKeyValue 是投影时写入底座的**凭据明文**（与该索引一一对应）。
++	//
++	// 存在的唯一理由：底座的 Key 级状态更新函数 `model.UpdateChannelStatus(channelId, usingKey, ...)`
++	// 是按**凭据字符串**定位索引的（它内部再换算成下标）。要让底座真正跳过一把失效的 Key，
++	// 就必须把当时投影用的那串凭据原样交给它。
++	//
++	// **只允许在进程内传递，不得写入日志、审计或任何持久化字段。**
++	IndexToKeyValue map[int]string
+ 	// KeyCount 是投影到基座的 Key 数量。
+ 	KeyCount int
+ }
+@@ -74,6 +82,7 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 
+ 	secrets := make([]string, 0, len(keys))
+ 	indexToStable := make(map[int]string, len(keys))
++	indexToKeyValue := make(map[int]string, len(keys))
+ 	for i := range keys {
+ 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
+ 		if err != nil {
+@@ -83,6 +92,7 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 			continue
+ 		}
+ 		indexToStable[len(secrets)] = keys[i].StableKeyID
++		indexToKeyValue[len(secrets)] = plain
+ 		secrets = append(secrets, plain)
+ 	}
+ 	if len(secrets) == 0 {
+@@ -108,7 +118,7 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 	if err := baseChannel.Update(); err != nil {
+ 		return nil, err
+ 	}
+-	return &Projection{IndexToStableKey: indexToStable, KeyCount: len(secrets)}, nil
++	return &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)}, nil
+ }
+ 
+ // baseMultiKeyMode 把分享渠道的池策略映射为底座的选择方式。
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index a7eb71e..d982664 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -426,3 +426,42 @@ func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
+ 	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status, "业务错误不得使凭据失效")
+ 	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
+ }
++
++// **最关键的一条**：失效必须同时落到底座，否则底座会继续使用已失效的凭据。
++//
++// 这条证明的是「我们的统计 → 底座的真实选择行为」这一整条链路：
++// 记一次 401 之后，再问底座要下一把 Key，它必须跳过那一把。
++func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9301
++	const baseChannelID int64 = 7272
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
++	}).Error)
++
++	secrets := []string{"sk-low-aaaaaaaaa", "sk-high-bbbbbbbb"}
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, []int64{1, 5})
++	projection, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	// 投影后索引 0 = 权重更高的 stable-b
++	assert.Equal(t, "stable-b", mustStable(t, projection, 0))
++
++	// 让索引 0 的凭据被上游拒绝
++	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{
++		AuthFailed: true, ErrorCode: "401_invalid_api_key",
++	}))
++
++	// 底座自己的状态表必须被标记（否则它会继续用这把）
++	base, err := basemodel.GetChannelById(int(baseChannelID), true)
++	require.NoError(t, err)
++	require.Equal(t, common.ChannelStatusAutoDisabled, base.ChannelInfo.MultiKeyStatusList[0],
++		"底座必须把该下标标为不可用，否则 Key 级隔离没有生效")
++
++	// 底座随后提供的必然是另一把凭据（这里就用底座自己的选择函数验证）
++	key, index, apiErr := base.GetNextEnabledKey()
++	require.Nil(t, apiErr)
++	assert.Equal(t, 1, index, "底座必须跳过已失效的索引 0")
++	assert.Equal(t, "sk-low-aaaaaaaaa", key)
++}
+-- 
+2.53.0.windows.1
+
