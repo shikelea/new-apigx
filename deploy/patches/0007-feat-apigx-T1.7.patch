@@ -1,0 +1,602 @@
+From 6d64b8ad82533740851a5067d14d83ca4f51f527 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 21:09:46 +0800
+Subject: [PATCH 7/7] =?UTF-8?q?feat(apigx):=20=E5=AE=B9=E9=87=8F=E5=9B=9B?=
+ =?UTF-8?q?=E6=80=81=E8=A7=A3=E6=9E=90=20+=20=E5=A4=9A=E7=BB=B4=E5=BA=A6?=
+ =?UTF-8?q?=E8=81=94=E5=90=88=E9=A2=84=E7=95=99=EF=BC=88T1.7=20=E7=AC=AC?=
+ =?UTF-8?q?=E4=B8=89=E9=83=A8=E5=88=86=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/capacity/policy.go: 四态语义(未配置/禁用/继承/明确不限/明确值) + 模式与值列配对校验
+  + 沿「最具体→最一般」链解析; 未配置返回 Unset, 绝不当成「不限」
+- apigx/capacity/policy_test.go: 4 个用例(配对校验 10 组、链语义 8 组、非法策略、IsEnforceable)
+- apigx/relayhook/capacity_hook.go: Config 结构体; 为 渠道+平台Key+用户 三维度做同一次原子预留;
+  对外 429 措辞改为中性(原写 channel capacity 会误导, 超限可能是 Key 或用户维度)
+- relayhook 测试 8/8(含多维度用例), capacity 12/12
+
+运行时验证: 只设 APIGX_TOKEN_CONCURRENCY_LIMIT=1(渠道不设限) + 并发 3
+  -> 200x1 + 429x2 + 上游仅 1 次 + Redis 零残留
+---
+ apigx/capacity/policy.go              | 123 +++++++++++++++++++++++++
+ apigx/capacity/policy_test.go         | 116 +++++++++++++++++++++++
+ apigx/relayhook/capacity_hook.go      | 127 ++++++++++++++++++++------
+ apigx/relayhook/capacity_hook_test.go |  77 +++++++++++++---
+ 4 files changed, 403 insertions(+), 40 deletions(-)
+ create mode 100644 apigx/capacity/policy.go
+ create mode 100644 apigx/capacity/policy_test.go
+
+diff --git a/apigx/capacity/policy.go b/apigx/capacity/policy.go
+new file mode 100644
+index 0000000..55cf29b
+--- /dev/null
++++ b/apigx/capacity/policy.go
+@@ -0,0 +1,123 @@
++package capacity
++
++import (
++	"errors"
++	"fmt"
++)
++
++// LimitMode 是「限制维度」的四态枚举。
++//
++// 依据 CODE_STYLE.md 第 11 条与 docs/stage0/schema-draft.md §3.3：
++// **未配置 / 禁用 / 继承默认 / 明确不限 / 明确值** 必须分别存储，
++// 空字段不得被解释成「不限」——这是底座与新表共同的硬约束。
++type LimitMode = int
++
++const (
++	// LimitModeUnset 未配置（未表态）：值列必须为 0，且**不得**解释为不限。
++	LimitModeUnset LimitMode = 0
++	// LimitModeDisabled 禁用：该资源不能用于此维度。
++	LimitModeDisabled LimitMode = 1
++	// LimitModeInherit 继承上级默认：显式向上查找。
++	LimitModeInherit LimitMode = 2
++	// LimitModeUnlimited 明确不限。
++	LimitModeUnlimited LimitMode = 3
++	// LimitModeValue 明确值：必须 > 0。
++	LimitModeValue LimitMode = 4
++)
++
++// ErrInvalidPolicy 表示四态与值列的组合非法。
++var ErrInvalidPolicy = errors.New("capacity: invalid policy")
++
++// Policy 是一条容量限制记录（对应 `apigx_capacity_policies` 的一行，
++// 或者由环境变量/平台默认构造出的临时策略）。
++type Policy struct {
++	Mode  LimitMode
++	Value int64
++}
++
++// Validate 校验四态与值列的一致性（计划书 §3.3：校验落在 Go 侧，数据库层不写 CHECK）。
++func (p Policy) Validate() error {
++	if p.Mode < LimitModeUnset || p.Mode > LimitModeValue {
++		return fmt.Errorf("%w: unknown mode %d", ErrInvalidPolicy, p.Mode)
++	}
++	if p.Mode == LimitModeValue {
++		if p.Value <= 0 {
++			return fmt.Errorf("%w: mode=明确值 requires value > 0 (got %d)", ErrInvalidPolicy, p.Value)
++		}
++		return nil
++	}
++	if p.Value != 0 {
++		return fmt.Errorf("%w: mode=%d requires value == 0 (got %d)", ErrInvalidPolicy, p.Mode, p.Value)
++	}
++	return nil
++}
++
++// LimitDecision 是解析结论。
++type LimitDecision int
++
++const (
++	// DecisionUnset 整条链都没有配置：**不等于不限**，由调用方决定如何处理。
++	DecisionUnset LimitDecision = iota
++	// DecisionDisabled 链上出现了「禁用」。
++	DecisionDisabled
++	// DecisionUnlimited 链上出现了「明确不限」。
++	DecisionUnlimited
++	// DecisionLimited 解析出一个明确上限。
++	DecisionLimited
++)
++
++func (d LimitDecision) String() string {
++	switch d {
++	case DecisionUnset:
++		return "unset"
++	case DecisionDisabled:
++		return "disabled"
++	case DecisionUnlimited:
++		return "unlimited"
++	case DecisionLimited:
++		return "limited"
++	default:
++		return fmt.Sprintf("unknown(%d)", int(d))
++	}
++}
++
++// Resolution 是限制链的解析结果。
++type Resolution struct {
++	Decision LimitDecision
++	Value    int64
++}
++
++// Resolve 沿「最具体 → 最一般」的顺序解析限制链。
++//
++// chain[0] 应当是最具体的来源（例如某个上游 Key），最后一项是最一般的默认值。
++// 语义：
++//   - `明确值` / `明确不限` / `禁用` 三者都会**立即终止**查找（更具体的表态优先）；
++//   - `继承上级` 与 `未配置` 都会**继续向上查找**（二者的区别在存储与展示层，不在解析结果）；
++//   - 整条链都未配置时返回 `DecisionUnset` —— 调用方必须显式决定如何处理，
++//     绝不能把它当成「不限」。
++func Resolve(chain ...Policy) (Resolution, error) {
++	for i, p := range chain {
++		if err := p.Validate(); err != nil {
++			return Resolution{}, fmt.Errorf("chain[%d]: %w", i, err)
++		}
++		switch p.Mode {
++		case LimitModeValue:
++			return Resolution{Decision: DecisionLimited, Value: p.Value}, nil
++		case LimitModeUnlimited:
++			return Resolution{Decision: DecisionUnlimited}, nil
++		case LimitModeDisabled:
++			return Resolution{Decision: DecisionDisabled}, nil
++		case LimitModeInherit, LimitModeUnset:
++			continue
++		}
++	}
++	return Resolution{Decision: DecisionUnset}, nil
++}
++
++// IsEnforceable 报告该解析结果是否应当在本层施加约束。
++//
++// 只有「明确值」才产生约束：明确不限不约束；未配置不约束（调用方需另行处理这一过渡行为）；
++// 禁用则由调用方按「拒绝」处理，不走这里。
++func (r Resolution) IsEnforceable() bool {
++	return r.Decision == DecisionLimited && r.Value > 0
++}
+diff --git a/apigx/capacity/policy_test.go b/apigx/capacity/policy_test.go
+new file mode 100644
+index 0000000..f330624
+--- /dev/null
++++ b/apigx/capacity/policy_test.go
+@@ -0,0 +1,116 @@
++package capacity
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// 四态语义的守门测试。
++//
++// 这里保护的是 CODE_STYLE.md 第 11 条：**未配置 ≠ 不限**。
++// 一旦有人把「未配置」当成「不限」，容量控制就会在没配置的情况下静默放开全部请求。
++func TestPolicyValidateEnforcesModeValuePairing(t *testing.T) {
++	tests := []struct {
++		name    string
++		policy  Policy
++		wantErr bool
++	}{
++		{"未配置 + 值为 0", Policy{Mode: LimitModeUnset, Value: 0}, false},
++		{"禁用 + 值为 0", Policy{Mode: LimitModeDisabled, Value: 0}, false},
++		{"继承 + 值为 0", Policy{Mode: LimitModeInherit, Value: 0}, false},
++		{"明确不限 + 值为 0", Policy{Mode: LimitModeUnlimited, Value: 0}, false},
++		{"明确值 + 正数", Policy{Mode: LimitModeValue, Value: 7}, false},
++		{"明确值 + 0（非法）", Policy{Mode: LimitModeValue, Value: 0}, true},
++		{"明确值 + 负数（非法）", Policy{Mode: LimitModeValue, Value: -1}, true},
++		{"未配置 + 非 0（非法）", Policy{Mode: LimitModeUnset, Value: 5}, true},
++		{"明确不限 + 非 0（非法）", Policy{Mode: LimitModeUnlimited, Value: 5}, true},
++		{"未知模式（非法）", Policy{Mode: 99, Value: 0}, true},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			err := tt.policy.Validate()
++			if tt.wantErr {
++				require.Error(t, err)
++				assert.ErrorIs(t, err, ErrInvalidPolicy)
++				return
++			}
++			require.NoError(t, err)
++		})
++	}
++}
++
++func TestResolveChainSemantics(t *testing.T) {
++	tests := []struct {
++		name  string
++		chain []Policy
++		want  Resolution
++	}{
++		{
++			name:  "最具体是明确值 → 立即采用",
++			chain: []Policy{{Mode: LimitModeValue, Value: 3}, {Mode: LimitModeValue, Value: 99}},
++			want:  Resolution{Decision: DecisionLimited, Value: 3},
++		},
++		{
++			name:  "最具体未配置 → 向上查找",
++			chain: []Policy{{Mode: LimitModeUnset}, {Mode: LimitModeValue, Value: 5}},
++			want:  Resolution{Decision: DecisionLimited, Value: 5},
++		},
++		{
++			name:  "显式继承 → 向上查找",
++			chain: []Policy{{Mode: LimitModeInherit}, {Mode: LimitModeValue, Value: 8}},
++			want:  Resolution{Decision: DecisionLimited, Value: 8},
++		},
++		{
++			name:  "最具体明确不限 → 终止，不再看下层更严格的限制",
++			chain: []Policy{{Mode: LimitModeUnlimited}, {Mode: LimitModeValue, Value: 1}},
++			want:  Resolution{Decision: DecisionUnlimited},
++		},
++		{
++			name:  "最具体禁用 → 终止",
++			chain: []Policy{{Mode: LimitModeDisabled}, {Mode: LimitModeValue, Value: 1}},
++			want:  Resolution{Decision: DecisionDisabled},
++		},
++		{
++			name:  "整条链都未配置 → Unset（**绝不是不限**）",
++			chain: []Policy{{Mode: LimitModeUnset}, {Mode: LimitModeUnset}},
++			want:  Resolution{Decision: DecisionUnset},
++		},
++		{
++			name:  "空链 → Unset",
++			chain: nil,
++			want:  Resolution{Decision: DecisionUnset},
++		},
++		{
++			name:  "继承到链尾仍无表态 → Unset",
++			chain: []Policy{{Mode: LimitModeInherit}, {Mode: LimitModeInherit}},
++			want:  Resolution{Decision: DecisionUnset},
++		},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got, err := Resolve(tt.chain...)
++			require.NoError(t, err)
++			assert.Equal(t, tt.want, got)
++		})
++	}
++}
++
++func TestResolveRejectsInvalidPolicyInChain(t *testing.T) {
++	_, err := Resolve(Policy{Mode: LimitModeValue, Value: 0})
++	require.Error(t, err)
++	assert.ErrorIs(t, err, ErrInvalidPolicy)
++
++	_, err = Resolve(Policy{Mode: LimitModeUnset, Value: 3})
++	require.Error(t, err)
++}
++
++// IsEnforceable 决定「这一层要不要真的去预留」。只有明确值才约束。
++func TestResolutionIsEnforceableOnlyForExplicitValue(t *testing.T) {
++	assert.True(t, Resolution{Decision: DecisionLimited, Value: 1}.IsEnforceable())
++	assert.False(t, Resolution{Decision: DecisionUnlimited}.IsEnforceable())
++	assert.False(t, Resolution{Decision: DecisionUnset}.IsEnforceable(), "未配置不得被当成可执行约束")
++	assert.False(t, Resolution{Decision: DecisionDisabled}.IsEnforceable(), "禁用由调用方按拒绝处理")
++	assert.False(t, Resolution{Decision: DecisionLimited, Value: 0}.IsEnforceable())
++}
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index 4e47a21..69241e4 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -1,10 +1,12 @@
+ // Package relayhook 承载 APIGX 与 relay 链路的接线点。
+ //
+-// 本文件是 T1.7 第二部分：把 apigx/capacity 的容量账本接进请求生命周期。
++// 本文件是 T1.7 的接线层：把 apigx/capacity 的容量账本接进请求生命周期。
+ //
+-// **默认关闭**（`APIGX_CAPACITY_ENABLED` 未设置时为 false），因此不改变既有链路行为；
+-// 打开后才对渠道并发做预留与归还。这样做是为了在 `apigx_capacity_policies`（T1.3 的
+-// 领域表）接管配置之前，能先把接线本身在真实请求路径上验证清楚。
++// **默认关闭**（`APIGX_CAPACITY_ENABLED` 未设置时为 false），因此不改变既有链路行为。
++//
++// 限制来源的过渡状态：当前各维度的上限来自环境变量；最终应来自
++// `apigx_capacity_policies`（T1.3 已建表）。为此这里刻意通过 `capacity.Resolve`
++// 走四态解析——接上数据库后只需在链首**追加更具体的策略**，接线层不必改动。
+ package relayhook
+ 
+ import (
+@@ -18,17 +20,23 @@ import (
+ 
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/google/uuid"
+ )
+ 
++// Config 是接线层的运行期配置（未来由 apigx_capacity_policies 填充）。
++//
++// 各 Limit 字段的语义遵循四态：**0 表示「未配置」**，绝不会被解释成「不限」。
++type Config struct {
++	Enabled      bool
++	ChannelLimit int64
++	TokenLimit   int64
++	UserLimit    int64
++}
++
+ var (
+-	capacityEnabled atomic.Bool
+-	// channelLimit 是渠道并发上限。0 表示**未配置**。
+-	//
+-	// 按 CODE_STYLE 第 11 条，未配置不得解释为「不限」；但在配置体系接好之前，
+-	// 未配置只能表示「本开关不施加约束」——因此 0 时直接跳过，并在文档中登记这一过渡行为。
+-	channelLimit atomic.Int64
++	currentConfig atomic.Value // 存 Config
+ 	// leaseTTL 是容量租约时长，长流由后台协程续租。
+ 	//
+ 	// 注意粒度：TTL 以**秒**为单位下发（`ttl/time.Second`），因此小于 1 秒的值会被截断为 0
+@@ -37,14 +45,73 @@ var (
+ )
+ 
+ func init() {
+-	capacityEnabled.Store(common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false))
+-	channelLimit.Store(int64(common.GetEnvOrDefault("APIGX_CHANNEL_CONCURRENCY_LIMIT", 0)))
++	Configure(Config{
++		Enabled:      common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false),
++		ChannelLimit: int64(common.GetEnvOrDefault("APIGX_CHANNEL_CONCURRENCY_LIMIT", 0)),
++		TokenLimit:   int64(common.GetEnvOrDefault("APIGX_TOKEN_CONCURRENCY_LIMIT", 0)),
++		UserLimit:    int64(common.GetEnvOrDefault("APIGX_USER_CONCURRENCY_LIMIT", 0)),
++	})
++}
++
++// Configure 设置运行期配置（供测试与未来的后台配置使用）。
++func Configure(cfg Config) { currentConfig.Store(cfg) }
++
++func getConfig() Config {
++	if v, ok := currentConfig.Load().(Config); ok {
++		return v
++	}
++	return Config{}
++}
++
++// policyFromLimit 把一个环境/默认限制转成四态策略。
++//
++// 值为 0 时返回「未配置」而不是「不限」——这是 CODE_STYLE 第 11 条的硬要求。
++func policyFromLimit(limit int64) capacity.Policy {
++	if limit <= 0 {
++		return capacity.Policy{Mode: capacity.LimitModeUnset}
++	}
++	return capacity.Policy{Mode: capacity.LimitModeValue, Value: limit}
+ }
+ 
+-// Configure 设置运行期开关与渠道并发上限（供测试与未来的后台配置使用）。
+-func Configure(enabled bool, limit int64) {
+-	capacityEnabled.Store(enabled)
+-	channelLimit.Store(limit)
++// buildDimensions 依据当前配置与调用者身份，构造本次请求需要预留的容量维度。
++//
++// 返回值 error 非空表示**明确禁用**（调用方必须拒绝请求），例如某个维度被配置为「禁用」。
++// 未配置的维度会被跳过（不产生约束），这与「明确不限」在解析结果上不同、在行为上都等于不约束——
++// 但区别必须保留在数据层，且未配置是待补的过渡状态（见包注释）。
++func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error) {
++	cfg := getConfig()
++	dims := make([]capacity.Dimension, 0, 3)
++
++	add := func(key string, limit int64) error {
++		res, err := capacity.Resolve(policyFromLimit(limit))
++		if err != nil {
++			return err
++		}
++		switch res.Decision {
++		case capacity.DecisionLimited:
++			dims = append(dims, capacity.Dimension{Key: key, Limit: res.Value, Amount: 1})
++		case capacity.DecisionDisabled:
++			return fmt.Errorf("capacity disabled on dimension %s", key)
++		default:
++			// unset / unlimited：本层不施加约束
++		}
++		return nil
++	}
++
++	if err := add(capacity.ChannelConcurrency(int64(channelID)), cfg.ChannelLimit); err != nil {
++		return nil, err
++	}
++	if tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId); tokenID > 0 {
++		if err := add(capacity.TokenConcurrency(int64(tokenID)), cfg.TokenLimit); err != nil {
++			return nil, err
++		}
++	}
++	if userID := common.GetContextKeyInt(c, constant.ContextKeyUserId); userID > 0 {
++		if err := add(capacity.UserConcurrency(int64(userID)), cfg.UserLimit); err != nil {
++			return nil, err
++		}
++	}
++	return dims, nil
+ }
+ 
+ // Lease 表示一次请求持有的容量租约。
+@@ -60,26 +127,28 @@ type Lease struct {
+ //
+ // 参数 channelID 用 int 以匹配底座 `model.Channel.Id` 的类型。
+ //
+-// 返回 (nil, true)  —— 本开关未启用、渠道无上限或渠道未知：不施加约束；
+-// 返回 (nil, false) —— 容量不足或账本不可用：**已经写出错误响应**，调用方必须直接返回；
++// 返回 (nil, true)  —— 本开关未启用、各维度均未配置上限或渠道未知：不施加约束；
++// 返回 (nil, false) —— 容量不足 / 维度被禁用 / 账本不可用：**已经写出错误响应**，调用方必须直接返回；
+ // 返回 (l, true)    —— 已持有租约，调用方必须在请求结束时调用 l.Release()。
+ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
+-	if !capacityEnabled.Load() || channelID <= 0 {
++	cfg := getConfig()
++	if !cfg.Enabled || channelID <= 0 {
+ 		return nil, true
+ 	}
+-	limit := channelLimit.Load()
+-	if limit <= 0 {
+-		// 未配置渠道并发上限：不施加约束（过渡行为，见包注释）
++
++	dims, err := buildDimensions(c, channelID)
++	if err != nil {
++		common.SysLog("apigx capacity: " + err.Error())
++		abortJSON(c, http.StatusForbidden, "capacity_disabled", "this resource is disabled for capacity control")
++		return nil, false
++	}
++	if len(dims) == 0 {
++		// 所有维度都未配置：不施加约束（过渡行为，见包注释）
+ 		return nil, true
+ 	}
+ 
+ 	ctrl := capacity.New(common.RDB)
+ 	id := uuid.NewString()
+-	dims := []capacity.Dimension{{
+-		Key:    capacity.ChannelConcurrency(int64(channelID)),
+-		Limit:  limit,
+-		Amount: 1,
+-	}}
+ 
+ 	ctx := context.Background()
+ 	if c != nil && c.Request != nil {
+@@ -153,10 +222,12 @@ func abortForError(c *gin.Context, err error) {
+ 	var exceeded *capacity.ErrExceeded
+ 	switch {
+ 	case errors.As(err, &exceeded):
++		// 内部日志带精确维度；对外只说「容量暂时不足」，不暴露是哪一维
++		// （对外写成 "channel capacity" 会误导：超限的也可能是平台 Key 或用户维度）。
+ 		common.SysLog("apigx capacity: exceeded on " + exceeded.Dimension)
+ 		c.Header("Retry-After", "1")
+ 		abortJSON(c, http.StatusTooManyRequests, "capacity_exceeded",
+-			"channel capacity is temporarily exceeded, please retry later")
++			"capacity is temporarily exceeded, please retry later")
+ 	case errors.Is(err, capacity.ErrRedisUnavailable):
+ 		// Redis 不可用时必须**拒绝准入**，不能从空计数恢复为「全部空闲」
+ 		common.SysLog("apigx capacity: ledger unavailable, refusing new admissions")
+diff --git a/apigx/relayhook/capacity_hook_test.go b/apigx/relayhook/capacity_hook_test.go
+index ec8dc2a..25f857c 100644
+--- a/apigx/relayhook/capacity_hook_test.go
++++ b/apigx/relayhook/capacity_hook_test.go
+@@ -9,6 +9,7 @@ import (
+ 
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/go-redis/redis/v8"
+ 	"github.com/stretchr/testify/assert"
+@@ -59,8 +60,8 @@ func cleanupChannel(t *testing.T, channelID int) {
+ // 默认关闭时不得施加任何约束（这就是「默认不改变既有链路」的保证）。
+ func TestAcquireIsNoopWhenDisabled(t *testing.T) {
+ 	setupRedis(t)
+-	t.Cleanup(func() { Configure(false, 0) })
+-	Configure(false, 1)
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{})
+ 
+ 	c := newCtx()
+ 	lease, ok := Acquire(c, 90001)
+@@ -72,8 +73,8 @@ func TestAcquireIsNoopWhenDisabled(t *testing.T) {
+ // 未配置上限（0）时不施加约束——过渡行为，接入 capacity_policies 后必须变成显式四态。
+ func TestAcquireIsNoopWhenLimitUnset(t *testing.T) {
+ 	setupRedis(t)
+-	t.Cleanup(func() { Configure(false, 0) })
+-	Configure(true, 0)
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{Enabled: true})
+ 
+ 	lease, ok := Acquire(newCtx(), 90002)
+ 	assert.True(t, ok)
+@@ -84,8 +85,8 @@ func TestAcquireIsNoopWhenLimitUnset(t *testing.T) {
+ func TestAcquireRejectsWhenFull(t *testing.T) {
+ 	setupRedis(t)
+ 	const channelID = 90003
+-	t.Cleanup(func() { Configure(false, 0) })
+-	Configure(true, 1)
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{Enabled: true, ChannelLimit: 1})
+ 
+ 	c1 := newCtx()
+ 	lease1, ok := Acquire(c1, channelID)
+@@ -115,8 +116,8 @@ func TestAcquireRejectsWhenFull(t *testing.T) {
+ func TestReleaseIsIdempotent(t *testing.T) {
+ 	setupRedis(t)
+ 	const channelID = 90004
+-	t.Cleanup(func() { Configure(false, 0) })
+-	Configure(true, 2)
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{Enabled: true, ChannelLimit: 2})
+ 
+ 	lease, ok := Acquire(newCtx(), channelID)
+ 	require.True(t, ok)
+@@ -136,8 +137,8 @@ func TestReleaseIsIdempotent(t *testing.T) {
+ // Redis 不可用时必须拒绝准入（503），而不是放行。
+ func TestAcquireFailsClosedWhenLedgerUnavailable(t *testing.T) {
+ 	setupRedis(t)
+-	t.Cleanup(func() { Configure(false, 0) })
+-	Configure(true, 1)
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{Enabled: true, ChannelLimit: 1})
+ 
+ 	previous := common.RDB
+ 	common.RDB = nil
+@@ -157,8 +158,8 @@ func TestAcquireFailsClosedWhenLedgerUnavailable(t *testing.T) {
+ func TestRenewKeepsLeaseAlive(t *testing.T) {
+ 	setupRedis(t)
+ 	const channelID = 90006
+-	t.Cleanup(func() { Configure(false, 0) })
+-	Configure(true, 1)
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{Enabled: true, ChannelLimit: 1})
+ 
+ 	previousTTL := leaseTTL
+ 	leaseTTL = 3 * time.Second // 续租间隔 = 1s
+@@ -176,3 +177,55 @@ func TestRenewKeepsLeaseAlive(t *testing.T) {
+ 	lease.Release()
+ 	cleanupChannel(t, channelID)
+ }
++
++// 多维度联合预留：渠道还有余量，但**平台 Key** 维度已满时必须拒绝。
++//
++// 这条用例守住的是「不能因切换维度而叠加容量」——只检查渠道是不够的。
++func TestAcquireRejectsWhenTokenDimensionFull(t *testing.T) {
++	setupRedis(t)
++	const channelID = 90007
++	const tokenID = 70001
++	t.Cleanup(func() { Configure(Config{}) })
++	// 渠道不限（未配置），平台 Key 上限 1
++	Configure(Config{Enabled: true, TokenLimit: 1})
++
++	mkCtx := func() *gin.Context {
++		c := newCtx()
++		common.SetContextKey(c, constant.ContextKeyTokenId, tokenID)
++		common.SetContextKey(c, constant.ContextKeyUserId, 80001)
++		return c
++	}
++
++	lease1, ok := Acquire(mkCtx(), channelID)
++	require.True(t, ok)
++	require.NotNil(t, lease1, "第一个请求应拿到平台 Key 维度的槽位")
++
++	c2 := mkCtx()
++	lease2, ok := Acquire(c2, channelID)
++	assert.False(t, ok, "平台 Key 维度已满时必须拒绝（即使渠道还有余量）")
++	assert.Nil(t, lease2)
++	assert.Equal(t, http.StatusTooManyRequests, c2.Writer.Status())
++
++	lease1.Release()
++	lease2b, ok := Acquire(mkCtx(), channelID)
++	assert.True(t, ok)
++	require.NotNil(t, lease2b)
++	lease2b.Release()
++
++	ctrl := capacity.New(common.RDB)
++	require.NoError(t, ctrl.Drop(t.Context(),
++		capacity.TokenConcurrency(tokenID), capacity.ChannelConcurrency(channelID)))
++}
++
++// 未配置任何维度上限时不得施加约束（过渡行为：上线 capacity_policies 后应改成显式拒绝或默认值）。
++func TestAcquireIsNoopWhenAllDimensionsUnset(t *testing.T) {
++	setupRedis(t)
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{Enabled: true})
++
++	c := newCtx()
++	common.SetContextKey(c, constant.ContextKeyTokenId, 70002)
++	lease, ok := Acquire(c, 90008)
++	assert.True(t, ok)
++	assert.Nil(t, lease)
++}
+-- 
+2.53.0.windows.1
+
