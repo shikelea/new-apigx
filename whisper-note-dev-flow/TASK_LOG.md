@@ -52,6 +52,8 @@
   - 🔒 **用户强调并要求记死**：本项目是**二开**，**不造轮子**。已把它写成 `CODE_STYLE.md` 第 25 条（最高优先级）：动手前必须先 grep 底座；列出「底座已有能力」对照表与「三条同时成立才允许自己写」的判定标准；并把本次 T1.5 重复实现作为反面案例永久记录。
   - [x] **投影已实现**（`apigx/channelpool`）：把分享者的 Key 池解密后按 `(weight DESC, id ASC)` **确定顺序**写进底座渠道的多 Key 列表，并调用**底座的 `channel.Update()`** 完成写入与规范化。测试 5/5：写入与顺序正确、只投影可用 Key、**重投影必须清空按索引存放的旧状态**（否则旧禁用状态会套到别的凭据上）、整池无可用凭据报错、单把解不开时跳过而不拖垮整池。
   - [x] 两个复用要点已记录：① 底座 `Update()` 用的是**全局 `basemodel.DB`**（生产由启动路径设置，测试须显式指向同一库）；② 它还会同步 **abilities 路由能力表**——这正是复用底座写路径的好处，路由不会与渠道状态脱节。
+  - [x] **逐 Key 统计回填（数据层）**：`apigx/channelpool/outcome.go` 的 `RecordKeyOutcome` —— 底座的运行期只提供 Key **索引**（`ContextKeyChannelMultiKeyIndex`），这里用投影把索引翻译回 `StableKeyID` 再落库（轮换/增删/改权重都会改变索引对应关系，不翻译就会张冠李戴）。实现：成功记 `LastOKAt`；失败记 `LastErrorAt` + 脱敏 `LastErrorCode`；**鉴权失效只把该 Key 标为 invalid（Key 级隔离），不动渠道与其它 Key**；可设 Key 级冷却。测试 5/5（另有投影 5/5，共 10/10）。
+  - [ ] 待做：把 `RecordKeyOutcome` 接到请求结束路径（底座在 `SetupContextForSelectedChannel` 写入 Key 索引，需在中继完成/失败处调用），并给投影映射加进程内缓存（当前每次重算投影，阶段 1 接受的成本）。
   - ⚠️ **已知残留风险（有意接受）**：底座 `channels.key` 是明文，投影后凭据会以明文出现在底座表中。我们自己的存储是加密信封；要消除这份明文投影必须改底座 relay 的取键路径，超出阶段 1 范围。
   - 📌 **T1.5 正确实现路径（复用底座，勿再自写）**：
     - 写入：构造底座 `model.Channel`（`Key` = 解密后按固定顺序换行拼接；`ChannelInfo.IsMultiKey=true`、`MultiKeySize=N`、`MultiKeyMode`）后调用 **`channel.Update()`**（其内部会重算 `MultiKeySize`、裁剪越界的状态表）；

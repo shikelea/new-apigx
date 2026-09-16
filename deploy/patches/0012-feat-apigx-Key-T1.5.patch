@@ -1,0 +1,240 @@
+From 6ca04f1266572ea8bee8448ba9632a5bef45e232 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 22:38:58 +0800
+Subject: [PATCH 12/12] =?UTF-8?q?feat(apigx):=20=E9=80=90=20Key=20?=
+ =?UTF-8?q?=E7=BB=9F=E8=AE=A1=E5=9B=9E=E5=A1=AB=EF=BC=88T1.5=20=E6=95=B0?=
+ =?UTF-8?q?=E6=8D=AE=E5=B1=82=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/channelpool/outcome.go: RecordKeyOutcome 把底座给的 Key 索引翻译回 StableKeyID 再落库
+  (轮换/增删/改权重都会改变索引对应关系, 不翻译统计就张冠李戴)
+- 成功记 LastOKAt; 失败记 LastErrorAt + 脱敏 LastErrorCode;
+  鉴权失效只把该 Key 标为 invalid(Key 级故障隔离), 不动渠道与其它 Key; 可设 Key 级冷却
+- 非我方渠道静默跳过; 未知索引报错不猜测
+- channelpool 测试 10/10; apigx 全量通过
+---
+ apigx/channelpool/outcome.go         |  99 ++++++++++++++++++++++++++
+ apigx/channelpool/projection_test.go | 102 +++++++++++++++++++++++++++
+ 2 files changed, 201 insertions(+)
+ create mode 100644 apigx/channelpool/outcome.go
+
+diff --git a/apigx/channelpool/outcome.go b/apigx/channelpool/outcome.go
+new file mode 100644
+index 0000000..7115520
+--- /dev/null
++++ b/apigx/channelpool/outcome.go
+@@ -0,0 +1,99 @@
++package channelpool
++
++import (
++	"errors"
++	"fmt"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// KeyOutcome 是一次调用结束后对某把上游凭据的反馈。
++type KeyOutcome struct {
++	// Success 为 true 时记 LastOKAt；否则记 LastErrorAt 与 ErrorCode。
++	Success bool
++	// ErrorCode 是脱敏后的失败原因（上游状态码或短标签），**不得包含凭据本身**。
++	ErrorCode string
++	// AuthFailed 表示上游明确拒绝了这份凭据（401/403 之类）：
++	// 计划书 §9.2 要求做 **Key 级故障隔离**，此时把该 Key 标为失效而不是停整个渠道。
++	AuthFailed bool
++	// CooldownSeconds > 0 时把该 Key 置入冷却（例如上游限流）。
++	// Key 级限流只让这一把冷却；确认是账户级/渠道级故障才应作用于共享范围。
++	CooldownSeconds int64
++}
++
++// RecordKeyOutcome 把一次调用的结果记到对应的上游凭据上。
++//
++// 为什么需要翻译：底座的请求上下文只携带 Key 的**索引**（`ContextKeyChannelMultiKeyIndex`），
++// 而我们的统计挂在**稳定凭据 ID** 上。轮换、增删、改权重都会改变索引与凭据的对应关系，
++// 因此每次都要用投影把索引翻译回 StableKeyID，否则统计会落到别的凭据上。
++//
++// 成本说明：本函数会重算一次投影（若干条查询）。阶段 1 接受这个成本；
++// 若成为热点，应在投影后把「底座渠道 → 索引映射」放入进程内缓存并在池变更时失效。
++func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyOutcome) error {
++	if db == nil {
++		return errors.New("channelpool: nil db")
++	}
++	if baseChannelID <= 0 || keyIndex < 0 {
++		return fmt.Errorf("%w: invalid base channel or key index", apigxmodel.ErrInvalidArgument)
++	}
++
++	var shareChannel apigxmodel.Channel
++	err := db.Where("base_channel_id = ?", baseChannelID).First(&shareChannel).Error
++	if err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			// 不是我们的分享渠道（例如管理员自建的普通渠道）：没有可记的对象，静默返回
++			return nil
++		}
++		return err
++	}
++
++	projection, err := ProjectKeyPool(db, shareChannel.ID)
++	if err != nil {
++		return err
++	}
++	stableKeyID, ok := projection.StableKeyIDForIndex(keyIndex)
++	if !ok {
++		// 索引不在当前投影里（池刚变更过）：不能猜，直接跳过本次统计
++		return fmt.Errorf("%w: key index %d not in current projection of channel %d",
++			apigxmodel.ErrNotFound, keyIndex, baseChannelID)
++	}
++
++	var key apigxmodel.UpstreamKey
++	err = db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, stableKeyID).First(&key).Error
++	if err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return fmt.Errorf("%w: upstream key %s", apigxmodel.ErrNotFound, stableKeyID)
++		}
++		return err
++	}
++
++	now := common.GetTimestamp()
++	updates := map[string]any{"updated_at": now}
++	if outcome.Success {
++		updates["last_ok_at"] = now
++	} else {
++		updates["last_error_at"] = now
++		updates["last_error_code"] = truncateErrorCode(outcome.ErrorCode)
++	}
++	if outcome.AuthFailed {
++		updates["status"] = apigxmodel.UpstreamKeyStatusInvalid
++	}
++	if outcome.CooldownSeconds > 0 {
++		updates["cooldown_until"] = now + outcome.CooldownSeconds
++	}
++
++	return db.Model(&apigxmodel.UpstreamKey{}).
++		Where("id = ? AND alive_flag = ?", key.ID, apigxmodel.AliveFlagAlive).
++		Updates(updates).Error
++}
++
++// truncateErrorCode 把失败原因裁剪到列宽（64），避免写入失败。
++func truncateErrorCode(code string) string {
++	const maxLen = 64
++	if len(code) <= maxLen {
++		return code
++	}
++	return code[:maxLen]
++}
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index a21410e..1e40893 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -232,3 +232,105 @@ func TestProjectKeyPoolSkipsUndecryptableKey(t *testing.T) {
+ 	require.Len(t, keys, 1)
+ 	assert.True(t, strings.HasPrefix(keys[0], "sk-good-"))
+ }
++
++// ---- 逐 Key 统计回填 ----
++
++// 底座的运行期只提供 Key 索引，统计必须翻译回稳定凭据 ID。
++func TestRecordKeyOutcomeTranslatesIndexToStableKey(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9101
++	const baseChannelID int64 = 5252
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	// 权重 5 的那把会被投影到索引 0
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-low-aaaaaaaaa", "sk-high-bbbbbbbb"}, []int64{1, 5})
++
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{Success: true}))
++
++	var high apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&high).Error)
++	assert.Positive(t, high.LastOKAt, "索引 0 对应权重最高的 stable-b，成功时间应记在它身上")
++	assert.Zero(t, high.LastErrorAt)
++
++	var low apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&low).Error)
++	assert.Zero(t, low.LastOKAt, "不该记到另一把凭据上")
++}
++
++// 鉴权失效 → 只把该 Key 标为失效（Key 级故障隔离），不动渠道与其它 Key。
++func TestRecordKeyOutcomeIsolatesAuthFailureToSingleKey(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9102
++	const baseChannelID int64 = 5253
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-one-aaaaaaaa", "sk-two-bbbbbbbb"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 1, KeyOutcome{
++		Success: false, AuthFailed: true, ErrorCode: "upstream_401_invalid_key",
++	}))
++
++	var failed apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&failed).Error)
++	assert.Equal(t, apigxmodel.UpstreamKeyStatusInvalid, failed.Status)
++	assert.Equal(t, "upstream_401_invalid_key", failed.LastErrorCode)
++	assert.Positive(t, failed.LastErrorAt)
++
++	var other apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&other).Error)
++	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, other.Status, "其它 Key 不受影响")
++
++	// 渠道本身也不应被改动（Key 级隔离）
++	var base basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
++	assert.Equal(t, common.ChannelStatusEnabled, base.Status)
++}
++
++func TestRecordKeyOutcomeSetsCooldown(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9103
++	const baseChannelID int64 = 5254
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-cool-aaaaaaaa"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	now := common.GetTimestamp()
++	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{CooldownSeconds: 120}))
++
++	var key apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
++	assert.Greater(t, key.CooldownUntil, now+60, "冷却应延伸到未来")
++	assert.False(t, apigxmodel.IsUpstreamKeyUsable(&key, now), "冷却期内该 Key 不可用")
++}
++
++// 非我们的渠道（管理员自建）没有可记对象：静默跳过，不报错、不误写。
++func TestRecordKeyOutcomeIgnoresForeignChannel(t *testing.T) {
++	db := setupProjectionEnv(t)
++	require.NoError(t, db.Create(&basemodel.Channel{Id: 9999, Name: "管理员自建", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	assert.NoError(t, RecordKeyOutcome(db, 9999, 0, KeyOutcome{Success: true}))
++}
++
++// 索引不在当前投影里时不得猜测（池刚变更过），必须报错让调用方跳过本次统计。
++func TestRecordKeyOutcomeRejectsUnknownIndex(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9104
++	const baseChannelID int64 = 5255
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-solo-aaaaaaaa"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	err = RecordKeyOutcome(db, int(baseChannelID), 7, KeyOutcome{Success: true})
++	assert.ErrorIs(t, err, apigxmodel.ErrNotFound, "未知索引不得被猜成某把凭据")
++}
+-- 
+2.53.0.windows.1
+
