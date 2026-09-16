@@ -1,0 +1,1458 @@
+From c96af9d906ce1d0d2239fac424c783c5b09c5c3a Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 20:16:04 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?feat(apigx):=2027=20=E5=BC=A0=E9=A2=86?=
+ =?UTF-8?q?=E5=9F=9F=E8=A1=A8=E8=90=BD=E5=9C=B0=20+=20=E8=BF=81=E7=A7=BB?=
+ =?UTF-8?q?=E5=85=A5=E5=8F=A3=20+=20=E6=8E=A5=E5=88=B0=E5=BA=95=E5=BA=A7?=
+ =?UTF-8?q?=E5=90=AF=E5=8A=A8=20(T1.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/model/base.go: package apigxmodel 的硬约束与类型别名规约、四态限制常量、软删除墓碑约定
+- apigx/model/models_identity.go: schema-draft §5.1-§5.13（13 张表）
+- apigx/model/models_metering.go: schema-draft §5.14-§5.27（14 张表）
+- apigx/model/migrate.go: Migrate()/AllModels()/ExpectedTableCount=27
+- apigx/model/migrate_test.go: 建表数量、SQLite 幂等、字段类型可移植守门
+- apigx/model/migrate_matrix_test.go: 三库矩阵（DSN 驱动，未配置的方言明确 SKIP）
+- model/main.go: 在 migrateDB() 末尾接入 APIGX 迁移（只增不改、幂等）
+
+验证：SQLite 单测全绿；PostgreSQL 18.4 上全新库 27 张表、从底座旧库升级 27+37（底座 37 张原样保留）、
+两种情况均连续迁移两次验幂等；go build ./... / go vet / gofmt 全部干净。MySQL 矩阵未执行（本机无实例）。
+---
+ apigx/model/migrate.go             |  68 ++++
+ apigx/model/migrate_matrix_test.go |  87 +++++
+ apigx/model/migrate_test.go        |  96 +++++
+ apigx/model/models_identity.go     | 571 +++++++++++++++++++++++++++++
+ apigx/model/models_metering.go     | 543 +++++++++++++++++++++++++++
+ model/main.go                      |   7 +
+ 6 files changed, 1372 insertions(+)
+ create mode 100644 apigx/model/migrate.go
+ create mode 100644 apigx/model/migrate_matrix_test.go
+ create mode 100644 apigx/model/migrate_test.go
+ create mode 100644 apigx/model/models_identity.go
+ create mode 100644 apigx/model/models_metering.go
+
+diff --git a/apigx/model/migrate.go b/apigx/model/migrate.go
+new file mode 100644
+index 0000000..f87cb48
+--- /dev/null
++++ b/apigx/model/migrate.go
+@@ -0,0 +1,68 @@
++package apigxmodel
++
++import "gorm.io/gorm"
++
++// Migrate 创建或升级 APIGX 的全部领域表。
++//
++// 与底座 AutoMigrate 的关系（依据 `docs/stage0/schema-draft.md` §2.3）：
++//
++//   - **只增不改**：只创建/补充我们自己的 apigx_* 表，不触碰底座的任何表；
++//   - **幂等**：可重复执行，连续启动两次不产生额外的结构差异；
++//   - **三库同源**：不使用任何方言特性，SQLite / MySQL / PostgreSQL 走同一条代码路径；
++//   - **不建库级外键**：表间关系由 `FK` 列在应用层维护（schema-draft §6.1），
++//     因此没有创建顺序要求，也不需要级联。
++//
++// 调用点见 `docs/stage0/upstream-diff.md` 的 D-003（底座 model.migrateDB 之后）。
++func Migrate(db *gorm.DB) error {
++	if db == nil {
++		return gorm.ErrInvalidDB
++	}
++	return db.AutoMigrate(AllModels()...)
++}
++
++// AllModels 返回全部 APIGX 领域表模型。
++//
++// 顺序与契约要求无关（不建库级外键）；但**新增表必须同时加到这里**，
++// 否则该表不会随启动创建。表数量由 `migrate_test.go` 守住。
++func AllModels() []any {
++	return []any{
++		// §5.1–§5.13 身份、分享与授权（models_identity.go）
++		&UserProfile{},
++		&APIKey{},
++		&ShareGroup{},
++		&Channel{},
++		&UpstreamAccount{},
++		&UpstreamKey{},
++		&KeyModelCapability{},
++		&CanonicalModel{},
++		&ModelAlias{},
++		&ModelOffering{},
++		&AccessPolicy{},
++		&Grant{},
++		&Invite{},
++		// §5.14–§5.27 计价、计量、异步与运维（models_metering.go）
++		&FxRate{},
++		&PriceRule{},
++		&PriceRuleItem{},
++		&CapacityPolicy{},
++		&Reservation{},
++		&Request{},
++		&Attempt{},
++		&UsageEvent{},
++		&QualityBucket{},
++		&AsyncTask{},
++		&UpstreamObjectRef{},
++		&AuditEvent{},
++		&IdempotencyRecord{},
++		&PlatformSetting{},
++	}
++}
++
++// TableNamePrefix 供迁移与验收脚本筛选 APIGX 自己的表（避免与底座表混淆）。
++const TableNamePrefix = TablePrefix
++
++// ExpectedTableCount 是当前冻结设计的表数量（schema-draft §5.1–§5.27，共 27 张）。
++//
++// 这是一个**契约常量**：新增表时必须同时调整它，并让 migrate_test.go 的断言继续成立；
++// 这样「漏加迁移」会立刻变成测试失败，而不是静默少建一张表。
++const ExpectedTableCount = 27
+diff --git a/apigx/model/migrate_matrix_test.go b/apigx/model/migrate_matrix_test.go
+new file mode 100644
+index 0000000..1aa291f
+--- /dev/null
++++ b/apigx/model/migrate_matrix_test.go
+@@ -0,0 +1,87 @@
++package apigxmodel
++
++import (
++	"os"
++	"testing"
++
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/driver/mysql"
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++// 三库兼容矩阵（底座 AGENTS.md 硬要求：SQLite / MySQL ≥ 5.7.8 / PostgreSQL ≥ 9.6
++// 必须**各自在真实实例上**验证；单库通过不算通过）。
++//
++// 由环境变量驱动，未配置的方言会**明确跳过并打印原因**，不会静默略过：
++//
++//	APIGX_TEST_PG_DSN    postgres://user:pass@host:port/db?sslmode=disable
++//	APIGX_TEST_MYSQL_DSN user:pass@tcp(host:port)/db?charset=utf8mb4&parseTime=True&loc=UTC
++//
++// 每种方言都做两件事：
++//  1. 在**全新库**上迁移，并断言建出 ExpectedTableCount 张 apigx_ 表；
++//  2. **连续迁移两次**，断言第二次无错且表集合不变（幂等）。
++//
++// 「从底座旧库升级」的场景由外部脚本驱动：同一个测试直接指向底座已迁移过的库即可
++// （此时 apigx_ 表是新增的，底座表原样保留）。
++func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
++	t.Run("sqlite", func(t *testing.T) {
++		db := newSQLiteDB(t)
++		require.NoError(t, Migrate(db))
++		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
++		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
++		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
++	})
++
++	t.Run("postgres", func(t *testing.T) {
++		dsn := os.Getenv("APIGX_TEST_PG_DSN")
++		if dsn == "" {
++			t.Skip("未设置 APIGX_TEST_PG_DSN：PostgreSQL 矩阵未执行（不允许当作通过）")
++		}
++		db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++		require.NoError(t, err, "连接 PostgreSQL 失败")
++		assertPostgresMatrix(t, db)
++	})
++
++	t.Run("mysql", func(t *testing.T) {
++		dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
++		if dsn == "" {
++			t.Skip("未设置 APIGX_TEST_MYSQL_DSN：MySQL 矩阵未执行（不允许当作通过）")
++		}
++		db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
++		require.NoError(t, err, "连接 MySQL 失败")
++		require.NoError(t, Migrate(db))
++		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
++		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
++		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
++	})
++}
++
++func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	require.NoError(t, Migrate(db))
++	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
++	require.NoError(t, Migrate(db), "第二次迁移必须幂等")
++	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
++}
++
++// informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，
++// 同时适用于 PostgreSQL 与 MySQL（SQLite 用 sqlite_master，见 apigxTableNames）。
++func informationSchemaApigxTables(t *testing.T, db *gorm.DB, column string) []string {
++	t.Helper()
++	var names []string
++	// 只查当前库的当前 schema；用参数绑定避免拼接
++	query := "SELECT " + column + " FROM information_schema.tables WHERE table_schema = current_schema() AND substr(" + column + ", 1, 6) = ?"
++	if err := db.Raw(query, TablePrefix).Scan(&names).Error; err != nil {
++		// MySQL 的 current_schema() 等价于 DATABASE()，若上面失败则回退
++		fallback := "SELECT " + column + " FROM information_schema.tables WHERE table_schema = DATABASE() AND substr(" + column + ", 1, 6) = ?"
++		require.NoError(t, db.Raw(fallback, TablePrefix).Scan(&names).Error)
++	}
++	return names
++}
++
++// 说明：sqlite 驱动在此文件被引用是为了保证 matrix 测试在只跑本文件时也能编译；
++// 真正的 SQLite 用例在 migrate_test.go。
++var _ = sqlite.Open
+diff --git a/apigx/model/migrate_test.go b/apigx/model/migrate_test.go
+new file mode 100644
+index 0000000..a7d7bf6
+--- /dev/null
++++ b/apigx/model/migrate_test.go
+@@ -0,0 +1,96 @@
++package apigxmodel
++
++import (
++	"path/filepath"
++	"reflect"
++	"testing"
++
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// apigxTableNames 从 SQLite 里取出所有 apigx_ 前缀的表名。
++// 用 substr 而不是 LIKE：LIKE 里 '_' 是通配符，会把 apigxX… 也匹配进来。
++func apigxTableNames(t *testing.T, db *gorm.DB) []string {
++	t.Helper()
++	var names []string
++	err := db.Raw("SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 6) = ?", TablePrefix).Scan(&names).Error
++	require.NoError(t, err)
++	return names
++}
++
++func newSQLiteDB(t *testing.T) *gorm.DB {
++	t.Helper()
++	// 用文件库而不是内存库：内存库每条连接一份，无法验证「连续两次迁移」的幂等性。
++	dsn := filepath.Join(t.TempDir(), "apigx_migrate_test.db")
++	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	// Windows 上必须显式关闭底层连接，否则 TempDir 清理会因文件被占用而失败。
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	return db
++}
++
++// TestMigrateCreatesAllDomainTables 守住「设计里有多少张表，迁移就必须建多少张」。
++// 漏加一张表会让本用例失败，而不是让问题在运行时才暴露。
++func TestMigrateCreatesAllDomainTables(t *testing.T) {
++	db := newSQLiteDB(t)
++
++	require.NoError(t, Migrate(db))
++
++	names := apigxTableNames(t, db)
++	assert.Len(t, names, ExpectedTableCount, "建表数量与冻结设计不一致：%v", names)
++	assert.Len(t, AllModels(), ExpectedTableCount, "AllModels 与 ExpectedTableCount 不一致")
++}
++
++// TestMigrateIsIdempotentOnSQLite 验证连续两次迁移不报错、且不改变表集合。
++// 依据底座 AGENTS.md：schema/迁移改动必须验证幂等性（要求连续启动两次）。
++func TestMigrateIsIdempotentOnSQLite(t *testing.T) {
++	db := newSQLiteDB(t)
++
++	require.NoError(t, Migrate(db))
++	first := apigxTableNames(t, db)
++
++	require.NoError(t, Migrate(db), "第二次迁移必须无错（幂等）")
++	second := apigxTableNames(t, db)
++
++	assert.ElementsMatch(t, first, second, "两次迁移后的表集合必须一致")
++	assert.Len(t, second, ExpectedTableCount)
++}
++
++// TestMigrateRejectsNilDB 保证误用（例如迁移前 DB 未初始化）会明确报错。
++func TestMigrateRejectsNilDB(t *testing.T) {
++	require.Error(t, Migrate(nil))
++}
++
++// TestModelFieldTypesArePortable 是本项目的「三库可移植」守门测试。
++//
++// schema-draft §3.2 把字段类型收敛到极小的集合（int64 / int / string / bool / gorm.DeletedAt），
++// 正是为了让 SQLite / MySQL / PostgreSQL 生成等价列类型。一旦有人在模型里引入
++// time.Time、float64、decimal、指针类型或自定义类型，本用例立刻失败——
++// 这类字段在不同驱动上的 Scanner/Valuer 行为会分叉（schema-draft §3.2 已说明为何金额用 int64 micro 单位）。
++func TestModelFieldTypesArePortable(t *testing.T) {
++	deletedAtType := reflect.TypeOf(gorm.DeletedAt{})
++	allowed := map[reflect.Kind]bool{
++		reflect.Int64:  true, // ID / FK / BIGINT / MICRO / TS
++		reflect.Int:    true, // INT / ENUM
++		reflect.String: true, // STR / TEXT / HASH64 / CUR3
++		reflect.Bool:   true, // BOOL
++	}
++
++	for _, m := range AllModels() {
++		modelType := reflect.TypeOf(m).Elem()
++		for i := 0; i < modelType.NumField(); i++ {
++			field := modelType.Field(i)
++			if field.Type == deletedAtType {
++				continue // 软删除列是唯一例外，底座同样使用
++			}
++			assert.True(t, allowed[field.Type.Kind()],
++				"%s.%s 的类型是 %s，不在可移植集合内（只允许 int64/int/string/bool/gorm.DeletedAt）",
++				modelType.Name(), field.Name, field.Type)
++		}
++	}
++}
+diff --git a/apigx/model/models_identity.go b/apigx/model/models_identity.go
+new file mode 100644
+index 0000000..1c08c9b
+--- /dev/null
++++ b/apigx/model/models_identity.go
+@@ -0,0 +1,571 @@
++// 本文件对应 `docs/stage0/schema-draft.md` §5.1–§5.13，字段与约束依据该文档，
++// 不得自行增删字段。
++//
++// 包名与硬约束（三库可移植、类型别名 → GORM tag 对照表、四态枚举、墓碑软删除模板）
++// 见同包的 `base.go` 包注释；本文件不再重复，字段 tag 一律按该对照表书写。
++//
++// 本文件只描述表结构，不含 SQL、不建库级外键约束（§6.1）、不写 CHECK（§3.3），
++// 所有跨表一致性校验落在 Go 服务端。
++package apigxmodel
++
++import (
++	"gorm.io/gorm"
++)
++
++// UserProfile 承载平台独有的用户属性，与底座 `users`（`new-api/model/user.go:79-115`）一对一。
++// 不新建用户表，不复制身份、密码、邮箱、会话（CODE_STYLE.md 第 9 条「不另起第二套用户系统」）。
++//
++// schema-draft §5.1
++type UserProfile struct {
++	// UserID 与底座 users.id 同值；主键即底座用户 ID，因此不自增。
++	UserID int64 `gorm:"primaryKey;autoIncrement:false"`
++	// TrustLevel 信任级别：0=待审核 / 1=普通 / 2=可信分享者 / 3=管理员指定。
++	TrustLevel int `gorm:"type:int;not null"`
++	// SharingEnabled 是否允许发布分享资源（审核策略开关）。
++	SharingEnabled bool `gorm:"not null"`
++	// DefaultRouteMode Key 未指定时的默认路由偏好：pinned/latency/throughput/reliability/auto。
++	DefaultRouteMode string `gorm:"size:16;not null;default:''"`
++	// DefaultAllowFallback 默认是否允许「指定来源失败后自动回退」（§9.1）。
++	DefaultAllowFallback bool `gorm:"not null"`
++	// BudgetLimitMode 用户级每日 USD 估算预算的模式（四态，§3.3）。
++	BudgetLimitMode int `gorm:"type:int;not null"`
++	// BudgetLimitMicro 用户级每日预算额度，micro-USD；仅 mode=4 时有效。
++	BudgetLimitMicro int64 `gorm:"bigint;not null;default:0"`
++	// FreezeState 冻结状态：0=正常 / 1=管理员封禁 / 2=风控冻结；与底座 users.status 并存，不替代它。
++	FreezeState int `gorm:"type:int;not null"`
++	// FrozenAt 冻结时间，UTC epoch 秒；0=未冻结。
++	FrozenAt int64 `gorm:"bigint;not null;default:0"`
++	// FrozenReason 冻结原因（脱敏，不含凭据）。
++	FrozenReason string `gorm:"size:255;not null;default:''"`
++	// CreatedAt 创建时间，UTC epoch 秒。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
++	AliveFlag int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间；用户删除后本行保留 user_id 供历史引用，不物理删。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_userprofile_del"`
++}
++
++// TableName 返回表名。
++func (UserProfile) TableName() string { return TablePrefix + "user_profiles" }
++
++// APIKey 是平台 API Key 的权威记录：持有者、可访问范围、默认策略、额度与到期时间。
++//
++// schema-draft §5.2
++type APIKey struct {
++	// ID 稳定内部 ID（Grant、请求归属、轮询索引都引用它）。
++	ID int64 `gorm:"primaryKey"`
++	// UserID 持有者，底座 users.id。
++	UserID int64 `gorm:"bigint;not null;default:0"`
++	// TokenID 底座 tokens.id（影子令牌）；唯一，永不复用。
++	TokenID int64 `gorm:"bigint;not null;default:0"`
++	// Name 展示名（可重名，不作授权依据，CODE_STYLE.md 第 1 条）。
++	Name string `gorm:"size:64;not null;default:''"`
++	// KeyPrefix 明文前 8 位，仅供界面识别；不含完整凭据。
++	KeyPrefix string `gorm:"size:12;not null;default:''"`
++	// KeyHash SHA-256(secret) 十六进制，不可恢复；天然不含 '-'（§2.4）。
++	KeyHash string `gorm:"type:char(64);uniqueIndex:idx_apigx_apikey_hash"`
++	// ScopeMode 可访问范围模式：0=全部已授权供给 / 1=白名单 / 2=固定单一来源（硬限制）。
++	ScopeMode int `gorm:"type:int;not null"`
++	// PinnedOfferingID scope_mode=2 时必填（非 0），指向 apigx_model_offerings.id。
++	PinnedOfferingID int64 `gorm:"bigint;not null;default:0"`
++	// AllowedModelIDs JSON 数组：允许的 apigx_canonical_models.id（scope_mode=1 用）；TEXT 列 + common.Marshal。
++	AllowedModelIDs string `gorm:"type:text"`
++	// AllowedOwnerUserIDs JSON 数组：允许的分享者（可信分享者限定，§10.3）。
++	AllowedOwnerUserIDs string `gorm:"type:text"`
++	// AllowFallback 是否允许回退；硬限制，请求参数不能放宽（§9.1）。
++	AllowFallback bool `gorm:"not null"`
++	// DefaultRouteMode 默认路由偏好（偏好，不是硬限制）。
++	DefaultRouteMode string `gorm:"size:16;not null;default:''"`
++	// RateLimitMode Key 级 RPM 限制模式（四态，§3.3）。
++	RateLimitMode int `gorm:"type:int;not null"`
++	// RateLimitRPM Key 级每分钟请求数上限；仅 mode=4 时有效。
++	RateLimitRPM int64 `gorm:"bigint;not null;default:0"`
++	// BudgetLimitMode Key 级每日 USD 预算模式（四态，§3.3）。
++	BudgetLimitMode int `gorm:"type:int;not null"`
++	// BudgetLimitMicro Key 级每日预算额度，micro-USD；仅 mode=4 时有效。
++	BudgetLimitMicro int64 `gorm:"bigint;not null;default:0"`
++	// Status 状态：0=待激活 / 1=启用 / 2=禁用 / 3=已撤销 / 4=已过期。
++	Status int `gorm:"type:int;not null"`
++	// ExpiresAt 到期时间，UTC epoch 秒；0=不过期。
++	ExpiresAt int64 `gorm:"bigint;not null;default:0"`
++	// LastUsedAt 最近使用时间，UTC epoch 秒；0=未使用。
++	LastUsedAt int64 `gorm:"bigint;not null;default:0"`
++	// RevokedAt 撤销时间，UTC epoch 秒；0=未撤销。
++	RevokedAt int64 `gorm:"bigint;not null;default:0"`
++	// RevokedByUserID 执行撤销的用户，指向底座 users.id。
++	RevokedByUserID int64 `gorm:"bigint;not null;default:0"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间；撤销（revoked_at）与软删除是两件事，撤销后行保留用于历史归属。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_apikey_del"`
++}
++
++// TableName 返回表名。
++func (APIKey) TableName() string { return TablePrefix + "api_keys" }
++
++// ShareGroup 是「分享者 + 分组名称 + 简介 + 默认策略 + 发布状态」。
++// 分组允许重名（CODE_STYLE.md 第 1 条），因此名称不是唯一键。
++//
++// schema-draft §5.3
++type ShareGroup struct {
++	// ID 稳定内部 ID（授权与历史归属一律用它）。
++	ID int64 `gorm:"primaryKey"`
++	// PublicID 对外稳定标识（展示、URL、日志用），永不复用。
++	PublicID string `gorm:"size:32;not null;default:'';uniqueIndex:idx_apigx_sharegroup_pub"`
++	// OwnerUserID 分享者，底座 users.id；第一版不可变更（§7）。
++	OwnerUserID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_sharegroup_owner_status,priority:1"`
++	// Name 展示名，可重名；更名不影响任何授权。
++	Name string `gorm:"size:64;not null;default:''"`
++	// Description 简介（不可信内容，渲染前转义）。
++	Description string `gorm:"type:text"`
++	// DefaultVisibility 默认可见性：0=私有 / 1=受限 / 2=公开。
++	DefaultVisibility int `gorm:"type:int;not null;index:idx_apigx_sharegroup_pubvis,priority:2"`
++	// DefaultPolicyID 该分组的默认策略行，指向 apigx_access_policies.id。
++	DefaultPolicyID int64 `gorm:"bigint;not null;default:0"`
++	// PublishStatus 发布状态：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停 / 4=已退役。
++	PublishStatus int `gorm:"type:int;not null;index:idx_apigx_sharegroup_owner_status,priority:2;index:idx_apigx_sharegroup_pubvis,priority:1"`
++	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
++	AliveFlag int64 `gorm:"bigint;not null;default:0"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒；名称与简介的编辑只更新这里。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间；退役用软删除，保留被引用 ID（§7）。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_sharegroup_del"`
++}
++
++// TableName 返回表名。
++func (ShareGroup) TableName() string { return TablePrefix + "share_groups" }
++
++// Channel 是分享渠道：owner、分组、协议、Base URL、Key 池策略、并发/RPM/TPM/任务上限、
++// 共享限额池、健康状态（计划书 §7 第 3 行）。
++//
++// schema-draft §5.4
++type Channel struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// PublicID 对外稳定标识。
++	PublicID string `gorm:"size:32;not null;default:'';uniqueIndex:idx_apigx_channel_pub"`
++	// OwnerUserID 分享者，底座 users.id；不可变（同 §5.3）。
++	OwnerUserID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_channel_owner_health,priority:1"`
++	// ShareGroupID 所属分享分组，apigx_share_groups.id。
++	ShareGroupID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_channel_group_health,priority:1"`
++	// Name 展示名。
++	Name string `gorm:"size:64;not null;default:''"`
++	// BaseChannelID 底座 channels.id；唯一的影子渠道行。
++	BaseChannelID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_channel_base"`
++	// Protocol 客户端协议族（openai / anthropic / gemini / …，取值对齐底座 constant 包）。
++	Protocol string `gorm:"size:32;not null;default:''"`
++	// BaseURL 上游 Base URL；不可信输入，出站前做 SSRF 校验（§10.3）。
++	BaseURL string `gorm:"size:512;not null;default:''"`
++	// AuthTarget 认证目标（域名/路径），与 base_url 一同参与「资源修订」判定。
++	AuthTarget string `gorm:"size:256;not null;default:''"`
++	// KeyPoolMode 渠道内选 Key 策略：0=轮询 / 1=随机 / 2=加权 / 3=最低占用；使用者不可见（§9.2）。
++	KeyPoolMode int `gorm:"type:int;not null"`
++	// CapacityPolicyID 渠道级容量策略，apigx_capacity_policies.id（scope_type=2）。
++	CapacityPolicyID int64 `gorm:"bigint;not null;default:0"`
++	// DefaultUpstreamAccountID 该渠道默认归属的上游账户池，apigx_upstream_accounts.id。
++	DefaultUpstreamAccountID int64 `gorm:"bigint;not null;default:0"`
++	// HealthState 健康状态：0=未知 / 1=健康 / 2=降级 / 3=不健康 / 4=冷却中。
++	HealthState int `gorm:"type:int;not null;index:idx_apigx_channel_group_health,priority:2;index:idx_apigx_channel_owner_health,priority:2;index:idx_apigx_channel_health_rev,priority:1"`
++	// HealthReason 脱敏原因码（不含地址细节与凭据，§9.1）。
++	HealthReason string `gorm:"size:128;not null;default:''"`
++	// HealthUpdatedAt 健康状态更新时间，UTC epoch 秒。
++	HealthUpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// Revision 资源修订号，初始 1；地址或模型归属变更时递增。
++	Revision int64 `gorm:"bigint;not null;default:0;index:idx_apigx_channel_health_rev,priority:2"`
++	// VerifiedAt 最近一次连通性验证时间，UTC epoch 秒。
++	VerifiedAt int64 `gorm:"bigint;not null;default:0"`
++	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
++	AliveFlag int64 `gorm:"bigint;not null;default:0"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间；退役用软删除，保留被请求/任务/价格/计量记录引用的稳定 ID。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_channel_del"`
++}
++
++// TableName 返回表名。
++func (Channel) TableName() string { return TablePrefix + "channels" }
++
++// UpstreamAccount 是上游账户池（派生表，服务 §9.2 共享限额）：
++// 同一上游账户下的多条渠道可共享额度与熔断范围，避免改名或多 Key 绕过同一限额。
++//
++// schema-draft §5.5
++type UpstreamAccount struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// OwnerUserID 分享者（账户归属），底座 users.id。
++	OwnerUserID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_upaccount_owner_prov,priority:1"`
++	// Provider 厂商/服务商标识。
++	Provider string `gorm:"size:32;not null;default:'';index:idx_apigx_upaccount_owner_prov,priority:2"`
++	// AccountLabel 脱敏展示标识（不含凭据、不含完整账号）。
++	AccountLabel string `gorm:"size:64;not null;default:''"`
++	// AccountKeyHash 由分享者声明的关联标识派生的摘要，用于去重；绝不由凭据明文派生。
++	AccountKeyHash string `gorm:"type:char(64);uniqueIndex:idx_apigx_upaccount_uniq,priority:3"`
++	// CapacityPolicyID 该账户池的共享限额，apigx_capacity_policies.id（scope_type=4）。
++	CapacityPolicyID int64 `gorm:"bigint;not null;default:0"`
++	// CircuitState 熔断状态：0=关闭 / 1=半开 / 2=打开（范围按账户池共享，§9.5）。
++	CircuitState int `gorm:"type:int;not null"`
++	// CircuitOpenedAt 熔断打开时间，UTC epoch 秒；0=未打开。
++	CircuitOpenedAt int64 `gorm:"bigint;not null;default:0"`
++	// CreatedAt 创建时间，UTC epoch 秒。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_upaccount_del"`
++}
++
++// TableName 返回表名。
++func (UpstreamAccount) TableName() string { return TablePrefix + "upstream_accounts" }
++
++// UpstreamKey 是渠道下的上游 Key：「渠道、稳定 ID、名称、secret_ref 与凭据版本、
++// 启停/冷却/到期、权重、独立限额、上游账户池及价格配置」（计划书 §7 第 4 行）。
++//
++// schema-draft §5.6
++type UpstreamKey struct {
++	// ID 稳定内部 ID（apigx_attempts / apigx_async_tasks 引用它，永不变）。
++	ID int64 `gorm:"primaryKey"`
++	// ChannelID 所属分享渠道，apigx_channels.id。
++	ChannelID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:1;index:idx_apigx_upkey_pool,priority:1"`
++	// StableKeyID 渠道内稳定标识：轮询/权重/统计都不依赖导入行号（CODE_STYLE.md 第 1 条）。
++	StableKeyID string `gorm:"size:32;not null;default:'';uniqueIndex:idx_apigx_upkey_stable,priority:2"`
++	// Name 展示名。
++	Name string `gorm:"size:64;not null;default:''"`
++	// SecretRef 指向受保护凭据存储的引用，不含明文；主密钥与数据库分离（§10.3）。
++	SecretRef string `gorm:"size:255;not null;default:''"`
++	// CredentialVersion 凭据版本号，轮换时递增（不新建行）。
++	CredentialVersion int64 `gorm:"bigint;not null;default:0"`
++	// CredentialStartedAt 当前凭据版本启用时间，UTC epoch 秒。
++	CredentialStartedAt int64 `gorm:"bigint;not null;default:0"`
++	// Status 状态：0=启用 / 1=禁用 / 2=冷却 / 3=已过期 / 4=鉴权失效 / 5=已撤销。
++	Status int `gorm:"type:int;not null;index:idx_apigx_upkey_pool,priority:2;index:idx_apigx_upkey_account_status,priority:2;index:idx_apigx_upkey_cooldown,priority:1"`
++	// Weight 权重（仅用于选 Key，与渠道权重不混用，§9.3）。
++	Weight int64 `gorm:"bigint;not null;default:0;index:idx_apigx_upkey_pool,priority:3"`
++	// CooldownUntil 冷却截止时间，UTC epoch 秒；0=未冷却。
++	CooldownUntil int64 `gorm:"bigint;not null;default:0;index:idx_apigx_upkey_cooldown,priority:2"`
++	// ExpiresAt 到期时间，UTC epoch 秒；0=不过期。
++	ExpiresAt int64 `gorm:"bigint;not null;default:0"`
++	// UpstreamAccountID 上游账户池归属，apigx_upstream_accounts.id；0=未归属。
++	UpstreamAccountID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_upkey_account_status,priority:1"`
++	// CapacityPolicyID Key 独立限额，apigx_capacity_policies.id（scope_type=3，四态）。
++	CapacityPolicyID int64 `gorm:"bigint;not null;default:0"`
++	// PriceRuleID Key 价格配置，apigx_price_rules.id；0=继承供给/渠道。
++	PriceRuleID int64 `gorm:"bigint;not null;default:0"`
++	// DiscoveryState 发现状态：0=未发现 / 1=已发现 / 2=发现失败 / 3=手工录入（§8.1）。
++	DiscoveryState int `gorm:"type:int;not null"`
++	// LastOKAt 最近一次成功时间，UTC epoch 秒；0=无记录。
++	LastOKAt int64 `gorm:"bigint;not null;default:0"`
++	// LastErrorAt 最近一次失败时间，UTC epoch 秒；0=无记录。
++	LastErrorAt int64 `gorm:"bigint;not null;default:0"`
++	// LastErrorCode 脱敏错误码。
++	LastErrorCode string `gorm:"size:64;not null;default:''"`
++	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
++	AliveFlag int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:3"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒；凭据轮换只更新它。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间；Key 退役用软删除 + status，绝不物理删除（§7）。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_upkey_del"`
++}
++
++// TableName 返回表名。
++func (UpstreamKey) TableName() string { return TablePrefix + "upstream_keys" }
++
++// KeyModelCapability 记录「Key 支持的上游模型和能力、发现/验证状态及时间」，
++// 是「分享者声明 / 目录发现 / 连通性验证」三类证据的唯一落点（§8.1）。
++// 刻意不直接挂 canonical_model_id：本表记录的是「上游自称什么」，归一由 apigx_model_aliases 负责。
++//
++// schema-draft §5.7
++type KeyModelCapability struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// UpstreamKeyID 所属上游 Key，apigx_upstream_keys.id。
++	UpstreamKeyID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_keycap_key_cap,priority:1"`
++	// CapabilityKeyHash SHA-256(upstream_model_id + "|" + capability)；进唯一索引用，绕开长字符串前缀限制（§3.5）。
++	CapabilityKeyHash string `gorm:"type:char(64);uniqueIndex:idx_apigx_keycap_uniq"`
++	// UpstreamModelID 上游模型 ID（不可信输入，存原文）。
++	UpstreamModelID string `gorm:"size:191;not null;default:''"`
++	// Capability 能力枚举：1=对话 / 2=向量 / 3=图片生成 / 4=图片编辑 / 5=语音识别 / 6=语音生成 / 7=重排 / 8=视频。
++	Capability int `gorm:"type:int;not null;index:idx_apigx_keycap_key_cap,priority:2;index:idx_apigx_keycap_evi_cap,priority:2"`
++	// DiscoverySource 发现来源：0=手工输入 / 1=目录接口 / 2=主动探测。
++	DiscoverySource int `gorm:"type:int;not null"`
++	// EvidenceState 证据状态：0=分享者声明 / 1=目录发现 / 2=连通性验证通过 / 3=验证失败。
++	EvidenceState int `gorm:"type:int;not null;index:idx_apigx_keycap_evi_cap,priority:1"`
++	// DiscoveredAt 发现时间，UTC epoch 秒；不可变快照字段。
++	DiscoveredAt int64 `gorm:"bigint;not null;default:0"`
++	// VerifiedAt 最近验证时间，UTC epoch 秒；重新验证只更新它。
++	VerifiedAt int64 `gorm:"bigint;not null;default:0"`
++	// LastErrorCode 脱敏错误码。
++	LastErrorCode string `gorm:"size:64;not null;default:''"`
++	// RawMetadata 上游返回的原始描述 JSON（不可信，展示转义）；TEXT 列 + common.Marshal。
++	RawMetadata string `gorm:"type:text"`
++	// RawMetadataBytes 写入时的字节数（用于 MySQL text 上限监控，§3.4）。
++	RawMetadataBytes int `gorm:"type:int;not null;default:0"`
++	// CreatedAt 创建时间，UTC epoch 秒。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++}
++
++// TableName 返回表名。
++func (KeyModelCapability) TableName() string { return TablePrefix + "key_model_capabilities" }
++
++// CanonicalModel 是「厂商、标准 ID、版本、类型、能力和描述来源」（计划书 §7 第 6 行）。
++// 由平台维护；分享者只能提交映射建议或发布自定义模型，不能编辑全局标准模型（§7）。
++//
++// schema-draft §5.8
++type CanonicalModel struct {
++	// ID 稳定内部 ID；Grant、请求归属、历史计量一律用它。
++	ID int64 `gorm:"primaryKey"`
++	// APIModelID 对外标准 ID，客户端从可用目录/调用示例获取（§8.2）；发布后永不复用。
++	APIModelID string `gorm:"size:191;not null;default:'';uniqueIndex:idx_apigx_canonmodel_api_id"`
++	// VendorID 软引用底座 vendors.id；0=未匹配到已知厂商。
++	VendorID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_canonmodel_vendor_fam,priority:1"`
++	// VendorLabel 厂商展示名快照（上游厂商字段不可信，可能与底座厂商列表不一致）。
++	VendorLabel string `gorm:"size:64;not null;default:''"`
++	// ModelFamily 模型族名（如 gpt、claude）。
++	ModelFamily string `gorm:"size:128;not null;default:'';index:idx_apigx_canonmodel_vendor_fam,priority:2"`
++	// VersionLabel 版本标识（如 4o、3-5-sonnet）；不通过删除版本号/日期/量化后缀来强行归并（§8.2）。
++	VersionLabel string `gorm:"size:64;not null;default:''"`
++	// Variant 变体（如 latest、preview、thinking）；动态 latest 别名必须在此标注（§8.2）。
++	Variant string `gorm:"size:64;not null;default:''"`
++	// ModalityType 主类型：1=对话 / 2=向量 / 3=图片 / 4=语音识别 / 5=语音生成 / 6=重排 / 7=视频。
++	ModalityType int `gorm:"type:int;not null;index:idx_apigx_canonmodel_status_type,priority:2"`
++	// Capabilities JSON：平台级参考能力（工具调用、视觉输入、上下文长度、JSON 格式等）；
++	// 供给的实际能力以 apigx_model_offerings.capabilities 为准（§8.2）。TEXT 列 + common.Marshal。
++	Capabilities string `gorm:"type:text"`
++	// DescriptionSource 描述来源：0=平台维护 / 1=上游声明 / 2=外部来源。
++	DescriptionSource int `gorm:"type:int;not null"`
++	// Description 描述（不可信内容，渲染前转义）。
++	Description string `gorm:"type:text"`
++	// Status 状态：0=草稿 / 1=生效 / 2=已弃用 / 3=已合并。
++	Status int `gorm:"type:int;not null;index:idx_apigx_canonmodel_status_type,priority:1"`
++	// MergedIntoID 合并目标，apigx_canonical_models.id；仅作路由与展示提示，不改变已有授权或历史归属（§7）。
++	MergedIntoID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_canonmodel_merged_into"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++}
++
++// TableName 返回表名。
++func (CanonicalModel) TableName() string { return TablePrefix + "canonical_models" }
++
++// ModelAlias 记录「上游或外部价格 ID 到标准模型的映射、范围和确认状态」。
++// §8.4 要求「通过独立的『价格来源映射』连接标准模型」，并保留厂商入口/地区/服务档位。
++//
++// schema-draft §5.9
++type ModelAlias struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// ScopeType 范围类型：0=平台全局 / 1=厂商 / 2=渠道 / 3=供给。
++	ScopeType int `gorm:"type:int;not null;index:idx_apigx_modelalias_scope_state,priority:1"`
++	// ScopeID 对应范围 ID；scope_type=0 时为 0。
++	ScopeID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_modelalias_scope_state,priority:2"`
++	// Source 来源：0=上游目录 / 1=外部价格源（模眼/ModelRadar/models.dev/OpenRouter） / 2=分享者建议。
++	Source int `gorm:"type:int;not null;index:idx_apigx_modelalias_source_norm,priority:1"`
++	// SourceRef 来源标识/URL（不可信，展示转义；出站前 SSRF 校验）。
++	SourceRef string `gorm:"size:255;not null;default:''"`
++	// ExternalModelID 上游或外部价格库的模型 ID（原文）。
++	ExternalModelID string `gorm:"size:191;not null;default:''"`
++	// NormalizedModelID 归一化后的匹配键（大小写/空白归一；不做版本号或日期剥离，§8.2）。
++	NormalizedModelID string `gorm:"size:191;not null;default:'';index:idx_apigx_modelalias_source_norm,priority:2"`
++	// AliasKeyHash SHA-256(scope_type|scope_id|source|normalized_model_id)；进唯一索引。
++	AliasKeyHash string `gorm:"type:char(64);uniqueIndex:idx_apigx_modelalias_uniq,priority:1"`
++	// TargetCanonicalModelID 映射目标，apigx_canonical_models.id。
++	TargetCanonicalModelID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_modelalias_target_state,priority:1"`
++	// Relation 关系：0=完全匹配 / 1=已确认别名 / 2=候选（仅提示，不自动路由）。
++	Relation int `gorm:"type:int;not null"`
++	// ConfirmationState 确认状态：0=待确认 / 1=已确认 / 2=已拒绝。
++	ConfirmationState int `gorm:"type:int;not null;index:idx_apigx_modelalias_scope_state,priority:3;index:idx_apigx_modelalias_target_state,priority:2"`
++	// ConfirmedByUserID 确认人，底座 users.id；分享者只能确认自己范围内的映射（§7）。
++	ConfirmedByUserID int64 `gorm:"bigint;not null;default:0"`
++	// ConfirmedAt 确认时间，UTC epoch 秒；0=未确认。
++	ConfirmedAt int64 `gorm:"bigint;not null;default:0"`
++	// RegionLabel 厂商入口/地区；同模型跨地区报价不互相覆盖（§8.3）。
++	RegionLabel string `gorm:"size:64;not null;default:''"`
++	// TierLabel 服务档位（Standard/Batch 等，§8.3）。
++	TierLabel string `gorm:"size:64;not null;default:''"`
++	// Evidence 证据 JSON（来源、抓取时间、页完整性标记；不可信）；TEXT 列 + common.Marshal。
++	Evidence string `gorm:"type:text"`
++	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
++	AliveFlag int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_modelalias_uniq,priority:2"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_modelalias_del"`
++}
++
++// TableName 返回表名。
++func (ModelAlias) TableName() string { return TablePrefix + "model_aliases" }
++
++// ModelOffering 是「标准模型与渠道的关联、上游 ID、实际能力、访问策略、价格版本」。
++// 这是「指定来源」的粒度，也是 X-APIGX-Offering 请求头的取值来源（§9.1）。
++//
++// schema-draft §5.10
++type ModelOffering struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// PublicID 对外 offer id，X-APIGX-Offering 用它（§9.1）。
++	PublicID string `gorm:"size:32;not null;default:'';uniqueIndex:idx_apigx_offering_pub"`
++	// ChannelID 所属渠道，apigx_channels.id。
++	ChannelID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_offering_channel,priority:1"`
++	// CanonicalModelID 标准模型，apigx_canonical_models.id。
++	CanonicalModelID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_offering_canon,priority:1"`
++	// UpstreamModelID 转发时替换成的上游模型 ID（§8.2）。
++	UpstreamModelID string `gorm:"size:191;not null;default:''"`
++	// OfferingKeyHash SHA-256(channel_id|canonical_model_id|upstream_model_id)；进唯一索引。
++	OfferingKeyHash string `gorm:"type:char(64);uniqueIndex:idx_apigx_offering_uniq,priority:1"`
++	// Capabilities JSON：该供给的实际能力（工具调用、视觉、上下文长度、JSON、音色、视频规格等，§8.2）。
++	Capabilities string `gorm:"type:text"`
++	// AccessDefault 默认访问级别：0=私有 / 1=受限 / 2=公开；与分组默认策略求交，不能放宽父级（§7）。
++	AccessDefault int `gorm:"type:int;not null;index:idx_apigx_offering_canon,priority:3"`
++	// CapacityPolicyID 供给级容量策略，apigx_capacity_policies.id（scope_type=5）。
++	CapacityPolicyID int64 `gorm:"bigint;not null;default:0"`
++	// PriceRuleID 当前生效价格版本，apigx_price_rules.id；0=未定价。
++	PriceRuleID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_offering_status_price,priority:2"`
++	// Status 状态：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停 / 4=已退役。
++	Status int `gorm:"type:int;not null;index:idx_apigx_offering_canon,priority:2;index:idx_apigx_offering_channel,priority:2;index:idx_apigx_offering_status_price,priority:1"`
++	// Revision 资源修订号；上游模型 ID 变更时递增。
++	Revision int64 `gorm:"bigint;not null;default:0"`
++	// VerifiedAt 最近连通性验证时间，UTC epoch 秒；0=未验证。
++	VerifiedAt int64 `gorm:"bigint;not null;default:0"`
++	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
++	AliveFlag int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_offering_uniq,priority:2"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++	// DeletedAt 软删除时间。
++	DeletedAt gorm.DeletedAt `gorm:"index:idx_apigx_offering_del"`
++}
++
++// TableName 返回表名。
++func (ModelOffering) TableName() string { return TablePrefix + "model_offerings" }
++
++// AccessPolicy 是「公开、私有或受限策略」（计划书 §7 第 10 行前半）；
++// 可设在分组（默认值）与供给（进一步收紧）两级。
++//
++// schema-draft §5.11
++type AccessPolicy struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// OwnerUserID 策略归属，底座 users.id（服务端按登录用户校验归属，§6）。
++	OwnerUserID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_accesspolicy_owner_scope,priority:1"`
++	// ScopeType 范围类型：0=分享分组默认策略 / 1=供给策略。
++	ScopeType int `gorm:"type:int;not null;uniqueIndex:idx_apigx_accesspolicy_scope,priority:1;index:idx_apigx_accesspolicy_owner_scope,priority:2;index:idx_apigx_accesspolicy_scope_vis,priority:1"`
++	// ScopeID 范围 ID，apigx_share_groups.id 或 apigx_model_offerings.id。
++	ScopeID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_accesspolicy_scope,priority:2"`
++	// Visibility 可见性：0=私有（仅本人） / 1=受限（仅获授权者可见） / 2=公开（可浏览）。
++	Visibility int `gorm:"type:int;not null;index:idx_apigx_accesspolicy_scope_vis,priority:2"`
++	// AllowAutoRoute 是否允许进入自动路由候选（可见 ≠ 可调用，§2/§7）。
++	AllowAutoRoute bool `gorm:"not null"`
++	// RequireTrustedSharer 是否只允许可信分享者范围内的用户调用。
++	RequireTrustedSharer bool `gorm:"not null"`
++	// PolicyVersion 权限版本号；每次变更 +1，用于权限变更传播与出站前重验（§10.3）。
++	PolicyVersion int64 `gorm:"bigint;not null;default:0"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++}
++
++// TableName 返回表名。
++func (AccessPolicy) TableName() string { return TablePrefix + "access_policies" }
++
++// Grant 是「用户授权、来源、到期和撤销状态」（计划书 §7 第 10 行后半）；
++// 资源邀请兑换和指定用户都生成受资源范围约束的 Grant（§7）。
++//
++// schema-draft §5.12
++type Grant struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// SubjectType 主体类型：0=用户 / 1=平台 Key / 2=邀请。
++	SubjectType int `gorm:"type:int;not null;uniqueIndex:idx_apigx_grant_uniq,priority:1;index:idx_apigx_grant_subject,priority:1"`
++	// SubjectID 主体 ID，按 subject_type 指向底座 users.id / apigx_api_keys.id / apigx_invites.id。
++	SubjectID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_grant_uniq,priority:2;index:idx_apigx_grant_subject,priority:2"`
++	// ResourceType 资源类型：0=分享分组 / 1=模型供给。
++	ResourceType int `gorm:"type:int;not null;uniqueIndex:idx_apigx_grant_uniq,priority:3;index:idx_apigx_grant_resource,priority:1"`
++	// ResourceID 资源 ID，按 resource_type 指向 apigx_share_groups.id / apigx_model_offerings.id。
++	ResourceID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_grant_uniq,priority:4;index:idx_apigx_grant_resource,priority:2"`
++	// ScopeKind 授权来源类别：0=指定用户 / 1=邀请兑换 / 2=所有者本人。
++	ScopeKind int `gorm:"type:int;not null"`
++	// SourceInviteID 来源邀请，apigx_invites.id；0 表示非邀请来源（不是 NULL，§5.12）。
++	SourceInviteID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_grant_uniq,priority:5;index:idx_apigx_grant_source_invite"`
++	// GrantedByUserID 授予人，底座 users.id。
++	GrantedByUserID int64 `gorm:"bigint;not null;default:0"`
++	// GrantedAt 授予时间，UTC epoch 秒；不可变快照字段。
++	GrantedAt int64 `gorm:"bigint;not null;default:0"`
++	// ExpiresAt 到期时间，UTC epoch 秒；0=不过期。已生成 Grant 有独立到期时间，不随邀请到期而变（§7）。
++	ExpiresAt int64 `gorm:"bigint;not null;default:0;index:idx_apigx_grant_subject,priority:4"`
++	// GiftVersion 授予时的 apigx_access_policies.policy_version 快照，用于审计「授予时是什么策略」。
++	GiftVersion int64 `gorm:"bigint;not null;default:0"`
++	// RevokedAt 撤销时间，UTC epoch 秒；0=未撤销。只允许单向推进一次。
++	RevokedAt int64 `gorm:"bigint;not null;default:0;index:idx_apigx_grant_subject,priority:3;index:idx_apigx_grant_resource,priority:3"`
++	// RevokedByUserID 撤销人，底座 users.id。
++	RevokedByUserID int64 `gorm:"bigint;not null;default:0"`
++	// RevokeReason 脱敏撤销原因。
++	RevokeReason string `gorm:"size:255;not null;default:''"`
++	// CreatedAt 创建时间，UTC epoch 秒。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++}
++
++// TableName 返回表名。
++func (Grant) TableName() string { return TablePrefix + "grants" }
++
++// Invite 是「注册邀请或资源邀请、Token 哈希、使用次数、有效期与目标范围」。
++// §10.1 要求注册邀请码与资源访问邀请码使用独立类型和校验逻辑，邀请码保存哈希，
++// 支持到期、次数限制、撤销和并发兑换时的原子扣减。
++//
++// schema-draft §5.13
++type Invite struct {
++	// ID 稳定内部 ID。
++	ID int64 `gorm:"primaryKey"`
++	// InviteType 邀请类型：0=注册邀请 / 1=资源访问邀请；两类共用表但校验逻辑独立（§10.1）。
++	InviteType int `gorm:"type:int;not null;index:idx_apigx_invite_type_status_exp,priority:1"`
++	// TokenHash SHA-256 十六进制，不存明文；不可恢复。
++	TokenHash string `gorm:"type:char(64);uniqueIndex:idx_apigx_invite_token_hash"`
++	// TokenPrefix 明文前 8 位，仅供界面识别。
++	TokenPrefix string `gorm:"size:12;not null;default:''"`
++	// TargetScopeType 目标范围类型：0=无（注册邀请） / 1=分享分组 / 2=模型供给。
++	TargetScopeType int `gorm:"type:int;not null;index:idx_apigx_invite_target_status,priority:1"`
++	// TargetScopeID 目标范围 ID；target_scope_type=0 时为 0。
++	TargetScopeID int64 `gorm:"bigint;not null;default:0;index:idx_apigx_invite_target_status,priority:2"`
++	// UseLimitMode 使用次数限制模式（四态，§3.3）。
++	UseLimitMode int `gorm:"type:int;not null"`
++	// MaxUses 最大使用次数；use_limit_mode=4 时有效且 > 0。
++	MaxUses int64 `gorm:"bigint;not null;default:0"`
++	// UsedCount 已使用次数；兑换时用一条 UPDATE ... WHERE status=0 AND used_count < max_uses 原子递增。
++	UsedCount int64 `gorm:"bigint;not null;default:0"`
++	// ExpiresAt 到期时间，UTC epoch 秒；0=不过期。
++	ExpiresAt int64 `gorm:"bigint;not null;default:0;index:idx_apigx_invite_type_status_exp,priority:3"`
++	// Status 状态：0=有效 / 1=已撤销 / 2=已用尽 / 3=已过期。
++	Status int `gorm:"type:int;not null;index:idx_apigx_invite_target_status,priority:3;index:idx_apigx_invite_type_status_exp,priority:2"`
++	// CreatedByUserID 创建人，底座 users.id；不可变快照字段。
++	CreatedByUserID int64 `gorm:"bigint;not null;default:0"`
++	// RevokedAt 撤销时间，UTC epoch 秒；0=未撤销。
++	RevokedAt int64 `gorm:"bigint;not null;default:0"`
++	// RevokedByUserID 撤销人，底座 users.id。
++	RevokedByUserID int64 `gorm:"bigint;not null;default:0"`
++	// RevokeGrants 撤销邀请时是否连带撤销由它产生的 Grant（§7 明确要求的可选项）。
++	RevokeGrants bool `gorm:"not null"`
++	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
++	CreatedAt int64 `gorm:"bigint;not null;default:0"`
++	// UpdatedAt 最近更新时间，UTC epoch 秒；原子扣减时一并写入。
++	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
++}
++
++// TableName 返回表名。
++func (Invite) TableName() string { return TablePrefix + "invites" }
+diff --git a/apigx/model/models_metering.go b/apigx/model/models_metering.go
+new file mode 100644
+index 0000000..a555c43
+--- /dev/null
++++ b/apigx/model/models_metering.go
+@@ -0,0 +1,543 @@
++// 本文件对应 `docs/stage0/schema-draft.md` §5.14–§5.27，字段与约束依据该文档，不得自行增删字段。
++//
++// 覆盖 14 张计量 / 计价 / 治理表：
++//
++//	§5.14 apigx_fx_rates              §5.21 apigx_usage_events
++//	§5.15 apigx_price_rules           §5.22 apigx_quality_buckets
++//	§5.16 apigx_price_rule_items      §5.23 apigx_async_tasks
++//	§5.17 apigx_capacity_policies     §5.24 apigx_upstream_object_refs
++//	§5.18 apigx_reservations          §5.25 apigx_audit_events
++//	§5.19 apigx_requests              §5.26 apigx_idempotency_records
++//	§5.20 apigx_attempts              §5.27 apigx_platform_settings
++//
++// 书写规约全部来自同文档 §3 与包注释 `base.go`：类型别名 → GORM tag 对照表（§3.2）、
++// 四态枚举（§3.3）、JSON 列一律 TEXT + 字节上界校验（§3.4）、保留期（§3.6）。
++// 每一条索引都显式命名且 ≤ 40 字符，复合索引用 priority 明确顺序。
++//
++// 下列 14 张表全部**无软删除**（文档逐表声明「软删除：无」），因此不出现 `gorm.DeletedAt`
++// 与 `alive_flag` 墓碑列；生命周期分别靠 `state` / `status` / 保留期清理表达。
++package apigxmodel
++
++// FxRate 对应 §5.14 `apigx_fx_rates`。
++//
++// 用途：PriceSnapshot 的汇率版本（派生表，服务 §8.5）——汇率必须保存来源、生效时间及
++// 版本，不能将某个固定汇率写死为永久规则；不引入未经选择的第三方汇率依赖。
++//
++// 唯一约束：`uniqueIndex(quote_currency, effective_from)`——同一币种同一生效时刻只有一版。
++// 不可变快照：整行几乎不可变；唯一允许的变更是 `effective_to` 从 0 单向封版，不允许改回。
++type FxRate struct {
++	ID                  int64  `gorm:"primaryKey"`                                                                                                 // 主键，自增交给 GORM
++	BaseCurrency        string `gorm:"type:char(3);not null"`                                                                                      // 基础币种，固定 USD；快照
++	QuoteCurrency       string `gorm:"type:char(3);not null;uniqueIndex:uniq_fxrate_ccy_from,priority:1;index:idx_fxrate_ccy_from,priority:1"`     // 原币种，如 CNY；快照
++	RateMicro           int64  `gorm:"bigint;not null;default:0"`                                                                                  // 1 USD = rate_micro / 1e6 原币（7.123456 CNY → 7123456）；快照
++	ConversionDirection int    `gorm:"type:int;not null"`                                                                                          // 换算方向；0 = USD = quote / rate，避免方向歧义；快照
++	EffectiveFrom       int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_fxrate_ccy_from,priority:2;index:idx_fxrate_ccy_from,priority:2"` // 生效时刻（UTC epoch 秒）；快照
++	EffectiveTo         int64  `gorm:"bigint;not null;default:0"`                                                                                  // 失效时刻；0=至今，仅允许单向封版一次
++	SourceLabel         string `gorm:"size:64;not null;default:''"`                                                                                // 依据来源（如 admin），不含凭据；快照
++	Note                string `gorm:"size:255;not null;default:''"`                                                                               // 说明
++	CreatedByUserID     int64  `gorm:"bigint;not null;default:0"`                                                                                  // 创建者
++	CreatedAt           int64  `gorm:"bigint;not null;default:0"`                                                                                  // 创建时刻（UTC epoch 秒）；快照
++}
++
++// TableName 返回 §5.14 定义的表名。
++func (FxRate) TableName() string { return TablePrefix + "fx_rates" }
++
++// PriceRule 对应 §5.15 `apigx_price_rules`。
++//
++// 用途：PriceRule / PriceSnapshot（不可变价格版本）——来源、原始记录、原币种、USD 价格、
++// 汇率快照、单位、倍率口径、条件、人工覆盖与生效时间（计划书 §7 第 12 行）。新价格 = 新行 +
++// `version+1`，绝不原地改价；人工覆盖优先且锁定。
++//
++// 唯一约束：`uniqueIndex(scope_type, scope_id, version)`。
++// 不可变快照：除 `effective_to`（单向封版）与 `validation_state` / `validation_note`
++// （待校验推进为终态一次）外整行不可变；`source`、`currency`、`fx_rate_id`、`fx_rate_micro`、
++// `conditions`、`raw_record`、`effective_from`、`version` 一次写入永不修改。
++type PriceRule struct {
++	ID              int64  `gorm:"primaryKey"`                                                                                                             // 主键
++	ScopeType       int    `gorm:"type:int;not null;uniqueIndex:uniq_pricerule_scope_version,priority:1;index:idx_pricerule_scope_eff,priority:1"`         // 范围：0=供给 / 1=上游 Key / 2=渠道；快照
++	ScopeID         int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_pricerule_scope_version,priority:2;index:idx_pricerule_scope_eff,priority:2"` // 范围稳定 ID；快照
++	Version         int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_pricerule_scope_version,priority:3"`                                          // 该 scope 内单调递增的版本号；快照
++	Source          int    `gorm:"type:int;not null;index:idx_pricerule_source_eff,priority:1"`                                                            // 来源：0=人工覆盖 / 1=上游渠道报价 / 2=模眼 / 3=ModelRadar / 4=New API 内置预设 / 5=models.dev / 6=OpenRouter；快照
++	SourceRef       string `gorm:"size:255;not null;default:''"`                                                                                           // 来源 URL 或标识（不可信；出站前 SSRF 校验，展示转义）
++	Currency        string `gorm:"type:char(3);not null"`                                                                                                  // 原币种；快照
++	PricingMode     int    `gorm:"type:int;not null"`                                                                                                      // 计价方式：0=分项绝对单价 / 1=按次（model_price） / 2=旧倍率兼容导入
++	LegacyRatios    string `gorm:"type:text"`                                                                                                              // JSON：旧倍率原文，仅作兼容导入证据，不参与运行时计算
++	FxRateID        int64  `gorm:"bigint;not null;default:0"`                                                                                              // 汇率版本；0=无需换算（原币种为 USD）；快照
++	FxRateMicro     int64  `gorm:"bigint;not null;default:0"`                                                                                              // 汇率快照；USD 来源时为 1000000；快照
++	UsdConverted    bool   `gorm:"not null"`                                                                                                               // 是否已换算到 USD
++	ManualOverride  bool   `gorm:"not null"`                                                                                                               // 是否人工覆盖（人工覆盖优先，同步不得改写）
++	Locked          bool   `gorm:"not null"`                                                                                                               // 人工覆盖锁定
++	Conditions      string `gorm:"type:text"`                                                                                                              // JSON：条件（分辨率/质量档位/上下文阶梯/服务档位/是否 Batch/缓存条件/地区/档位）；快照
++	ValidationState int    `gorm:"type:int;not null;index:idx_pricerule_valid_created,priority:1"`                                                         // 校验状态：0=待校验 / 1=已接受 / 2=已拒绝 / 3=冲突；仅单向推进一次
++	ValidationNote  string `gorm:"size:255;not null;default:''"`                                                                                           // 脱敏校验说明；仅单向推进一次
++	RawRecord       string `gorm:"type:text"`                                                                                                              // 来源原始记录（含分页完整性标记；不可信）；快照
++	RawRecordBytes  int    `gorm:"type:int;not null;default:0"`                                                                                            // 写入字节数（MySQL text 上限监控）
++	CreatedByUserID int64  `gorm:"bigint;not null;default:0"`                                                                                              // 创建者；0=系统同步
++	EffectiveFrom   int64  `gorm:"bigint;not null;default:0;index:idx_pricerule_scope_eff,priority:3;index:idx_pricerule_source_eff,priority:2"`           // 生效时刻；快照
++	EffectiveTo     int64  `gorm:"bigint;not null;default:0"`                                                                                              // 失效时刻；0=至今，被新版本取代时封版一次
++	CreatedAt       int64  `gorm:"bigint;not null;default:0;index:idx_pricerule_valid_created,priority:2"`                                                 // 创建时刻；快照
++}
++
++// TableName 返回 §5.15 定义的表名。
++func (PriceRule) TableName() string { return TablePrefix + "price_rules" }
++
++// PriceRuleItem 对应 §5.16 `apigx_price_rule_items`。
++//
++// 用途：价格分项（派生子表，服务 §8.5）——估算基础为「各个不重叠计量分项的用量 × 对应单价
++// 之和」；分项落表才能用 SQL 做按请求数/按秒/按张的聚合与对账。
++//
++// 唯一约束：`uniqueIndex(price_rule_id, dimension)`。
++// 不可变快照：全部字段（随父行一起不可变），绝不回写。
++// 「价格未知」与「价格为零」分别存储：本表**没有任何行** = 未知；有行且 `unit_price_micro = 0`
++// = 明确零价。**不允许**用「单价 0」表示未知。
++type PriceRuleItem struct {
++	ID                 int64  `gorm:"primaryKey"`                                                                                             // 主键
++	PriceRuleID        int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_pritem_rule_dim,priority:1"`                                  // 所属价格版本；快照
++	Dimension          int    `gorm:"type:int;not null;uniqueIndex:uniq_pritem_rule_dim,priority:2;index:idx_pritem_dim_currency,priority:1"` // 计量维度：0=输入 token / 1=输出 token / 2=缓存读 token / 3=缓存写 token / 4=推理 token / 5=图片张数 / 6=输入音频秒 / 7=输出音频秒 / 8=输出视频秒 / 9=请求次数 / 10=输入字符数 / 11=文档数；快照
++	UnitScale          int    `gorm:"type:int;not null"`                                                                                      // 单价单位：0=/1M tokens / 1=/1K tokens / 2=/张 / 3=/秒 / 4=/分钟 / 5=/次 / 6=/1K 字符 / 7=/文档；快照
++	UnitPriceMicro     int64  `gorm:"bigint;not null;default:0"`                                                                              // 原币种绝对单价（micro）；快照
++	Currency           string `gorm:"type:char(3);not null;index:idx_pritem_dim_currency,priority:2"`                                         // 原币种；快照（进索引用于跨供给横向价格对比）
++	UsdUnitPriceMicro  int64  `gorm:"bigint;not null;default:0"`                                                                              // 换算后 USD 单价；未换算时为 0；快照
++	UsdState           int    `gorm:"type:int;not null;index:idx_pritem_usd_state"`                                                           // 换算状态：0=已换算 / 1=待汇率 / 2=不适用（原币种即 USD）；快照（服务「待换算队列」）
++	CountedInDimension int    `gorm:"type:int;not null;default:0"`                                                                            // 该分项是否已包含在另一分项内（-1=独立分项），表达「缓存 token 包含在输入总量中」；快照
++	CreatedAt          int64  `gorm:"bigint;not null;default:0"`                                                                              // 创建时刻；快照
++}
++
++// TableName 返回 §5.16 定义的表名。
++func (PriceRuleItem) TableName() string { return TablePrefix + "price_rule_items" }
++
++// CapacityPolicy 对应 §5.17 `apigx_capacity_policies`。
++//
++// 用途：限制维度与配置版本（计划书 §7 第 13 行）——每个容量维度都是「模式列 + 值列」成对
++// 出现的四态枚举（§3.3），空字段不得被解释成无限容量；校验落在 Go 侧，数据库不写 CHECK。
++//
++// 唯一约束：`uniqueIndex(scope_type, scope_id)`——一个范围一份当前策略，版本靠 `policy_version`
++// 递增。不可变快照：`scope_type`、`scope_id`、`created_at`；全部维度列绝不追溯改写已有预留或
++// 历史用量（已有请求/任务持有的是 `apigx_reservations.policy_version` 快照）。
++type CapacityPolicy struct {
++	ID                  int64  `gorm:"primaryKey"`                                                                                         // 主键
++	OwnerUserID         int64  `gorm:"bigint;not null;default:0;index:idx_cappol_owner_scope,priority:1"`                                  // 配置归属（服务端按登录用户校验，防越权改他人限额）
++	ScopeType           int    `gorm:"type:int;not null;uniqueIndex:uniq_cappol_scope,priority:1;index:idx_cappol_owner_scope,priority:2"` // 范围：0=用户 / 1=平台 Key / 2=渠道 / 3=上游 Key / 4=上游账户池 / 5=供给；快照
++	ScopeID             int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_cappol_scope,priority:2"`                                 // 范围稳定 ID；快照
++	PolicyVersion       int64  `gorm:"bigint;not null;default:0"`                                                                          // 配置版本；调度实时读取生效版本
++	MaxConcurrencyMode  int    `gorm:"type:int;not null"`                                                                                  // 最大并发请求数：模式列（0=未配置 / 1=禁用 / 2=继承上级默认 / 3=明确不限 / 4=明确值）
++	MaxConcurrency      int64  `gorm:"bigint;not null;default:0"`                                                                          // 最大并发请求数：值列（所有实例共享占用数，不能各自单独计算）
++	RpmMode             int    `gorm:"type:int;not null"`                                                                                  // 每分钟请求数：模式列
++	RpmLimit            int64  `gorm:"bigint;not null;default:0"`                                                                          // 每分钟请求数：值列
++	TpmMode             int    `gorm:"type:int;not null"`                                                                                  // 每分钟 token 数：模式列
++	TpmLimit            int64  `gorm:"bigint;not null;default:0"`                                                                          // 每分钟 token 数：值列
++	MaxRunningTasksMode int    `gorm:"type:int;not null"`                                                                                  // 最大运行中异步任务数：模式列
++	MaxRunningTasks     int64  `gorm:"bigint;not null;default:0"`                                                                          // 最大运行中异步任务数：值列（提交成功后持续占用到终态）
++	DailyRequestMode    int    `gorm:"type:int;not null"`                                                                                  // 每日请求数：模式列
++	DailyRequestLimit   int64  `gorm:"bigint;not null;default:0"`                                                                          // 每日请求数：值列
++	DailyBudgetMode     int    `gorm:"type:int;not null"`                                                                                  // 每日预算：模式列
++	DailyBudgetMicro    int64  `gorm:"bigint;not null;default:0"`                                                                          // 每日 USD 估算预算（micro）：值列
++	MaxInputTokensMode  int    `gorm:"type:int;not null"`                                                                                  // 单次输入上限：模式列
++	MaxInputTokens      int64  `gorm:"bigint;not null;default:0"`                                                                          // 单次输入上限：值列
++	MaxOutputTokensMode int    `gorm:"type:int;not null"`                                                                                  // 单次输出上限：模式列
++	MaxOutputTokens     int64  `gorm:"bigint;not null;default:0"`                                                                          // 单次输出上限：值列（必须是**可执行的**，不能只是展示值）
++	MaxImageSideMode    int    `gorm:"type:int;not null"`                                                                                  // 图片边长上限：模式列
++	MaxImageSide        int64  `gorm:"bigint;not null;default:0"`                                                                          // 图片边长上限：值列
++	MaxAudioSecondsMode int    `gorm:"type:int;not null"`                                                                                  // 音频时长上限：模式列
++	MaxAudioSeconds     int64  `gorm:"bigint;not null;default:0"`                                                                          // 音频时长上限（秒）：值列
++	MaxVideoSecondsMode int    `gorm:"type:int;not null"`                                                                                  // 视频时长上限：模式列
++	MaxVideoSeconds     int64  `gorm:"bigint;not null;default:0"`                                                                          // 视频时长上限（秒）：值列
++	QueueMode           int    `gorm:"type:int;not null"`                                                                                  // 排队模式：0=不排队（满载即 429） / 1=有限短等待
++	QueueMaxWaitMs      int64  `gorm:"bigint;not null;default:0"`                                                                          // 排队上限毫秒；queue_mode=0 时置 0
++	LimitTimezone       string `gorm:"size:64;not null;default:''"`                                                                        // 日限额划分时区，默认 Asia/Shanghai
++	CreatedAt           int64  `gorm:"bigint;not null;default:0"`                                                                          // 创建时刻；快照
++	UpdatedAt           int64  `gorm:"bigint;not null;default:0"`                                                                          // 更新时刻
++}
++
++// TableName 返回 §5.17 定义的表名。
++func (CapacityPolicy) TableName() string { return TablePrefix + "capacity_policies" }
++
++// Reservation 对应 §5.18 `apigx_reservations`。
++//
++// 用途：并发或运行任务租约、RPM/TPM 与预算预留、归还和过期状态（计划书 §7 第 13 行）——这是
++// 「持久预算与请求状态由数据库事务维护」的**持久侧**；Redis 侧并发/速率计数器不在此表。
++//
++// 唯一约束：`uniqueIndex(reservation_uid)` 与
++// `uniqueIndex(request_id, dimension, scope_type, scope_id, attempt_id)`——防止同一请求对同一
++// 维度重复预留。本表是**追加式**的：`amount_micro` 是首次估算证据、**永不改写**，结算差异写进
++// `settled_amount_micro`（只增不改）。租约到期**不证明**上游已停止，`state` 必须先进入 4=对账中。
++type Reservation struct {
++	ID                 int64  `gorm:"primaryKey"`                                                                                                       // 主键
++	ReservationUID     string `gorm:"size:64;not null;default:'';uniqueIndex:uniq_resv_uid"`                                                            // 预留幂等 ID；归还、续租、对账全部靠它；快照
++	RequestID          int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_resv_request_dim,priority:1;index:idx_resv_scope_cycle_dim,priority:2"` // 所属请求；快照
++	AttemptID          int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_resv_request_dim,priority:5"`                                           // 所属尝试；0=请求级预留；快照
++	AsyncTaskID        int64  `gorm:"bigint;not null;default:0"`                                                                                        // 所属异步任务；0=非任务；快照
++	CapacityPolicyID   int64  `gorm:"bigint;not null;default:0"`                                                                                        // 容量策略；快照
++	PolicyVersion      int64  `gorm:"bigint;not null;default:0"`                                                                                        // 配置版本快照；绝不回写
++	ScopeType          int    `gorm:"type:int;not null;uniqueIndex:uniq_resv_request_dim,priority:3;index:idx_resv_scope_cycle_dim,priority:1"`         // 范围类型（冗余便于聚合与对账）；快照
++	ScopeID            int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_resv_request_dim,priority:4;index:idx_resv_scope_cycle_dim,priority:3"` // 范围稳定 ID（冗余）；快照
++	Dimension          int    `gorm:"type:int;not null;uniqueIndex:uniq_resv_request_dim,priority:2;index:idx_resv_scope_cycle_dim,priority:4"`         // 维度：0=并发 / 1=RPM / 2=TPM / 3=运行任务 / 4=USD 预算 / 5=请求数；快照
++	AmountMicro        int64  `gorm:"bigint;not null;default:0"`                                                                                        // 预留额（USD 预算用 micro，计数类×1e6 以统一类型）；**永不改写**
++	SettledAmountMicro int64  `gorm:"bigint;not null;default:0"`                                                                                        // 实际用量调整后的值（追加而非覆盖 amount_micro，只增不改）
++	State              int    `gorm:"type:int;not null;index:idx_resv_state_expires,priority:1"`                                                        // 状态：0=已持有 / 1=已结算 / 2=已释放 / 3=已过期 / 4=对账中；仅单向推进
++	CycleKey           string `gorm:"size:16;not null;default:'';index:idx_resv_scope_cycle_dim,priority:4"`                                            // 准入日（Asia/Shanghai 的 YYYY-MM-DD；跨日完成的结算回到原预留周期）；快照
++	AcquiredAt         int64  `gorm:"bigint;not null;default:0"`                                                                                        // 获取时刻；快照
++	ExpiresAt          int64  `gorm:"bigint;not null;default:0;index:idx_resv_state_expires,priority:2"`                                                // 租约到期时刻（长流用续租）；服务对账/恢复扫描
++	RenewedAt          int64  `gorm:"bigint;not null;default:0"`                                                                                        // 最近续租时刻；仅单向推进
++	ReleasedAt         int64  `gorm:"bigint;not null;default:0"`                                                                                        // 释放时刻；仅单向推进
++	LeaseOwnerNode     string `gorm:"size:128;not null;default:''"`                                                                                     // 实例标识，用于进程异常后的恢复与对账
++	CreatedAt          int64  `gorm:"bigint;not null;default:0"`                                                                                        // 创建时刻；快照
++	UpdatedAt          int64  `gorm:"bigint;not null;default:0"`                                                                                        // 更新时刻
++}
++
++// TableName 返回 §5.18 定义的表名。
++func (Reservation) TableName() string { return TablePrefix + "reservations" }
++
++// Request 对应 §5.19 `apigx_requests`。
++//
++// 用途：一次用户请求的权威记录（计划书 §7 第 14 行前半；§8.5「一次用户调用对应一个 Request」）。
++// **不记录请求正文**——平台默认只记录请求元数据和用量，不保存提示词、输出文本或原始音视频。
++//
++// 唯一约束：`uniqueIndex(request_uid)`。幂等唯一键**不放本表**（非幂等请求没有幂等键，空字符串
++// 会互相冲突），由 §5.26 `apigx_idempotency_records` 承担。
++// 不可变快照：`request_uid`、`requested_model`、`api_model_id`、`canonical_model_id`、`route_mode`、
++// `pinned_offering_id`、`resolved_scope_kind`、`allow_fallback`、`admission_cycle_key`、
++// `admission_at`、`client_ip_hash`、`idempotency_record_id`、`created_at`。
++// 仅允许单向推进（幂等 CAS）：耗时/计数/终态列。
++type Request struct {
++	ID                  int64  `gorm:"primaryKey"`                                                                                                                                                 // 主键
++	RequestUID          string `gorm:"size:64;not null;default:'';uniqueIndex:uniq_request_uid"`                                                                                                   // 对外脱敏请求 ID（建议由 common.NewRequestId() 生成）；快照
++	LogRequestID        string `gorm:"size:64;not null;default:'';index:idx_request_log_request"`                                                                                                  // 与底座 logs.request_id 对齐（**弱关联**：logs 可能跨库或 ClickHouse，不 JOIN、不事务）；快照
++	UserID              int64  `gorm:"bigint;not null;default:0;index:idx_request_user_created,priority:1"`                                                                                        // 使用者
++	ApiKeyID            int64  `gorm:"bigint;not null;default:0;index:idx_request_apikey_created,priority:1"`                                                                                      // 平台 Key
++	TokenID             int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 影子令牌；快照
++	CanonicalModelID    int64  `gorm:"bigint;not null;default:0;index:idx_request_model_created,priority:1"`                                                                                       // 规范模型（模型合并/别名调整不改写）；快照
++	ApiModelID          string `gorm:"size:191;not null;default:''"`                                                                                                                               // 快照：当时的对外标准 ID
++	RequestedModel      string `gorm:"size:191;not null;default:''"`                                                                                                                               // 客户端原始 model 字符串（不可信输入，存原文）；快照
++	Endpoint            string `gorm:"size:128;not null;default:''"`                                                                                                                               // 请求路径
++	Protocol            string `gorm:"size:32;not null;default:''"`                                                                                                                                // 客户端协议族
++	Capability          int    `gorm:"type:int;not null"`                                                                                                                                          // 能力枚举（同 §5.7：1=对话 / 2=向量 / 3=图片生成 / 4=图片编辑 / 5=语音识别 / 6=语音生成 / 7=重排 / 8=视频）
++	RouteMode           int    `gorm:"type:int;not null"`                                                                                                                                          // 路由模式：0=指定来源 / 1=延迟优先 / 2=吞吐优先 / 3=可靠性优先 / 4=综合自动；快照
++	PinnedOfferingID    int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 客户端显式指定的供给；0=未指定；快照
++	ResolvedScopeKind   int    `gorm:"type:int;not null"`                                                                                                                                          // 权威路由决定来源：0=请求头显式指定 / 1=Key 固定来源 / 2=Key 默认偏好 / 3=系统默认 auto；快照
++	AllowFallback       bool   `gorm:"not null"`                                                                                                                                                   // 快照：本次是否允许回退（硬限制）
++	AdmissionState      int    `gorm:"type:int;not null;index:idx_request_admit_cycle,priority:1"`                                                                                                 // 准入结果：0=已准入 / 1=容量不足拒绝 / 2=鉴权拒绝 / 3=参数冲突拒绝 / 4=预算拒绝
++	AdmissionCycleKey   string `gorm:"size:16;not null;default:'';index:idx_request_admit_cycle,priority:2"`                                                                                       // 准入日（YYYY-MM-DD）；快照
++	ClientIpHash        string `gorm:"type:char(64)"`                                                                                                                                              // 脱敏 IP 摘要（不存原始 IP）；快照
++	IdempotencyRecordID int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 幂等记录；0=非幂等请求；快照
++	AdmissionAt         int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 「提交准入完成」时刻，是「请求是否已接收」的边界；快照
++	StartedAt           int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 网关开始处理时刻；仅单向推进
++	FirstOutputAt       int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 首个有效输出时刻；仅单向推进
++	CompletedAt         int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 完成时刻；仅单向推进
++	QueueMs             int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 排队耗时（**计入用户总耗时**）；仅单向推进
++	TotalMs             int64  `gorm:"bigint;not null;default:0"`                                                                                                                                  // 总耗时；仅单向推进
++	AttemptCount        int    `gorm:"type:int;not null;default:0"`                                                                                                                                // 实际上游尝试次数（上游请求数按 Attempt 计）；仅单向推进
++	FinalState          int    `gorm:"type:int;not null"`                                                                                                                                          // 终态：0=成功 / 1=失败 / 2=已取消 / 3=结果未知 / 4=部分成功；仅单向推进
++	FailureClass        int    `gorm:"type:int;not null"`                                                                                                                                          // 请求级失败归因（把平台自身拒绝/用户参数错误/用户主动取消与上游故障分开）；仅单向推进
++	CreatedAt           int64  `gorm:"bigint;not null;default:0;index:idx_request_user_created,priority:2;index:idx_request_apikey_created,priority:2;index:idx_request_model_created,priority:2"` // 创建时刻；快照
++}
++
++// TableName 返回 §5.19 定义的表名。
++func (Request) TableName() string { return TablePrefix + "requests" }
++
++// Attempt 对应 §5.20 `apigx_attempts`。
++//
++// 用途：每次上游尝试的渠道和 Key 策略、实际渠道及 Key ID、结果及耗时（计划书 §7 第 14 行后半）。
++// 本表是「一次请求只有一个权威路由决定、实际 Key 同样由该调度流程决定，不能在原生
++// `GetNextEnabledKey` 中再次抽选」这条不变量的落地证据。
++//
++// 唯一约束：`uniqueIndex(attempt_uid)` 与 `uniqueIndex(request_id, attempt_index)`（后者已覆盖
++// 文档要求的 `index(request_id, attempt_index)`，不再重复建同名索引）。
++// 不可变快照：**本表是全库最不可变的一张表**——`attempt_uid`、`request_id`、`attempt_index`、
++// `selected_channel_id`、`base_channel_id`、`offering_id`、`upstream_key_id`、
++// `upstream_key_credential_version`、`upstream_account_id`、`upstream_model_id`、`price_rule_id`、
++// `fx_rate_micro`、`reservation_uid`、`retry_reason`、`started_at`、`created_at` 全部一次写入
++// 永不修改：Key 轮换/停用/移除后**不得**把历史 Attempt 改绑到池里的下一把 Key；Key 重试成功
++// 不得掩盖前一次失败；超时不得改判为按时成功。
++type Attempt struct {
++	ID                           int64  `gorm:"primaryKey"`                                                                                                                                                   // 主键
++	AttemptUID                   string `gorm:"size:64;not null;default:'';uniqueIndex:uniq_attempt_uid"`                                                                                                     // 尝试幂等 ID；快照
++	RequestID                    int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_attempt_request_index,priority:1"`                                                                                  // 所属请求；快照
++	AttemptIndex                 int    `gorm:"type:int;not null;default:0;uniqueIndex:uniq_attempt_request_index,priority:2"`                                                                                // 第几次上游尝试（第一版最多 2）；快照
++	SelectedChannelID            int64  `gorm:"bigint;not null;default:0;index:idx_attempt_channel_started,priority:1"`                                                                                       // 权威路由决定的**实际渠道**（不是候选池）；快照
++	BaseChannelID                int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 底座 channels.id；快照
++	OfferingID                   int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 供给；快照
++	UpstreamKeyID                int64  `gorm:"bigint;not null;default:0;index:idx_attempt_upkey_started,priority:1"`                                                                                         // **实际使用的 Key 稳定 ID**（不是池内下一把）；快照
++	UpstreamKeyCredentialVersion int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 凭据版本快照（轮换后仍能指回「当时用的是哪一版」）
++	UpstreamAccountID            int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 上游账户池快照（共享限额归属）
++	UpstreamModelID              string `gorm:"size:191;not null;default:''"`                                                                                                                                 // 快照：实际发给上游的模型 ID
++	PriceRuleID                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 快照：该次实际 Key 的价格版本（不借用池内最低价）
++	FxRateMicro                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 汇率快照
++	ReservationUID               string `gorm:"size:64;not null;default:''"`                                                                                                                                  // 容量预留的幂等引用；快照
++	State                        int    `gorm:"type:int;not null;index:idx_attempt_state_started,priority:1"`                                                                                                 // 状态：0=待发送 / 1=已发送 / 2=成功 / 3=上游错误 / 4=超时 / 5=已取消 / 6=结果未知；仅单向推进
++	FailureClass                 int    `gorm:"type:int;not null"`                                                                                                                                            // 失败归因：0=无 / 1=上游超时 / 2=连接错误 / 3=上游 5xx / 4=上游鉴权失败 / 5=上游不可用 / 6=上游限流 / 7=平台拒绝 / 8=用户参数错误 / 9=用户取消；仅单向推进
++	RetryReason                  int    `gorm:"type:int;not null"`                                                                                                                                            // 重试原因：0=无 / 1=Key 鉴权失效 / 2=Key 冷却 / 3=渠道故障 / 4=容量不足（换 Key 与上游重试共用同一预算）；快照
++	HttpStatus                   int    `gorm:"type:int;not null;default:0"`                                                                                                                                  // 上游 HTTP 状态（脱敏，不含响应体）；仅单向推进
++	StartedAt                    int64  `gorm:"bigint;not null;default:0;index:idx_attempt_channel_started,priority:2;index:idx_attempt_upkey_started,priority:2;index:idx_attempt_state_started,priority:2"` // 发送时刻；快照
++	FirstOutputAt                int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 首个有效输出时刻；仅单向推进
++	CompletedAt                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 完成时刻；仅单向推进
++	TtftMs                       int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 首个**有效**输出延迟（心跳/空事件不算，由适配器判定）；仅单向推进
++	GenerationMs                 int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 生成时段耗时；仅单向推进
++	OutputTokens                 int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 适配器可见的输出 token（不可见时置 0 并在 UsageEvent.trust 标注）；仅单向推进
++	CreatedAt                    int64  `gorm:"bigint;not null;default:0"`                                                                                                                                    // 创建时刻；快照
++}
++
++// TableName 返回 §5.20 定义的表名。
++func (Attempt) TableName() string { return TablePrefix + "attempts" }
++
++// UsageEvent 对应 §5.21 `apigx_usage_events`。
++//
++// 用途：分项用量、可信度、成本估算状态、价格快照与归属（计划书 §7 第 15 行）。重复事件按稳定
++// 事件 ID 幂等处理；补到准确 usage 时**追加校正事件**（`kind=2` + `correction_of_event_id`），
++// 保留原估算与修订轨迹，不覆盖历史证据、不重复扣预算。
++//
++// 唯一约束：`uniqueIndex(event_uid)`。
++// 不可变快照：**整行不可变**（除 `id` 外全部一次写入）；成本、价格、汇率、归属、用量与可信度列
++// 绝不回写。
++//
++// 两条硬约束（§8.4/§8.5）：① `cost_state=2`（未定价）的行 `cost_usd_micro` 必须为 0，并计入
++// 「未估算数量」，统计页的「可估算总额」**不得**把这些行当 0 加进总额；② 流式中间 usage 与最终
++// 累计 usage **不相加**，由适配器区分后只落一条最终事件。
++type UsageEvent struct {
++	ID                  int64  `gorm:"primaryKey"`                                                                                                                                                                                         // 主键
++	EventUID            string `gorm:"size:64;not null;default:'';uniqueIndex:uniq_usage_event_uid"`                                                                                                                                       // 稳定事件 ID，幂等去重；快照
++	Kind                int    `gorm:"type:int;not null"`                                                                                                                                                                                  // 事件类型：0=用量 / 1=调整 / 2=校正（校正指向原事件，不覆盖）；快照
++	CorrectionOfEventID int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 被修订的原事件；0=非校正，形成修订轨迹；快照
++	RequestID           int64  `gorm:"bigint;not null;default:0;index:idx_usage_request"`                                                                                                                                                  // 同步请求来源；0=非同步请求来源；快照
++	AttemptID           int64  `gorm:"bigint;not null;default:0;index:idx_usage_attempt"`                                                                                                                                                  // 上游尝试；0=请求级或任务级；快照
++	AsyncTaskID         int64  `gorm:"bigint;not null;default:0;index:idx_usage_async_task"`                                                                                                                                               // 异步任务来源；0=非任务；快照
++	UserID              int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 使用者（归属）；快照
++	OwnerUserID         int64  `gorm:"bigint;not null;default:0;index:idx_usage_owner_occurred,priority:1"`                                                                                                                                // 分享者（分享者消耗视图的归属依据）；快照
++	ApiKeyID            int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 平台 Key；快照
++	CanonicalModelID    int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 规范模型；快照
++	ApiModelID          string `gorm:"size:191;not null;default:''"`                                                                                                                                                                       // 快照：当时的对外标准 ID
++	OfferingID          int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 供给；快照
++	ChannelID           int64  `gorm:"bigint;not null;default:0;index:idx_usage_channel_occurred,priority:1"`                                                                                                                              // 实际执行渠道；快照
++	UpstreamKeyID       int64  `gorm:"bigint;not null;default:0;index:idx_usage_upkey_occurred,priority:1"`                                                                                                                                // 实际执行 Key；快照
++	UpstreamAccountID   int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 实际执行上游账户池；快照
++	Dimension           int    `gorm:"type:int;not null;index:idx_usage_cycle_dim,priority:2"`                                                                                                                                             // 计量维度（同 §5.16）；快照
++	QuantityMilli       int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 用量，**千分之一最小单位**（1 token / 1 张 / 1 秒 / 1 次 = 1000，用整数表达小数秒）；快照
++	UnitScale           int    `gorm:"type:int;not null"`                                                                                                                                                                                  // 该维度的计量单位（同 §5.16）；快照
++	Trust               int    `gorm:"type:int;not null"`                                                                                                                                                                                  // 可信度：0=上游上报 / 1=本地估算 / 2=未知 / 3=不可得（不伪装为实际计量）；快照
++	PriceRuleID         int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 价格版本快照引用；0=未定价
++	PriceRuleItemID     int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 价格分项快照引用；0=未定价
++	UnitPriceMicro      int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 快照：该分项单价（原币种）
++	Currency            string `gorm:"type:char(3);not null"`                                                                                                                                                                              // 快照：原币种
++	FxRateMicro         int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 快照：换算时使用的汇率
++	CostMicro           int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 快照：原币种成本
++	CostUsdMicro        int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 快照：USD 成本
++	CostState           int    `gorm:"type:int;not null;index:idx_usage_cost_occurred,priority:1"`                                                                                                                                         // 成本状态：0=参考成本已估 / 1=渠道成本已估 / 2=未定价 / 3=待换算（缺汇率） / 4=明确零价；快照
++	CycleKey            string `gorm:"size:16;not null;default:'';index:idx_usage_cycle_dim,priority:1"`                                                                                                                                   // 结算归属周期（跨日结算回到原预留周期）；快照
++	OccurredAt          int64  `gorm:"bigint;not null;default:0;index:idx_usage_owner_occurred,priority:2;index:idx_usage_channel_occurred,priority:2;index:idx_usage_upkey_occurred,priority:2;index:idx_usage_cost_occurred,priority:2"` // 事件时间（UTC epoch 秒）；快照
++	CreatedAt           int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                          // 创建时刻；快照
++}
++
++// TableName 返回 §5.21 定义的表名。
++func (UsageEvent) TableName() string { return TablePrefix + "usage_events" }
++
++// QualityBucket 对应 §5.22 `apigx_quality_buckets`。
++//
++// 用途：供给、能力、地区或部署点、时间桶、样本量、延迟及吞吐分布（计划书 §7 第 16 行）。至少按
++// 「模型供给 × 能力 × 部署点」区分，并保留任务规格或输入输出长度分桶；同时保存分钟桶，按所需精度
++// 聚合并标记更新时间。**不引用底座 `perf_metrics`**（维度不匹配）。
++//
++// 唯一约束：`uniqueIndex(bucket_key_hash)`——`deploy_point` + `spec_bucket` 在 utf8mb4 下最坏合计
++// 384 字节，叠加其余身份列会超 MySQL COMPACT 行格式的 767 字节索引前缀边界，用固定 64 字节摘要
++// 完全绕开该风险（§3.5）。
++// 不可变快照：桶身份列（`offering_id`、`capability`、`deploy_point`、`spec_bucket`、`window_kind`、
++// `bucket_ts`、`aggregator_version`）全部不可变；计数/求和列只允许**原子累加**（仿底座
++// `model/perf_metric.go` 的 `clause.OnConflict` + `gorm.Expr("col + ?")`），
++// `reliability_lower_bound_ppm` 由重算过程覆盖。迟到结果进入其**事件时间**所在的桶，不改写其他桶。
++type QualityBucket struct {
++	ID                       int64  `gorm:"primaryKey"`                                                                                                                            // 代理主键（与其余表一致；不用 64 字符哈希做主键，避免 InnoDB 聚簇索引过宽）
++	BucketKeyHash            string `gorm:"type:char(64);not null;default:'';uniqueIndex:uniq_qbucket_key_hash"`                                                                   // SHA-256(offering_id|capability|deploy_point|spec_bucket|window_kind|bucket_ts|aggregator_version)；桶自然键
++	OfferingID               int64  `gorm:"bigint;not null;default:0;index:idx_qbucket_roll_window,priority:1"`                                                                    // 供给；桶身份
++	Capability               int    `gorm:"type:int;not null;index:idx_qbucket_roll_window,priority:2"`                                                                            // 能力；桶身份
++	DeployPoint              string `gorm:"size:64;not null;default:''"`                                                                                                           // 地区/部署点；无则为空串；桶身份
++	SpecBucket               string `gorm:"size:32;not null;default:''"`                                                                                                           // 任务规格或输入/输出长度分桶键；空串=不适用；桶身份
++	WindowKind               int    `gorm:"type:int;not null;index:idx_qbucket_roll_window,priority:3"`                                                                            // 窗口类型：0=分钟桶 / 1=小时桶（6 小时窗口由分钟桶聚合）；桶身份
++	BucketTs                 int64  `gorm:"bigint;not null;default:0;index:idx_qbucket_roll_window,priority:4;index:idx_qbucket_bucket_ts;index:idx_qbucket_aggver_ts,priority:2"` // 桶起始时间（UTC epoch 秒）；桶身份
++	AggregatorVersion        int64  `gorm:"bigint;not null;default:0;index:idx_qbucket_aggver_ts,priority:1"`                                                                      // 指标配置版本（Key 模式/可用 Key 集合/定价配置明显变化时新建版本）；桶身份
++	NaturalRequestCount      int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 自然调用样本数（只允许原子累加）
++	ProbeCount               int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 主动探测样本数（与自然调用分别统计）
++	CompleteSuccessCount     int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 完整成功数（同步正确结束/流式完整结束/异步终态成功；HTTP 200 或「任务已创建」不算）
++	TimeoutCount             int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 超时事件数（超时进入窗口，不因迟到结果改判）
++	UpstreamFailureCount     int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 上游故障数
++	CancelledCount           int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 用户取消（**单列**）
++	PlatformRejectCount      int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 平台自身拒绝（**单列**）
++	LatencyMsSum             int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 总耗时分布：求和
++	LatencyMsP50             int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 总耗时分布：P50（分位数由写入侧 Go 用环形缓冲预计算后写入）
++	TtftMsSum                int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 首字延迟分布：求和
++	TtftMsP50                int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 首字延迟分布：P50（同上，写入侧预计算）
++	OutputTokensSum          int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 文本吞吐分子：有效输出 token 求和
++	GenerationMsSum          int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 文本吞吐分母：生成时段耗时求和
++	SampleOkCount            int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 合格尝试总数（可靠性分母）
++	ReliabilityLowerBoundPpm int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 可靠性置信下界（百万分之一）；样本不足时置 0 并由自然样本数判定「样本不足」
++	UpdatedAt                int64  `gorm:"bigint;not null;default:0"`                                                                                                             // 标记更新时间
++}
++
++// TableName 返回 §5.22 定义的表名。
++func (QualityBucket) TableName() string { return TablePrefix + "quality_buckets" }
++
++// AsyncTask 对应 §5.23 `apigx_async_tasks`。
++//
++// 用途：平台任务 ID、上游任务 ID、用户、原渠道与 Key/凭据版本、分享者与权限版本快照、价格版本、
++// 状态、结果引用（计划书 §7 第 17 行）。这些快照保证轮换/撤权/封禁后**仍能定位原任务**：查询/取消/
++// 下载不参与普通轮询、不随机换 Key、不跨用户读取上游任务。
++//
++// 唯一约束：`uniqueIndex(public_task_id)` 与 `uniqueIndex(base_task_id)`。
++// 不可变快照：`public_task_id`、`base_task_id`、`upstream_task_id`、`user_id`、`channel_id`、
++// `upstream_key_id`、`upstream_key_credential_version`、`upstream_account_id`、`share_group_id`、
++// `owner_user_id`、`grant_version`、`policy_version`、`price_rule_id`、`fx_rate_micro`、`action`、
++// `submit_at`。仅允许单向推进的是状态/时间/结算/结果引用列。
++type AsyncTask struct {
++	ID                           int64  `gorm:"primaryKey"`                                                                                                                                                                                                   // 主键
++	PublicTaskID                 string `gorm:"size:64;not null;default:'';uniqueIndex:uniq_asynctask_public_id"`                                                                                                                                             // 平台任务 ID（对外）；快照
++	BaseTaskID                   int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_asynctask_base_id"`                                                                                                                                                 // 底座 tasks.id（影子任务，复用底座轮询与结算链路）；快照
++	UpstreamTaskID               string `gorm:"size:191;not null;default:''"`                                                                                                                                                                                 // 上游任务 ID（**私有，不出公共 DTO**，不得用于跨用户访问）；快照
++	UserID                       int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_user_status_created,priority:1"`                                                                                                                                 // 任务所有者（历史访问授权来自创建时的所有权）；快照
++	ApiKeyID                     int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 平台 Key；快照
++	OfferingID                   int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 原供给；快照
++	ChannelID                    int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_channel_status,priority:1"`                                                                                                                                      // 原渠道快照（后续查询/取消/下载不参与普通轮询）
++	UpstreamKeyID                int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_upkey_status,priority:1"`                                                                                                                                        // 原 Key 快照（轮换/停用/移除后不改绑）；快照
++	UpstreamKeyCredentialVersion int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 凭据版本快照（轮换后原版本只为绑定任务保留必要的查询/取消能力）
++	UpstreamAccountID            int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 上游账户池快照；快照
++	ShareGroupID                 int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 分享分组快照；快照
++	OwnerUserID                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 分享者快照；快照
++	GrantVersion                 int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 权限版本快照；快照
++	PolicyVersion                int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 容量策略版本快照；快照
++	PriceRuleID                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 价格版本快照；快照
++	FxRateMicro                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 汇率快照；快照
++	CapacityPolicyID             int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 容量策略
++	ReservationUID               string `gorm:"size:64;not null;default:''"`                                                                                                                                                                                  // 运行任务槽位预留引用（提交成功后持续占用到终态）
++	Action                       string `gorm:"size:40;not null;default:''"`                                                                                                                                                                                  // 任务类型（对齐底座 tasks.action）；快照
++	Capability                   int    `gorm:"type:int;not null"`                                                                                                                                                                                            // 能力枚举
++	Status                       int    `gorm:"type:int;not null;index:idx_asynctask_user_status_created,priority:2;index:idx_asynctask_status_timeout,priority:1;index:idx_asynctask_channel_status,priority:2;index:idx_asynctask_upkey_status,priority:2"` // 状态：0=待提交 / 1=运行中 / 2=成功 / 3=失败 / 4=已取消 / 5=结果未知 / 6=对账中；仅单向推进
++	StatusReason                 string `gorm:"size:128;not null;default:''"`                                                                                                                                                                                 // 脱敏原因码；仅单向推进
++	ClientDisconnected           bool   `gorm:"not null"`                                                                                                                                                                                                     // 客户端断连（**提交响应结束 ≠ 释放槽位**）；仅单向推进
++	SubmitAt                     int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 提交时刻；快照
++	StartAt                      int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 上游开始时刻；仅单向推进
++	FinishAt                     int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 终态时刻；仅单向推进
++	TimeoutAt                    int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_status_timeout,priority:2"`                                                                                                                                      // 超时线（用于质量窗口：超过适配器服务时限且结果仍未知的尝试以超时事件进入窗口）；仅单向推进
++	BillingSettled               bool   `gorm:"not null"`                                                                                                                                                                                                     // 是否已形成一份任务用量结算（提交/轮询/终态只能形成一份）；仅单向推进
++	SettledUsageEventID          int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 结算指向的 usage_event；billing_settled=1 时非 0；仅单向推进
++	IdempotencyRecordID          int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 幂等创建记录
++	PollFailures                 int    `gorm:"type:int;not null;default:0"`                                                                                                                                                                                  // 连续无法识别的轮询结果计数；仅单向累加
++	CreatedAt                    int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_user_status_created,priority:3"`                                                                                                                                 // 创建时刻
++	UpdatedAt                    int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 更新时刻
++}
++
++// TableName 返回 §5.23 定义的表名。
++func (AsyncTask) TableName() string { return TablePrefix + "async_tasks" }
++
++// UpstreamObjectRef 对应 §5.24 `apigx_upstream_object_refs`。
++//
++// 用途：用户、平台对象 ID、上游对象 ID、对象类型、原渠道/Key/账户、访问期限；用于文件、会话、
++// 缓存和任务产物（计划书 §7 第 18 行）。客户端只用 `ref_uid`，**永不用上游 ID**。
++//
++// 唯一约束：`uniqueIndex(ref_uid)` 与 `uniqueIndex(channel_id, object_type, upstream_object_id)`——
++// 同一渠道内同类型上游对象只登记一条，防止跨用户重复登记导致归属歧义。
++// 不可变快照：`ref_uid`、`user_id`、`object_type`、`upstream_object_id`、`channel_id`、
++// `upstream_key_id`、`upstream_key_credential_version`、`upstream_account_id`、`created_at`；
++// 凭据轮换或移除后**不得**改绑 `upstream_key_id`。软删除：无，用 `state`（含 2=已清理）表达
++// 生命周期，保留「曾经存在过什么」的证据。
++type UpstreamObjectRef struct {
++	ID                           int64  `gorm:"primaryKey"`                                                                                                                                      // 主键
++	RefUID                       string `gorm:"size:64;not null;default:'';uniqueIndex:uniq_objref_ref_uid"`                                                                                     // 对外平台对象 ID；快照
++	UserID                       int64  `gorm:"bigint;not null;default:0;index:idx_objref_user_type_state,priority:1"`                                                                           // 所有者（**访问校验的唯一依据**）；快照
++	ObjectType                   int    `gorm:"type:int;not null;uniqueIndex:uniq_objref_channel_object,priority:2;index:idx_objref_user_type_state,priority:2"`                                 // 对象类型：0=文件 / 1=会话 / 2=缓存 / 3=任务产物；快照
++	UpstreamObjectID             string `gorm:"size:191;not null;default:'';uniqueIndex:uniq_objref_channel_object,priority:3"`                                                                  // 上游对象 ID（**私有，不出公共 DTO**）；快照
++	ChannelID                    int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_objref_channel_object,priority:1"`                                                                     // 原渠道快照；快照
++	UpstreamKeyID                int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 原 Key 快照；快照
++	UpstreamKeyCredentialVersion int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 凭据版本快照；快照
++	UpstreamAccountID            int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 上游账户池快照；快照
++	OfferingID                   int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 供给；0=不属于特定供给
++	StorageBackend               int    `gorm:"type:int;not null"`                                                                                                                               // 存储后端：0=仅上游 / 1=平台私有对象存储
++	StorageURI                   string `gorm:"size:512;not null;default:''"`                                                                                                                    // 平台私有存储路径（**不含任何凭据**）
++	AccessPolicy                 int    `gorm:"type:int;not null"`                                                                                                                               // 访问策略：0=仅所有者鉴权访问 / 1=允许签名下载；仅单向推进
++	SignedUrlTtlSeconds          int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 签名下载有效期上限（默认 ≤ 600 秒且可撤销）；仅单向推进
++	SizeBytes                    int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 对象字节数
++	MimeType                     string `gorm:"size:128;not null;default:''"`                                                                                                                    // MIME 类型（不可信输入，响应时按白名单处理）
++	ContentSha256                string `gorm:"type:char(64)"`                                                                                                                                   // 内容摘要（完整性校验，不用于鉴权）
++	State                        int    `gorm:"type:int;not null;index:idx_objref_user_type_state,priority:3;index:idx_objref_state_purge,priority:1;index:idx_objref_expires_state,priority:2"` // 状态：0=有效 / 1=已过期 / 2=已清理 / 3=已撤销；仅单向推进
++	ExpiresAt                    int64  `gorm:"bigint;not null;default:0;index:idx_objref_expires_state,priority:1"`                                                                             // 访问期限；仅单向推进
++	PurgeAfter                   int64  `gorm:"bigint;not null;default:0;index:idx_objref_state_purge,priority:2"`                                                                               // 清理时间（终态后默认 24 小时）；仅单向推进
++	CreatedAt                    int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 创建时刻；快照
++	UpdatedAt                    int64  `gorm:"bigint;not null;default:0"`                                                                                                                       // 更新时刻
++}
++
++// TableName 返回 §5.24 定义的表名。
++func (UpstreamObjectRef) TableName() string { return TablePrefix + "upstream_object_refs" }
++
++// AuditEvent 对应 §5.25 `apigx_audit_events`。
++//
++// 用途：分享配置、权限、价格、凭据轮换与管理员操作的**脱敏**记录（计划书 §7 第 19 行）。
++//
++// 唯一约束：`uniqueIndex(event_uid)`。
++// 不可变快照：**整行不可变**。并且本表自身**绝不允许写入凭据**——不得含密码、验证码、恢复码、
++// 私钥、可用会话或认证令牌、上游 Key 明文；`actor_credential_ref` 只存指纹。
++type AuditEvent struct {
++	ID                 int64  `gorm:"primaryKey"`                                                                                                                                                  // 主键
++	EventUID           string `gorm:"size:64;not null;default:'';uniqueIndex:uniq_audit_event_uid"`                                                                                                // 事件幂等 ID；快照
++	ActorUserID        int64  `gorm:"bigint;not null;default:0;index:idx_audit_actor_occurred,priority:1"`                                                                                         // 操作者；0=系统；快照
++	ActorRole          int    `gorm:"type:int;not null"`                                                                                                                                           // 快照：事件发生时的角色（不随后续改角色而变）
++	ActorApiKeyID      int64  `gorm:"bigint;not null;default:0"`                                                                                                                                   // 操作者 Key；0=非 Key 操作；快照
++	ActorCredentialRef string `gorm:"type:char(64)"`                                                                                                                                               // 操作者凭据的**指纹**（绝不是凭据本身）；快照
++	Category           string `gorm:"size:24;not null;default:'';index:idx_audit_category_occurred,priority:1"`                                                                                    // 类别：share_config / access / price / credential_rotation / admin / retention
++	Action             string `gorm:"size:64;not null;default:''"`                                                                                                                                 // 动作码
++	TargetType         string `gorm:"size:32;not null;default:'';index:idx_audit_target_occurred,priority:1"`                                                                                      // 目标类型
++	TargetID           int64  `gorm:"bigint;not null;default:0;index:idx_audit_target_occurred,priority:2"`                                                                                        // 目标稳定 ID
++	TargetPublicID     string `gorm:"size:64;not null;default:''"`                                                                                                                                 // 目标对外标识（不用名称，改名不影响可读性）
++	BeforeDigest       string `gorm:"type:char(64)"`                                                                                                                                               // 变更前摘要（脱敏，可比较但不可逆）
++	AfterDigest        string `gorm:"type:char(64)"`                                                                                                                                               // 变更后摘要（脱敏，可比较但不可逆）
++	ChangeSummary      string `gorm:"type:text"`                                                                                                                                                   // 字段级变更摘要（脱敏；绝不含凭据/验证码/恢复码/私钥/令牌/上游 Key 明文）
++	RequestID          string `gorm:"size:64;not null;default:''"`                                                                                                                                 // 关联请求（与底座 logs.request_id 及 apigx_requests.request_uid 对齐）
++	IpHash             string `gorm:"type:char(64)"`                                                                                                                                               // 脱敏 IP 摘要
++	UserAgent          string `gorm:"size:255;not null;default:''"`                                                                                                                                // 客户端 UA
++	OccurredAt         int64  `gorm:"bigint;not null;default:0;index:idx_audit_actor_occurred,priority:2;index:idx_audit_target_occurred,priority:3;index:idx_audit_category_occurred,priority:2"` // 事件时间；快照
++	CreatedAt          int64  `gorm:"bigint;not null;default:0"`                                                                                                                                   // 创建时刻；快照
++}
++
++// TableName 返回 §5.25 定义的表名。
++func (AuditEvent) TableName() string { return TablePrefix + "audit_events" }
++
++// IdempotencyRecord 对应 §5.26 `apigx_idempotency_records`。
++//
++// 用途：支持的创建端点以「用户 + 平台 Key 授权范围 + 幂等键 + 请求摘要」识别同一次创建，同键
++// 不同参数返回冲突；请求摘要仅作校验，不保存明文内容（§9.5）。
++//
++// 唯一约束：`uniqueIndex(user_id, api_key_id, operation, idempotency_key_hash)`——并发下由数据库
++// 唯一键保证只有一次创建成功，随后比对 `request_digest`。
++// 不可变快照：`user_id`、`api_key_id`、`operation`、`idempotency_key_hash`、`request_digest`、
++// `created_at`。边界：上游不支持幂等或结果无法查询时状态保留为「未知」（`state=3`），
++// **不得**被自动重试改写为「已完成」。
++type IdempotencyRecord struct {
++	ID                 int64  `gorm:"primaryKey"`                                                             // 主键
++	UserID             int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_idem_scope_key,priority:1"`   // 用户；快照
++	ApiKeyID           int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_idem_scope_key,priority:2"`   // 平台 Key；快照
++	Operation          string `gorm:"size:32;not null;default:'';uniqueIndex:uniq_idem_scope_key,priority:3"` // 操作类型（chat / image / audio.speech / video.create / file.upload）；快照
++	IdempotencyKeyHash string `gorm:"type:char(64);uniqueIndex:uniq_idem_scope_key,priority:4"`               // 客户端幂等键摘要（长字符串一律用摘要进唯一索引）；快照
++	RequestDigest      string `gorm:"type:char(64)"`                                                          // 请求摘要（仅作校验，不保存明文内容）；快照
++	State              int    `gorm:"type:int;not null;index:idx_idem_state_created,priority:1"`              // 状态：0=进行中 / 1=已完成 / 2=同键不同参数冲突 / 3=上游结果未知
++	RequestID          int64  `gorm:"bigint;not null;default:0"`                                              // 生成的请求；0=未生成请求
++	AsyncTaskID        int64  `gorm:"bigint;not null;default:0"`                                              // 关联异步任务；0=非任务
++	ResponseRef        string `gorm:"size:255;not null;default:''"`                                           // 结果引用（**不含凭据**）
++	CreatedAt          int64  `gorm:"bigint;not null;default:0;index:idx_idem_state_created,priority:2"`      // 创建时刻；快照
++	CompletedAt        int64  `gorm:"bigint;not null;default:0"`                                              // 完成时刻；仅单向推进
++}
++
++// TableName 返回 §5.26 定义的表名。
++func (IdempotencyRecord) TableName() string { return TablePrefix + "idempotency_records" }
++
++// PlatformSetting 对应 §5.27 `apigx_platform_settings`。
++//
++// 用途：承载平台级可配置默认值（保留期天数、默认时区、签名下载 TTL 上限、冷启动流量比例、自动
++// 路由权重、探测预算等）。**不写底座 `options`**，避免与上游已知键白名单加载语义耦合。
++//
++// 主键即唯一（`setting_key`），无额外索引（按主键点查）；无软删除，删除即移除键。
++// 保留期、时区、权重等配置变更**只影响未来行为**，不得追溯改写历史计量、历史周期归属或历史质量桶。
++type PlatformSetting struct {
++	SettingKey      string `gorm:"size:128;primaryKey;autoIncrement:false"` // 键名（避开保留字 key）；主键即唯一，不自增
++	SettingValue    string `gorm:"type:text"`                               // 值（JSON 或标量字符串）
++	ValueVersion    int64  `gorm:"bigint;not null;default:0"`               // 值版本（配置变更用版本传播）
++	UpdatedByUserID int64  `gorm:"bigint;not null;default:0"`               // 更新者；0=系统默认
++	UpdatedAt       int64  `gorm:"bigint;not null;default:0"`               // 更新时刻
++}
++
++// TableName 返回 §5.27 定义的表名。
++func (PlatformSetting) TableName() string { return TablePrefix + "platform_settings" }
+diff --git a/model/main.go b/model/main.go
+index 917d4e0..3bf2888 100644
+--- a/model/main.go
++++ b/model/main.go
+@@ -9,6 +9,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 
+@@ -389,6 +390,12 @@ func migrateDB() error {
+ 			return err
+ 		}
+ 	}
++	// APIGX 新增领域表（apigx_*）。只增不改、幂等，且不触碰底座表；
++	// 放在底座迁移全部完成之后，避免与底座既有迁移互相干扰。
++	// 台账：docs/stage0/upstream-diff.md D-003。
++	if err := apigxmodel.Migrate(DB); err != nil {
++		return fmt.Errorf("apigx domain tables migration failed: %w", err)
++	}
+ 	return nil
+ }
+ 
+-- 
+2.53.0.windows.1
+

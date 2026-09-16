@@ -1,0 +1,246 @@
+From f6e91d3f990268770ec89545d5178d4791bb3a89 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 19:45:56 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?feat(apigx):=20=E6=8E=88=E6=9D=83=E6=94=B6?=
+ =?UTF-8?q?=E6=95=9B=EF=BC=88TD-08=EF=BC=89+=20=E9=A2=86=E5=9F=9F=E8=A1=A8?=
+ =?UTF-8?q?=E5=9C=B0=E5=9F=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- middleware/distributor.go: 把令牌「允许模型」硬限制校验提为共用函数
+  enforceTokenModelLimit 并提前到 pin/非 pin 分支之前，指定来源不再绕过模型限制
+- middleware/task_plugin_origin_task_test.go: 追加正反两个回归测试
+- apigx/model/base.go: 领域层地基（package apigxmodel 的 10 条硬约束、类型别名规约、
+  四态限制常量、软删除墓碑约定）
+---
+ apigx/model/base.go                        | 75 ++++++++++++++++++++++
+ middleware/distributor.go                  | 54 ++++++++++------
+ middleware/task_plugin_origin_task_test.go | 53 +++++++++++++++
+ 3 files changed, 162 insertions(+), 20 deletions(-)
+ create mode 100644 apigx/model/base.go
+
+diff --git a/apigx/model/base.go b/apigx/model/base.go
+new file mode 100644
+index 0000000..33cca76
+--- /dev/null
++++ b/apigx/model/base.go
+@@ -0,0 +1,75 @@
++// Package apigxmodel 承载 APIGX 新增的领域表（表名一律 apigx_ 前缀）。
++//
++// 包名用 apigxmodel 而不是 model，是为了与底座的 model 包区分，避免导入歧义：
++//
++//	import apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++//
++// # 硬约束（违反即视为缺陷）
++//
++// 这些规则来自 `docs/stage0/schema-draft.md` §3 与底座 `AGENTS.md`，全部是**三库可移植**的要求：
++//
++//  1. 三库同时兼容：SQLite / MySQL ≥ 5.7.8 / PostgreSQL ≥ 9.6。单库通过不算通过。
++//  2. 绝不手写 `AUTO_INCREMENT` / `SERIAL`：主键交给 GORM 按方言生成。
++//  3. 布尔字段**不写** `default:true`：MySQL 与 PostgreSQL 对布尔默认值的归一化不同，
++//     `AutoMigrate` 会在每次启动反复下发 `ALTER TABLE`。
++//  4. 时间列一律 UTC epoch 秒（int64），与底座 `common.GetTimestamp()` 一致（计划书 §8.5）。
++//  5. 金额一律 int64 最小单位（micro-USD，1 unit = 1e-6 USD），不用 decimal：
++//     避免各驱动 `Scanner`/`Valuer` 差异；换算走底座 `common/quota_math.go` 收口。
++//  6. JSON 一律 TEXT 列 + `common.Marshal` / `common.Unmarshal`；**禁止**直接 `encoding/json`。
++//     写入前必须做字节数上界校验（MySQL text 上限 65535 字节）。
++//  7. 列名不得使用保留字（`group`、`key`、`order`、`user`、`desc`、`usage`）：
++//     从命名上绕开，就没有方言引号问题。
++//  8. 每一条索引都**显式命名**且长度 ≤ 40 字符（MySQL 标识符上限 64）。
++//  9. 软删除用「`deleted_at` + `alive_flag` 墓碑列」：
++//     存活行 `alive_flag = 0`，删除时置为本行 ID（唯一值），
++//     「存活期间唯一」写成 `uniqueIndex(..., alive_flag)`。
++//     不使用部分唯一索引（`WHERE deleted_at IS NULL`）——MySQL 不支持。
++//  10. 快照列只存值，不加外键语义、不加级联；展示名 / 价格 / owner 变化不得回写历史。
++//
++// # 字段类型别名（schema-draft §3.2）
++//
++// Go 没有「带 tag 的类型别名」，因此别名只是**书写规约**，写字段时必须按下表选用 tag：
++//
++//	别名         Go 类型          GORM tag
++//	ID          int64           `gorm:"primaryKey"`                     // 自增交给 GORM
++//	FK          int64           `gorm:"bigint;not null;default:0"`      // 逻辑外键，不建库级约束
++//	BIGINT      int64           `gorm:"bigint;not null;default:0"`
++//	INT         int             `gorm:"type:int;not null;default:0"`
++//	ENUM        int             `gorm:"type:int;not null"`              // 无 default，由 Go 侧常量赋值
++//	BOOL        bool            `gorm:"not null"`                       // 无 default
++//	MICRO       int64           `gorm:"bigint;not null;default:0"`      // micro-USD / micro 倍率
++//	TS          int64           `gorm:"bigint;not null;default:0"`      // UTC epoch 秒，0=未设置
++//	STR(n)      string          `gorm:"size:n;not null;default:''"`     // n ≤ 191
++//	STRN(n)     string          `gorm:"size:n"`                         // 可空
++//	TEXT        string          `gorm:"type:text"`
++//	HASH64      string          `gorm:"type:char(64)"`                  // SHA-256 hex，不含 '-'
++//	CUR3        string          `gorm:"type:char(3);not null"`          // ISO 4217
++//	SOFTDEL     gorm.DeletedAt  `gorm:"index"`
++package apigxmodel
++
++// TablePrefix 是所有 APIGX 表的统一前缀，用于「新增文件集中、命名空间不相交」的约束。
++const TablePrefix = "apigx_"
++
++// 四态限制：计划书 §9.2 要求「未配置 / 禁用 / 继承默认 / 明确不限」分别存储，
++// 空字段不得被解释成无限容量（CODE_STYLE.md 第 11 条）。
++//
++// 所有容量维度都以「模式列 + 值列」成对出现，校验落在 Go 侧（数据库层不写 CHECK，
++// 因为三库对 CHECK 的支持与执行时机差异较大，且底座未使用 CHECK）。
++const (
++	// LimitModeUnset 未配置（未表态）；值列必须为 0，且不得解释为不限。
++	LimitModeUnset int = 0
++	// LimitModeDisabled 禁用：该资源不能用于此维度；值列必须为 0。
++	LimitModeDisabled int = 1
++	// LimitModeInherit 继承上级默认；值列必须为 0，解析时向上查找。
++	LimitModeInherit int = 2
++	// LimitModeUnlimited 明确不限；值列必须为 0。
++	LimitModeUnlimited int = 3
++	// LimitModeValue 明确值；值列必须 > 0。
++	LimitModeValue int = 4
++)
++
++// AliveFlagAlive 是「存活」标识的取值（软删除墓碑约定，见包注释第 9 条）。
++//
++// 存活行取 0；被软删除时置为本行 ID（保证同一业务键下墓碑值互不相同），
++// 这样 `uniqueIndex(业务键..., alive_flag)` 既能阻止存活行重复，又不会让墓碑互相冲突。
++const AliveFlagAlive int64 = 0
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 6bad3d8..1f2998e 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -45,6 +45,11 @@ func Distribute() func(c *gin.Context) {
+ 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
+ 			return
+ 		}
++		// 令牌的「允许模型」是硬限制：指定来源（pin）、原渠道锁定与非 pin 选路必须
++		// 走同一套校验，否则指定来源可以绕过模型限制，扩大授权。
++		if !enforceTokenModelLimit(c, modelRequest.Model) {
++			return
++		}
+ 		if pin, found, overridden := constraints.ResolvedPin(); found {
+ 			for _, lost := range overridden {
+ 				logger.LogWarn(c, fmt.Sprintf(
+@@ -78,26 +83,7 @@ func Distribute() func(c *gin.Context) {
+ 			}
+ 		} else {
+ 			// Select a channel for the user
+-			// check token model mapping
+-			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
+-			if modelLimitEnable {
+-				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
+-				if !ok {
+-					// token model limit is empty, all models are not allowed
+-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+-					return
+-				}
+-				var tokenModelLimit map[string]bool
+-				tokenModelLimit, ok = s.(map[string]bool)
+-				if !ok {
+-					tokenModelLimit = map[string]bool{}
+-				}
+-				if !tokenModelLimitAllows(tokenModelLimit, modelRequest.Model) {
+-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
+-					return
+-				}
+-			}
+-
++			// 令牌模型限制已在上面统一校验（pin 与非 pin 共用），此处不再重复。
+ 			if shouldSelectChannel {
+ 				if modelRequest.Model == "" {
+ 					abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorModelNameRequired))
+@@ -576,6 +562,34 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
+ 	return &modelRequest, shouldSelectChannel, nil
+ }
+ 
++// enforceTokenModelLimit applies the token's allowed-model hard limit to the
++// requested model and returns false (already having written the error response)
++// when the request must be rejected.
++//
++// It is shared by the pinned path (specific source, origin-task lock) and the
++// unpinned selection path, so that pinning a source can never widen the token's
++// authorization. Tokens without a model limit are unaffected.
++func enforceTokenModelLimit(c *gin.Context, model string) bool {
++	if !common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled) {
++		return true
++	}
++	s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
++	if !ok {
++		// token model limit is empty, all models are not allowed
++		abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
++		return false
++	}
++	tokenModelLimit, ok := s.(map[string]bool)
++	if !ok {
++		tokenModelLimit = map[string]bool{}
++	}
++	if !tokenModelLimitAllows(tokenModelLimit, model) {
++		abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": model}))
++		return false
++	}
++	return true
++}
++
+ // tokenModelLimitAllows reports whether a token model-limit map authorizes
+ // model. Exact name, wildcard-normalized name, and routing-normalized name
+ // (modifiers and legacy aliases stripped) are all accepted.
+diff --git a/middleware/task_plugin_origin_task_test.go b/middleware/task_plugin_origin_task_test.go
+index c6933c2..7fc9f94 100644
+--- a/middleware/task_plugin_origin_task_test.go
++++ b/middleware/task_plugin_origin_task_test.go
+@@ -448,3 +448,56 @@ func TestDistributePinViolatingIdentityFilterErrors(t *testing.T) {
+ 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
+ 	assert.Contains(t, recorder.Body.String(), string(dto.FilterTaskPluginIdentity))
+ }
++
++// TD-08 回归：固定来源（pin）不能绕过令牌的「允许模型」硬限制。
++// 修复前本用例会放行（pin 分支不校验模型限制），修复后必须被拒。
++func TestDistributePinnedRequestStillEnforcesTokenModelLimit(t *testing.T) {
++	require.NoError(t, appI18n.Init())
++	setupOriginTaskDB(t)
++	channel := insertOriginTaskChannel(t, common.ChannelStatusEnabled)
++
++	recorder := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Request = httptest.NewRequest(http.MethodPost, "/vendor/jobs", strings.NewReader(`{}`))
++	c.Request.Header.Set("Content-Type", "application/json")
++	c.Set("resolved_task_model", "resolved-model")
++	common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, true)
++	common.SetContextKey(c, constant.ContextKeyTokenModelLimit, map[string]bool{"other-model": true})
++	service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
++		ChannelId: channel.Id,
++		Source:    dto.PinSourceOriginTask,
++		Rank:      dto.PinRankOriginTask,
++		RetryMode: dto.PinRetrySameChannel,
++	})
++
++	Distribute()(c)
++
++	assert.True(t, c.IsAborted(), "固定来源请求同样必须受令牌模型限制约束")
++	assert.Equal(t, http.StatusForbidden, c.Writer.Status())
++}
++
++// 反向保护：pin 下请求**已授权**模型仍应正常放行，避免修复过度拦截。
++func TestDistributePinnedRequestAllowsAuthorizedModel(t *testing.T) {
++	require.NoError(t, appI18n.Init())
++	setupOriginTaskDB(t)
++	channel := insertOriginTaskChannel(t, common.ChannelStatusEnabled)
++
++	recorder := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Request = httptest.NewRequest(http.MethodPost, "/vendor/jobs", strings.NewReader(`{}`))
++	c.Request.Header.Set("Content-Type", "application/json")
++	c.Set("resolved_task_model", "resolved-model")
++	common.SetContextKey(c, constant.ContextKeyTokenModelLimitEnabled, true)
++	common.SetContextKey(c, constant.ContextKeyTokenModelLimit, map[string]bool{"resolved-model": true})
++	service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
++		ChannelId: channel.Id,
++		Source:    dto.PinSourceOriginTask,
++		Rank:      dto.PinRankOriginTask,
++		RetryMode: dto.PinRetrySameChannel,
++	})
++
++	Distribute()(c)
++
++	assert.False(t, c.IsAborted(), "已授权模型不应被拦截")
++	assert.Equal(t, channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
++}
+-- 
+2.53.0.windows.1
+

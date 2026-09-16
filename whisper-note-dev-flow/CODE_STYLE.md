@@ -30,6 +30,12 @@
     **编辑工具重写 `.ps1` 会丢掉 BOM，每次改完都要重新补。** `.md` / `.sql` / `.json` 不由 PowerShell 解析，保持无 BOM 的 UTF-8。
 
     同一个原因还有一个**假故障**：PS 5.1 用 `Get-Content` 读无 BOM 的 UTF-8 文件时也会按 GBK 显示成乱码，容易被误判为「文件被写坏了」。判断文件真实内容用 `Get-Content -Encoding UTF8`，或直接用 read 工具；不要用裸 `Get-Content` 的显示结果下结论。仓库内已有守卫脚本：`.\tools\dev\check-ps1-bom.ps1`（报告）与 `-Fix`（就地补 BOM）。
+
+13b. **不要在 PowerShell 里写含非 ASCII 内容的文件**：`Set-Content` / `Add-Content` / `Out-File` / here-string 都会走 PS 5.1 的 ANSI 编码路径，结果不只是乱码——**多字节序列会吞掉换行，把两行合并**，产生的 Go/JS 源文件直接语法错误（已实际踩中一次：一份 77KB 的 Go 文件被压成 304 行、668 个乱码字符，`go build` 报 `expected 'package', found ID`）。
+
+    - 写 `.go` / `.mjs` / `.md` 等含中文的文件：一律用 **write / edit 文件工具**。
+    - 用 PowerShell 只做读取、编译、跑测试、拼 ASCII 命令。
+    - 需要校验文件是否真的坏了：用 read 工具，或按字节统计中文与可疑乱码字符的数量，**不要只看 `Get-Content` 的显示**。
 14. **需要 HTTPS 下载时不要用 curl / Invoke-WebRequest / .NET WebClient**：沙箱进程内 Schannel 报 `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030e)`，必然失败（TCP 与代理隧道本身是好的，别误判为断网）。统一走：下载用 `node tools/net/fetch.mjs <url> [outFile] [--direct]`；Git 用仓库级 `http.https://github.com/.proxy`；Go 用 `GOPROXY=https://goproxy.cn,direct`。
 15. **不要跨命令依赖环境变量**：每次 `pwsh` 调用都是全新进程，开工先 `. .\tools\dev\env.ps1`，它把 `.toolchain/go`、`.toolchain/redis` 挂进 PATH 并设置 Go 缓存与镜像。
 16. **开发期密钥不进仓库**：`.env` 已在 `.gitignore`；数据库密码只作为参数或 `PGPASSWORD` 传给 `tools/dev/init-db.ps1`，不写进脚本、文档、日志或提交信息。`.toolchain/` 属于本机缓存，不入库。

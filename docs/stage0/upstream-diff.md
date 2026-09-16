@@ -24,7 +24,9 @@
 | D-001 | `new-api/middleware/distributor.go` | 必须修改 | 把 token「允许模型」硬限制的校验从**非 pin 分支内部**提取为共用函数 `enforceTokenModelLimit`，并提前到 pin / 非 pin 分支**之前**执行 | TD-08；计划书 §5.2 第 1 条「不能只删除管理员判断；指定、自动、亲和缓存、重试和任务原渠道锁定都必须经过同一资源授权检查」 | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。该文件在上游属高频改动区，升级时需重新核对 pin 分支与模型限制的相对位置 | 2026-09-16 | 已实施 |
 | D-001-注 | 同上 | — | 仅影响**启用了 token 模型限制**的令牌（`token_model_limit_enabled=true`）；未启用限制的令牌行为完全不变 | 影响面收敛，便于回归 | — | 2026-09-16 | — |
 | D-002 | `new-api/middleware/task_plugin_origin_task_test.go` | 追加 | 追加 2 个回归测试：`TestDistributePinnedRequestStillEnforcesTokenModelLimit`（反例：pin 下未授权模型必须 403）与 `TestDistributePinnedRequestAllowsAuthorizedModel`（正例：pin 下已授权模型仍放行） | D-001 的回归保护；底座 AGENTS.md 要求「扩展既有测试文件，不为小改动散落测试」 | 低：仅追加测试函数，不改上游既有用例 | 2026-09-16 | 已实施 |
-| — | 验证方式 | — | 运行时 A/B/C 回归脚本 `tools/stage1-verify/td08-pin-model-limit.mjs`（修复前 B=200 绕过，修复后 B=403）＋ Go 回归测试（临时禁用修复即 FAIL，证明测试有效） | 双重证据：单测 + 端到端 | — | 2026-09-16 | 通过 |
+| D-003 | `new-api/model/main.go` | 接线 | 在 `migrateDB()` 末尾（底座所有迁移完成之后）加 5 行：调用 `apigxmodel.Migrate(DB)`，失败即返回错误。另加 1 行 import | T1.3：让 APIGX 的 27 张领域表随底座启动创建；只增不改、幂等，不触碰底座表 | 低（新增调用点，不改既有迁移顺序）；升级时需核对 `migrateDB()` 末尾是否仍是合适的挂载点 | 2026-09-16 | 已实施 |
+| D-004 | `new-api/apigx/**`（新增目录，不入上游） | 新增 | 27 张领域表的 GORM 模型 + 迁移入口 + 两个测试文件 | T1.3；架构基线 §2 的「新增代码集中在 `apigx/`」 | 无（上游不存在同名路径） | 2026-09-16 | 已实施 |
+| — | 补丁导出 | — | `deploy/patches/0001-*.patch`（D-001/D-002）、`0002-*.patch`（D-003/D-004）；fork 分支 `apigx`，HEAD `c96af9d` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-16 | 已导出 |
 
 ## 二、新增文件（不修改上游）
 

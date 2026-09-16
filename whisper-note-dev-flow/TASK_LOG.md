@@ -29,7 +29,15 @@
 **任务清单**（工作包定义见 `docs/stage0/gate-review.md` 第 3 节）：
 - [x] T1.2 授权收敛（TD-08）：pin / 非 pin 走同一授权函数 → `new-api/middleware/distributor.go`；回归测试 `middleware/task_plugin_origin_task_test.go`；运行时回归 `tools/stage1-verify/td08-pin-model-limit.mjs`。证据：修复前 pin 下未授权模型 HTTP 200 且到达上游，修复后 403 且 0 次出站；临时禁用修复时回归测试 FAIL（证明测试有效）；middleware 全量测试通过、全仓构建通过。台账登记 D-001/D-002。
 - [ ] T1.1 平台 Key 接入（按底座现状：明文存储 + 等值查找；用 `authz.SecretView` 约束可见性；明文不进日志）
-- [ ] T1.3 领域表落地（27 张，三库兼容矩阵：全新库 / 旧库升级 / 连续启动两次验幂等）
+- [ ] T1.3 领域表落地（**PG + SQLite 已通过；MySQL 矩阵未执行，故未勾选**）
+  - [x] 27 张表代码：`new-api/apigx/model/{base,models_identity,models_metering,migrate}.go`（`apigx_` 前缀，包名 `apigxmodel`）；`ExpectedTableCount = 27` 作为契约常量
+  - [x] 测试守门：`migrate_test.go`（建表数量 = 27 / SQLite 连续迁移幂等 / 反射扫描字段类型只允许 int64·int·string·bool·gorm.DeletedAt）；`migrate_matrix_test.go`（DSN 驱动的三库矩阵，未配置的方言**明确 SKIP 并打印原因**）
+  - [x] **PostgreSQL 实测**（`tools/stage1-verify/migrate-pg-matrix.ps1`）：全新库建出 **27 张**；从底座旧库升级建出 **27 张 apigx 表 + 37 张底座原生表原样保留**；两种情况内部均连续迁移两次验幂等 → 全部通过
+  - [x] DDL 实测与图纸核对：`bigint 382 / varchar 77 / char 20 / text 13 / boolean 12 / timestamptz 8`，132 索引（58 唯一）；**12 个布尔列 0 默认值**；**8 个软删除列正好对应 8 张声明软删除的表**；27 个主键中 24 个带自增序列（另 3 个是有意设计）
+  - [x] 图纸勘误：§3.2 的「`INT` → PG `int`」被实测证伪（PG 上是 `bigint`，底座自身亦然），已修正；§5.13 的 `use_limit_mode = 1` 已改为 `3`
+  - [x] 接线：底座 `model/main.go` 的 `migrateDB()` 末尾调用 `apigxmodel.Migrate(DB)`（台账 D-003）
+  - [ ] **MySQL 矩阵未执行**（本机无 MySQL/MariaDB）：按底座 `AGENTS.md`「单库通过不算通过」，本工作包在补齐 MySQL 前**不算完成**
+  - 记录：`docs/stage1/schema-impl-notes.md`（验证结果、DDL 事实、7 条实现期决策、未验证项、环境怪癖）
 - [ ] T1.4 分享者接口（分组 / 渠道 / Key 池 CRUD，受 owner 约束）
 - [ ] T1.5 多 Key 导入与池策略（稳定凭据 ID、逐 Key 状态与统计）
 - [ ] T1.6 免费计量 `usage_only`（新资金来源替换钱包前置；不得走 FreeModel 短路）

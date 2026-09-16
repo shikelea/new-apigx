@@ -157,7 +157,7 @@
 | `ID` | `int64` | `gorm:"primaryKey"` | `integer`（rowid 别名，自增） | `bigint` + 自增（GORM 生成） | `bigserial`（GORM 生成） | **绝不手写 `AUTO_INCREMENT` / `SERIAL`** |
 | `FK` | `int64` | `gorm:"bigint;not null;default:0"` | `integer` | `bigint` | `bigint` | 指向其它表的 `ID`；**不建数据库级外键约束**（见 §6.1） |
 | `BIGINT` | `int64` | `gorm:"bigint;not null;default:0"` | `integer` | `bigint` | `bigint` | 计数、求和 |
-| `INT` | `int` | `gorm:"type:int;not null;default:0"` | `int` | `int` | `int` | 小整数；与底座 `User.Role`（`new-api/model/user.go:87` 的 `type:int;default:1`）同风格 |
+| `INT` | `int` | `gorm:"type:int;not null;default:0"` | `int` | `int` | **`bigint`（实测）** | 小整数；与底座 `User.Role`（`new-api/model/user.go:87` 的 `type:int;default:1`）同风格。**勘误（2026-09-16）**：GORM 在 PostgreSQL 上把 Go `int` 映射为 `bigint`（Go `int` 为 64 位），`type:int` 也一样；**底座自身**的 `channels.status/type/weight` 实测同样是 `bigint`。因此 PG 上 `INT` 与 `BIGINT` 无区别，本项目接受该行为（要真正 4 字节只能写方言专有类型，会破坏三库可移植）。详见 `docs/stage1/schema-impl-notes.md` §2 |
 | `ENUM` | `int` | `gorm:"type:int;not null"`（**无 default**） | `int` | `int` | `int` | 状态/模式枚举；由 Go 侧常量显式赋值 |
 | `BOOL` | `bool` | `gorm:"not null"`（**无 default**） | `numeric` | `boolean` | `boolean` | 见 §2.2；需要「四态」时改用 `ENUM` |
 | `MICRO` | `int64` | `gorm:"bigint;not null;default:0"` | `integer` | `bigint` | `bigint` | **金额最小单位**：1 unit = 1e-6 USD（micro-USD）；汇率同理（1e-6 倍） |
@@ -703,8 +703,9 @@ apigx_async_tasks ──1:N── apigx_upstream_object_refs
   ```
   UPDATE apigx_invites SET used_count = used_count + 1, updated_at = ?
    WHERE id = ? AND status = 0
-     AND (use_limit_mode = 1 OR used_count < max_uses)
+     AND (use_limit_mode = 3 OR used_count < max_uses)
   ```
+  > **勘误（2026-09-16）**：此处原写作 `use_limit_mode = 1`，与 §3.3 的四态定义冲突——§3.3 规定 `1 = 禁用`、`3 = 明确不限`。本 SQL 的语义是「不限次数或未达上限则允许」，因此必须用 `3`；用 `1` 会把「禁用」当成「不限」，等于把被禁用的邀请当成无限次可用。该字段本身不在本表实现范围内，但**服务端实现时必须按本节修正后的取值**。
   以 `RowsAffected == 1` 判定成功，否则拒绝。**不得**用「先 SELECT 再 UPDATE」——并发下会突破次数上限。
   ```
   同时在 Go 侧校验：expires_at = 0 OR expires_at > now
