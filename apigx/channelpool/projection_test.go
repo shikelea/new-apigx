@@ -232,3 +232,105 @@ func TestProjectKeyPoolSkipsUndecryptableKey(t *testing.T) {
 	require.Len(t, keys, 1)
 	assert.True(t, strings.HasPrefix(keys[0], "sk-good-"))
 }
+
+// ---- 逐 Key 统计回填 ----
+
+// 底座的运行期只提供 Key 索引，统计必须翻译回稳定凭据 ID。
+func TestRecordKeyOutcomeTranslatesIndexToStableKey(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9101
+	const baseChannelID int64 = 5252
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+
+	// 权重 5 的那把会被投影到索引 0
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-low-aaaaaaaaa", "sk-high-bbbbbbbb"}, []int64{1, 5})
+
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{Success: true}))
+
+	var high apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&high).Error)
+	assert.Positive(t, high.LastOKAt, "索引 0 对应权重最高的 stable-b，成功时间应记在它身上")
+	assert.Zero(t, high.LastErrorAt)
+
+	var low apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&low).Error)
+	assert.Zero(t, low.LastOKAt, "不该记到另一把凭据上")
+}
+
+// 鉴权失效 → 只把该 Key 标为失效（Key 级故障隔离），不动渠道与其它 Key。
+func TestRecordKeyOutcomeIsolatesAuthFailureToSingleKey(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9102
+	const baseChannelID int64 = 5253
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-one-aaaaaaaa", "sk-two-bbbbbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 1, KeyOutcome{
+		Success: false, AuthFailed: true, ErrorCode: "upstream_401_invalid_key",
+	}))
+
+	var failed apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&failed).Error)
+	assert.Equal(t, apigxmodel.UpstreamKeyStatusInvalid, failed.Status)
+	assert.Equal(t, "upstream_401_invalid_key", failed.LastErrorCode)
+	assert.Positive(t, failed.LastErrorAt)
+
+	var other apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&other).Error)
+	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, other.Status, "其它 Key 不受影响")
+
+	// 渠道本身也不应被改动（Key 级隔离）
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+	assert.Equal(t, common.ChannelStatusEnabled, base.Status)
+}
+
+func TestRecordKeyOutcomeSetsCooldown(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9103
+	const baseChannelID int64 = 5254
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-cool-aaaaaaaa"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	now := common.GetTimestamp()
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{CooldownSeconds: 120}))
+
+	var key apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
+	assert.Greater(t, key.CooldownUntil, now+60, "冷却应延伸到未来")
+	assert.False(t, apigxmodel.IsUpstreamKeyUsable(&key, now), "冷却期内该 Key 不可用")
+}
+
+// 非我们的渠道（管理员自建）没有可记对象：静默跳过，不报错、不误写。
+func TestRecordKeyOutcomeIgnoresForeignChannel(t *testing.T) {
+	db := setupProjectionEnv(t)
+	require.NoError(t, db.Create(&basemodel.Channel{Id: 9999, Name: "管理员自建", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+
+	assert.NoError(t, RecordKeyOutcome(db, 9999, 0, KeyOutcome{Success: true}))
+}
+
+// 索引不在当前投影里时不得猜测（池刚变更过），必须报错让调用方跳过本次统计。
+func TestRecordKeyOutcomeRejectsUnknownIndex(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9104
+	const baseChannelID int64 = 5255
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-solo-aaaaaaaa"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	err = RecordKeyOutcome(db, int(baseChannelID), 7, KeyOutcome{Success: true})
+	assert.ErrorIs(t, err, apigxmodel.ErrNotFound, "未知索引不得被猜成某把凭据")
+}
