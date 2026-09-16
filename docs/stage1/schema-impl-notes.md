@@ -40,6 +40,31 @@
 - §3.2 的「`INT` → PG `int`」应改为「PG 实测为 `bigint`（与底座一致）」。
 - 结论：`INT` 与 `BIGINT` 在 PG 上**没有区别**；若确实需要 4 字节列，必须写 `type:integer` 之类的显式方言写法——本项目**不采用**（会破坏三库可移植），因此保持 Go `int` + `bigint` 生成的现状。
 
+## 2.5 MySQL 实测（8.0.12，phpStudy 实例，3306）
+
+| 项目 | 结果 |
+|---|---|
+| 全新库迁移 + 连续两次（幂等） | ✅ 27 张表 |
+| 列类型分布 | `bigint 383 / varchar 77 / char 20 / text 13 / tinyint 12 / datetime 8` |
+| 与 PostgreSQL 的对照 | 列数**逐类完全一致**（383/77/20/13/12/8），仅方言名不同：`boolean`→`tinyint`、`timestamptz`→`datetime` |
+| `apigx_quality_buckets` | `id bigint(20)`（主键）+ `bucket_key_hash char(64)` ✅ |
+| 底座在 MySQL 上启动 | ✅ `GET /api/status` → 200；库内 **64 张表全部 InnoDB**（37 底座原生 + 27 APIGX） |
+
+### ⚠️ 一个必须记住的坑：默认引擎是 MyISAM
+
+首次接入时**三库矩阵「通过」了，但通过得没有意义**：
+
+- phpStudy 的 `my.ini` 写着 `default-storage-engine=MyIsam`，于是 27 张表**全部建成 MyISAM**（25 Dynamic + 2 Fixed）。
+- 后果一：**底座自己 FATAL 起不来**——`Error 1071: Specified key was too long; max key length is 1000 bytes`，卡在它原生的 `passkey_credentials`（`credential_id varchar(512)` 上的唯一索引）。MyISAM 的索引上限是 1000 字节，InnoDB DYNAMIC 是 3072。
+- 后果二（更严重）：**MyISAM 没有事务与行锁**。本项目的 Reservation 预留、Invite 的原子扣减、额度原子预留、幂等记录全都依赖事务语义——跑在 MyISAM 上这些保证会**静默失效**，而且测试照样"通过"。
+
+**处理**：
+1. 运行时切换 `SET GLOBAL default_storage_engine=InnoDB`（未改 phpStudy 的 `my.ini`，重启即失效——若希望长期生效需改配置文件）；
+2. 重建测试库后重跑，矩阵在 InnoDB 上通过；
+3. **新增守门断言**：MySQL 子测试读 `information_schema.tables.engine` 并要求 `InnoDB`，否则失败。反向验证过：把引擎临时切回 MyISAM，断言**如实失败**（`actual: "MyISAM"`）——不是永远绿的测试。
+
+**结论（需求级）**：PostgreSQL 天然支持这些语义；**MySQL 部署必须使用 InnoDB**；SQLite 由其自身事务语义保证。这一点已写入 `docs/dev-environment.md`。
+
 ## 3. 实现期决策（与图纸的差异及裁决）
 
 | # | 事项 | 图纸 | 实现 | 裁决与理由 |
@@ -54,7 +79,7 @@
 
 ## 4. 未验证（必须如实记录）
 
-1. **MySQL 矩阵未执行**：本机没有 MySQL/MariaDB 实例。Go 测试在缺少 `APIGX_TEST_MYSQL_DSN` 时**明确 SKIP 并打印原因**，不会静默当作通过。按底座 `AGENTS.md`，**三库矩阵在 MySQL 补齐前不算完成**。
+1. ~~**MySQL 矩阵未执行**~~ → **已完成（2026-09-16）**：本机 phpStudy 的 MySQL 8.0.12（3306）上通过；细节与 MyISAM 坑见 §2.5。测试仍保留「缺 DSN 时明确 SKIP 并打印原因」的行为，任何一台机器上漏跑都会显式暴露。
 2. **SQLite 只验证了「表数量 + 幂等 + 字段类型守门」**，未逐一核对 SQLite 上每列的实际亲和类型。
 3. **未做旧版本兼容性验证**：`agipx_*` 表尚无历史版本，因此「从更早的 APIGX 版本升级」这一路径不存在，本轮只覆盖「全新库」与「从底座旧库升级」。
 4. 全部结论基于**本机 PostgreSQL 18.4 + SQLite（glebarez 纯 Go 驱动）**；未在 PostgreSQL 9.6（底座声明的下限）上验证。

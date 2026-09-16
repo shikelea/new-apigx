@@ -126,7 +126,28 @@ DATABASE_URL=postgres://apigx:apigx_dev@127.0.0.1:5433/apigx_dev?sslmode=disable
 
 如果希望统一用 5432 上那个服务实例（例如为了和别人的环境一致），需要用户提供超级用户密码，然后执行 `tools/dev/init-db.ps1` 创建 `apigx` 角色与库；该脚本幂等，且不会修改超级用户配置。
 
-## 6. 本地开发用的底座选项（可回滚）
+## 6. MySQL（phpStudy 实例）与 InnoDB 硬要求
+
+| 项 | 值 |
+|---|---|
+| 实例 | MySQL **8.0.12**（phpStudy 面板启动），`127.0.0.1:3306` |
+| 客户端 | `D:\phpstudy_pro\Extensions\MySQL8.0.12\bin\mysql.exe`（另有 5.7.26 已安装但未启动） |
+| 应用账号 | `apigx` / `ApigxDev#2026`（`mysql_native_password`；只授权到 `apigx_%` 库，**不用 root 跑应用**） |
+| 库 | `apigx_matrix_mysql`（矩阵验证）、`apigx_mysql`（底座真实运行） |
+| 连接串 | `apigx:ApigxDev#2026@tcp(127.0.0.1:3306)/<db>?charset=utf8mb4&parseTime=True&loc=UTC` |
+
+**硬要求：存储引擎必须是 InnoDB。**
+
+`D:\phpstudy_pro\Extensions\MySQL8.0.12\my.ini` 里是 `default-storage-engine=MyIsam`，这会带来两个后果：
+
+1. **底座自身起不来**：MyISAM 索引上限 1000 字节，底座原生 `passkey_credentials.credential_id varchar(512)` 的唯一索引直接超限 → `Error 1071`，启动 FATAL。
+2. **更严重**：MyISAM **没有事务与行锁**。本项目的预留、额度原子扣减、邀请原子核销、幂等记录全依赖事务语义，跑在 MyISAM 上会**静默失效**，而结构测试照样通过。
+
+**当前处置**：运行时执行 `SET GLOBAL default_storage_engine=InnoDB`（**没有改 phpStudy 的 my.ini**，所以 MySQL 服务重启后会退回 MyISAM）。若希望长期生效，需要在 `my.ini` 里把该行改成 `default-storage-engine=InnoDB` 并重启服务（这一步涉及你现有的其它站点，由你决定）。
+
+**已加守门**：`apigx/model` 的 MySQL 矩阵子测试会断言表引擎为 `InnoDB`，否则失败（反向验证过：切回 MyISAM 时断言如实失败）。
+
+## 7. 本地开发用的底座选项（可回滚）
 
 底座的 relay 链路上挂了 `SystemPerformanceCheck` 中间件（`middleware/performance.go:64-67`），磁盘使用率超过阈值时直接返回 `503 system_disk_overloaded`。本机 D: 盘实测占用 **98.9%**（`dir D:\` 显示仅剩约 5.3 GB），默认阈值 95% 必然触发，因此本地联调时把阈值放宽：
 

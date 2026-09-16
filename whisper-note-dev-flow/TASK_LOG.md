@@ -29,15 +29,16 @@
 **任务清单**（工作包定义见 `docs/stage0/gate-review.md` 第 3 节）：
 - [x] T1.2 授权收敛（TD-08）：pin / 非 pin 走同一授权函数 → `new-api/middleware/distributor.go`；回归测试 `middleware/task_plugin_origin_task_test.go`；运行时回归 `tools/stage1-verify/td08-pin-model-limit.mjs`。证据：修复前 pin 下未授权模型 HTTP 200 且到达上游，修复后 403 且 0 次出站；临时禁用修复时回归测试 FAIL（证明测试有效）；middleware 全量测试通过、全仓构建通过。台账登记 D-001/D-002。
 - [ ] T1.1 平台 Key 接入（按底座现状：明文存储 + 等值查找；用 `authz.SecretView` 约束可见性；明文不进日志）
-- [ ] T1.3 领域表落地（**PG + SQLite 已通过；MySQL 矩阵未执行，故未勾选**）
+- [x] T1.3 领域表落地（**三库矩阵全部通过**）
   - [x] 27 张表代码：`new-api/apigx/model/{base,models_identity,models_metering,migrate}.go`（`apigx_` 前缀，包名 `apigxmodel`）；`ExpectedTableCount = 27` 作为契约常量
-  - [x] 测试守门：`migrate_test.go`（建表数量 = 27 / SQLite 连续迁移幂等 / 反射扫描字段类型只允许 int64·int·string·bool·gorm.DeletedAt）；`migrate_matrix_test.go`（DSN 驱动的三库矩阵，未配置的方言**明确 SKIP 并打印原因**）
-  - [x] **PostgreSQL 实测**（`tools/stage1-verify/migrate-pg-matrix.ps1`）：全新库建出 **27 张**；从底座旧库升级建出 **27 张 apigx 表 + 37 张底座原生表原样保留**；两种情况内部均连续迁移两次验幂等 → 全部通过
-  - [x] DDL 实测与图纸核对：`bigint 382 / varchar 77 / char 20 / text 13 / boolean 12 / timestamptz 8`，132 索引（58 唯一）；**12 个布尔列 0 默认值**；**8 个软删除列正好对应 8 张声明软删除的表**；27 个主键中 24 个带自增序列（另 3 个是有意设计）
-  - [x] 图纸勘误：§3.2 的「`INT` → PG `int`」被实测证伪（PG 上是 `bigint`，底座自身亦然），已修正；§5.13 的 `use_limit_mode = 1` 已改为 `3`
+  - [x] 测试守门：`migrate_test.go`（建表数量 = 27 / SQLite 连续迁移幂等 / 反射扫描字段类型只允许 int64·int·string·bool·gorm.DeletedAt）；`migrate_matrix_test.go`（DSN 驱动的三库矩阵，未配置的方言**明确 SKIP 并打印原因**；MySQL 额外断言引擎必须是 InnoDB）
+  - [x] **PostgreSQL 实测**：全新库 **27 张**；从底座旧库升级 **27 张 apigx + 37 张底座原生表原样保留**；两种情况均连续迁移两次验幂等
+  - [x] **MySQL 8.0.12 实测**：全新库 27 张 + 幂等；列类型分布与 PG **逐类一致**（383/77/20/13/12/8，仅方言名不同：boolean→tinyint、timestamptz→datetime）；**底座真的跑在 MySQL 上**：`/api/status` 200，库内 64 张表全部 InnoDB（37 底座 + 27 APIGX）
+  - [x] **SQLite 实测**：建表数量、幂等、字段类型可移植守门
+  - [x] ⚠️ **踩到并修掉的关键坑**：phpStudy 的 `my.ini` 是 `default-storage-engine=MyIsam` → 27 张表全建成 MyISAM（无事务！）、底座自身 FATAL 起不来（MyISAM 索引上限 1000 字节）。已切到 InnoDB 重验，并**新增引擎守门断言**（反向验证：切回 MyISAM 时断言如实失败）。详见 `docs/dev-environment.md` §6
+  - [x] 图纸勘误 2 处：§3.2 的「`INT` → PG `int`」被实测证伪（实为 `bigint`，底座自身亦然）；§5.13 的 `use_limit_mode = 1` 改为 `3`（原文把「禁用」当成「不限」）
   - [x] 接线：底座 `model/main.go` 的 `migrateDB()` 末尾调用 `apigxmodel.Migrate(DB)`（台账 D-003）
-  - [ ] **MySQL 矩阵未执行**（本机无 MySQL/MariaDB）：按底座 `AGENTS.md`「单库通过不算通过」，本工作包在补齐 MySQL 前**不算完成**
-  - 记录：`docs/stage1/schema-impl-notes.md`（验证结果、DDL 事实、7 条实现期决策、未验证项、环境怪癖）
+  - 记录：`docs/stage1/schema-impl-notes.md`（验证结果、DDL 事实、MySQL 章节、7 条实现期决策、未验证项、环境怪癖）
 - [ ] T1.4 分享者接口（分组 / 渠道 / Key 池 CRUD，受 owner 约束）
 - [ ] T1.5 多 Key 导入与池策略（稳定凭据 ID、逐 Key 状态与统计）
 - [ ] T1.6 免费计量 `usage_only`（新资金来源替换钱包前置；不得走 FreeModel 短路）

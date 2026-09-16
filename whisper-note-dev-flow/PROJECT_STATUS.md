@@ -9,20 +9,21 @@
 
 ## 当前任务
 
-`[进行中]` 阶段 1：文本共享闭环（12 个工作包；**T1.2 已完成、T1.3 进行中（PG+SQLite 通过，MySQL 待补）**，其余未开始）
+`[进行中]` 阶段 1：文本共享闭环（12 个工作包；**T1.2、T1.3 已完成**，其余未开始）
 
 - **T1.2 授权收敛（TD-08）已完成并验证**：把令牌「允许模型」硬限制的校验从非 pin 分支提取为共用函数 `enforceTokenModelLimit`，提前到 pin / 非 pin 分支之前执行（`new-api/middleware/distributor.go`）。
   - 复现证据：修复前 pin 到渠道 3 请求未授权模型 → **HTTP 200 且请求已发往上游**（绕过）；修复后 → **403 且 0 次出站**；反例（已授权模型）仍 200。
   - 回归保护：新增 2 个 Go 测试（正例 + 反例），**临时禁用修复时测试 FAIL**，证明测试确实守住该回归。
   - 台账：D-001（`distributor.go`）/ D-002（测试文件）。
-- **T1.3 领域表落地：进行中**（27 张 `apigx_*` 表已实现并接线到启动）
+- **T1.3 领域表落地：已完成（三库矩阵全部通过）** —— 27 张 `apigx_*` 表已实现、接线到启动，并在 **SQLite / PostgreSQL / MySQL 三库**上验证。
   - 代码：`new-api/apigx/model/{base,models_identity,models_metering,migrate}.go` + 两个测试文件；底座 `model/main.go` 的 `migrateDB()` 末尾接入（台账 D-003）。
-  - **PostgreSQL 实测通过**：全新库 **27 张**；从底座旧库升级 **27 张 apigx + 37 张底座表原样保留**；两种情况均连续迁移两次验幂等。
-  - **SQLite 通过**：建表数量 27、连续迁移幂等、字段类型可移植守门（反射扫描只允许 5 种可移植类型）。
-  - **MySQL 未执行**：本机无实例 → 按底座 `AGENTS.md`「单库通过不算通过」，**该工作包尚未完成**。
+  - PostgreSQL：全新库 27 张；从底座旧库升级 **27 + 37（底座表原样保留）**；均连续迁移两次验幂等。
+  - MySQL 8.0.12：27 张 + 幂等；列类型分布与 PG **逐类一致**；**底座真的跑在 MySQL 上**（`/api/status` 200，64 张表全部 InnoDB）。
+  - SQLite：建表数量、幂等、字段类型可移植守门。
+  - ⚠️ **关键坑并已修**：本机 phpStudy 的 MySQL 默认引擎是 **MyISAM** → 表全部建成 MyISAM（**无事务**）、底座自身 FATAL 起不来（MyISAM 索引上限 1000 字节）。已切 InnoDB 重验，并**新增引擎守门断言**（反向验证：切回 MyISAM 断言如实失败）。
   - 图纸勘误 2 处：§3.2 的「`INT` → PG `int`」被实测证伪（实为 `bigint`，底座自身亦然）；§5.13 的 `use_limit_mode = 1` 改为 `3`（原文把「禁用」当成「不限」）。
-  - 详细记录：`docs/stage1/schema-impl-notes.md`。
-- **下一步**：补 MySQL 矩阵（需装便携版 MariaDB，约 400–500MB；D 盘余量 5.2GB），然后进入 T1.6（免费计量 `usage_only`）与 T1.7（共享容量控制）。
+  - 记录：`docs/stage1/schema-impl-notes.md`、`docs/dev-environment.md` §6。
+- **下一步**：T1.6 免费计量 `usage_only`（落点在计费会话的资金来源维度）与 T1.7 共享容量控制（实测确认底座没有并发上限）；两者都必须遵守闸门评审给出的约束（不得走 `FreeModel` 短路、不得依赖 `effectiveQuota`）。
 
 ### [001] 2026-09-16 阶段 0：底座验证与设计冻结
 
