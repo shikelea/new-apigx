@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
@@ -182,6 +183,19 @@ func Distribute() func(c *gin.Context) {
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		// APIGX 共享容量控制（T1.7）：渠道选定后按共享账本预留并发槽位。
+		// 位置很关键：在 c.Next() 之前注册 defer，因此释放发生在下游（含流式响应）
+		// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
+		// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
+		if channel != nil {
+			lease, ok := relayhook.Acquire(c, channel.Id)
+			if !ok {
+				return
+			}
+			if lease != nil {
+				defer lease.Release()
+			}
+		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
