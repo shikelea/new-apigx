@@ -166,6 +166,20 @@ func TestAvailableUpstreamKeysFiltersThreeConditions(t *testing.T) {
 }
 
 // 一个底座渠道只能被一个分享渠道引用（BaseChannelID 唯一）。
+// 渠道必须挂在**自己的**分组下：ShareGroupID 来自请求体，不校验就等于让任何人
+// 只要知道别人的分组 ID 就能挂进去。这是接口层测试发现越权后补的仓储层守门。
+func TestCreateChannelRequiresOwnedShareGroup(t *testing.T) {
+	db := newRepoDB(t)
+	const ownerA, ownerB int64 = 8001, 8002
+	groupA, _ := seedGroupAndChannel(t, db, ownerA)
+
+	intruder := &Channel{OwnerUserID: ownerB, ShareGroupID: groupA.ID, Name: "偷渡渠道", BaseChannelID: nextBaseChannelID()}
+	assert.ErrorIs(t, CreateChannel(db, intruder), ErrNotFound, "不得把自己的渠道挂到别人的分组下")
+
+	// 不存在的分组同样被拒（与「不属于自己」不可区分）
+	orphan := &Channel{OwnerUserID: ownerB, ShareGroupID: 999999, Name: "孤儿渠道", BaseChannelID: nextBaseChannelID()}
+	assert.ErrorIs(t, CreateChannel(db, orphan), ErrNotFound)
+}
 func TestChannelBaseIDIsUnique(t *testing.T) {
 	db := newRepoDB(t)
 	const owner int64 = 5001

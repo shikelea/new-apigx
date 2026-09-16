@@ -209,7 +209,7 @@ func DeleteUpstreamKey(db *gorm.DB, ownerUserID, keyID int64) error {
 	now := common.GetTimestamp()
 	res := db.Model(&UpstreamKey{}).
 		Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
-		Updates(map[string]any{"deleted_at": now, "alive_flag": key.ID, "updated_at": now})
+		Updates(map[string]any{"deleted_at": softDeletedAt(now), "alive_flag": key.ID, "updated_at": now})
 	if res.Error != nil {
 		return res.Error
 	}

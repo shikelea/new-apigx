@@ -1,6 +1,7 @@
 package router
 
 import (
+	apigxroute "github.com/QuantumNous/new-api/apigx/route"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/service/authz"
@@ -69,6 +70,13 @@ func SetApiRouter(router *gin.Engine) {
 		// Universal secure verification routes
 		apiRouter.GET("/verify/methods", middleware.UserAuth(), middleware.DisableCache(), controller.GetVerificationMethods)
 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("security-verification"), middleware.DisableCache(), controller.UniversalVerify)
+
+		// APIGX 分享者接口：独立路由组，只依赖 UserAuth。
+		// 不复用 /channel 那组管理员接口（渠道是全局资源，且那组挂在 AdminAuth 下）。
+		// 具体路由集中在 apigx/route，上游这里只保留这几行接线。
+		apigxRoute := apiRouter.Group("")
+		apigxRoute.Use(middleware.UserAuth())
+		apigxroute.Register(apigxRoute)
 
 		userRoute := apiRouter.Group("/user")
 		{

@@ -2,6 +2,16 @@ package apigxmodel
 
 import "gorm.io/gorm"
 
+// defaultDB 是迁移成功后捕获的数据库句柄。
+//
+// 与底座 `model.DB` 同样的做法：进程内只有一个主库句柄，由启动路径注入一次。
+// 这样 APIGX 的接口层不需要再往上游 router/ 里加 `model` 包的 import，
+// 上游接线只剩下「挂一组路由」这几行。
+var defaultDB *gorm.DB
+
+// DefaultDB 返回迁移时捕获的主库句柄；可能为 nil（尚未迁移），调用方必须判空。
+func DefaultDB() *gorm.DB { return defaultDB }
+
 // Migrate 创建或升级 APIGX 的全部领域表。
 //
 // 与底座 AutoMigrate 的关系（依据 `docs/stage0/schema-draft.md` §2.3）：
@@ -17,7 +27,12 @@ func Migrate(db *gorm.DB) error {
 	if db == nil {
 		return gorm.ErrInvalidDB
 	}
-	return db.AutoMigrate(AllModels()...)
+	if err := db.AutoMigrate(AllModels()...); err != nil {
+		return err
+	}
+	// 迁移成功后才捕获句柄：确保接口层拿到的一定是可用的库
+	defaultDB = db
+	return nil
 }
 
 // AllModels 返回全部 APIGX 领域表模型。

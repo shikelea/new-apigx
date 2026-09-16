@@ -3,6 +3,7 @@ package apigxmodel
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
@@ -41,6 +42,11 @@ func touchTimestamps(created bool, createdAt, updatedAt *int64) {
 //
 // 必须是一条语句：`WHERE id = ? AND owner_user_id = ? AND alive_flag = 0` 保证
 // 重复删除不会改变墓碑值（第二次 RowsAffected = 0 → ErrNotFound）。
+//
+// **注意 `deleted_at` 的类型**：表里其它 `*_at` 列都是 `int64`（UTC epoch 秒），
+// 但 `deleted_at` 是 `gorm.DeletedAt` → PostgreSQL 的 `timestamptz`、MySQL 的 `datetime`。
+// 往它写整数会在 PG 上直接报 `SQLSTATE 22008 日期/时间值超出范围`，
+// 而 SQLite 因为类型宽松会静默接受——**只有真实 PG 才能暴露**（首次端到端验收即被它拦下）。
 func softDeleteByOwner(db *gorm.DB, model any, ownerUserID, id int64) error {
 	if ownerUserID <= 0 || id <= 0 {
 		return fmt.Errorf("%w: owner and id are required", ErrInvalidArgument)
@@ -48,7 +54,11 @@ func softDeleteByOwner(db *gorm.DB, model any, ownerUserID, id int64) error {
 	now := common.GetTimestamp()
 	res := db.Model(model).
 		Where("id = ? AND owner_user_id = ? AND alive_flag = ?", id, ownerUserID, AliveFlagAlive).
-		Updates(map[string]any{"deleted_at": now, "alive_flag": id, "updated_at": now})
+		Updates(map[string]any{
+			"deleted_at": softDeletedAt(now),
+			"alive_flag": id,
+			"updated_at": now,
+		})
 	if res.Error != nil {
 		return res.Error
 	}
@@ -56,6 +66,11 @@ func softDeleteByOwner(db *gorm.DB, model any, ownerUserID, id int64) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// softDeletedAt 把 epoch 秒转成 gorm.DeletedAt 能写入的**时间值**。
+func softDeletedAt(epochSeconds int64) gorm.DeletedAt {
+	return gorm.DeletedAt{Time: time.Unix(epochSeconds, 0).UTC(), Valid: true}
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +149,12 @@ func CreateChannel(db *gorm.DB, channel *Channel) error {
 	}
 	if channel.BaseChannelID <= 0 {
 		return fmt.Errorf("%w: base_channel_id is required（每个分享渠道必须绑定一条底座渠道；该列有唯一索引，0 会互相冲突）", ErrInvalidArgument)
+	}
+	// **必须校验分组归属**：ShareGroupID 来自请求体，若不校验，
+	// 只要知道别人的分组 ID 就能把自己的渠道挂进去（接口层测试发现的越权）。
+	// 先验归属再看其它字段，避免通过错误信息差异探测他人分组是否存在。
+	if _, err := GetShareGroup(db, channel.OwnerUserID, channel.ShareGroupID); err != nil {
+		return err
 	}
 	if channel.PublicID == "" {
 		channel.PublicID = newPublicID()
