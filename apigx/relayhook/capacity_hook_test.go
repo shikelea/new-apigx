@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
@@ -59,8 +60,8 @@ func cleanupChannel(t *testing.T, channelID int) {
 // 默认关闭时不得施加任何约束（这就是「默认不改变既有链路」的保证）。
 func TestAcquireIsNoopWhenDisabled(t *testing.T) {
 	setupRedis(t)
-	t.Cleanup(func() { Configure(false, 0) })
-	Configure(false, 1)
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{})
 
 	c := newCtx()
 	lease, ok := Acquire(c, 90001)
@@ -72,8 +73,8 @@ func TestAcquireIsNoopWhenDisabled(t *testing.T) {
 // 未配置上限（0）时不施加约束——过渡行为，接入 capacity_policies 后必须变成显式四态。
 func TestAcquireIsNoopWhenLimitUnset(t *testing.T) {
 	setupRedis(t)
-	t.Cleanup(func() { Configure(false, 0) })
-	Configure(true, 0)
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{Enabled: true})
 
 	lease, ok := Acquire(newCtx(), 90002)
 	assert.True(t, ok)
@@ -84,8 +85,8 @@ func TestAcquireIsNoopWhenLimitUnset(t *testing.T) {
 func TestAcquireRejectsWhenFull(t *testing.T) {
 	setupRedis(t)
 	const channelID = 90003
-	t.Cleanup(func() { Configure(false, 0) })
-	Configure(true, 1)
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{Enabled: true, ChannelLimit: 1})
 
 	c1 := newCtx()
 	lease1, ok := Acquire(c1, channelID)
@@ -115,8 +116,8 @@ func TestAcquireRejectsWhenFull(t *testing.T) {
 func TestReleaseIsIdempotent(t *testing.T) {
 	setupRedis(t)
 	const channelID = 90004
-	t.Cleanup(func() { Configure(false, 0) })
-	Configure(true, 2)
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{Enabled: true, ChannelLimit: 2})
 
 	lease, ok := Acquire(newCtx(), channelID)
 	require.True(t, ok)
@@ -136,8 +137,8 @@ func TestReleaseIsIdempotent(t *testing.T) {
 // Redis 不可用时必须拒绝准入（503），而不是放行。
 func TestAcquireFailsClosedWhenLedgerUnavailable(t *testing.T) {
 	setupRedis(t)
-	t.Cleanup(func() { Configure(false, 0) })
-	Configure(true, 1)
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{Enabled: true, ChannelLimit: 1})
 
 	previous := common.RDB
 	common.RDB = nil
@@ -157,8 +158,8 @@ func TestAcquireFailsClosedWhenLedgerUnavailable(t *testing.T) {
 func TestRenewKeepsLeaseAlive(t *testing.T) {
 	setupRedis(t)
 	const channelID = 90006
-	t.Cleanup(func() { Configure(false, 0) })
-	Configure(true, 1)
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{Enabled: true, ChannelLimit: 1})
 
 	previousTTL := leaseTTL
 	leaseTTL = 3 * time.Second // 续租间隔 = 1s
@@ -175,4 +176,56 @@ func TestRenewKeepsLeaseAlive(t *testing.T) {
 
 	lease.Release()
 	cleanupChannel(t, channelID)
+}
+
+// 多维度联合预留：渠道还有余量，但**平台 Key** 维度已满时必须拒绝。
+//
+// 这条用例守住的是「不能因切换维度而叠加容量」——只检查渠道是不够的。
+func TestAcquireRejectsWhenTokenDimensionFull(t *testing.T) {
+	setupRedis(t)
+	const channelID = 90007
+	const tokenID = 70001
+	t.Cleanup(func() { Configure(Config{}) })
+	// 渠道不限（未配置），平台 Key 上限 1
+	Configure(Config{Enabled: true, TokenLimit: 1})
+
+	mkCtx := func() *gin.Context {
+		c := newCtx()
+		common.SetContextKey(c, constant.ContextKeyTokenId, tokenID)
+		common.SetContextKey(c, constant.ContextKeyUserId, 80001)
+		return c
+	}
+
+	lease1, ok := Acquire(mkCtx(), channelID)
+	require.True(t, ok)
+	require.NotNil(t, lease1, "第一个请求应拿到平台 Key 维度的槽位")
+
+	c2 := mkCtx()
+	lease2, ok := Acquire(c2, channelID)
+	assert.False(t, ok, "平台 Key 维度已满时必须拒绝（即使渠道还有余量）")
+	assert.Nil(t, lease2)
+	assert.Equal(t, http.StatusTooManyRequests, c2.Writer.Status())
+
+	lease1.Release()
+	lease2b, ok := Acquire(mkCtx(), channelID)
+	assert.True(t, ok)
+	require.NotNil(t, lease2b)
+	lease2b.Release()
+
+	ctrl := capacity.New(common.RDB)
+	require.NoError(t, ctrl.Drop(t.Context(),
+		capacity.TokenConcurrency(tokenID), capacity.ChannelConcurrency(channelID)))
+}
+
+// 未配置任何维度上限时不得施加约束（过渡行为：上线 capacity_policies 后应改成显式拒绝或默认值）。
+func TestAcquireIsNoopWhenAllDimensionsUnset(t *testing.T) {
+	setupRedis(t)
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{Enabled: true})
+
+	c := newCtx()
+	common.SetContextKey(c, constant.ContextKeyTokenId, 70002)
+	lease, ok := Acquire(c, 90008)
+	assert.True(t, ok)
+	assert.Nil(t, lease)
 }

@@ -1,10 +1,12 @@
 // Package relayhook 承载 APIGX 与 relay 链路的接线点。
 //
-// 本文件是 T1.7 第二部分：把 apigx/capacity 的容量账本接进请求生命周期。
+// 本文件是 T1.7 的接线层：把 apigx/capacity 的容量账本接进请求生命周期。
 //
-// **默认关闭**（`APIGX_CAPACITY_ENABLED` 未设置时为 false），因此不改变既有链路行为；
-// 打开后才对渠道并发做预留与归还。这样做是为了在 `apigx_capacity_policies`（T1.3 的
-// 领域表）接管配置之前，能先把接线本身在真实请求路径上验证清楚。
+// **默认关闭**（`APIGX_CAPACITY_ENABLED` 未设置时为 false），因此不改变既有链路行为。
+//
+// 限制来源的过渡状态：当前各维度的上限来自环境变量；最终应来自
+// `apigx_capacity_policies`（T1.3 已建表）。为此这里刻意通过 `capacity.Resolve`
+// 走四态解析——接上数据库后只需在链首**追加更具体的策略**，接线层不必改动。
 package relayhook
 
 import (
@@ -18,17 +20,23 @@ import (
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
+// Config 是接线层的运行期配置（未来由 apigx_capacity_policies 填充）。
+//
+// 各 Limit 字段的语义遵循四态：**0 表示「未配置」**，绝不会被解释成「不限」。
+type Config struct {
+	Enabled      bool
+	ChannelLimit int64
+	TokenLimit   int64
+	UserLimit    int64
+}
+
 var (
-	capacityEnabled atomic.Bool
-	// channelLimit 是渠道并发上限。0 表示**未配置**。
-	//
-	// 按 CODE_STYLE 第 11 条，未配置不得解释为「不限」；但在配置体系接好之前，
-	// 未配置只能表示「本开关不施加约束」——因此 0 时直接跳过，并在文档中登记这一过渡行为。
-	channelLimit atomic.Int64
+	currentConfig atomic.Value // 存 Config
 	// leaseTTL 是容量租约时长，长流由后台协程续租。
 	//
 	// 注意粒度：TTL 以**秒**为单位下发（`ttl/time.Second`），因此小于 1 秒的值会被截断为 0
@@ -37,14 +45,73 @@ var (
 )
 
 func init() {
-	capacityEnabled.Store(common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false))
-	channelLimit.Store(int64(common.GetEnvOrDefault("APIGX_CHANNEL_CONCURRENCY_LIMIT", 0)))
+	Configure(Config{
+		Enabled:      common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false),
+		ChannelLimit: int64(common.GetEnvOrDefault("APIGX_CHANNEL_CONCURRENCY_LIMIT", 0)),
+		TokenLimit:   int64(common.GetEnvOrDefault("APIGX_TOKEN_CONCURRENCY_LIMIT", 0)),
+		UserLimit:    int64(common.GetEnvOrDefault("APIGX_USER_CONCURRENCY_LIMIT", 0)),
+	})
 }
 
-// Configure 设置运行期开关与渠道并发上限（供测试与未来的后台配置使用）。
-func Configure(enabled bool, limit int64) {
-	capacityEnabled.Store(enabled)
-	channelLimit.Store(limit)
+// Configure 设置运行期配置（供测试与未来的后台配置使用）。
+func Configure(cfg Config) { currentConfig.Store(cfg) }
+
+func getConfig() Config {
+	if v, ok := currentConfig.Load().(Config); ok {
+		return v
+	}
+	return Config{}
+}
+
+// policyFromLimit 把一个环境/默认限制转成四态策略。
+//
+// 值为 0 时返回「未配置」而不是「不限」——这是 CODE_STYLE 第 11 条的硬要求。
+func policyFromLimit(limit int64) capacity.Policy {
+	if limit <= 0 {
+		return capacity.Policy{Mode: capacity.LimitModeUnset}
+	}
+	return capacity.Policy{Mode: capacity.LimitModeValue, Value: limit}
+}
+
+// buildDimensions 依据当前配置与调用者身份，构造本次请求需要预留的容量维度。
+//
+// 返回值 error 非空表示**明确禁用**（调用方必须拒绝请求），例如某个维度被配置为「禁用」。
+// 未配置的维度会被跳过（不产生约束），这与「明确不限」在解析结果上不同、在行为上都等于不约束——
+// 但区别必须保留在数据层，且未配置是待补的过渡状态（见包注释）。
+func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error) {
+	cfg := getConfig()
+	dims := make([]capacity.Dimension, 0, 3)
+
+	add := func(key string, limit int64) error {
+		res, err := capacity.Resolve(policyFromLimit(limit))
+		if err != nil {
+			return err
+		}
+		switch res.Decision {
+		case capacity.DecisionLimited:
+			dims = append(dims, capacity.Dimension{Key: key, Limit: res.Value, Amount: 1})
+		case capacity.DecisionDisabled:
+			return fmt.Errorf("capacity disabled on dimension %s", key)
+		default:
+			// unset / unlimited：本层不施加约束
+		}
+		return nil
+	}
+
+	if err := add(capacity.ChannelConcurrency(int64(channelID)), cfg.ChannelLimit); err != nil {
+		return nil, err
+	}
+	if tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId); tokenID > 0 {
+		if err := add(capacity.TokenConcurrency(int64(tokenID)), cfg.TokenLimit); err != nil {
+			return nil, err
+		}
+	}
+	if userID := common.GetContextKeyInt(c, constant.ContextKeyUserId); userID > 0 {
+		if err := add(capacity.UserConcurrency(int64(userID)), cfg.UserLimit); err != nil {
+			return nil, err
+		}
+	}
+	return dims, nil
 }
 
 // Lease 表示一次请求持有的容量租约。
@@ -60,26 +127,28 @@ type Lease struct {
 //
 // 参数 channelID 用 int 以匹配底座 `model.Channel.Id` 的类型。
 //
-// 返回 (nil, true)  —— 本开关未启用、渠道无上限或渠道未知：不施加约束；
-// 返回 (nil, false) —— 容量不足或账本不可用：**已经写出错误响应**，调用方必须直接返回；
+// 返回 (nil, true)  —— 本开关未启用、各维度均未配置上限或渠道未知：不施加约束；
+// 返回 (nil, false) —— 容量不足 / 维度被禁用 / 账本不可用：**已经写出错误响应**，调用方必须直接返回；
 // 返回 (l, true)    —— 已持有租约，调用方必须在请求结束时调用 l.Release()。
 func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
-	if !capacityEnabled.Load() || channelID <= 0 {
+	cfg := getConfig()
+	if !cfg.Enabled || channelID <= 0 {
 		return nil, true
 	}
-	limit := channelLimit.Load()
-	if limit <= 0 {
-		// 未配置渠道并发上限：不施加约束（过渡行为，见包注释）
+
+	dims, err := buildDimensions(c, channelID)
+	if err != nil {
+		common.SysLog("apigx capacity: " + err.Error())
+		abortJSON(c, http.StatusForbidden, "capacity_disabled", "this resource is disabled for capacity control")
+		return nil, false
+	}
+	if len(dims) == 0 {
+		// 所有维度都未配置：不施加约束（过渡行为，见包注释）
 		return nil, true
 	}
 
 	ctrl := capacity.New(common.RDB)
 	id := uuid.NewString()
-	dims := []capacity.Dimension{{
-		Key:    capacity.ChannelConcurrency(int64(channelID)),
-		Limit:  limit,
-		Amount: 1,
-	}}
 
 	ctx := context.Background()
 	if c != nil && c.Request != nil {
@@ -153,10 +222,12 @@ func abortForError(c *gin.Context, err error) {
 	var exceeded *capacity.ErrExceeded
 	switch {
 	case errors.As(err, &exceeded):
+		// 内部日志带精确维度；对外只说「容量暂时不足」，不暴露是哪一维
+		// （对外写成 "channel capacity" 会误导：超限的也可能是平台 Key 或用户维度）。
 		common.SysLog("apigx capacity: exceeded on " + exceeded.Dimension)
 		c.Header("Retry-After", "1")
 		abortJSON(c, http.StatusTooManyRequests, "capacity_exceeded",
-			"channel capacity is temporarily exceeded, please retry later")
+			"capacity is temporarily exceeded, please retry later")
 	case errors.Is(err, capacity.ErrRedisUnavailable):
 		// Redis 不可用时必须**拒绝准入**，不能从空计数恢复为「全部空闲」
 		common.SysLog("apigx capacity: ledger unavailable, refusing new admissions")
