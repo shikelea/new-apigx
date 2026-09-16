@@ -336,7 +336,8 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
 	}
 
 	// 立即加密：明文不落库、不进日志、不回显。
-	envelope, err := secretbox.Encrypt(strings.TrimSpace(req.Key))
+	plain := strings.TrimSpace(req.Key)
+	envelope, err := secretbox.Encrypt(plain)
 	if err != nil {
 		// 主密钥未配置时失败关闭——绝不退化成明文存储
 		common.SysError("apigx api: refuse to store upstream key: " + err.Error())
@@ -344,13 +345,21 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
 			"credential store is not configured; refusing to store the key")
 		return
 	}
+	// 指纹用于查重：密文带随机 nonce 无法比对，重复导入只能靠它发现。
+	fingerprint, err := secretbox.Fingerprint(plain)
+	if err != nil {
+		common.SysError("apigx api: fingerprint failed: " + err.Error())
+		fail(c, http.StatusServiceUnavailable, "secret_store_unavailable", "credential store is not configured")
+		return
+	}
 
 	key := &apigxmodel.UpstreamKey{
-		ChannelID:   channelID,
-		StableKeyID: req.StableKeyID,
-		Name:        strings.TrimSpace(req.Name),
-		SecretRef:   envelope,
-		Status:      apigxmodel.UpstreamKeyStatusEnabled,
+		ChannelID:         channelID,
+		StableKeyID:       req.StableKeyID,
+		Name:              strings.TrimSpace(req.Name),
+		SecretRef:         envelope,
+		SecretFingerprint: fingerprint,
+		Status:            apigxmodel.UpstreamKeyStatusEnabled,
 	}
 	if req.Weight != nil {
 		key.Weight = *req.Weight

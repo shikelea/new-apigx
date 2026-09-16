@@ -128,6 +128,9 @@ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
 	if key.SecretRef == "" {
 		return fmt.Errorf("%w: secret_ref is required（凭据只存引用，不存明文）", ErrInvalidArgument)
 	}
+	if key.SecretFingerprint == "" {
+		return fmt.Errorf("%w: secret_fingerprint is required（密文不可比对，重复导入只能靠指纹发现）", ErrInvalidArgument)
+	}
 	if key.CredentialVersion <= 0 {
 		key.CredentialVersion = 1
 	}

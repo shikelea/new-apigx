@@ -16,7 +16,9 @@ package secretbox
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -146,6 +148,30 @@ func Decrypt(envelope string) (string, error) {
 		return "", ErrDecrypt
 	}
 	return string(plain), nil
+}
+
+// Fingerprint 计算凭据的稳定指纹（HMAC-SHA256(主密钥, 明文) 的十六进制）。
+//
+// **存在的理由**：AES-GCM 使用随机 nonce，同一明文每次加密得到的密文都不同，
+// 因此**无法用密文比对来检测「同一把 Key 被重复导入」**（计划书 §3.5 明确要求导入时检测重复）。
+// 指纹既能用于查重，又不泄露明文：
+//   - 用主密钥做 HMAC 而不是裸 SHA-256：没有主密钥就无法离线批量猜测；
+//   - 指纹列参与唯一索引时，仍应按天/按渠道截断存储（本函数返回完整 64 字符，调用方自行决定）。
+//
+// 主密钥未配置时返回 ErrKeyNotConfigured（与加密一致，**失败关闭**）。
+func Fingerprint(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", fmt.Errorf("%w: refusing to fingerprint empty secret", ErrInvalidEnvelope)
+	}
+	key, err := loadKey()
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	if _, err := mac.Write([]byte(plaintext)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // IsEnvelope 报告某个引用是否为本包生成的信封（用于区分「已加密」与「外部引用」）。

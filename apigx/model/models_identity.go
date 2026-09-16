@@ -233,13 +233,17 @@ type UpstreamKey struct {
 	// ID 稳定内部 ID（apigx_attempts / apigx_async_tasks 引用它，永不变）。
 	ID int64 `gorm:"primaryKey"`
 	// ChannelID 所属分享渠道，apigx_channels.id。
-	ChannelID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:1;index:idx_apigx_upkey_pool,priority:1"`
+	ChannelID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:1;uniqueIndex:idx_apigx_upkey_fingerprint,priority:1;index:idx_apigx_upkey_pool,priority:1"`
 	// StableKeyID 渠道内稳定标识：轮询/权重/统计都不依赖导入行号（CODE_STYLE.md 第 1 条）。
 	StableKeyID string `gorm:"size:32;not null;default:'';uniqueIndex:idx_apigx_upkey_stable,priority:2"`
 	// Name 展示名。
 	Name string `gorm:"size:64;not null;default:''"`
 	// SecretRef 指向受保护凭据存储的引用，不含明文；主密钥与数据库分离（§10.3）。
 	SecretRef string `gorm:"size:255;not null;default:''"`
+	// SecretFingerprint 是凭据的 HMAC 指纹，仅用于查重（见 apigx/secretbox.Fingerprint）：
+	// AES-GCM 用随机 nonce，同一明文每次密文都不同，重复导入只能靠指纹发现。
+	// 与 channel_id、alive_flag 组成唯一索引：存活期间同渠道内不得重复，软删除后可重新导入。
+	SecretFingerprint string `gorm:"type:char(64);not null;default:'';uniqueIndex:idx_apigx_upkey_fingerprint,priority:2"`
 	// CredentialVersion 凭据版本号，轮换时递增（不新建行）。
 	CredentialVersion int64 `gorm:"bigint;not null;default:0"`
 	// CredentialStartedAt 当前凭据版本启用时间，UTC epoch 秒。
@@ -267,7 +271,7 @@ type UpstreamKey struct {
 	// LastErrorCode 脱敏错误码。
 	LastErrorCode string `gorm:"size:64;not null;default:''"`
 	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
-	AliveFlag int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:3"`
+	AliveFlag int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:3;uniqueIndex:idx_apigx_upkey_fingerprint,priority:3"`
 	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
 	CreatedAt int64 `gorm:"bigint;not null;default:0"`
 	// UpdatedAt 最近更新时间，UTC epoch 秒；凭据轮换只更新它。

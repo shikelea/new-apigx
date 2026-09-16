@@ -2,7 +2,9 @@ package apigxmodel
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -92,15 +94,15 @@ func TestSoftDeleteTombstoneAllowsKeyReuse(t *testing.T) {
 	assert.NotEqual(t, group.ID, recreated.ID)
 
 	// UpstreamKey 的唯一索引包含 alive_flag，因此同一个 StableKeyID 可被重新添加
-	key1 := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1", SecretRef: "secret://k1"}
+	key1 := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1", SecretRef: "secret://k1", SecretFingerprint: "fp-k1"}
 	require.NoError(t, CreateUpstreamKey(db, owner, key1))
 	require.NoError(t, DeleteUpstreamKey(db, owner, key1.ID))
 
-	reuse := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1-reimported", SecretRef: "secret://k1b"}
+	reuse := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1-reimported", SecretRef: "secret://k1b", SecretFingerprint: "fp-k1b"}
 	require.NoError(t, CreateUpstreamKey(db, owner, reuse), "软删除后同一 StableKeyID 应可重新添加")
 
 	// 但存活期间重复的 StableKeyID 必须被拒绝
-	dup := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "dup", SecretRef: "secret://dup"}
+	dup := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "dup", SecretRef: "secret://dup", SecretFingerprint: "fp-dup"}
 	require.Error(t, CreateUpstreamKey(db, owner, dup), "存活期间同一 StableKeyID 不得重复")
 }
 
@@ -110,7 +112,7 @@ func TestUpstreamKeyOwnershipTravelsThroughChannel(t *testing.T) {
 	_, channelA := seedGroupAndChannel(t, db, ownerA)
 	_, channelB := seedGroupAndChannel(t, db, ownerB)
 
-	keyA := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "a-1", Name: "A 的 Key", SecretRef: "secret://a1"}
+	keyA := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "a-1", Name: "A 的 Key", SecretRef: "secret://a1", SecretFingerprint: "fp-a1"}
 	require.NoError(t, CreateUpstreamKey(db, ownerA, keyA))
 
 	// B 拿 A 的 channel id 去操作：必须全部拒绝（Key 没有 owner 列，归属经渠道传递）
@@ -121,7 +123,7 @@ func TestUpstreamKeyOwnershipTravelsThroughChannel(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound, "也不能借自己的身份去查别人的渠道")
 
 	// 用别人的渠道创建 Key 也不行
-	intruder := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "x-1", Name: "偷渡", SecretRef: "secret://x"}
+	intruder := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "x-1", Name: "偷渡", SecretRef: "secret://x", SecretFingerprint: "fp-x"}
 	assert.ErrorIs(t, CreateUpstreamKey(db, ownerB, intruder), ErrNotFound)
 
 	// 改状态同样被拒
@@ -138,7 +140,8 @@ func TestAvailableUpstreamKeysFiltersThreeConditions(t *testing.T) {
 
 	mk := func(stableID string, status int, cooldownUntil, expiresAt int64) *UpstreamKey {
 		k := &UpstreamKey{ChannelID: channel.ID, StableKeyID: stableID, Name: stableID, SecretRef: "secret://" + stableID,
-			Status: status, CooldownUntil: cooldownUntil, ExpiresAt: expiresAt}
+			SecretFingerprint: "fp-" + stableID,
+			Status:            status, CooldownUntil: cooldownUntil, ExpiresAt: expiresAt}
 		require.NoError(t, CreateUpstreamKey(db, owner, k))
 		return k
 	}
@@ -259,4 +262,32 @@ func TestGetUpstreamAccountScopesByOwner(t *testing.T) {
 
 	_, err = GetUpstreamAccount(db, 7002, account.ID)
 	assert.True(t, errors.Is(err, ErrNotFound))
+}
+
+// ---- 批量导入解析（选择策略交给底座 model.Channel.GetNextEnabledKey） ----
+
+func TestParseImportedKeys(t *testing.T) {
+	raw := "# 注释行\n" +
+		"sk-aaaaaaaaaaaa\n" +
+		"\n" +
+		"  sk-bbbbbbbbbbbb  \n" +
+		"sk-aaaaaaaaaaaa\n" + // 批内重复
+		"short\n" + // 非法（太短）
+		"sk-cccccccccccc\r\n"
+
+	result, err := ParseImportedKeys(raw)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sk-aaaaaaaaaaaa", "sk-bbbbbbbbbbbb", "sk-cccccccccccc"}, result.Accepted,
+		"应忽略注释与空行、去掉首尾空白、批内去重（保留首次出现）")
+	assert.Equal(t, []int{5}, result.DuplicateLines)
+	assert.Equal(t, []int{6}, result.InvalidLines)
+}
+
+func TestParseImportedKeysRejectsOversizedBatch(t *testing.T) {
+	var b strings.Builder
+	for i := range MaxImportBatch + 1 {
+		fmt.Fprintf(&b, "sk-key-%06d\n", i)
+	}
+	_, err := ParseImportedKeys(b.String())
+	assert.ErrorIs(t, err, ErrImportRejected, "超批量上限必须整体拒绝")
 }
