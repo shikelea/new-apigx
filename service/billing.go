@@ -13,6 +13,9 @@ import (
 const (
 	BillingSourceWallet       = "wallet"
 	BillingSourceSubscription = "subscription"
+	// BillingSourceUsageOnly 是 APIGX 免费共享模式的资金来源：
+	// 只记账、不动钱包与订阅（见 service/apigx_usage_only.go）。
+	BillingSourceUsageOnly = "usage_only"
 )
 
 // PreConsumeBilling 根据用户计费偏好创建 BillingSession 并执行预扣费。

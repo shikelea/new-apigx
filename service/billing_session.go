@@ -283,6 +283,10 @@ func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) e
 			)
 		}
 		return nil
+	case *UsageOnlyFunding:
+		// APIGX 免费共享模式：没有资金可预留/扣减，只由令牌额度与 APIGX 容量控制把关。
+		// 必须显式接住，否则会落到下面的 default 分支报 "unsupported funding source"。
+		return nil
 	default:
 		return types.NewError(fmt.Errorf("unsupported funding source: %s", s.funding.Source()), types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 	}
@@ -377,6 +381,13 @@ func (s *BillingSession) syncRelayInfo() {
 func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preConsumedQuota int) (*BillingSession, *types.NewAPIError) {
 	if relayInfo == nil {
 		return nil, types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
+
+	// APIGX 免费共享模式：跳过「充值余额前置条件」，改用只记账的资金来源。
+	// 放在最前面，因此不经过 tryWallet 的 userQuota 检查，也不受计费偏好分支影响。
+	// 实现见 service/apigx_usage_only.go（不改价格、不伪造余额、不走 FreeModel 短路）。
+	if IsUsageOnlyMode() {
+		return newUsageOnlySession(c, relayInfo, preConsumedQuota)
 	}
 
 	pref := common.NormalizeBillingPreference(relayInfo.UserSetting.BillingPreference)
