@@ -1,0 +1,456 @@
+From 861e586bc3d977a8be5d0ef202a8c6ac55ea6d40 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 22:19:48 +0800
+Subject: [PATCH 11/11] =?UTF-8?q?feat(apigx):=20Key=20=E6=B1=A0=E6=8A=95?=
+ =?UTF-8?q?=E5=BD=B1=E5=88=B0=E5=BA=95=E5=BA=A7=E5=A4=9A=20Key=20=E6=A8=A1?=
+ =?UTF-8?q?=E5=BC=8F=EF=BC=88T1.5=EF=BC=8C=E5=A4=8D=E7=94=A8=E5=BA=95?=
+ =?UTF-8?q?=E5=BA=A7=E5=86=99=E8=B7=AF=E5=BE=84=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/channelpool/projection.go: ProjectKeyPool 解密后按 (weight DESC, id ASC) 确定顺序
+  写入底座渠道 Key 列表, 调用底座 channel.Update() 完成写入与规范化;
+  返回 索引->StableKeyID 映射(底座运行期只给索引, 统计需翻译回落)
+- 关键正确性点: 重投影前必须清空 MultiKeyStatusList/DisabledReason/DisabledTime/PollingIndex,
+  因为索引会变, 旧状态套到别的凭据上就是隐性故障
+- 复用要点: 底座 Update() 依赖全局 basemodel.DB, 并会同步 abilities 路由表
+- 测试 5/5; apigx 全量通过
+- 已知残留: 底座 channels.key 为明文(投影所致), 消除需改底座 relay 取键路径
+---
+ apigx/channelpool/projection.go      | 158 ++++++++++++++++++
+ apigx/channelpool/projection_test.go | 234 +++++++++++++++++++++++++++
+ apigx/model/pool.go                  |  11 ++
+ 3 files changed, 403 insertions(+)
+ create mode 100644 apigx/channelpool/projection.go
+ create mode 100644 apigx/channelpool/projection_test.go
+
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+new file mode 100644
+index 0000000..bd8ff95
+--- /dev/null
++++ b/apigx/channelpool/projection.go
+@@ -0,0 +1,158 @@
++// Package channelpool 把分享者的 Key 池投影到底座渠道的多 Key 模式。
++//
++// # 为什么是「投影」而不是「自己选」
++//
++// 多 Key 的选择、轮询游标、逐 Key 故障隔离、以及「全部 Key 失效才停渠道」全部由底座实现
++// （`model.Channel.GetNextEnabledKey`、`handlerMultiKeyUpdate`、`UpdateChannelStatus`），
++// 且底座在 `SetupContextForSelectedChannel` 里已完成**唯一的选路决定**（计划书 §9.2）。
++// 因此 APIGX 不实现选择逻辑，只负责把「我们这边的 Key 池」同步成底座渠道的 Key 列表：
++//
++//	我们的领域表（稳定 ID / 归属 / 容量策略 / 加密存储 / 统计）
++//	        ↓ ProjectKeyPool（解密 + 按确定顺序拼接 + 调底座 Update()）
++//	底座 channels.key + channel_info.is_multi_key（选择与健康由底座负责）
++//
++// # 已知的残留风险（有意接受，必须记录）
++//
++// 底座渠道的 `key` 列是**明文**（底座既有设计）。投影后我们的凭据会以明文出现在底座表里。
++// 我们自己的存储（`apigx_upstream_keys.secret_ref`）是加密信封，主密钥与库分离；
++// 要消除这份明文投影，必须改底座的 relay 取键路径，超出阶段 1 范围。
++package channelpool
++
++import (
++	"errors"
++	"fmt"
++	"strconv"
++	"strings"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/secretbox"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	basemodel "github.com/QuantumNous/new-api/model"
++	"gorm.io/gorm"
++)
++
++// ErrNoUsableKey 表示池内没有可用凭据——此时渠道不能接收新请求（计划书 §9.2）。
++var ErrNoUsableKey = errors.New("channelpool: no usable upstream key")
++
++// Projection 是一次投影的结果。
++type Projection struct {
++	// IndexToStableKey 把底座渠道的 Key 索引映射回我们稳定的凭据 ID。
++	// 底座的运行期统计只带索引（上下文 `ContextKeyChannelMultiKeyIndex`），
++	// 需要靠它把统计落回正确的 StableKeyID。
++	IndexToStableKey map[int]string
++	// KeyCount 是投影到基座的 Key 数量。
++	KeyCount int
++}
++
++// ProjectKeyPool 把分享渠道的可用 Key 池投影到底座渠道。
++//
++// 顺序**必须确定**：按 (weight DESC, id ASC) 排列（与 `ListUpstreamKeysByChannel` 一致），
++// 这样索引到 StableKeyID 的映射在池未变化时可以稳定重算。
++//
++// 只投影**当前可用**的 Key（启用 + 未到期 + 不在冷却）：分享者显式停用或已失效的凭据
++// 不应继续被发往上游。运行期故障（上游拒绝）仍由底座按索引隔离。
++func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
++	if db == nil {
++		return nil, errors.New("channelpool: nil db")
++	}
++	var shareChannel apigxmodel.Channel
++	if err := db.Where("id = ?", shareChannelID).First(&shareChannel).Error; err != nil {
++		return nil, err
++	}
++	if shareChannel.BaseChannelID <= 0 {
++		return nil, fmt.Errorf("channelpool: share channel %d has no base channel", shareChannelID)
++	}
++
++	keys, err := apigxmodel.AvailableUpstreamKeys(db, shareChannel.OwnerUserID, shareChannelID, common.GetTimestamp())
++	if err != nil {
++		return nil, err
++	}
++	if len(keys) == 0 {
++		return nil, ErrNoUsableKey
++	}
++
++	secrets := make([]string, 0, len(keys))
++	indexToStable := make(map[int]string, len(keys))
++	for i := range keys {
++		plain, err := secretbox.Decrypt(keys[i].SecretRef)
++		if err != nil {
++			// 单把凭据解不开（密钥轮换/信封损坏）：跳过它并记录，不能让整池投影失败
++			common.SysError(fmt.Sprintf("channelpool: cannot decrypt key id=%d stable=%s: %v",
++				keys[i].ID, keys[i].StableKeyID, err))
++			continue
++		}
++		indexToStable[len(secrets)] = keys[i].StableKeyID
++		secrets = append(secrets, plain)
++	}
++	if len(secrets) == 0 {
++		return nil, ErrNoUsableKey
++	}
++
++	var baseChannel basemodel.Channel
++	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
++		return nil, err
++	}
++
++	// 索引即将改变，**必须清空按索引存放的状态**，否则旧状态会套到别的 Key 上。
++	baseChannel.Key = strings.Join(secrets, "\n")
++	baseChannel.ChannelInfo.IsMultiKey = true
++	baseChannel.ChannelInfo.MultiKeySize = len(secrets)
++	baseChannel.ChannelInfo.MultiKeyMode = baseMultiKeyMode(shareChannel.KeyPoolMode)
++	baseChannel.ChannelInfo.MultiKeyStatusList = nil
++	baseChannel.ChannelInfo.MultiKeyDisabledReason = nil
++	baseChannel.ChannelInfo.MultiKeyDisabledTime = nil
++	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
++
++	// 复用底座的更新路径：它会重算 MultiKeySize 并按当前 Key 列表裁剪越界的索引状态。
++	if err := baseChannel.Update(); err != nil {
++		return nil, err
++	}
++	return &Projection{IndexToStableKey: indexToStable, KeyCount: len(secrets)}, nil
++}
++
++// baseMultiKeyMode 把分享渠道的池策略映射为底座的选择方式。
++//
++// 阶段 1 只支持底座已有的两种（用户裁决：不为「加权/剩余容量」扩展底座）。
++// 未知取值一律回落到轮询——**不报错**，因为这是运行期选择方式而非准入判据，
++// 让一个写错的配置把渠道打瘫是不划算的。
++func baseMultiKeyMode(poolMode int) constant.MultiKeyMode {
++	switch poolMode {
++	case apigxmodel.KeyPoolModeRandom: // = 1
++		return constant.MultiKeyModeRandom
++	default:
++		return constant.MultiKeyModePolling
++	}
++}
++
++// StableKeyIDForIndex 把底座上下文里的 Key 索引翻译成我们的稳定凭据 ID。
++//
++// 底座的日志与上下文只携带索引，落库统计必须先翻译，否则轮换/增删之后统计会张冠李戴。
++func (p *Projection) StableKeyIDForIndex(index int) (string, bool) {
++	if p == nil {
++		return "", false
++	}
++	stable, ok := p.IndexToStableKey[index]
++	return stable, ok
++}
++
++// IndexOfStableKeyID 反向查找（例如按稳定 ID 主动禁用某把 Key 时定位其索引）。
++func (p *Projection) IndexOfStableKeyID(stableKeyID string) (int, bool) {
++	if p == nil {
++		return 0, false
++	}
++	for idx, stable := range p.IndexToStableKey {
++		if stable == stableKeyID {
++			return idx, true
++		}
++	}
++	return 0, false
++}
++
++// MustIndexString 仅用于日志/审计拼接，避免调用方在各处重复 strconv。
++func (p *Projection) MustIndexString(index int) string {
++	if stable, ok := p.StableKeyIDForIndex(index); ok {
++		return stable
++	}
++	return "unknown:" + strconv.Itoa(index)
++}
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+new file mode 100644
+index 0000000..a21410e
+--- /dev/null
++++ b/apigx/channelpool/projection_test.go
+@@ -0,0 +1,234 @@
++package channelpool
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/secretbox"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	basemodel "github.com/QuantumNous/new-api/model"
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++const testMasterKey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
++
++func setupProjectionEnv(t *testing.T) *gorm.DB {
++	t.Helper()
++	dsn := filepath.Join(t.TempDir(), "apigx_channelpool_test.db")
++	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++
++	require.NoError(t, apigxmodel.Migrate(db))
++	// 复用的前提是底座渠道表存在；测试里单独建它，不走底座完整迁移
++	// 底座 channel.Update() 会同步 abilities（路由能力表），因此测试库也要有它——
++	// 这正是复用底座写路径的好处：路由能力不会与渠道状态脱节。
++	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
++
++	// 底座 model 层用的是**全局 DB**（`basemodel.DB`）。生产由启动路径设置；
++	// 测试必须显式指向同一个库，否则 `channel.Update()` 会空指针。
++	previousDB := basemodel.DB
++	basemodel.DB = db
++	t.Cleanup(func() { basemodel.DB = previousDB })
++
++	previous, had := os.LookupEnv(secretbox.KeyEnvVar)
++	require.NoError(t, os.Setenv(secretbox.KeyEnvVar, testMasterKey))
++	secretbox.ResetKeyCacheForTest()
++	t.Cleanup(func() {
++		if had {
++			_ = os.Setenv(secretbox.KeyEnvVar, previous)
++		} else {
++			_ = os.Unsetenv(secretbox.KeyEnvVar)
++		}
++		secretbox.ResetKeyCacheForTest()
++	})
++	return db
++}
++
++// seedShareChannelWithKeys 建好「分享者 → 分组 → 渠道 → N 把 Key」与对应的底座渠道。
++func seedShareChannelWithKeys(t *testing.T, db *gorm.DB, owner int64, baseChannelID int64, secrets []string, weights []int64) *apigxmodel.Channel {
++	t.Helper()
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "投影测试组", DefaultVisibility: 1, PublishStatus: 1}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	shareChannel := &apigxmodel.Channel{
++		OwnerUserID: owner, ShareGroupID: group.ID, Name: "投影测试渠道",
++		Protocol: "openai", BaseURL: "http://stub", BaseChannelID: baseChannelID,
++		KeyPoolMode: apigxmodel.KeyPoolModePolling,
++	}
++	require.NoError(t, apigxmodel.CreateChannel(db, shareChannel))
++
++	for i, secret := range secrets {
++		envelope, err := secretbox.Encrypt(secret)
++		require.NoError(t, err)
++		fingerprint, err := secretbox.Fingerprint(secret)
++		require.NoError(t, err)
++		weight := int64(1)
++		if i < len(weights) {
++			weight = weights[i]
++		}
++		key := &apigxmodel.UpstreamKey{
++			ChannelID:         shareChannel.ID,
++			StableKeyID:       "stable-" + string(rune('a'+i)),
++			Name:              "k" + string(rune('a'+i)),
++			SecretRef:         envelope,
++			SecretFingerprint: fingerprint,
++			Status:            apigxmodel.UpstreamKeyStatusEnabled,
++			Weight:            weight,
++		}
++		require.NoError(t, apigxmodel.CreateUpstreamKey(db, owner, key))
++	}
++	return shareChannel
++}
++
++func TestProjectKeyPoolWritesBaseMultiKeyChannel(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9001
++	const baseChannelID int64 = 4242
++
++	base := &basemodel.Channel{Id: int(baseChannelID), Name: "底座影子渠道", Key: "placeholder", Status: common.ChannelStatusEnabled, Group: "default"}
++	require.NoError(t, db.Create(base).Error)
++
++	secrets := []string{"sk-first-aaaaaaaa", "sk-second-bbbbbbb", "sk-third-ccccccc"}
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, []int64{1, 5, 1})
++
++	projection, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++	assert.Equal(t, 3, projection.KeyCount)
++
++	// 底座渠道应进入多 Key 模式，且 Key 按 (weight DESC, id ASC) 排列
++	var loaded basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
++	assert.True(t, loaded.ChannelInfo.IsMultiKey, "必须切到多 Key 模式")
++	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize)
++	assert.Equal(t, constant.MultiKeyModePolling, loaded.ChannelInfo.MultiKeyMode)
++
++	lines := loaded.GetKeys()
++	require.Len(t, lines, 3)
++	assert.Equal(t, []string{"sk-second-bbbbbbb", "sk-first-aaaaaaaa", "sk-third-ccccccc"}, lines,
++		"权重高的排前面；权重相同按 ID 升序，保证顺序确定")
++
++	// 索引 → 稳定 ID 的映射必须与写入顺序一致
++	assert.Equal(t, "stable-b", mustStable(t, projection, 0))
++	assert.Equal(t, "stable-a", mustStable(t, projection, 1))
++	assert.Equal(t, "stable-c", mustStable(t, projection, 2))
++
++	idx, ok := projection.IndexOfStableKeyID("stable-c")
++	assert.True(t, ok)
++	assert.Equal(t, 2, idx)
++}
++
++func mustStable(t *testing.T, p *Projection, index int) string {
++	t.Helper()
++	stable, ok := p.StableKeyIDForIndex(index)
++	require.True(t, ok, "索引 %d 应有对应凭据", index)
++	return stable
++}
++
++// 只投影可用 Key：分享者显式停用 / 已到期 / 冷却中的凭据不应继续发往上游。
++func TestProjectKeyPoolSkipsUnusableKeys(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9002
++	const baseChannelID int64 = 4243
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	secrets := []string{"sk-live-aaaaaaaa", "sk-disabled-bbbb", "sk-expired-cccccc"}
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, nil)
++
++	now := common.GetTimestamp()
++	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
++		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").
++		Update("status", apigxmodel.UpstreamKeyStatusDisabled).Error)
++	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
++		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-c").
++		Update("expires_at", now-1).Error)
++
++	projection, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++	assert.Equal(t, 1, projection.KeyCount)
++
++	var loaded basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
++	keys := loaded.GetKeys()
++	require.Len(t, keys, 1)
++	assert.Equal(t, "sk-live-aaaaaaaa", keys[0])
++	assert.Equal(t, 1, loaded.ChannelInfo.MultiKeySize)
++}
++
++// 重投影必须清空按索引存放的旧状态：Key 顺序变了，旧状态会套到别的凭据上。
++func TestProjectKeyPoolResetsStaleIndexState(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9003
++	const baseChannelID int64 = 4244
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++		ChannelInfo: basemodel.ChannelInfo{
++			IsMultiKey:             true,
++			MultiKeySize:           2,
++			MultiKeyMode:           constant.MultiKeyModePolling,
++			MultiKeyPollingIndex:   1,
++			MultiKeyStatusList:     map[int]int{0: common.ChannelStatusAutoDisabled},
++			MultiKeyDisabledReason: map[int]string{0: "provider rejected key"},
++			MultiKeyDisabledTime:   map[int]int64{0: 123456},
++		},
++	}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-new-aaaaaaaa", "sk-new-bbbbbbbb"}, nil)
++
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	var loaded basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
++	assert.Empty(t, loaded.ChannelInfo.MultiKeyStatusList, "索引变了，旧禁用状态必须清空")
++	assert.Empty(t, loaded.ChannelInfo.MultiKeyDisabledReason)
++	assert.Empty(t, loaded.ChannelInfo.MultiKeyDisabledTime)
++	assert.Zero(t, loaded.ChannelInfo.MultiKeyPollingIndex, "轮询游标必须归零")
++}
++
++func TestProjectKeyPoolFailsWhenNoUsableKey(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9004
++	const baseChannelID int64 = 4245
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-only-aaaaaaaa"}, nil)
++	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
++		Where("channel_id = ?", shareChannel.ID).
++		Update("status", apigxmodel.UpstreamKeyStatusInvalid).Error)
++
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	assert.ErrorIs(t, err, ErrNoUsableKey, "整池无可用凭据必须报错，让渠道停止接收新请求")
++}
++
++// 单把凭据解不开（信封损坏/换过主密钥）时跳过它，其余 Key 仍要能投影。
++func TestProjectKeyPoolSkipsUndecryptableKey(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9005
++	const baseChannelID int64 = 4246
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-good-aaaaaaaa", "sk-broken-bbbbbb"}, nil)
++	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
++		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").
++		Update("secret_ref", "enc:v1:AAAA:BBBB").Error)
++
++	projection, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++	assert.Equal(t, 1, projection.KeyCount, "坏掉的那把应被跳过，不能拖垮整池")
++	assert.Equal(t, "stable-a", mustStable(t, projection, 0))
++
++	var loaded basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
++	keys := loaded.GetKeys()
++	require.Len(t, keys, 1)
++	assert.True(t, strings.HasPrefix(keys[0], "sk-good-"))
++}
+diff --git a/apigx/model/pool.go b/apigx/model/pool.go
+index 3571ccf..fd412b8 100644
+--- a/apigx/model/pool.go
++++ b/apigx/model/pool.go
+@@ -24,6 +24,17 @@ import (
+ // 稳定凭据 ID（跨轮换保持身份，底座用位置索引，删一把就整体错位）、分享者归属、
+ // 逐 Key 容量策略、加密存储（底座 `channels.key` 是明文），以及逐 Key 统计。
+ 
++// 分享渠道的池策略取值（`apigx_channels.key_pool_mode`）。
++//
++// **只映射到底座已有的两种选择方式**——用户已裁决不为「加权/剩余容量」扩展底座。
++// 这里定义的是我们列里的枚举值，真正的选择由 `model.Channel.GetNextEnabledKey` 执行。
++const (
++	// KeyPoolModePolling 轮询（默认）。
++	KeyPoolModePolling int = 0
++	// KeyPoolModeRandom 随机。
++	KeyPoolModeRandom int = 1
++)
++
+ // MaxImportBatch 是单次批量导入允许的 Key 数量上限。
+ const MaxImportBatch = 200
+ 
+-- 
+2.53.0.windows.1
+

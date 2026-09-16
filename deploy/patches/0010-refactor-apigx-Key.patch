@@ -1,0 +1,346 @@
+From 89f0029f7af5b9a111db5687808913a4e919d2cd Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 21:47:16 +0800
+Subject: [PATCH 10/11] =?UTF-8?q?refactor(apigx):=20=E5=88=A0=E9=99=A4?=
+ =?UTF-8?q?=E9=87=8D=E5=A4=8D=E5=AE=9E=E7=8E=B0=E7=9A=84=E5=A4=9A=20Key=20?=
+ =?UTF-8?q?=E9=80=89=E6=8B=A9=E5=99=A8=EF=BC=8C=E9=80=89=E6=8B=A9=E4=BA=A4?=
+ =?UTF-8?q?=E7=BB=99=E5=BA=95=E5=BA=A7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户质询后核查: 底座已有完整多 Key 机制 —— 轮询/随机选择(model.Channel.GetNextEnabledKey,
+constant/multi_key_mode.go)、逐 Key 禁用状态与原因/时间、单 Key 故障隔离与全失效才停渠道
+(handlerMultiKeyUpdate)、批量导入、逐 Key 管理接口(ManageMultiKeys)。且底座在
+SetupContextForSelectedChannel 已完成唯一选路决定(计划书 §9.2)。
+
+因此删除 apigx/model/pool.go 里的 SelectUpstreamKey 与 KeyPoolMode 常量及其测试：
+它既重复底座能力，又制造第二个选路决定点并与底座轮询游标竞争。
+保留 ParseImportedKeys(底座批量导入是控制器内联逻辑不可复用) 与指纹查重。
+
+另新增: UpstreamKey.SecretFingerprint(唯一索引含 channel_id+alive_flag，用于重复导入检测，
+因为 AES-GCM 随机 nonce 使密文不可比对)。apigx 全量测试通过。
+---
+ apigx/api/share.go             | 21 ++++++---
+ apigx/model/models_identity.go |  8 +++-
+ apigx/model/pool.go            | 80 ++++++++++++++++++++++++++++++++++
+ apigx/model/repo_test.go       | 43 +++++++++++++++---
+ apigx/model/repo_upstream.go   |  3 ++
+ apigx/secretbox/secretbox.go   | 26 +++++++++++
+ 6 files changed, 167 insertions(+), 14 deletions(-)
+ create mode 100644 apigx/model/pool.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 3d92fff..a052283 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -336,7 +336,8 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
+ 	}
+ 
+ 	// 立即加密：明文不落库、不进日志、不回显。
+-	envelope, err := secretbox.Encrypt(strings.TrimSpace(req.Key))
++	plain := strings.TrimSpace(req.Key)
++	envelope, err := secretbox.Encrypt(plain)
+ 	if err != nil {
+ 		// 主密钥未配置时失败关闭——绝不退化成明文存储
+ 		common.SysError("apigx api: refuse to store upstream key: " + err.Error())
+@@ -344,13 +345,21 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
+ 			"credential store is not configured; refusing to store the key")
+ 		return
+ 	}
++	// 指纹用于查重：密文带随机 nonce 无法比对，重复导入只能靠它发现。
++	fingerprint, err := secretbox.Fingerprint(plain)
++	if err != nil {
++		common.SysError("apigx api: fingerprint failed: " + err.Error())
++		fail(c, http.StatusServiceUnavailable, "secret_store_unavailable", "credential store is not configured")
++		return
++	}
+ 
+ 	key := &apigxmodel.UpstreamKey{
+-		ChannelID:   channelID,
+-		StableKeyID: req.StableKeyID,
+-		Name:        strings.TrimSpace(req.Name),
+-		SecretRef:   envelope,
+-		Status:      apigxmodel.UpstreamKeyStatusEnabled,
++		ChannelID:         channelID,
++		StableKeyID:       req.StableKeyID,
++		Name:              strings.TrimSpace(req.Name),
++		SecretRef:         envelope,
++		SecretFingerprint: fingerprint,
++		Status:            apigxmodel.UpstreamKeyStatusEnabled,
+ 	}
+ 	if req.Weight != nil {
+ 		key.Weight = *req.Weight
+diff --git a/apigx/model/models_identity.go b/apigx/model/models_identity.go
+index 1c08c9b..28b9247 100644
+--- a/apigx/model/models_identity.go
++++ b/apigx/model/models_identity.go
+@@ -233,13 +233,17 @@ type UpstreamKey struct {
+ 	// ID 稳定内部 ID（apigx_attempts / apigx_async_tasks 引用它，永不变）。
+ 	ID int64 `gorm:"primaryKey"`
+ 	// ChannelID 所属分享渠道，apigx_channels.id。
+-	ChannelID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:1;index:idx_apigx_upkey_pool,priority:1"`
++	ChannelID int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:1;uniqueIndex:idx_apigx_upkey_fingerprint,priority:1;index:idx_apigx_upkey_pool,priority:1"`
+ 	// StableKeyID 渠道内稳定标识：轮询/权重/统计都不依赖导入行号（CODE_STYLE.md 第 1 条）。
+ 	StableKeyID string `gorm:"size:32;not null;default:'';uniqueIndex:idx_apigx_upkey_stable,priority:2"`
+ 	// Name 展示名。
+ 	Name string `gorm:"size:64;not null;default:''"`
+ 	// SecretRef 指向受保护凭据存储的引用，不含明文；主密钥与数据库分离（§10.3）。
+ 	SecretRef string `gorm:"size:255;not null;default:''"`
++	// SecretFingerprint 是凭据的 HMAC 指纹，仅用于查重（见 apigx/secretbox.Fingerprint）：
++	// AES-GCM 用随机 nonce，同一明文每次密文都不同，重复导入只能靠指纹发现。
++	// 与 channel_id、alive_flag 组成唯一索引：存活期间同渠道内不得重复，软删除后可重新导入。
++	SecretFingerprint string `gorm:"type:char(64);not null;default:'';uniqueIndex:idx_apigx_upkey_fingerprint,priority:2"`
+ 	// CredentialVersion 凭据版本号，轮换时递增（不新建行）。
+ 	CredentialVersion int64 `gorm:"bigint;not null;default:0"`
+ 	// CredentialStartedAt 当前凭据版本启用时间，UTC epoch 秒。
+@@ -267,7 +271,7 @@ type UpstreamKey struct {
+ 	// LastErrorCode 脱敏错误码。
+ 	LastErrorCode string `gorm:"size:64;not null;default:''"`
+ 	// AliveFlag 软删除墓碑列：0=存活，软删除时置为本行 ID（§3.5）。
+-	AliveFlag int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:3"`
++	AliveFlag int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_stable,priority:3;uniqueIndex:idx_apigx_upkey_fingerprint,priority:3"`
+ 	// CreatedAt 创建时间，UTC epoch 秒；不可变快照字段。
+ 	CreatedAt int64 `gorm:"bigint;not null;default:0"`
+ 	// UpdatedAt 最近更新时间，UTC epoch 秒；凭据轮换只更新它。
+diff --git a/apigx/model/pool.go b/apigx/model/pool.go
+new file mode 100644
+index 0000000..3571ccf
+--- /dev/null
++++ b/apigx/model/pool.go
+@@ -0,0 +1,80 @@
++package apigxmodel
++
++import (
++	"errors"
++	"fmt"
++	"strings"
++)
++
++// 本文件只保留**底座没有**的那部分能力：批量导入文本的解析。
++//
++// # 为什么这里没有选择策略
++//
++// 底座的 `model.Channel.GetNextEnabledKey` 已经实现了多 Key 的选择与健康：
++//   - 轮询（`MultiKeyModePolling`，游标存在渠道缓存里、线程安全）/ 随机（`MultiKeyModeRandom`）；
++//   - 跳过逐个 Key 的禁用状态（`MultiKeyStatusList`，含禁用原因与时间）；
++//   - 全部 Key 都不可用时返回明确错误（`ErrorCodeChannelNoAvailableKey`），而不是硬用一把；
++//   - 单 Key 故障隔离与「全部失效才停渠道」见 `model/channel.go` 的 `handlerMultiKeyUpdate`。
++//
++// 而且底座在 `SetupContextForSelectedChannel` 里已经完成了**唯一的选路决定**
++// （计划书 §9.2 要求「一个权威决定点」）。在 APIGX 侧再写一套选择器会制造第二个决定点，
++// 也会与底座的轮询游标互相竞争——因此这里**不提供**选择函数，选择一律交给底座。
++//
++// APIGX 自己的领域表（`apigx_upstream_keys`）负责的是底座表达不了的东西：
++// 稳定凭据 ID（跨轮换保持身份，底座用位置索引，删一把就整体错位）、分享者归属、
++// 逐 Key 容量策略、加密存储（底座 `channels.key` 是明文），以及逐 Key 统计。
++
++// MaxImportBatch 是单次批量导入允许的 Key 数量上限。
++const MaxImportBatch = 200
++
++// importedKeyMinLength 是接受的最短凭据长度（明显短于此值的多半是粘贴错误）。
++const importedKeyMinLength = 8
++
++// ErrInvalidArgument 之外的导入错误统一用这个哨兵，便于接口层映射为 400。
++var ErrImportRejected = errors.New("apigx: import rejected")
++
++// ImportedKeys 是批量导入的解析结果。
++type ImportedKeys struct {
++	// Accepted 是可用的凭据明文，按首次出现顺序。
++	Accepted []string
++	// DuplicateLines 是批内重复的行号（1-based），便于回显给分享者。
++	DuplicateLines []int
++	// InvalidLines 是格式不合法的行号（1-based）。
++	InvalidLines []int
++}
++
++// ParseImportedKeys 解析批量粘贴的凭据文本。
++//
++// 规则：一行一把；忽略空行与以 `#` 开头的注释行；去掉首尾空白；批内去重（保留首次出现）；
++// 单批超过 MaxImportBatch 直接拒绝。底座的批量导入是写在渠道控制器里的内联逻辑，
++// 无法作为库复用；这里对齐它的行为（去空白、丢空行），并额外做批内去重与行号回显。
++//
++// 注意：这里只检测**批内**重复。与库里已有凭据的重复由
++// `UpstreamKey.SecretFingerprint` 的唯一索引兜住（密文带随机 nonce，无法比对密文）。
++func ParseImportedKeys(raw string) (ImportedKeys, error) {
++	result := ImportedKeys{}
++	seen := make(map[string]struct{})
++
++	lineNo := 0
++	for line := range strings.SplitSeq(raw, "\n") {
++		lineNo++
++		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
++		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
++			continue
++		}
++		if len(trimmed) < importedKeyMinLength || len(trimmed) > 512 {
++			result.InvalidLines = append(result.InvalidLines, lineNo)
++			continue
++		}
++		if _, dup := seen[trimmed]; dup {
++			result.DuplicateLines = append(result.DuplicateLines, lineNo)
++			continue
++		}
++		seen[trimmed] = struct{}{}
++		result.Accepted = append(result.Accepted, trimmed)
++		if len(result.Accepted) > MaxImportBatch {
++			return ImportedKeys{}, fmt.Errorf("%w: at most %d keys per import", ErrImportRejected, MaxImportBatch)
++		}
++	}
++	return result, nil
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index a2309d9..f7282e0 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -2,7 +2,9 @@ package apigxmodel
+ 
+ import (
+ 	"errors"
++	"fmt"
+ 	"path/filepath"
++	"strings"
+ 	"sync/atomic"
+ 	"testing"
+ 
+@@ -92,15 +94,15 @@ func TestSoftDeleteTombstoneAllowsKeyReuse(t *testing.T) {
+ 	assert.NotEqual(t, group.ID, recreated.ID)
+ 
+ 	// UpstreamKey 的唯一索引包含 alive_flag，因此同一个 StableKeyID 可被重新添加
+-	key1 := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1", SecretRef: "secret://k1"}
++	key1 := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1", SecretRef: "secret://k1", SecretFingerprint: "fp-k1"}
+ 	require.NoError(t, CreateUpstreamKey(db, owner, key1))
+ 	require.NoError(t, DeleteUpstreamKey(db, owner, key1.ID))
+ 
+-	reuse := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1-reimported", SecretRef: "secret://k1b"}
++	reuse := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "k1-reimported", SecretRef: "secret://k1b", SecretFingerprint: "fp-k1b"}
+ 	require.NoError(t, CreateUpstreamKey(db, owner, reuse), "软删除后同一 StableKeyID 应可重新添加")
+ 
+ 	// 但存活期间重复的 StableKeyID 必须被拒绝
+-	dup := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "dup", SecretRef: "secret://dup"}
++	dup := &UpstreamKey{ChannelID: channel.ID, StableKeyID: "stable-1", Name: "dup", SecretRef: "secret://dup", SecretFingerprint: "fp-dup"}
+ 	require.Error(t, CreateUpstreamKey(db, owner, dup), "存活期间同一 StableKeyID 不得重复")
+ }
+ 
+@@ -110,7 +112,7 @@ func TestUpstreamKeyOwnershipTravelsThroughChannel(t *testing.T) {
+ 	_, channelA := seedGroupAndChannel(t, db, ownerA)
+ 	_, channelB := seedGroupAndChannel(t, db, ownerB)
+ 
+-	keyA := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "a-1", Name: "A 的 Key", SecretRef: "secret://a1"}
++	keyA := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "a-1", Name: "A 的 Key", SecretRef: "secret://a1", SecretFingerprint: "fp-a1"}
+ 	require.NoError(t, CreateUpstreamKey(db, ownerA, keyA))
+ 
+ 	// B 拿 A 的 channel id 去操作：必须全部拒绝（Key 没有 owner 列，归属经渠道传递）
+@@ -121,7 +123,7 @@ func TestUpstreamKeyOwnershipTravelsThroughChannel(t *testing.T) {
+ 	assert.ErrorIs(t, err, ErrNotFound, "也不能借自己的身份去查别人的渠道")
+ 
+ 	// 用别人的渠道创建 Key 也不行
+-	intruder := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "x-1", Name: "偷渡", SecretRef: "secret://x"}
++	intruder := &UpstreamKey{ChannelID: channelA.ID, StableKeyID: "x-1", Name: "偷渡", SecretRef: "secret://x", SecretFingerprint: "fp-x"}
+ 	assert.ErrorIs(t, CreateUpstreamKey(db, ownerB, intruder), ErrNotFound)
+ 
+ 	// 改状态同样被拒
+@@ -138,7 +140,8 @@ func TestAvailableUpstreamKeysFiltersThreeConditions(t *testing.T) {
+ 
+ 	mk := func(stableID string, status int, cooldownUntil, expiresAt int64) *UpstreamKey {
+ 		k := &UpstreamKey{ChannelID: channel.ID, StableKeyID: stableID, Name: stableID, SecretRef: "secret://" + stableID,
+-			Status: status, CooldownUntil: cooldownUntil, ExpiresAt: expiresAt}
++			SecretFingerprint: "fp-" + stableID,
++			Status:            status, CooldownUntil: cooldownUntil, ExpiresAt: expiresAt}
+ 		require.NoError(t, CreateUpstreamKey(db, owner, k))
+ 		return k
+ 	}
+@@ -260,3 +263,31 @@ func TestGetUpstreamAccountScopesByOwner(t *testing.T) {
+ 	_, err = GetUpstreamAccount(db, 7002, account.ID)
+ 	assert.True(t, errors.Is(err, ErrNotFound))
+ }
++
++// ---- 批量导入解析（选择策略交给底座 model.Channel.GetNextEnabledKey） ----
++
++func TestParseImportedKeys(t *testing.T) {
++	raw := "# 注释行\n" +
++		"sk-aaaaaaaaaaaa\n" +
++		"\n" +
++		"  sk-bbbbbbbbbbbb  \n" +
++		"sk-aaaaaaaaaaaa\n" + // 批内重复
++		"short\n" + // 非法（太短）
++		"sk-cccccccccccc\r\n"
++
++	result, err := ParseImportedKeys(raw)
++	require.NoError(t, err)
++	assert.Equal(t, []string{"sk-aaaaaaaaaaaa", "sk-bbbbbbbbbbbb", "sk-cccccccccccc"}, result.Accepted,
++		"应忽略注释与空行、去掉首尾空白、批内去重（保留首次出现）")
++	assert.Equal(t, []int{5}, result.DuplicateLines)
++	assert.Equal(t, []int{6}, result.InvalidLines)
++}
++
++func TestParseImportedKeysRejectsOversizedBatch(t *testing.T) {
++	var b strings.Builder
++	for i := range MaxImportBatch + 1 {
++		fmt.Fprintf(&b, "sk-key-%06d\n", i)
++	}
++	_, err := ParseImportedKeys(b.String())
++	assert.ErrorIs(t, err, ErrImportRejected, "超批量上限必须整体拒绝")
++}
+diff --git a/apigx/model/repo_upstream.go b/apigx/model/repo_upstream.go
+index af64c58..cc5ad19 100644
+--- a/apigx/model/repo_upstream.go
++++ b/apigx/model/repo_upstream.go
+@@ -128,6 +128,9 @@ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
+ 	if key.SecretRef == "" {
+ 		return fmt.Errorf("%w: secret_ref is required（凭据只存引用，不存明文）", ErrInvalidArgument)
+ 	}
++	if key.SecretFingerprint == "" {
++		return fmt.Errorf("%w: secret_fingerprint is required（密文不可比对，重复导入只能靠指纹发现）", ErrInvalidArgument)
++	}
+ 	if key.CredentialVersion <= 0 {
+ 		key.CredentialVersion = 1
+ 	}
+diff --git a/apigx/secretbox/secretbox.go b/apigx/secretbox/secretbox.go
+index 8fa8063..f012e95 100644
+--- a/apigx/secretbox/secretbox.go
++++ b/apigx/secretbox/secretbox.go
+@@ -16,7 +16,9 @@ package secretbox
+ import (
+ 	"crypto/aes"
+ 	"crypto/cipher"
++	"crypto/hmac"
+ 	"crypto/rand"
++	"crypto/sha256"
+ 	"encoding/base64"
+ 	"encoding/hex"
+ 	"errors"
+@@ -148,6 +150,30 @@ func Decrypt(envelope string) (string, error) {
+ 	return string(plain), nil
+ }
+ 
++// Fingerprint 计算凭据的稳定指纹（HMAC-SHA256(主密钥, 明文) 的十六进制）。
++//
++// **存在的理由**：AES-GCM 使用随机 nonce，同一明文每次加密得到的密文都不同，
++// 因此**无法用密文比对来检测「同一把 Key 被重复导入」**（计划书 §3.5 明确要求导入时检测重复）。
++// 指纹既能用于查重，又不泄露明文：
++//   - 用主密钥做 HMAC 而不是裸 SHA-256：没有主密钥就无法离线批量猜测；
++//   - 指纹列参与唯一索引时，仍应按天/按渠道截断存储（本函数返回完整 64 字符，调用方自行决定）。
++//
++// 主密钥未配置时返回 ErrKeyNotConfigured（与加密一致，**失败关闭**）。
++func Fingerprint(plaintext string) (string, error) {
++	if plaintext == "" {
++		return "", fmt.Errorf("%w: refusing to fingerprint empty secret", ErrInvalidEnvelope)
++	}
++	key, err := loadKey()
++	if err != nil {
++		return "", err
++	}
++	mac := hmac.New(sha256.New, key)
++	if _, err := mac.Write([]byte(plaintext)); err != nil {
++		return "", err
++	}
++	return hex.EncodeToString(mac.Sum(nil)), nil
++}
++
+ // IsEnvelope 报告某个引用是否为本包生成的信封（用于区分「已加密」与「外部引用」）。
+ func IsEnvelope(ref string) bool { return strings.HasPrefix(ref, EnvelopePrefix) }
+ 
+-- 
+2.53.0.windows.1
+
