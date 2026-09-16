@@ -264,7 +264,8 @@ effective_set(D, request) ⊆ authorized_set(D, key)         # 恒成立，无�
 | 亲和缓存命中后直接选渠道 | `middleware/distributor.go:126` | 缓存命中可能绕过当前授权 | 命中后仍执行完整 S3–S11；资源修订使亲和失效（§6.5） |
 | 任务提交走原渠道 pin | `relay/relay_task.go:174`、`dto/channel_constraints.go:5-8,71-117` | 与 Web 走不同路径 | 与 Web 收敛到同一授权函数（§6.4） |
 
-> 未核实：`service/authz` 的 `Permission` 语义、Casbin 策略定义、`RequirePermission`/`SecureVerificationRequired`/`CriticalRateLimit` 的内部实现**未读取**。上表只断言「路由注册与中间件挂载」这一层的事实。
+> **已核实（2026-09-16 补读）**：`service/authz` 是 Casbin 驱动的**管理面**资源/动作矩阵——`permission.go` 定义 `Permission{Resource, Action}` 与主体 `user:<id>` / `role:<key>`，`resolver.go:38 Capabilities(userID, systemRole) PermissionsMap` 返回完整矩阵；资源含 `ResourceChannel`、`ResourceTaskPlugin`，动作含 `Read / Operate / Write / SensitiveWrite / SecretView / Bind`（见 `service/authz/authz_test.go:275-286`）。
+> **对我们的意义**：① 它管的是**管理员/运营权限**，不是终端用户的资源 ACL，因此**分享者接口不应复用这套矩阵**；② 但「资源 + 动作」的范式值得沿用，其中 `SecretView` 为「谁能看见凭据」提供了先例；③ `RequirePermission` / `SecureVerificationRequired` / `CriticalRateLimit` 的**内部实现**仍未逐行阅读，本节只断言「路由注册与中间件挂载」这一层的事实。
 
 ---
 

@@ -69,11 +69,13 @@
 |---|---|---|
 | 工具调用 / function call | **广泛支持**：转换层 `relaykit/relayconvert/internal/toolconv/{encode,decode}.go`、`relaykit/relayconvert/internal/oai_chat/to_gemini_chat_req.go:262`、`relaykit/relayconvert/internal/oai_responses/to_claude_messages_req.go:94-98`；计费侧 `relay/common/tool_usage.go:42`、`relay/channel/openai/relay-openai.go:188-189`、`relay/channel/gemini/relay-gemini.go:94-106` | ✅ 可复用，但**逐协议核对**，不能假定全部适配器一致 |
 | 流式（SSE） | `relay/common/stream_status.go`、各 handler 的流式分支；模型列表分流见 `router/relay-router.go:25-43` | ✅ 有统一基础 |
-| 视觉输入 | 未找到显式的「模型能力」布尔字段（检索 `SupportVision` / `VisionEnabled` 无命中） | **未核实**；能力表达很可能散落在各适配器的请求构造里 |
-| 上下文长度 / 最大输出 | 检索 `ContextLength` / `MaxContextTokens` 无命中 | **未核实** |
-| JSON 格式、缓存读写 | 未定位到统一的供给级声明 | **未核实** |
-| 音色、视频规格 | 未定位 | **未核实** |
+| 视觉输入 | **已核实（2026-09-16 补查）**：底座**没有渠道/供给级的能力声明字段**。能力是在**转换层按模型名前缀硬编码**的：`relaykit/dto/openai_request.go:306-356`（`OpenAIChatCapabilities`，按模型名决定 `UseMaxCompletionTokens` / `SupportsTemperature` / `UseDeveloperRole` 等）、`relaykit/relayconvert/reasoning/claude.go:21-74`、`relaykit/relayconvert/reasoning/gemini.go:25-60` | ⚠️ **缺口确认**：不存在可复用的「供给能力」载体，计划书 §8.2 要求的供给层能力记录必须由我们新增 |
+| 上下文长度 / 最大输出 | 同上：检索 `ContextLength` / `MaxContextTokens` 无命中，能力判断分散在各转换器按模型名推导 | ⚠️ 同属缺口，需我们新增 |
+| JSON 格式、缓存读写 | 未定位到统一的供给级声明 | ⚠️ 同属缺口，需我们新增 |
+| 音色、视频规格 | 未定位 | ⚠️ 同属缺口，需我们新增 |
 | 任务取消 | 未定位到统一的 Cancel 接口（任务适配器在 `relay/channel/task/**`、`relay/relay_adaptor.go:188`） | **未核实**；阶段 3 需按适配器逐个确认 |
+
+**补充说明**：底座另有一套同名但**无关**的机制——JS 任务插件的 `requiredCapabilities`（`pkg/jsplugin/registry.go:87`，`HasCapability` 在 `pkg/jsplugin/json_state.go:25`），那是**插件宿主 API 的能力协商**，与模型能力无关，不能借用。
 
 **由此得到一条设计结论**：底座**缺少统一的「模型供给能力声明」**。计划书 §8.2 末段要求「同一模型的工具调用、视觉输入、上下文长度、JSON 格式、音色和视频规格可能因渠道而异，记录在供给层，自动路由先按请求能力过滤」——**这个供给层能力记录必须由我们新增**（见 `docs/stage0/schema-draft.md` 的 `KeyModelCapability` / `ModelOffering`），不能指望从上游读出来。
 
@@ -121,7 +123,7 @@
 
 ## 8. 未核实清单
 
-1. 「视觉输入 / 上下文长度 / JSON 格式 / 缓存读写 / 音色 / 视频规格」是否有可复用的能力表达：本轮**未找到**统一的声明字段，需要时须在 `relay/channel/**` 与 `setting/model_setting/**` 逐个适配器确认。
+1. ~~「视觉输入 / 上下文长度 / JSON 格式 / 缓存读写 / 音色 / 视频规格」是否有可复用的能力表达~~ → **已核实（2026-09-16）**：没有供给级能力字段，能力在转换层按模型名硬编码，**必须由我们新增供给层能力记录**（见 §4）。
 2. 任务**取消**能力：未定位统一接口。
 3. 图片与视频在 Gemini / Anthropic 原生路径下的支持情况。
 4. `/v1beta` 侧的 embeddings 支持情况。
