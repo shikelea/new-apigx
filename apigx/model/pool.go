@@ -24,6 +24,17 @@ import (
 // 稳定凭据 ID（跨轮换保持身份，底座用位置索引，删一把就整体错位）、分享者归属、
 // 逐 Key 容量策略、加密存储（底座 `channels.key` 是明文），以及逐 Key 统计。
 
+// 分享渠道的池策略取值（`apigx_channels.key_pool_mode`）。
+//
+// **只映射到底座已有的两种选择方式**——用户已裁决不为「加权/剩余容量」扩展底座。
+// 这里定义的是我们列里的枚举值，真正的选择由 `model.Channel.GetNextEnabledKey` 执行。
+const (
+	// KeyPoolModePolling 轮询（默认）。
+	KeyPoolModePolling int = 0
+	// KeyPoolModeRandom 随机。
+	KeyPoolModeRandom int = 1
+)
+
 // MaxImportBatch 是单次批量导入允许的 Key 数量上限。
 const MaxImportBatch = 200
 
