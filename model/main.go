@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 
@@ -388,6 +389,12 @@ func migrateDB() error {
 		if err := DB.AutoMigrate(&SubscriptionPlan{}); err != nil {
 			return err
 		}
+	}
+	// APIGX 新增领域表（apigx_*）。只增不改、幂等，且不触碰底座表；
+	// 放在底座迁移全部完成之后，避免与底座既有迁移互相干扰。
+	// 台账：docs/stage0/upstream-diff.md D-003。
+	if err := apigxmodel.Migrate(DB); err != nil {
+		return fmt.Errorf("apigx domain tables migration failed: %w", err)
 	}
 	return nil
 }
