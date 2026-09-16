@@ -1,0 +1,1398 @@
+From 6764938774a84458c505459dadf47c021dedbef3 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 21:38:26 +0800
+Subject: [PATCH 9/9] =?UTF-8?q?feat(apigx):=20=E5=88=86=E4=BA=AB=E8=80=85?=
+ =?UTF-8?q?=E6=8E=A5=E5=8F=A3=20+=20=E4=B8=8A=E6=B8=B8=E5=87=AD=E6=8D=AE?=
+ =?UTF-8?q?=E5=8A=A0=E5=AF=86=EF=BC=88T1.4=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/secretbox: AES-256-GCM 信封(enc:v1:nonce:ciphertext); 主密钥来自 APIGX_SECRET_KEY
+  与库分离; 缺密钥失败关闭; 篡改/错密钥必须失败
+- apigx/api/share.go: 分组/渠道/上游Key池 CRUD; owner 只来自登录态; 越权一律 404;
+  凭据只回脱敏, 不回显明文或信封; 缺主密钥拒绝创建(503)
+- apigx/route/route.go + router/api-router.go: 独立路由组 /api/apigx + UserAuth (D-012)
+- apigx/model: DB 句柄由 Migrate 捕获, 使上游接线只需 4 行
+
+修的三个真缺陷(均为测试发现): base_channel_id 唯一索引与 0 冲突;
+CreateChannel 未校验分组归属(越权: 可把渠道挂到别人分组); deleted_at 写入整数 epoch
+导致 PG SQLSTATE 22008(SQLite 宽松故潜伏)。
+测试缺陷一个: 篡改测试改 base64 末字符可能不改动字节 -> 改为确定性字节翻转。
+
+验证: apigx 全量 -count=2 通过; 端到端 16/16(真实网关+PG); PG 核对密文(明文计数 0)与墓碑。
+---
+ apigx/api/share.go                | 484 ++++++++++++++++++++++++++++++
+ apigx/api/share_test.go           | 332 ++++++++++++++++++++
+ apigx/model/migrate.go            |  17 +-
+ apigx/model/repo_share.go         |  23 +-
+ apigx/model/repo_test.go          |  14 +
+ apigx/model/repo_upstream.go      |   2 +-
+ apigx/route/route.go              |  22 ++
+ apigx/secretbox/secretbox.go      | 158 ++++++++++
+ apigx/secretbox/secretbox_test.go | 167 +++++++++++
+ router/api-router.go              |   8 +
+ 10 files changed, 1224 insertions(+), 3 deletions(-)
+ create mode 100644 apigx/api/share.go
+ create mode 100644 apigx/api/share_test.go
+ create mode 100644 apigx/route/route.go
+ create mode 100644 apigx/secretbox/secretbox.go
+ create mode 100644 apigx/secretbox/secretbox_test.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+new file mode 100644
+index 0000000..3d92fff
+--- /dev/null
++++ b/apigx/api/share.go
+@@ -0,0 +1,484 @@
++// Package apigxapi 提供 APIGX 的分享者接口（受 owner 约束）。
++//
++// 与底座既有管理接口的关系：**不复用** `router/channel-router.go` 的管理员路由
++// （那一整组挂在 `AdminAuth()` 下，且渠道是全局资源）。这里是一套独立接口，
++// 每次请求都从登录态取 owner，并把它带进每一个数据库查询。
++//
++// 凭据处理（计划书 §10.3）：
++//   - 上游 Key 以明文提交，但**只在内存中转为密文**（apigx/secretbox 的 AES-256-GCM 信封），
++//     数据库里只存信封；
++//   - 接口**从不回显**明文或信封，只给脱敏提示（后 4 位）；
++//   - 主密钥未配置时**拒绝创建**（失败关闭），绝不退化成明文存储。
++package apigxapi
++
++import (
++	"errors"
++	"net/http"
++	"strconv"
++	"strings"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/secretbox"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/gin-gonic/gin"
++	"gorm.io/gorm"
++)
++
++// Register 注册全部分享者接口。调用方需已挂好认证中间件（UserAuth）。
++func Register(r *gin.RouterGroup, db *gorm.DB) {
++	h := &handler{db: db}
++
++	groups := r.Group("/share-groups")
++	{
++		groups.POST("", h.createShareGroup)
++		groups.GET("", h.listShareGroups)
++		groups.GET("/:id", h.getShareGroup)
++		groups.DELETE("/:id", h.deleteShareGroup)
++		groups.GET("/:id/channels", h.listChannels)
++	}
++
++	channels := r.Group("/channels")
++	{
++		channels.POST("", h.createChannel)
++		channels.GET("/:id", h.getChannel)
++		channels.DELETE("/:id", h.deleteChannel)
++		channels.POST("/:id/keys", h.createUpstreamKey)
++		channels.GET("/:id/keys", h.listUpstreamKeys)
++	}
++
++	keys := r.Group("/keys")
++	{
++		keys.PATCH("/:id/status", h.updateKeyStatus)
++		keys.PATCH("/:id/cooldown", h.updateKeyCooldown)
++		keys.DELETE("/:id", h.deleteUpstreamKey)
++	}
++}
++
++type handler struct{ db *gorm.DB }
++
++// ownerID 从登录态取所有者；底座 UserAuth 会写入 "id"。
++//
++// **服务端强制**：任何接口都不接受客户端提交的 owner 参数（否则等于把归属校验交给调用方）。
++func (h *handler) ownerID(c *gin.Context) (int64, bool) {
++	id := c.GetInt("id")
++	if id <= 0 {
++		fail(c, http.StatusUnauthorized, "unauthorized", "login required")
++		return 0, false
++	}
++	return int64(id), true
++}
++
++func paramID(c *gin.Context, name string) (int64, bool) {
++	raw := c.Param(name)
++	id, err := strconv.ParseInt(raw, 10, 64)
++	if err != nil || id <= 0 {
++		fail(c, http.StatusBadRequest, "invalid_id", "invalid "+name)
++		return 0, false
++	}
++	return id, true
++}
++
++func ok(c *gin.Context, data any) {
++	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": data})
++}
++
++func fail(c *gin.Context, status int, code, message string) {
++	c.JSON(status, gin.H{"success": false, "code": code, "message": message})
++}
++
++// failFromRepo 把仓储层错误映射为对外响应。
++//
++// 关键：`ErrNotFound`（不存在**或**不属于自己）一律 404，不区分——避免枚举他人资源。
++func failFromRepo(c *gin.Context, err error) {
++	switch {
++	case errors.Is(err, apigxmodel.ErrNotFound):
++		fail(c, http.StatusNotFound, "not_found", "resource not found")
++	case errors.Is(err, apigxmodel.ErrInvalidArgument):
++		fail(c, http.StatusBadRequest, "invalid_argument", err.Error())
++	default:
++		common.SysError("apigx api: " + err.Error())
++		fail(c, http.StatusInternalServerError, "internal_error", "internal error")
++	}
++}
++
++// ---------------------------------------------------------------------------
++// 分享分组
++// ---------------------------------------------------------------------------
++
++type createShareGroupRequest struct {
++	Name        string `json:"name"`
++	Description string `json:"description"`
++	// DefaultVisibility 见 schema-draft §5.3：0=私有 / 1=受限 / 2=公开
++	DefaultVisibility *int `json:"default_visibility"`
++}
++
++func (h *handler) createShareGroup(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	var req createShareGroupRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	group := &apigxmodel.ShareGroup{
++		OwnerUserID:       owner,
++		Name:              strings.TrimSpace(req.Name),
++		Description:       req.Description,
++		DefaultVisibility: 0,
++		PublishStatus:     0, // 待审核（计划书 §12：新公开资源先审核）
++	}
++	if req.DefaultVisibility != nil {
++		group.DefaultVisibility = *req.DefaultVisibility
++	}
++	if err := apigxmodel.CreateShareGroup(h.db, group); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": group.ID, "public_id": group.PublicID, "name": group.Name, "publish_status": group.PublishStatus})
++}
++
++func (h *handler) listShareGroups(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	groups, err := apigxmodel.ListShareGroups(h.db, owner, 100)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	items := make([]gin.H, 0, len(groups))
++	for _, g := range groups {
++		items = append(items, gin.H{
++			"id": g.ID, "public_id": g.PublicID, "name": g.Name,
++			"default_visibility": g.DefaultVisibility, "publish_status": g.PublishStatus,
++			"updated_at": g.UpdatedAt,
++		})
++	}
++	ok(c, gin.H{"items": items})
++}
++
++func (h *handler) getShareGroup(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	group, err := apigxmodel.GetShareGroup(h.db, owner, id)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{
++		"id": group.ID, "public_id": group.PublicID, "name": group.Name,
++		"description": group.Description, "default_visibility": group.DefaultVisibility,
++		"publish_status": group.PublishStatus, "created_at": group.CreatedAt, "updated_at": group.UpdatedAt,
++	})
++}
++
++func (h *handler) deleteShareGroup(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.DeleteShareGroup(h.db, owner, id); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"deleted": id})
++}
++
++// ---------------------------------------------------------------------------
++// 分享渠道
++// ---------------------------------------------------------------------------
++
++type createChannelRequest struct {
++	ShareGroupID  int64  `json:"share_group_id"`
++	BaseChannelID int64  `json:"base_channel_id"`
++	Name          string `json:"name"`
++	Protocol      string `json:"protocol"`
++	BaseURL       string `json:"base_url"`
++	KeyPoolMode   *int   `json:"key_pool_mode"`
++}
++
++func (h *handler) createChannel(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	var req createChannelRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	channel := &apigxmodel.Channel{
++		OwnerUserID:   owner,
++		ShareGroupID:  req.ShareGroupID,
++		Name:          strings.TrimSpace(req.Name),
++		Protocol:      req.Protocol,
++		BaseURL:       req.BaseURL,
++		BaseChannelID: req.BaseChannelID,
++		KeyPoolMode:   0, // 默认轮询（计划书 §3.5）
++		HealthState:   0,
++	}
++	if req.KeyPoolMode != nil {
++		channel.KeyPoolMode = *req.KeyPoolMode
++	}
++	if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name, "key_pool_mode": channel.KeyPoolMode})
++}
++
++func (h *handler) listChannels(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	groupID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	channels, err := apigxmodel.ListChannelsByGroup(h.db, owner, groupID, 100)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	items := make([]gin.H, 0, len(channels))
++	for _, ch := range channels {
++		items = append(items, gin.H{
++			"id": ch.ID, "public_id": ch.PublicID, "name": ch.Name, "protocol": ch.Protocol,
++			"key_pool_mode": ch.KeyPoolMode, "health_state": ch.HealthState, "base_url": ch.BaseURL,
++		})
++	}
++	ok(c, gin.H{"items": items})
++}
++
++func (h *handler) getChannel(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	ch, err := apigxmodel.GetChannel(h.db, owner, id)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	// 注意：不返回 BaseURL 之外的任何上游细节，也不返回凭据
++	ok(c, gin.H{
++		"id": ch.ID, "public_id": ch.PublicID, "name": ch.Name, "protocol": ch.Protocol,
++		"base_url": ch.BaseURL, "key_pool_mode": ch.KeyPoolMode,
++		"health_state": ch.HealthState, "health_reason": ch.HealthReason,
++	})
++}
++
++func (h *handler) deleteChannel(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.DeleteChannel(h.db, owner, id); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"deleted": id})
++}
++
++// ---------------------------------------------------------------------------
++// 上游 Key 池
++// ---------------------------------------------------------------------------
++
++type createUpstreamKeyRequest struct {
++	StableKeyID string `json:"stable_key_id"`
++	Name        string `json:"name"`
++	// Key 是**明文**，仅在此处出现；服务端立即加密，落库只存信封，响应不回显。
++	Key               string `json:"key"`
++	Weight            *int64 `json:"weight"`
++	ExpiresAt         *int64 `json:"expires_at"`
++	UpstreamAccountID *int64 `json:"upstream_account_id"`
++}
++
++func (h *handler) createUpstreamKey(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	channelID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req createUpstreamKeyRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	if strings.TrimSpace(req.Key) == "" {
++		fail(c, http.StatusBadRequest, "missing_key", "upstream key is required")
++		return
++	}
++
++	// 立即加密：明文不落库、不进日志、不回显。
++	envelope, err := secretbox.Encrypt(strings.TrimSpace(req.Key))
++	if err != nil {
++		// 主密钥未配置时失败关闭——绝不退化成明文存储
++		common.SysError("apigx api: refuse to store upstream key: " + err.Error())
++		fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
++			"credential store is not configured; refusing to store the key")
++		return
++	}
++
++	key := &apigxmodel.UpstreamKey{
++		ChannelID:   channelID,
++		StableKeyID: req.StableKeyID,
++		Name:        strings.TrimSpace(req.Name),
++		SecretRef:   envelope,
++		Status:      apigxmodel.UpstreamKeyStatusEnabled,
++	}
++	if req.Weight != nil {
++		key.Weight = *req.Weight
++	}
++	if req.ExpiresAt != nil {
++		key.ExpiresAt = *req.ExpiresAt
++	}
++	if req.UpstreamAccountID != nil {
++		key.UpstreamAccountID = *req.UpstreamAccountID
++	}
++	if err := apigxmodel.CreateUpstreamKey(h.db, owner, key); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++
++	// 响应只给脱敏提示：后 4 位，其余打码。
++	ok(c, gin.H{
++		"id": key.ID, "stable_key_id": key.StableKeyID, "name": key.Name,
++		"status": key.Status, "weight": key.Weight, "masked": maskTail(req.Key),
++	})
++}
++
++// maskTail 只保留末尾 4 位。用于给分享者确认「加的是哪一把」，不构成泄露。
++func maskTail(secret string) string {
++	s := strings.TrimSpace(secret)
++	if len(s) <= 4 {
++		return "****"
++	}
++	return "****" + s[len(s)-4:]
++}
++
++func (h *handler) listUpstreamKeys(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	channelID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	keys, err := apigxmodel.ListUpstreamKeysByChannel(h.db, owner, channelID)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	now := common.GetTimestamp()
++	items := make([]gin.H, 0, len(keys))
++	for _, k := range keys {
++		// 只输出脱敏与状态类信息：**绝不输出 SecretRef**（那是密文信封，也属于凭据材料）
++		items = append(items, gin.H{
++			"id": k.ID, "stable_key_id": k.StableKeyID, "name": k.Name,
++			"status": k.Status, "weight": k.Weight, "cooldown_until": k.CooldownUntil,
++			"expires_at": k.ExpiresAt, "credential_version": k.CredentialVersion,
++			"usable": apigxmodel.IsUpstreamKeyUsable(&k, now),
++			"masked": "****",
++		})
++	}
++	ok(c, gin.H{"items": items})
++}
++
++type updateStatusRequest struct {
++	Status *int `json:"status"`
++}
++
++func (h *handler) updateKeyStatus(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req updateStatusRequest
++	if err := c.ShouldBindJSON(&req); err != nil || req.Status == nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "status is required")
++		return
++	}
++	switch *req.Status {
++	case apigxmodel.UpstreamKeyStatusDisabled, apigxmodel.UpstreamKeyStatusEnabled, apigxmodel.UpstreamKeyStatusInvalid:
++	default:
++		fail(c, http.StatusBadRequest, "invalid_status", "unsupported status")
++		return
++	}
++	if err := apigxmodel.UpdateUpstreamKeyStatus(h.db, owner, id, *req.Status); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "status": *req.Status})
++}
++
++type updateCooldownRequest struct {
++	CooldownUntil *int64 `json:"cooldown_until"`
++}
++
++func (h *handler) updateKeyCooldown(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req updateCooldownRequest
++	if err := c.ShouldBindJSON(&req); err != nil || req.CooldownUntil == nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "cooldown_until is required")
++		return
++	}
++	if err := apigxmodel.SetUpstreamKeyCooldown(h.db, owner, id, *req.CooldownUntil); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "cooldown_until": *req.CooldownUntil})
++}
++
++func (h *handler) deleteUpstreamKey(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.DeleteUpstreamKey(h.db, owner, id); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"deleted": id})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+new file mode 100644
+index 0000000..6704296
+--- /dev/null
++++ b/apigx/api/share_test.go
+@@ -0,0 +1,332 @@
++package apigxapi
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/secretbox"
++	"github.com/gin-gonic/gin"
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// 分享者接口测试（SQLite + httptest，无需外部依赖）。
++//
++// 用 `X-Test-User` 头模拟底座的 UserAuth（它只负责把 owner 写进上下文 "id"），
++// 这样可以在同一个测试里切换身份，专门验证**归属隔离**。
++
++const (
++	testKeyHex  = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
++	plainSecret = "sk-upstream-PLAINTEXT-must-never-leak"
++)
++
++type testEnv struct {
++	db     *gorm.DB
++	engine *gin.Engine
++}
++
++func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++
++	dsn := filepath.Join(t.TempDir(), "apigx_api_test.db")
++	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, apigxmodel.Migrate(db))
++
++	// 主密钥
++	previous, had := os.LookupEnv(secretbox.KeyEnvVar)
++	if withMasterKey {
++		require.NoError(t, os.Setenv(secretbox.KeyEnvVar, testKeyHex))
++	} else {
++		require.NoError(t, os.Unsetenv(secretbox.KeyEnvVar))
++	}
++	secretbox.ResetKeyCacheForTest()
++	t.Cleanup(func() {
++		if had {
++			_ = os.Setenv(secretbox.KeyEnvVar, previous)
++		} else {
++			_ = os.Unsetenv(secretbox.KeyEnvVar)
++		}
++		secretbox.ResetKeyCacheForTest()
++	})
++
++	engine := gin.New()
++	api := engine.Group("/api")
++	api.Use(func(c *gin.Context) {
++		if raw := c.GetHeader("X-Test-User"); raw != "" {
++			if id, convErr := strconv.Atoi(raw); convErr == nil {
++				c.Set("id", id)
++			}
++		}
++	})
++	Register(api.Group(""), apigxmodel.DefaultDB())
++	return &testEnv{db: db, engine: engine}
++}
++
++func (e *testEnv) do(t *testing.T, method, path string, userID int64, body string) (*httptest.ResponseRecorder, map[string]any) {
++	t.Helper()
++	var reader *strings.Reader
++	if body == "" {
++		reader = strings.NewReader("")
++	} else {
++		reader = strings.NewReader(body)
++	}
++	req := httptest.NewRequest(method, path, reader)
++	if body != "" {
++		req.Header.Set("Content-Type", "application/json")
++	}
++	if userID > 0 {
++		req.Header.Set("X-Test-User", strconv.FormatInt(userID, 10))
++	}
++	rec := httptest.NewRecorder()
++	e.engine.ServeHTTP(rec, req)
++
++	var parsed map[string]any
++	if rec.Body.Len() > 0 {
++		_ = json.Unmarshal(rec.Body.Bytes(), &parsed)
++	}
++	return rec, parsed
++}
++
++func (e *testEnv) createGroup(t *testing.T, userID int64, name string) int64 {
++	t.Helper()
++	rec, body := e.do(t, http.MethodPost, "/api/share-groups", userID, `{"name":"`+name+`"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	id, ok := data["id"].(float64)
++	require.True(t, ok, "创建分组应返回 id：%s", rec.Body.String())
++	return int64(id)
++}
++
++func (e *testEnv) createChannel(t *testing.T, userID, groupID, baseChannelID int64) int64 {
++	t.Helper()
++	payload := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
++		`,"base_channel_id":` + strconv.FormatInt(baseChannelID, 10) +
++		`,"name":"主线路","protocol":"openai","base_url":"http://stub"}`
++	rec, body := e.do(t, http.MethodPost, "/api/channels", userID, payload)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	id, ok := data["id"].(float64)
++	require.True(t, ok)
++	return int64(id)
++}
++
++func TestShareGroupLifecycle(t *testing.T) {
++	env := newTestEnv(t, true)
++	const user int64 = 1001
++
++	id := env.createGroup(t, user, "小林公益站")
++
++	// 列表能看到
++	rec, body := env.do(t, http.MethodGet, "/api/share-groups", user, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ := body["data"].(map[string]any)
++	items, _ := data["items"].([]any)
++	require.Len(t, items, 1)
++
++	// 详情
++	rec, body = env.do(t, http.MethodGet, "/api/share-groups/"+strconv.FormatInt(id, 10), user, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	detail, _ := body["data"].(map[string]any)
++	assert.Equal(t, "小林公益站", detail["name"])
++	assert.Equal(t, float64(0), detail["publish_status"], "新建分组默认待审核")
++
++	// 删除后读不到
++	rec, _ = env.do(t, http.MethodDelete, "/api/share-groups/"+strconv.FormatInt(id, 10), user, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	rec, _ = env.do(t, http.MethodGet, "/api/share-groups/"+strconv.FormatInt(id, 10), user, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++}
++
++// 归属隔离：别人的资源一律 404（而不是 403）——403 会暴露「这个 ID 存在」。
++func TestOwnershipIsolationReturnsNotFound(t *testing.T) {
++	env := newTestEnv(t, true)
++	const ownerA, ownerB int64 = 2001, 2002
++
++	groupID := env.createGroup(t, ownerA, "A 的分组")
++	channelID := env.createChannel(t, ownerA, groupID, 50001)
++
++	for _, tc := range []struct {
++		name, method, path string
++	}{
++		{"读分组", http.MethodGet, "/api/share-groups/" + strconv.FormatInt(groupID, 10)},
++		{"删分组", http.MethodDelete, "/api/share-groups/" + strconv.FormatInt(groupID, 10)},
++		{"读分组下的渠道", http.MethodGet, "/api/share-groups/" + strconv.FormatInt(groupID, 10) + "/channels"},
++		{"读渠道", http.MethodGet, "/api/channels/" + strconv.FormatInt(channelID, 10)},
++		{"删渠道", http.MethodDelete, "/api/channels/" + strconv.FormatInt(channelID, 10)},
++		{"读渠道的 Key 池", http.MethodGet, "/api/channels/" + strconv.FormatInt(channelID, 10) + "/keys"},
++		{"加 Key", http.MethodPost, "/api/channels/" + strconv.FormatInt(channelID, 10) + "/keys"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			body := ""
++			if tc.method == http.MethodPost {
++				body = `{"stable_key_id":"x","key":"sk-x"}`
++			}
++			rec, _ := env.do(t, tc.method, tc.path, ownerB, body)
++			assert.Equal(t, http.StatusNotFound, rec.Code, "越权访问必须表现为 404：%s", rec.Body.String())
++		})
++	}
++
++	// B 自己的列表不含 A 的分组
++	rec, body := env.do(t, http.MethodGet, "/api/share-groups", ownerB, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ := body["data"].(map[string]any)
++	items, _ := data["items"].([]any)
++	assert.Empty(t, items)
++}
++
++// 未登录（上下文没有 owner）必须被拒：归属只能来自服务端。
++func TestRequiresAuthenticatedOwner(t *testing.T) {
++	env := newTestEnv(t, true)
++	rec, _ := env.do(t, http.MethodGet, "/api/share-groups", 0, "")
++	assert.Equal(t, http.StatusUnauthorized, rec.Code)
++	rec, _ = env.do(t, http.MethodPost, "/api/share-groups", 0, `{"name":"x"}`)
++	assert.Equal(t, http.StatusUnauthorized, rec.Code)
++}
++
++// 上游 Key：明文只在请求里出现一次，落库必须是密文信封，响应只给脱敏。
++func TestUpstreamKeyIsEncryptedAndNeverEchoed(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 3001
++	groupID := env.createGroup(t, owner, "分组")
++	channelID := env.createChannel(t, owner, groupID, 50002)
++
++	rec, body := env.do(t, http.MethodPost,
++		"/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
++		`{"stable_key_id":"stable-1","name":"主 Key","key":"`+plainSecret+`"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	// 响应：只给脱敏提示，不含明文
++	assert.NotContains(t, rec.Body.String(), plainSecret, "响应不得回显明文")
++	assert.NotContains(t, rec.Body.String(), "enc:v1:", "响应不得回显密文信封")
++	data, _ := body["data"].(map[string]any)
++	assert.Equal(t, "****"+plainSecret[len(plainSecret)-4:], data["masked"])
++
++	// 落库：secret_ref 必须是信封，且不含明文
++	var stored apigxmodel.UpstreamKey
++	require.NoError(t, env.db.Where("channel_id = ?", channelID).First(&stored).Error)
++	assert.True(t, secretbox.IsEnvelope(stored.SecretRef), "落库必须是加密信封：%s", stored.SecretRef)
++	assert.NotContains(t, stored.SecretRef, plainSecret)
++
++	// 而且能解回原文（证明不是「存了个没用的东西」）
++	plain, err := secretbox.Decrypt(stored.SecretRef)
++	require.NoError(t, err)
++	assert.Equal(t, plainSecret, plain)
++
++	// 列表接口同样不得输出信封或明文
++	rec, _ = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	assert.NotContains(t, rec.Body.String(), plainSecret)
++	assert.NotContains(t, rec.Body.String(), "enc:v1:")
++	assert.Contains(t, rec.Body.String(), "stable-1")
++}
++
++// 主密钥未配置时**必须拒绝创建**，不能退化成明文存储。
++func TestUpstreamKeyCreationFailsClosedWithoutMasterKey(t *testing.T) {
++	env := newTestEnv(t, false)
++	const owner int64 = 4001
++	groupID := env.createGroup(t, owner, "分组")
++	channelID := env.createChannel(t, owner, groupID, 50003)
++
++	rec, _ := env.do(t, http.MethodPost,
++		"/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
++		`{"stable_key_id":"stable-1","key":"sk-must-not-be-stored"}`)
++	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "缺主密钥必须失败关闭")
++
++	// 库里不能有任何 Key 行
++	var count int64
++	require.NoError(t, env.db.Model(&apigxmodel.UpstreamKey{}).Count(&count).Error)
++	assert.Zero(t, count, "失败时不得写入任何凭据")
++}
++
++func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
++	env := newTestEnv(t, true)
++	const ownerA, ownerB int64 = 5001, 5002
++	groupA := env.createGroup(t, ownerA, "A 的分组")
++
++	// 缺 base_channel_id → 400（该列有唯一索引，未绑定会互相冲突）
++	rec, _ := env.do(t, http.MethodPost, "/api/channels", ownerA,
++		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"未绑定"}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	assert.Contains(t, rec.Body.String(), "base_channel_id")
++
++	// 用别人的分组 → 404
++	rec, _ = env.do(t, http.MethodPost, "/api/channels", ownerB,
++		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"base_channel_id":60001,"name":"偷渡"}`)
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++}
++
++func TestUpstreamKeyStatusAndValidation(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 6001
++	groupID := env.createGroup(t, owner, "分组")
++	channelID := env.createChannel(t, owner, groupID, 50004)
++
++	// 缺 key → 400
++	rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
++		`{"stable_key_id":"s1"}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++
++	// 正常创建
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
++		`{"stable_key_id":"s1","name":"k1","key":"sk-abcdefgh"}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ := body["data"].(map[string]any)
++	keyID := int64(data["id"].(float64))
++
++	// 非法状态 → 400；缺字段 → 400
++	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/status", owner, `{"status":99}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/status", owner, `{}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++
++	// 合法状态切换 → 200，且列表里的 usable 随之改变
++	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/status", owner, `{"status":0}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	rec, _ = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	assert.Contains(t, rec.Body.String(), `"usable":false`)
++
++	// 冷却：设置未来时间 → usable=false；过去时间 → usable=true
++	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/cooldown", owner, `{"cooldown_until":99999999999}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/status", owner, `{"status":1}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	rec, _ = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner, "")
++	assert.Contains(t, rec.Body.String(), `"usable":false`, "冷却期内不可用")
++
++	// 非法 id → 400
++	rec, _ = env.do(t, http.MethodDelete, "/api/keys/abc", owner, "")
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++}
++
++func TestDeleteUpstreamKeyTwice(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 7001
++	groupID := env.createGroup(t, owner, "分组")
++	channelID := env.createChannel(t, owner, groupID, 50005)
++
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
++		`{"stable_key_id":"s1","key":"sk-abcdefgh"}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	keyID := int64(body["data"].(map[string]any)["id"].(float64))
++
++	rec, _ = env.do(t, http.MethodDelete, "/api/keys/"+strconv.FormatInt(keyID, 10), owner, "")
++	assert.Equal(t, http.StatusOK, rec.Code)
++	// 第二次删除：墓碑已存在 → 404（而不是静默成功）
++	rec, _ = env.do(t, http.MethodDelete, "/api/keys/"+strconv.FormatInt(keyID, 10), owner, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++}
+diff --git a/apigx/model/migrate.go b/apigx/model/migrate.go
+index f87cb48..0d84388 100644
+--- a/apigx/model/migrate.go
++++ b/apigx/model/migrate.go
+@@ -2,6 +2,16 @@ package apigxmodel
+ 
+ import "gorm.io/gorm"
+ 
++// defaultDB 是迁移成功后捕获的数据库句柄。
++//
++// 与底座 `model.DB` 同样的做法：进程内只有一个主库句柄，由启动路径注入一次。
++// 这样 APIGX 的接口层不需要再往上游 router/ 里加 `model` 包的 import，
++// 上游接线只剩下「挂一组路由」这几行。
++var defaultDB *gorm.DB
++
++// DefaultDB 返回迁移时捕获的主库句柄；可能为 nil（尚未迁移），调用方必须判空。
++func DefaultDB() *gorm.DB { return defaultDB }
++
+ // Migrate 创建或升级 APIGX 的全部领域表。
+ //
+ // 与底座 AutoMigrate 的关系（依据 `docs/stage0/schema-draft.md` §2.3）：
+@@ -17,7 +27,12 @@ func Migrate(db *gorm.DB) error {
+ 	if db == nil {
+ 		return gorm.ErrInvalidDB
+ 	}
+-	return db.AutoMigrate(AllModels()...)
++	if err := db.AutoMigrate(AllModels()...); err != nil {
++		return err
++	}
++	// 迁移成功后才捕获句柄：确保接口层拿到的一定是可用的库
++	defaultDB = db
++	return nil
+ }
+ 
+ // AllModels 返回全部 APIGX 领域表模型。
+diff --git a/apigx/model/repo_share.go b/apigx/model/repo_share.go
+index 1c597a0..6fa3fd1 100644
+--- a/apigx/model/repo_share.go
++++ b/apigx/model/repo_share.go
+@@ -3,6 +3,7 @@ package apigxmodel
+ import (
+ 	"errors"
+ 	"fmt"
++	"time"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+ 	"gorm.io/gorm"
+@@ -41,6 +42,11 @@ func touchTimestamps(created bool, createdAt, updatedAt *int64) {
+ //
+ // 必须是一条语句：`WHERE id = ? AND owner_user_id = ? AND alive_flag = 0` 保证
+ // 重复删除不会改变墓碑值（第二次 RowsAffected = 0 → ErrNotFound）。
++//
++// **注意 `deleted_at` 的类型**：表里其它 `*_at` 列都是 `int64`（UTC epoch 秒），
++// 但 `deleted_at` 是 `gorm.DeletedAt` → PostgreSQL 的 `timestamptz`、MySQL 的 `datetime`。
++// 往它写整数会在 PG 上直接报 `SQLSTATE 22008 日期/时间值超出范围`，
++// 而 SQLite 因为类型宽松会静默接受——**只有真实 PG 才能暴露**（首次端到端验收即被它拦下）。
+ func softDeleteByOwner(db *gorm.DB, model any, ownerUserID, id int64) error {
+ 	if ownerUserID <= 0 || id <= 0 {
+ 		return fmt.Errorf("%w: owner and id are required", ErrInvalidArgument)
+@@ -48,7 +54,11 @@ func softDeleteByOwner(db *gorm.DB, model any, ownerUserID, id int64) error {
+ 	now := common.GetTimestamp()
+ 	res := db.Model(model).
+ 		Where("id = ? AND owner_user_id = ? AND alive_flag = ?", id, ownerUserID, AliveFlagAlive).
+-		Updates(map[string]any{"deleted_at": now, "alive_flag": id, "updated_at": now})
++		Updates(map[string]any{
++			"deleted_at": softDeletedAt(now),
++			"alive_flag": id,
++			"updated_at": now,
++		})
+ 	if res.Error != nil {
+ 		return res.Error
+ 	}
+@@ -58,6 +68,11 @@ func softDeleteByOwner(db *gorm.DB, model any, ownerUserID, id int64) error {
+ 	return nil
+ }
+ 
++// softDeletedAt 把 epoch 秒转成 gorm.DeletedAt 能写入的**时间值**。
++func softDeletedAt(epochSeconds int64) gorm.DeletedAt {
++	return gorm.DeletedAt{Time: time.Unix(epochSeconds, 0).UTC(), Valid: true}
++}
++
+ // ---------------------------------------------------------------------------
+ // ShareGroup
+ // ---------------------------------------------------------------------------
+@@ -135,6 +150,12 @@ func CreateChannel(db *gorm.DB, channel *Channel) error {
+ 	if channel.BaseChannelID <= 0 {
+ 		return fmt.Errorf("%w: base_channel_id is required（每个分享渠道必须绑定一条底座渠道；该列有唯一索引，0 会互相冲突）", ErrInvalidArgument)
+ 	}
++	// **必须校验分组归属**：ShareGroupID 来自请求体，若不校验，
++	// 只要知道别人的分组 ID 就能把自己的渠道挂进去（接口层测试发现的越权）。
++	// 先验归属再看其它字段，避免通过错误信息差异探测他人分组是否存在。
++	if _, err := GetShareGroup(db, channel.OwnerUserID, channel.ShareGroupID); err != nil {
++		return err
++	}
+ 	if channel.PublicID == "" {
+ 		channel.PublicID = newPublicID()
+ 	}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 3389b1d..a2309d9 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -166,6 +166,20 @@ func TestAvailableUpstreamKeysFiltersThreeConditions(t *testing.T) {
+ }
+ 
+ // 一个底座渠道只能被一个分享渠道引用（BaseChannelID 唯一）。
++// 渠道必须挂在**自己的**分组下：ShareGroupID 来自请求体，不校验就等于让任何人
++// 只要知道别人的分组 ID 就能挂进去。这是接口层测试发现越权后补的仓储层守门。
++func TestCreateChannelRequiresOwnedShareGroup(t *testing.T) {
++	db := newRepoDB(t)
++	const ownerA, ownerB int64 = 8001, 8002
++	groupA, _ := seedGroupAndChannel(t, db, ownerA)
++
++	intruder := &Channel{OwnerUserID: ownerB, ShareGroupID: groupA.ID, Name: "偷渡渠道", BaseChannelID: nextBaseChannelID()}
++	assert.ErrorIs(t, CreateChannel(db, intruder), ErrNotFound, "不得把自己的渠道挂到别人的分组下")
++
++	// 不存在的分组同样被拒（与「不属于自己」不可区分）
++	orphan := &Channel{OwnerUserID: ownerB, ShareGroupID: 999999, Name: "孤儿渠道", BaseChannelID: nextBaseChannelID()}
++	assert.ErrorIs(t, CreateChannel(db, orphan), ErrNotFound)
++}
+ func TestChannelBaseIDIsUnique(t *testing.T) {
+ 	db := newRepoDB(t)
+ 	const owner int64 = 5001
+diff --git a/apigx/model/repo_upstream.go b/apigx/model/repo_upstream.go
+index 73b1e81..af64c58 100644
+--- a/apigx/model/repo_upstream.go
++++ b/apigx/model/repo_upstream.go
+@@ -209,7 +209,7 @@ func DeleteUpstreamKey(db *gorm.DB, ownerUserID, keyID int64) error {
+ 	now := common.GetTimestamp()
+ 	res := db.Model(&UpstreamKey{}).
+ 		Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
+-		Updates(map[string]any{"deleted_at": now, "alive_flag": key.ID, "updated_at": now})
++		Updates(map[string]any{"deleted_at": softDeletedAt(now), "alive_flag": key.ID, "updated_at": now})
+ 	if res.Error != nil {
+ 		return res.Error
+ 	}
+diff --git a/apigx/route/route.go b/apigx/route/route.go
+new file mode 100644
+index 0000000..32a6dc0
+--- /dev/null
++++ b/apigx/route/route.go
+@@ -0,0 +1,22 @@
++// Package apigxroute 是 APIGX 接口的路由注册入口。
++//
++// 上游 `router/` 里只需要一处几行的接线；所有具体路由都集中在这里，
++// 便于「以新增文件为主、少改上游」的维护策略（docs/architecture/baseline.md §3 E1）。
++package apigxroute
++
++import (
++	apigxapi "github.com/QuantumNous/new-api/apigx/api"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/gin-gonic/gin"
++)
++
++// BasePath 是 APIGX 接口的挂载前缀（最终路径形如 /api/apigx/share-groups）。
++const BasePath = "/apigx"
++
++// Register 把 APIGX 的分享者接口挂到传入的路由组上。
++//
++// 调用方负责挂认证中间件（UserAuth）；本函数只负责路由与处理器。
++// 数据库句柄由 `apigxmodel.Migrate` 在启动时捕获（见其注释），因此这里不需要额外参数。
++func Register(apiRouter *gin.RouterGroup) {
++	apigxapi.Register(apiRouter.Group(BasePath), apigxmodel.DefaultDB())
++}
+diff --git a/apigx/secretbox/secretbox.go b/apigx/secretbox/secretbox.go
+new file mode 100644
+index 0000000..8fa8063
+--- /dev/null
++++ b/apigx/secretbox/secretbox.go
+@@ -0,0 +1,158 @@
++// Package secretbox 提供「上游凭据的静态加密封装」。
++//
++// 计划书 §10.3 对两类凭据的要求不同，必须分清：
++//   - **平台 API Key**（使用者凭证）：按用户决定跟随底座现状（`tokens.key` 明文 + 等值查找），
++//     见 docs/architecture/tech-debt.md 的 TD-07；本包不涉及。
++//   - **上游 Key**（分享者的供应商凭据）：平台**必须**加密存储，主密钥与数据库分离，
++//     界面不回显完整凭据，日志/错误/监控都不得携带。
++//
++// 设计要点：
++//   - AES-256-GCM：同时保证机密性与完整性（密文被篡改会解密失败，而不是返回垃圾明文）。
++//   - 信封格式 `enc:v1:<base64(nonce)>:<base64(ciphertext)>`：带版本号，便于将来换算法而不破坏旧数据。
++//   - 主密钥来自环境变量 `APIGX_SECRET_KEY`（64 位十六进制 = 32 字节），**不入库**。
++//   - 缺少或非法的主密钥时**失败关闭**：拒绝写入，绝不退化成明文存储。
++package secretbox
++
++import (
++	"crypto/aes"
++	"crypto/cipher"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"os"
++	"strings"
++	"sync"
++)
++
++const (
++	// EnvelopePrefix 是信封前缀，形如 `enc:v1:...`。
++	EnvelopePrefix = "enc:v1:"
++	// KeyEnvVar 是主密钥的环境变量名。
++	KeyEnvVar = "APIGX_SECRET_KEY"
++	// KeyBytes 是 AES-256 要求的密钥长度。
++	KeyBytes = 32
++)
++
++var (
++	// ErrKeyNotConfigured 表示主密钥未配置——写入凭据必须失败，不能退化为明文。
++	ErrKeyNotConfigured = errors.New("secretbox: master key not configured (set " + KeyEnvVar + ")")
++	// ErrInvalidEnvelope 表示信封格式非法或版本不受支持。
++	ErrInvalidEnvelope = errors.New("secretbox: invalid envelope")
++	// ErrDecrypt 表示解密失败（密钥不对或密文被篡改）。
++	ErrDecrypt = errors.New("secretbox: decryption failed")
++)
++
++var (
++	keyOnce sync.Once
++	keyVal  []byte
++	keyErr  error
++)
++
++// loadKey 从环境变量读取主密钥（进程内只读一次）。
++func loadKey() ([]byte, error) {
++	keyOnce.Do(func() {
++		raw := strings.TrimSpace(os.Getenv(KeyEnvVar))
++		if raw == "" {
++			keyErr = ErrKeyNotConfigured
++			return
++		}
++		decoded, err := hex.DecodeString(raw)
++		if err != nil {
++			keyErr = fmt.Errorf("secretbox: %s must be hex-encoded: %w", KeyEnvVar, err)
++			return
++		}
++		if len(decoded) != KeyBytes {
++			keyErr = fmt.Errorf("secretbox: %s must decode to %d bytes (got %d)", KeyEnvVar, KeyBytes, len(decoded))
++			return
++		}
++		keyVal = decoded
++	})
++	return keyVal, keyErr
++}
++
++// ResetKeyCacheForTest 清空密钥缓存，供测试切换主密钥使用。**不得在请求路径上调用。**
++func ResetKeyCacheForTest() {
++	keyOnce = sync.Once{}
++	keyVal = nil
++	keyErr = nil
++}
++
++func newGCM(key []byte) (cipher.AEAD, error) {
++	block, err := aes.NewCipher(key)
++	if err != nil {
++		return nil, err
++	}
++	return cipher.NewGCM(block)
++}
++
++// Encrypt 把明文封装成信封字符串。
++//
++// 返回值形如 `enc:v1:<nonce-b64>:<ciphertext-b64>`，可直接存进 `secret_ref`。
++// 主密钥缺失时返回 ErrKeyNotConfigured（**失败关闭**）。
++func Encrypt(plaintext string) (string, error) {
++	if plaintext == "" {
++		return "", fmt.Errorf("%w: refusing to encrypt empty secret", ErrInvalidEnvelope)
++	}
++	key, err := loadKey()
++	if err != nil {
++		return "", err
++	}
++	gcm, err := newGCM(key)
++	if err != nil {
++		return "", err
++	}
++	nonce := make([]byte, gcm.NonceSize())
++	if _, err := rand.Read(nonce); err != nil {
++		return "", fmt.Errorf("secretbox: nonce: %w", err)
++	}
++	sealed := gcm.Seal(nil, nonce, []byte(plaintext), nil)
++	return EnvelopePrefix +
++		base64.RawURLEncoding.EncodeToString(nonce) + ":" +
++		base64.RawURLEncoding.EncodeToString(sealed), nil
++}
++
++// Decrypt 解出信封里的明文。密钥不对或密文被改动都会返回 ErrDecrypt。
++func Decrypt(envelope string) (string, error) {
++	if !strings.HasPrefix(envelope, EnvelopePrefix) {
++		return "", ErrInvalidEnvelope
++	}
++	parts := strings.Split(strings.TrimPrefix(envelope, EnvelopePrefix), ":")
++	if len(parts) != 2 {
++		return "", ErrInvalidEnvelope
++	}
++	nonce, err := base64.RawURLEncoding.DecodeString(parts[0])
++	if err != nil {
++		return "", ErrInvalidEnvelope
++	}
++	sealed, err := base64.RawURLEncoding.DecodeString(parts[1])
++	if err != nil {
++		return "", ErrInvalidEnvelope
++	}
++	key, err := loadKey()
++	if err != nil {
++		return "", err
++	}
++	gcm, err := newGCM(key)
++	if err != nil {
++		return "", err
++	}
++	if len(nonce) != gcm.NonceSize() {
++		return "", ErrInvalidEnvelope
++	}
++	plain, err := gcm.Open(nil, nonce, sealed, nil)
++	if err != nil {
++		return "", ErrDecrypt
++	}
++	return string(plain), nil
++}
++
++// IsEnvelope 报告某个引用是否为本包生成的信封（用于区分「已加密」与「外部引用」）。
++func IsEnvelope(ref string) bool { return strings.HasPrefix(ref, EnvelopePrefix) }
++
++// IsConfigured 报告主密钥是否可用（供启动自检使用）。
++func IsConfigured() bool {
++	_, err := loadKey()
++	return err == nil
++}
+diff --git a/apigx/secretbox/secretbox_test.go b/apigx/secretbox/secretbox_test.go
+new file mode 100644
+index 0000000..c515a1a
+--- /dev/null
++++ b/apigx/secretbox/secretbox_test.go
+@@ -0,0 +1,167 @@
++package secretbox
++
++import (
++	"encoding/base64"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++const testKeyHex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
++
++func withKey(t *testing.T, hexKey string) {
++	t.Helper()
++	previous, had := os.LookupEnv(KeyEnvVar)
++	require.NoError(t, os.Setenv(KeyEnvVar, hexKey))
++	ResetKeyCacheForTest()
++	t.Cleanup(func() {
++		if had {
++			_ = os.Setenv(KeyEnvVar, previous)
++		} else {
++			_ = os.Unsetenv(KeyEnvVar)
++		}
++		ResetKeyCacheForTest()
++	})
++}
++
++func TestEncryptDecryptRoundTrip(t *testing.T) {
++	withKey(t, testKeyHex)
++
++	plaintext := "sk-upstream-SECRET-abcdefghijklmnop"
++	envelope, err := Encrypt(plaintext)
++	require.NoError(t, err)
++
++	assert.True(t, strings.HasPrefix(envelope, EnvelopePrefix))
++	assert.True(t, IsEnvelope(envelope))
++
++	// 密文里绝不能出现明文片段：这是「不落明文」的最直接证据
++	assert.NotContains(t, envelope, plaintext)
++	assert.NotContains(t, envelope, "SECRET")
++
++	got, err := Decrypt(envelope)
++	require.NoError(t, err)
++	assert.Equal(t, plaintext, got)
++}
++
++// 同一个明文两次加密必须得到**不同的**信封（随机 nonce）：否则密文可被用来判断「两个分享者是否用了同一把 Key」。
++func TestEncryptIsNonDeterministic(t *testing.T) {
++	withKey(t, testKeyHex)
++
++	a, err := Encrypt("same-secret")
++	require.NoError(t, err)
++	b, err := Encrypt("same-secret")
++	require.NoError(t, err)
++
++	assert.NotEqual(t, a, b, "相同明文不得产生相同密文")
++	assert.Len(t, strings.Split(strings.TrimPrefix(a, EnvelopePrefix), ":"), 2)
++
++	gotA, errA := Decrypt(a)
++	gotB, errB := Decrypt(b)
++	require.NoError(t, errA)
++	require.NoError(t, errB)
++	assert.Equal(t, gotA, gotB)
++}
++
++// GCM 保证完整性：密文被改动必须解密失败，而不是返回垃圾明文。
++//
++// 篡改方式必须**确定性地改变解码后的字节**：早先的写法是替换 base64 的最后一个字符，
++// 但 last-char 的部分比特在 RawURL 编码里可能被忽略，于是「篡改」有时根本没发生，
++// 测试变成偶发通过/失败。改成翻转解码后的第一个字节，再重新编码。
++func TestDecryptRejectsTamperedCiphertext(t *testing.T) {
++	withKey(t, testKeyHex)
++
++	envelope, err := Encrypt("sk-tamper-me")
++	require.NoError(t, err)
++
++	parts := strings.Split(strings.TrimPrefix(envelope, EnvelopePrefix), ":")
++	require.Len(t, parts, 2)
++
++	sealed, err := base64.RawURLEncoding.DecodeString(parts[1])
++	require.NoError(t, err)
++	require.NotEmpty(t, sealed)
++
++	sealed[0] ^= 0xFF // 确定性翻转一个字节
++	tampered := EnvelopePrefix + parts[0] + ":" + base64.RawURLEncoding.EncodeToString(sealed)
++
++	_, err = Decrypt(tampered)
++	assert.ErrorIs(t, err, ErrDecrypt, "密文被改动必须完整性校验失败")
++
++	// 篡改 nonce 同样必须失败
++	nonce, err := base64.RawURLEncoding.DecodeString(parts[0])
++	require.NoError(t, err)
++	nonce[0] ^= 0xFF
++	tamperedNonce := EnvelopePrefix + base64.RawURLEncoding.EncodeToString(nonce) + ":" + parts[1]
++	_, err = Decrypt(tamperedNonce)
++	assert.ErrorIs(t, err, ErrDecrypt, "nonce 被改动必须失败")
++
++	// 原信封仍然可解（证明上面两步确实只动了副本）
++	plain, err := Decrypt(envelope)
++	require.NoError(t, err)
++	assert.Equal(t, "sk-tamper-me", plain)
++}
++
++// 换一把主密钥后旧密文不可解——这正是「主密钥与数据库分离」的意义所在。
++func TestDecryptFailsWithWrongKey(t *testing.T) {
++	withKey(t, testKeyHex)
++	envelope, err := Encrypt("sk-under-key-1")
++	require.NoError(t, err)
++
++	otherKey := strings.Repeat("ab", KeyBytes)
++	withKey(t, otherKey)
++	_, err = Decrypt(envelope)
++	assert.ErrorIs(t, err, ErrDecrypt)
++}
++
++// 主密钥未配置时必须**失败关闭**：拒绝加密，而不是退化成明文存储。
++func TestEncryptFailsClosedWithoutKey(t *testing.T) {
++	withKey(t, "")
++
++	assert.False(t, IsConfigured())
++
++	_, err := Encrypt("sk-must-not-be-plaintext")
++	assert.ErrorIs(t, err, ErrKeyNotConfigured, "缺主密钥时必须拒绝写入，不能明文落库")
++
++	_, err = Decrypt(EnvelopePrefix + "AAAA:BBBB")
++	assert.ErrorIs(t, err, ErrKeyNotConfigured)
++}
++
++func TestKeyValidation(t *testing.T) {
++	for _, tt := range []struct {
++		name string
++		key  string
++	}{
++		{"非十六进制", "not-hex-at-all"},
++		{"长度不足", "00112233"},
++		{"长度过长", testKeyHex + "aa"},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			withKey(t, tt.key)
++			assert.False(t, IsConfigured())
++			_, err := Encrypt("x")
++			require.Error(t, err)
++			assert.NotErrorIs(t, err, ErrDecrypt)
++		})
++	}
++}
++
++func TestEnvelopeFormatValidation(t *testing.T) {
++	withKey(t, testKeyHex)
++
++	for _, bad := range []string{
++		"",
++		"sk-plaintext-not-an-envelope",
++		"enc:v2:AAAA:BBBB",     // 版本不受支持
++		"enc:v1:only-one-part", // 缺少密文段
++		"enc:v1:AAAA:BBBB:CC",  // 段数过多
++		"enc:v1:!!!:###",       // base64 非法
++	} {
++		_, err := Decrypt(bad)
++		assert.ErrorIs(t, err, ErrInvalidEnvelope, "输入：%q", bad)
++	}
++
++	_, err := Encrypt("")
++	assert.ErrorIs(t, err, ErrInvalidEnvelope, "空明文应被拒绝")
++}
+diff --git a/router/api-router.go b/router/api-router.go
+index b6b80fd..dded93a 100644
+--- a/router/api-router.go
++++ b/router/api-router.go
+@@ -1,6 +1,7 @@
+ package router
+ 
+ import (
++	apigxroute "github.com/QuantumNous/new-api/apigx/route"
+ 	"github.com/QuantumNous/new-api/controller"
+ 	"github.com/QuantumNous/new-api/middleware"
+ 	"github.com/QuantumNous/new-api/service/authz"
+@@ -70,6 +71,13 @@ func SetApiRouter(router *gin.Engine) {
+ 		apiRouter.GET("/verify/methods", middleware.UserAuth(), middleware.DisableCache(), controller.GetVerificationMethods)
+ 		apiRouter.POST("/verify", middleware.UserAuth(), middleware.CriticalRateLimit(), middleware.UserCriticalRateLimit("security-verification"), middleware.DisableCache(), controller.UniversalVerify)
+ 
++		// APIGX 分享者接口：独立路由组，只依赖 UserAuth。
++		// 不复用 /channel 那组管理员接口（渠道是全局资源，且那组挂在 AdminAuth 下）。
++		// 具体路由集中在 apigx/route，上游这里只保留这几行接线。
++		apigxRoute := apiRouter.Group("")
++		apigxRoute.Use(middleware.UserAuth())
++		apigxroute.Register(apigxRoute)
++
+ 		userRoute := apiRouter.Group("/user")
+ 		{
+ 			userRoute.POST("/auth/refresh", middleware.SessionCookieOriginGuard(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.RefreshAuth)
+-- 
+2.53.0.windows.1
+
