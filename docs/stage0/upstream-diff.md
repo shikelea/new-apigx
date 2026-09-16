@@ -25,7 +25,9 @@
 | D-001-注 | 同上 | — | 仅影响**启用了 token 模型限制**的令牌（`token_model_limit_enabled=true`）；未启用限制的令牌行为完全不变 | 影响面收敛，便于回归 | — | 2026-09-16 | — |
 | D-002 | `new-api/middleware/task_plugin_origin_task_test.go` | 追加 | 追加 2 个回归测试：`TestDistributePinnedRequestStillEnforcesTokenModelLimit`（反例：pin 下未授权模型必须 403）与 `TestDistributePinnedRequestAllowsAuthorizedModel`（正例：pin 下已授权模型仍放行） | D-001 的回归保护；底座 AGENTS.md 要求「扩展既有测试文件，不为小改动散落测试」 | 低：仅追加测试函数，不改上游既有用例 | 2026-09-16 | 已实施 |
 | D-003 | `new-api/model/main.go` | 接线 | 在 `migrateDB()` 末尾（底座所有迁移完成之后）加 5 行：调用 `apigxmodel.Migrate(DB)`，失败即返回错误。另加 1 行 import | T1.3：让 APIGX 的 27 张领域表随底座启动创建；只增不改、幂等，不触碰底座表 | 低（新增调用点，不改既有迁移顺序）；升级时需核对 `migrateDB()` 末尾是否仍是合适的挂载点 | 2026-09-16 | 已实施 |
-| D-004 | `new-api/apigx/**`（新增目录，不入上游） | 新增 | 27 张领域表的 GORM 模型 + 迁移入口 + 两个测试文件 | T1.3；架构基线 §2 的「新增代码集中在 `apigx/`」 | 无（上游不存在同名路径） | 2026-09-16 | 已实施 |
+| D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
+| D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
+| D-007 | `new-api/service/apigx_usage_only.go`、`apigx_usage_only_test.go` | 新增（同包） | 模式开关（`APIGX_USAGE_ONLY`）、`UsageOnlyFunding`、`newUsageOnlySession` 及其单测 | T1.6 | 低（新文件；与底座 `funding_source.go` 同包，便于实现 FundingSource 接口而不产生循环依赖） | 2026-09-16 | 已实施 |
 | — | 补丁导出 | — | `deploy/patches/0001-*.patch`（D-001/D-002）、`0002-*.patch`（D-003/D-004）；fork 分支 `apigx`，HEAD `c96af9d` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-16 | 已导出 |
 
 ## 二、新增文件（不修改上游）

@@ -41,7 +41,15 @@
   - 记录：`docs/stage1/schema-impl-notes.md`（验证结果、DDL 事实、MySQL 章节、7 条实现期决策、未验证项、环境怪癖）
 - [ ] T1.4 分享者接口（分组 / 渠道 / Key 池 CRUD，受 owner 约束）
 - [ ] T1.5 多 Key 导入与池策略（稳定凭据 ID、逐 Key 状态与统计）
-- [ ] T1.6 免费计量 `usage_only`（新资金来源替换钱包前置；不得走 FreeModel 短路）
+- [x] T1.6 免费计量 `usage_only`（落点在计费会话的**资金来源**维度）
+  - [x] 实现：`service/apigx_usage_only.go`（模式开关 + `UsageOnlyFunding` + `newUsageOnlySession`）、`service/billing.go`（常量）、`service/billing_session.go`（NewBillingSession 分支 + reserveFunding 接住新资金来源）；台账 D-005/D-006/D-007
+  - [x] 单测 4/4：资金源三方法必须空操作、模式开关默认关闭、`reserveFunding` 必须接住新来源、**未知来源仍须报错**（反向保护）
+  - [x] **运行时 A/B 验收**（`tools/stage1-verify/usage-only.mjs`，同一底座只差一个环境变量）：
+    阶段 A 默认 → 零余额 **403**、0 次出站、令牌闸门 401（3/3 通过，**默认行为零回归**）；
+    阶段 B 开启 → 零余额 **200 且 1 次到达上游**、**钱包仍为 0（只记账）**、令牌额度 0 时**仍 401 且 0 次出站**、**成本仍记账**（used_quota 1725→3450）（5/5 通过）
+  - [x] 明确未采用四条错误路径：不走 `FreeModel` 短路、不把价格/倍率设 0、不给超大余额、不另起计量
+  - [x] 回归检查发现基线事实：`service` 包有 2 个**上游既存失败**（channel affinity 用例），已用原始提交的独立工作树对照确认与本次改动无关 → 验收标准应表述为「不新增失败」
+  - 记录：`docs/stage1/usage-only-notes.md`
 - [ ] T1.7 共享容量控制（并发 / RPM / TPM / 预算预留与对账；不得依赖 `effectiveQuota`）
 - [ ] T1.8 模型获取与供给发布（一键获取 + 手工添加 + 待发布流程）
 - [ ] T1.9 广场与详情（只启用已完成能力）

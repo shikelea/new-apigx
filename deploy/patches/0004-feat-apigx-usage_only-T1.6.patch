@@ -1,0 +1,225 @@
+From 70c2bfed6f759569eeaec9e62fa6cc2b49c98915 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Wed, 16 Sep 2026 20:38:29 +0800
+Subject: [PATCH 4/4] =?UTF-8?q?feat(apigx):=20=E5=85=8D=E8=B4=B9=E5=85=B1?=
+ =?UTF-8?q?=E4=BA=AB=E6=A8=A1=E5=BC=8F=20usage=5Fonly=EF=BC=88T1.6?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- service/apigx_usage_only.go: 模式开关(APIGX_USAGE_ONLY) + UsageOnlyFunding + newUsageOnlySession
+- service/billing.go: 新增 BillingSourceUsageOnly 常量
+- service/billing_session.go: NewBillingSession 前置分支跳过余额前置; reserveFunding 接住新资金来源
+- service/apigx_usage_only_test.go: 4 个单测(含反向保护: 未知资金来源仍须报错)
+
+验证: 单测 4/4; 运行时 A/B —— 默认模式零余额 403(零回归), 开启后 200 且到达上游,
+钱包仍为 0(只记账), 令牌额度闸门仍生效(401 且 0 次出站), 成本仍记账(used_quota +1725)。
+---
+ service/apigx_usage_only.go      | 80 ++++++++++++++++++++++++++++++++
+ service/apigx_usage_only_test.go | 61 ++++++++++++++++++++++++
+ service/billing.go               |  3 ++
+ service/billing_session.go       | 11 +++++
+ 4 files changed, 155 insertions(+)
+ create mode 100644 service/apigx_usage_only.go
+ create mode 100644 service/apigx_usage_only_test.go
+
+diff --git a/service/apigx_usage_only.go b/service/apigx_usage_only.go
+new file mode 100644
+index 0000000..172b660
+--- /dev/null
++++ b/service/apigx_usage_only.go
+@@ -0,0 +1,80 @@
++package service
++
++import (
++	"fmt"
++	"sync/atomic"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/logger"
++	"github.com/QuantumNous/new-api/model"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/gin-gonic/gin"
++)
++
++// APIGX 免费共享模式（usage_only）
++//
++// 计划书 §6 与 §11 阶段 1 要求：免费共享模式下**保持鉴权、额度与计量**，
++// 但取消「用户充值余额」作为调用前置条件。本文件的实现方式是**替换资金来源**，
++// 而不是改价格、也不是伪造余额：
++//
++//	✅ 新增 UsageOnlyFunding：只记账、不动钱包与订阅
++//	✅ 跳过 NewBillingSession 中 tryWallet 的余额前置检查
++//	❌ 不走 FreeModel 短路（relay/request_billing.go 会直接 return nil，
++//	   既不建计费会话也不结算，计量与预算预留都会丢失）
++//	❌ 不把模型价格或倍率设为 0
++//	❌ 不给用户超大余额（会触发 shouldTrust 旁路，连令牌额度预扣都跳过）
++//
++// 计量不受影响：令牌（平台 Key）额度的原子预留仍由 BillingSession.preConsume 负责，
++// 用量与估算成本仍走结算与日志链路。
++//
++// 配置：环境变量 APIGX_USAGE_ONLY，默认 false，读取方式与底座其它开关一致。
++var usageOnlyMode atomic.Bool
++
++func init() {
++	usageOnlyMode.Store(common.GetEnvOrDefaultBool("APIGX_USAGE_ONLY", false))
++}
++
++// IsUsageOnlyMode 报告当前是否处于 APIGX 免费共享模式。
++func IsUsageOnlyMode() bool { return usageOnlyMode.Load() }
++
++// SetUsageOnlyMode 运行期切换模式（供测试使用；未来的后台配置也经由这里生效）。
++func SetUsageOnlyMode(on bool) { usageOnlyMode.Store(on) }
++
++// UsageOnlyFunding 是免费共享模式的资金来源：**只记账、不动任何资金**。
++//
++// 三个方法都是空操作，因此没有充值余额的合法用户也能调用。
++// 注意：资金侧的「不超支」保护在本模式下不适用——真正的容量与预算保护由
++// 令牌额度原子预留与 APIGX 自己的容量控制承担（docs/stage0/metering-state.md §2、§7）。
++type UsageOnlyFunding struct{}
++
++func (u *UsageOnlyFunding) Source() string { return BillingSourceUsageOnly }
++
++func (u *UsageOnlyFunding) PreConsume(_ int) error { return nil }
++
++func (u *UsageOnlyFunding) Settle(_ int) error { return nil }
++
++func (u *UsageOnlyFunding) Refund() error { return nil }
++
++// newUsageOnlySession 在免费共享模式下创建计费会话。
++//
++// 与 tryWallet 的差别只有两点：
++//  1. 不再因用户额度为 0 或不足而拒绝（这正是「取消充值余额前置条件」）；
++//  2. 资金来源换成 UsageOnlyFunding。
++//
++// 其余行为完全一致：令牌额度预扣、结算、退款、幂等守卫都走原有链路。
++func newUsageOnlySession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preConsumedQuota int) (*BillingSession, *types.NewAPIError) {
++	// 仍然把用户额度写回 relayInfo，供日志与展示使用；但**不作为准入条件**。
++	if userQuota, err := model.GetUserQuota(relayInfo.UserId, false); err == nil {
++		relayInfo.UserQuota = userQuota
++	}
++	session := &BillingSession{
++		relayInfo: relayInfo,
++		funding:   &UsageOnlyFunding{},
++	}
++	if apiErr := session.preConsume(c, preConsumedQuota); apiErr != nil {
++		return nil, apiErr
++	}
++	logger.LogInfo(c, fmt.Sprintf("APIGX usage_only 模式：用户 %d 无充值余额前置，仅记账 (quota=%d)", relayInfo.UserId, preConsumedQuota))
++	return session, nil
++}
+diff --git a/service/apigx_usage_only_test.go b/service/apigx_usage_only_test.go
+new file mode 100644
+index 0000000..4aa0f26
+--- /dev/null
++++ b/service/apigx_usage_only_test.go
+@@ -0,0 +1,61 @@
++package service
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// APIGX 免费共享模式（usage_only）的单元测试。
++//
++// 端到端行为（零余额用户可调用、钱包不动、令牌额度仍被预留）由运行时验收脚本
++// tools/stage1-verify/usage-only.mjs 验证；本文件守住不需要数据库的那部分契约。
++
++func TestUsageOnlyFundingIsNoOp(t *testing.T) {
++	funding := &UsageOnlyFunding{}
++
++	assert.Equal(t, BillingSourceUsageOnly, funding.Source())
++
++	// 三个方法都必须是空操作：这是「只记账、不动资金」的核心契约。
++	// 一旦有人把钱包/订阅调用塞进来，免费共享模式就会重新依赖充值余额。
++	require.NoError(t, funding.PreConsume(12345))
++	require.NoError(t, funding.Settle(12345))
++	require.NoError(t, funding.Settle(-12345))
++	require.NoError(t, funding.Refund())
++}
++
++func TestUsageOnlyModeDefaultsOffAndToggles(t *testing.T) {
++	original := IsUsageOnlyMode()
++	t.Cleanup(func() { SetUsageOnlyMode(original) })
++
++	SetUsageOnlyMode(true)
++	assert.True(t, IsUsageOnlyMode())
++
++	SetUsageOnlyMode(false)
++	assert.False(t, IsUsageOnlyMode())
++}
++
++// reserveFunding 用的是 funding 的类型 switch。若新资金源没有显式分支，
++// 会落到 default 并返回 "unsupported funding source"——本用例就是守住这一点。
++func TestReserveFundingAcceptsUsageOnlyFunding(t *testing.T) {
++	session := &BillingSession{funding: &UsageOnlyFunding{}}
++
++	require.NoError(t, session.reserveFunding(1000, true), "usage_only 在 requireAvailableQuota 路径下不得报错")
++	require.NoError(t, session.reserveFunding(1000, false), "usage_only 在非严格路径下不得报错")
++}
++
++// 反向保护：未知资金源必须仍然报错，不能因为新加了 case 就把 default 放宽。
++func TestReserveFundingStillRejectsUnknownFunding(t *testing.T) {
++	session := &BillingSession{funding: unknownFundingForTest{}}
++	err := session.reserveFunding(1000, true)
++	require.Error(t, err, "未知资金来源必须被拒绝")
++	assert.Contains(t, err.Error(), "unsupported funding source")
++}
++
++type unknownFundingForTest struct{}
++
++func (unknownFundingForTest) Source() string         { return "not-a-real-source" }
++func (unknownFundingForTest) PreConsume(_ int) error { return nil }
++func (unknownFundingForTest) Settle(_ int) error     { return nil }
++func (unknownFundingForTest) Refund() error          { return nil }
+diff --git a/service/billing.go b/service/billing.go
+index 7ffa537..9c48c1b 100644
+--- a/service/billing.go
++++ b/service/billing.go
+@@ -13,6 +13,9 @@ import (
+ const (
+ 	BillingSourceWallet       = "wallet"
+ 	BillingSourceSubscription = "subscription"
++	// BillingSourceUsageOnly 是 APIGX 免费共享模式的资金来源：
++	// 只记账、不动钱包与订阅（见 service/apigx_usage_only.go）。
++	BillingSourceUsageOnly = "usage_only"
+ )
+ 
+ // PreConsumeBilling 根据用户计费偏好创建 BillingSession 并执行预扣费。
+diff --git a/service/billing_session.go b/service/billing_session.go
+index 6ff872d..b1e0ad6 100644
+--- a/service/billing_session.go
++++ b/service/billing_session.go
+@@ -283,6 +283,10 @@ func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) e
+ 			)
+ 		}
+ 		return nil
++	case *UsageOnlyFunding:
++		// APIGX 免费共享模式：没有资金可预留/扣减，只由令牌额度与 APIGX 容量控制把关。
++		// 必须显式接住，否则会落到下面的 default 分支报 "unsupported funding source"。
++		return nil
+ 	default:
+ 		return types.NewError(fmt.Errorf("unsupported funding source: %s", s.funding.Source()), types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+ 	}
+@@ -379,6 +383,13 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
+ 		return nil, types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+ 	}
+ 
++	// APIGX 免费共享模式：跳过「充值余额前置条件」，改用只记账的资金来源。
++	// 放在最前面，因此不经过 tryWallet 的 userQuota 检查，也不受计费偏好分支影响。
++	// 实现见 service/apigx_usage_only.go（不改价格、不伪造余额、不走 FreeModel 短路）。
++	if IsUsageOnlyMode() {
++		return newUsageOnlySession(c, relayInfo, preConsumedQuota)
++	}
++
+ 	pref := common.NormalizeBillingPreference(relayInfo.UserSetting.BillingPreference)
+ 
+ 	// 钱包路径需要先检查用户额度
+-- 
+2.53.0.windows.1
+
