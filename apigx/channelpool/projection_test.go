@@ -1,6 +1,7 @@
 package channelpool
 
 import (
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	basemodel "github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -333,4 +335,94 @@ func TestRecordKeyOutcomeRejectsUnknownIndex(t *testing.T) {
 
 	err = RecordKeyOutcome(db, int(baseChannelID), 7, KeyOutcome{Success: true})
 	assert.ErrorIs(t, err, apigxmodel.ErrNotFound, "未知索引不得被猜成某把凭据")
+}
+
+// ---- 请求路径接入（默认关闭） ----
+
+// 关闭时必须是彻底的空操作：不查询、不改任何行。它挂在每次失败处理上，属热路径。
+func TestRecordFailureFromContextIsNoopWhenDisabled(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9201
+	const baseChannelID int64 = 6262
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-noop-aaaaaaaa"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	previous := dbProvider
+	SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
+
+	SetKeyStatsEnabled(false)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
+	RecordFailureFromContext(ctx, int(baseChannelID), 500, "boom")
+
+	var key apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
+	assert.Zero(t, key.LastErrorAt, "关闭时不得写入任何统计")
+}
+
+// 开启后：401 记为「凭据失效」并只隔离该 Key；非多 Key 渠道跳过；统计失败不影响请求。
+func TestRecordFailureFromContextRecordsAuthFailure(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9202
+	const baseChannelID int64 = 6263
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-first-aaaaaaa", "sk-second-bbbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	previous := dbProvider
+	SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
+	SetKeyStatsEnabled(true)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 1)
+	RecordFailureFromContext(ctx, int(baseChannelID), 401, "invalid_api_key")
+
+	var second apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&second).Error)
+	assert.Equal(t, apigxmodel.UpstreamKeyStatusInvalid, second.Status, "401 应把该 Key 标为失效")
+	assert.Equal(t, "401_invalid_api_key", second.LastErrorCode)
+	assert.Positive(t, second.LastErrorAt)
+
+	var first apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&first).Error)
+	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, first.Status, "另一把不受影响")
+
+	// 非多 Key 渠道（上下文无标记）应被跳过
+	singleCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	RecordFailureFromContext(singleCtx, int(baseChannelID), 500, "x")
+	assert.NoError(t, nil)
+}
+
+// 400 之类的业务错误不应被当成凭据失效（否则一次参数错误就会停掉一把好 Key）。
+func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9203
+	const baseChannelID int64 = 6264
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-client-aaaaaa"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	previous := dbProvider
+	SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
+	SetKeyStatsEnabled(true)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
+	RecordFailureFromContext(ctx, int(baseChannelID), 400, "invalid_request_error")
+
+	var key apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
+	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status, "业务错误不得使凭据失效")
+	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
 }

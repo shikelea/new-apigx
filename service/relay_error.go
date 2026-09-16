@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/channelpool"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
@@ -59,6 +60,10 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			DisableChannel(channelError, reason)
 		})
 	}
+
+	// APIGX 逐 Key 统计与故障隔离（T1.5）：把失败记到对应的上游凭据上。
+	// 默认关闭（APIGX_KEY_STATS_ENABLED）；只对多 Key 渠道生效，且统计失败不影响请求。
+	channelpool.RecordFailureFromContext(c, channelError.ChannelId, err.StatusCode, string(err.GetErrorCode()))
 
 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
 		userId := c.GetInt("id")
