@@ -24,6 +24,7 @@ import {
   PowerOff,
   ExternalLink,
   ArrowRightLeft,
+  ShieldCheck,
   Copy,
   Link,
   Loader2,
@@ -265,6 +266,17 @@ export function DataTableRowActions<TData>({
           {t('CC Switch')}
           <DropdownMenuShortcut>
             <ArrowRightLeft size={16} />
+          </DropdownMenuShortcut>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => {
+            setCurrentRow(apiKey)
+            setOpen('apigx-scope')
+          }}
+        >
+          {t('apigxKey.scope.menu')}
+          <DropdownMenuShortcut>
+            <ShieldCheck size={16} />
           </DropdownMenuShortcut>
         </DropdownMenuItem>
         {hasChatPresets && (

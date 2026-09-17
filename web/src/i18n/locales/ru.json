@@ -6627,5 +6627,19 @@
   "usage.cost": "Cost (USD)",
   "usage.time": "Time",
   "usage.source": "Source",
-  "usage.requestId": "Request ID"
+  "usage.requestId": "Request ID",
+  "apigxKey.scope.menu": "Source scope & routing",
+  "apigxKey.scope.title": "Source scope & routing",
+  "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
+  "apigxKey.scope.routeMode": "Default routing strategy",
+  "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
+  "apigxKey.scope.routeMode.latency": "Prefer low latency",
+  "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
+  "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
+  "apigxKey.scope.pinnedOffering": "Pinned source (offering ID)",
+  "apigxKey.scope.pinnedOfferingPlaceholder": "Empty = not pinned",
+  "apigxKey.scope.allowedModels": "Allowed models",
+  "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
+  "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
+  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
 }

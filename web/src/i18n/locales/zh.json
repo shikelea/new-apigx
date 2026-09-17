@@ -6627,5 +6627,19 @@
   "usage.cost": "成本（USD）",
   "usage.time": "时间",
   "usage.source": "来源",
-  "usage.requestId": "请求 ID"
+  "usage.requestId": "请求 ID",
+  "apigxKey.scope.menu": "来源限制与路由策略",
+  "apigxKey.scope.title": "来源限制与路由策略",
+  "apigxKey.scope.hint": "保存在这把 API Key 上。某一维留空即表示该维度不限制。",
+  "apigxKey.scope.routeMode": "默认路由策略",
+  "apigxKey.scope.routeMode.auto": "自动（不加限定）",
+  "apigxKey.scope.routeMode.latency": "偏好低延迟",
+  "apigxKey.scope.routeMode.throughput": "偏好高吞吐",
+  "apigxKey.scope.routeMode.reliability": "偏好高可靠",
+  "apigxKey.scope.pinnedOffering": "绑定来源（供给 ID）",
+  "apigxKey.scope.pinnedOfferingPlaceholder": "留空 = 不绑定",
+  "apigxKey.scope.allowedModels": "允许的模型",
+  "apigxKey.scope.allowedOwners": "允许的分享者（用户 ID）",
+  "apigxKey.scope.listPlaceholder": "逗号或空格分隔；留空 = 不限制",
+  "apigxKey.scope.allowFallback": "允许回退到其他来源"
 }
