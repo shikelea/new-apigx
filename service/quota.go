@@ -422,9 +422,9 @@ type postConsumeQuotaResult struct {
 }
 
 func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) error {
-	// APIGX 质量样本（T2.4）：**成功路径也必须记录**。
-	// 只记失败会让成功率永远是 0% —— 那种"半个统计"比没有统计更误导。
-	// 放在结算入口，保证"真的成功了"才计入成功（预扣/准入阶段不产生成功样本）。
+	// APIGX 质量样本（T2.4）：这里只覆盖「**没有计费会话时的旧回退路径**」。
+	// 正常请求的成功样本由 `BillingSession.Settle` 记录（那才是热路径）——
+	// 两处都挂是为了不遗漏回退路径，而不是重复计数（两条路径互斥）。
 	defer qualityhook.RecordFromRelay(relayInfo, nil)
 	_, err := postConsumeQuotaWithResult(relayInfo, quota, preConsumedQuota, sendEmail)
 	return err

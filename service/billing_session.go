@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/QuantumNous/new-api/apigx/qualityhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -41,6 +42,14 @@ type BillingSession struct {
 // 资金来源和令牌额度分两步提交：若资金来源已提交但令牌调整失败，
 // 会标记 fundingSettled 防止 Refund 对已提交的资金来源执行退款。
 func (s *BillingSession) Settle(actualQuota int) error {
+	// APIGX 质量样本（T2.4）：**成功路径真正走的是这里**。
+	// 早期把钩子挂在 `PostConsumeQuota` 上，那是"没有计费会话时的旧回退路径"，
+	// 正常请求根本不经过它——端到端验证时表现为"桶表一行都没有、日志也没有任何提示"。
+	//
+	// defer 必须注册在 `s.mu.Lock()` **之前**：defer 是后注册先执行，
+	// 若放在加锁之后就会在**持锁期间写库**。
+	defer qualityhook.RecordFromRelay(s.relayInfo, nil)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.settled {

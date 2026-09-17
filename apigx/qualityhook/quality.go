@@ -85,7 +85,6 @@ func RecordFromRelay(relayInfo *relaycommon.RelayInfo, apiErr *types.NewAPIError
 		return
 	}
 	if !found {
-		// 该模型在这个渠道上没有供给（未发布/已下架）：不制造无主统计
 		return
 	}
 
