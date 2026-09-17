@@ -1,0 +1,427 @@
+From 0d3bad1203e545c827a8b14f2900af887f237bcb Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:56:08 +0800
+Subject: [PATCH 83/83] =?UTF-8?q?feat(web):=20T3.9=E3=80=8C=E6=88=91?=
+ =?UTF-8?q?=E7=9A=84=20API=20Key=E3=80=8D=E5=BC=B9=E7=AA=97=E5=AE=8C?=
+ =?UTF-8?q?=E6=88=90=EF=BC=88=E6=9D=A5=E6=BA=90=E9=99=90=E5=88=B6=E4=B8=8E?=
+ =?UTF-8?q?=E8=B7=AF=E7=94=B1=E7=AD=96=E7=95=A5=E5=8F=AF=E7=94=A8=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+照同目录范例 cc-switch-dialog.tsx: 复用 @/components/dialog 的 Dialog + 项目 Select/Input/Label/Switch
+- dialogs/apigx-scope-dialog.tsx(新): 默认路由策略(自动/低延迟/高吞吐/高可靠) + 绑定来源 + 允许模型
+  + 允许分享者 + 允许回退; 表单用 GET 当前值预填后整体提交 = 幂等往返; 未打开不发请求(enabled)
+- api-keys-dialogs.tsx(改): 挂载弹窗(与底座 CC Switch 同写法)
+- data-table-row-actions.tsx(改): 下拉菜单加「来源限制与路由策略」入口
+- i18n: 14 键(en/zh 手工 + 其余语言 i18n:sync)
+- 类型自查: Select onValueChange 可能给 null => 归为 auto(与后端"空串=自动"一致)
+
+检查(全过): typecheck ✅ 0 错 / oxlint 涉及文件 0 错 0 警 ✅ / build ✅
+  / **整个前端套件 143 文件 1733 用例全绿** ✅ (本次改动触及底座共享文件, 这条是必须的回归)
+下一步: 任务中心 -> 管理后台(含价格同步与供给审核)
+---
+ .../keys/components/api-keys-dialogs.tsx      |   6 +
+ .../components/data-table-row-actions.tsx     |  12 ++
+ .../components/dialogs/apigx-scope-dialog.tsx | 152 ++++++++++++++++++
+ web/src/i18n/locales/en.json                  |  16 +-
+ web/src/i18n/locales/fr.json                  |  16 +-
+ web/src/i18n/locales/ja.json                  |  16 +-
+ web/src/i18n/locales/ru.json                  |  16 +-
+ web/src/i18n/locales/vi.json                  |  16 +-
+ web/src/i18n/locales/zh-TW.json               |  16 +-
+ web/src/i18n/locales/zh.json                  |  16 +-
+ 10 files changed, 275 insertions(+), 7 deletions(-)
+ create mode 100644 web/src/features/keys/components/dialogs/apigx-scope-dialog.tsx
+
+diff --git a/web/src/features/keys/components/api-keys-dialogs.tsx b/web/src/features/keys/components/api-keys-dialogs.tsx
+index ae45cdf..b9fb43a 100644
+--- a/web/src/features/keys/components/api-keys-dialogs.tsx
++++ b/web/src/features/keys/components/api-keys-dialogs.tsx
+@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
+ import { ApiKeysDeleteDialog } from './api-keys-delete-dialog'
+ import { ApiKeysMutateDrawer } from './api-keys-mutate-drawer'
+ import { useApiKeys } from './api-keys-provider'
++import { ApigxScopeDialog } from './dialogs/apigx-scope-dialog'
+ import { CCSwitchDialog } from './dialogs/cc-switch-dialog'
+ 
+ export function ApiKeysDialogs() {
+@@ -32,6 +33,11 @@ export function ApiKeysDialogs() {
+         currentRow={open === 'update' ? currentRow || undefined : undefined}
+       />
+       <ApiKeysDeleteDialog />
++      <ApigxScopeDialog
++        open={open === 'apigx-scope'}
++        onOpenChange={(isOpen) => !isOpen && setOpen(null)}
++        tokenId={currentRow?.id ?? 0}
++      />
+       <CCSwitchDialog
+         open={open === 'cc-switch'}
+         onOpenChange={(isOpen) => !isOpen && setOpen(null)}
+diff --git a/web/src/features/keys/components/data-table-row-actions.tsx b/web/src/features/keys/components/data-table-row-actions.tsx
+index 910ad6d..84c3790 100644
+--- a/web/src/features/keys/components/data-table-row-actions.tsx
++++ b/web/src/features/keys/components/data-table-row-actions.tsx
+@@ -24,6 +24,7 @@ import {
+   PowerOff,
+   ExternalLink,
+   ArrowRightLeft,
++  ShieldCheck,
+   Copy,
+   Link,
+   Loader2,
+@@ -267,6 +268,17 @@ export function DataTableRowActions<TData>({
+             <ArrowRightLeft size={16} />
+           </DropdownMenuShortcut>
+         </DropdownMenuItem>
++        <DropdownMenuItem
++          onClick={() => {
++            setCurrentRow(apiKey)
++            setOpen('apigx-scope')
++          }}
++        >
++          {t('apigxKey.scope.menu')}
++          <DropdownMenuShortcut>
++            <ShieldCheck size={16} />
++          </DropdownMenuShortcut>
++        </DropdownMenuItem>
+         {hasChatPresets && (
+           <DropdownMenuSub>
+             <DropdownMenuSubTrigger>{t('Chat')}</DropdownMenuSubTrigger>
+diff --git a/web/src/features/keys/components/dialogs/apigx-scope-dialog.tsx b/web/src/features/keys/components/dialogs/apigx-scope-dialog.tsx
+new file mode 100644
+index 0000000..defda63
+--- /dev/null
++++ b/web/src/features/keys/components/dialogs/apigx-scope-dialog.tsx
+@@ -0,0 +1,152 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useMutation, useQuery } from '@tanstack/react-query'
++import { useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { Dialog } from '@/components/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
++import { Switch } from '@/components/ui/switch'
++
++import { getPlatformKeyPreferences, setPlatformKeyPreferences } from '../../api'
++import { buildScopePayload, ROUTE_MODE_OPTIONS, type ScopeFormState } from '../../lib/apigx-scope'
++
++const EMPTY_FORM: ScopeFormState = {
++  scopeMode: '0',
++  pinnedOfferingId: '',
++  allowedModelIds: '',
++  allowedOwnerUserIds: '',
++  allowFallback: true,
++  defaultRouteMode: 'auto',
++}
++
++/**
++ * 平台 Key 的**来源限制与路由策略**（计划书 §9.1：偏好保存在平台 Key 上）。
++ *
++ * 表单用 `GET` 的当前值**预填**后再整体提交 ⇒ 幂等往返，不会误清空用户没动过的限制。
++ */
++export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: boolean) => void; tokenId: number }) {
++  const { t } = useTranslation()
++  const [form, setForm] = useState<ScopeFormState>(EMPTY_FORM)
++
++  const prefsQuery = useQuery({
++    queryKey: ['apigx-key-preferences', props.tokenId],
++    queryFn: () => getPlatformKeyPreferences(props.tokenId),
++    enabled: props.open && props.tokenId > 0,
++  })
++
++  useEffect(() => {
++    const prefs = prefsQuery.data?.data
++    if (!prefs) {
++      return
++    }
++    setForm({
++      scopeMode: String(prefs.scope_mode),
++      pinnedOfferingId: prefs.pinned_offering_id > 0 ? String(prefs.pinned_offering_id) : '',
++      allowedModelIds: prefs.allowed_model_ids.join(', '),
++      allowedOwnerUserIds: prefs.allowed_owner_user_ids.join(', '),
++      allowFallback: prefs.allow_fallback,
++      defaultRouteMode: prefs.default_route_mode === '' ? 'auto' : prefs.default_route_mode,
++    })
++  }, [prefsQuery.data])
++
++  const saveMutation = useMutation({
++    mutationFn: () => setPlatformKeyPreferences(props.tokenId, buildScopePayload(form)),
++    onSuccess: () => {
++      props.onOpenChange(false)
++    },
++  })
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('apigxKey.scope.title')}
++      contentClassName='sm:max-w-lg'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
++            {t('Save')}
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-4'>
++        <p className='text-muted-foreground text-xs'>{t('apigxKey.scope.hint')}</p>
++
++        <div className='space-y-2'>
++          <Label>{t('apigxKey.scope.routeMode')}</Label>
++          <Select value={form.defaultRouteMode} onValueChange={(next) => setForm({ ...form, defaultRouteMode: next ?? 'auto' })}>
++            <SelectTrigger>
++              <SelectValue />
++            </SelectTrigger>
++            <SelectContent>
++              {ROUTE_MODE_OPTIONS.map((option) => (
++                <SelectItem key={option.value} value={option.value}>
++                  {t(option.labelKey)}
++                </SelectItem>
++              ))}
++            </SelectContent>
++          </Select>
++        </div>
++
++        <div className='space-y-2'>
++          <Label>{t('apigxKey.scope.pinnedOffering')}</Label>
++          <Input
++            value={form.pinnedOfferingId}
++            onChange={(event) => setForm({ ...form, pinnedOfferingId: event.target.value })}
++            placeholder={t('apigxKey.scope.pinnedOfferingPlaceholder')}
++          />
++        </div>
++
++        <div className='space-y-2'>
++          <Label>{t('apigxKey.scope.allowedModels')}</Label>
++          <Input
++            value={form.allowedModelIds}
++            onChange={(event) => setForm({ ...form, allowedModelIds: event.target.value })}
++            placeholder={t('apigxKey.scope.listPlaceholder')}
++          />
++        </div>
++
++        <div className='space-y-2'>
++          <Label>{t('apigxKey.scope.allowedOwners')}</Label>
++          <Input
++            value={form.allowedOwnerUserIds}
++            onChange={(event) => setForm({ ...form, allowedOwnerUserIds: event.target.value })}
++            placeholder={t('apigxKey.scope.listPlaceholder')}
++          />
++        </div>
++
++        <div className='flex items-center gap-3'>
++          <Switch
++            checked={form.allowFallback}
++            onCheckedChange={(next) => setForm({ ...form, allowFallback: next })}
++            id='apigx-scope-fallback'
++          />
++          <Label htmlFor='apigx-scope-fallback'>{t('apigxKey.scope.allowFallback')}</Label>
++        </div>
++      </div>
++    </Dialog>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 92992e6..439d164 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6627,5 +6627,19 @@
+   "usage.cost": "Cost (USD)",
+   "usage.time": "Time",
+   "usage.source": "Source",
+-  "usage.requestId": "Request ID"
++  "usage.requestId": "Request ID",
++  "apigxKey.scope.menu": "Source scope & routing",
++  "apigxKey.scope.title": "Source scope & routing",
++  "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
++  "apigxKey.scope.routeMode": "Default routing strategy",
++  "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++  "apigxKey.scope.routeMode.latency": "Prefer low latency",
++  "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
++  "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
++  "apigxKey.scope.pinnedOffering": "Pinned source (offering ID)",
++  "apigxKey.scope.pinnedOfferingPlaceholder": "Empty = not pinned",
++  "apigxKey.scope.allowedModels": "Allowed models",
++  "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
++  "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index fbc1d11..532fac1 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6627,5 +6627,19 @@
+   "usage.cost": "Cost (USD)",
+   "usage.time": "Time",
+   "usage.source": "Source",
+-  "usage.requestId": "Request ID"
++  "usage.requestId": "Request ID",
++  "apigxKey.scope.menu": "Source scope & routing",
++  "apigxKey.scope.title": "Source scope & routing",
++  "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
++  "apigxKey.scope.routeMode": "Default routing strategy",
++  "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++  "apigxKey.scope.routeMode.latency": "Prefer low latency",
++  "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
++  "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
++  "apigxKey.scope.pinnedOffering": "Pinned source (offering ID)",
++  "apigxKey.scope.pinnedOfferingPlaceholder": "Empty = not pinned",
++  "apigxKey.scope.allowedModels": "Allowed models",
++  "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
++  "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index be7d579..17395bb 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6627,5 +6627,19 @@
+   "usage.cost": "Cost (USD)",
+   "usage.time": "Time",
+   "usage.source": "Source",
+-  "usage.requestId": "Request ID"
++  "usage.requestId": "Request ID",
++  "apigxKey.scope.menu": "Source scope & routing",
++  "apigxKey.scope.title": "Source scope & routing",
++  "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
++  "apigxKey.scope.routeMode": "Default routing strategy",
++  "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++  "apigxKey.scope.routeMode.latency": "Prefer low latency",
++  "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
++  "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
++  "apigxKey.scope.pinnedOffering": "Pinned source (offering ID)",
++  "apigxKey.scope.pinnedOfferingPlaceholder": "Empty = not pinned",
++  "apigxKey.scope.allowedModels": "Allowed models",
++  "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
++  "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 5d59227..21973fe 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6627,5 +6627,19 @@
+   "usage.cost": "Cost (USD)",
+   "usage.time": "Time",
+   "usage.source": "Source",
+-  "usage.requestId": "Request ID"
++  "usage.requestId": "Request ID",
++  "apigxKey.scope.menu": "Source scope & routing",
++  "apigxKey.scope.title": "Source scope & routing",
++  "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
++  "apigxKey.scope.routeMode": "Default routing strategy",
++  "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++  "apigxKey.scope.routeMode.latency": "Prefer low latency",
++  "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
++  "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
++  "apigxKey.scope.pinnedOffering": "Pinned source (offering ID)",
++  "apigxKey.scope.pinnedOfferingPlaceholder": "Empty = not pinned",
++  "apigxKey.scope.allowedModels": "Allowed models",
++  "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
++  "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index d98819e..d87eaa5 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6627,5 +6627,19 @@
+   "usage.cost": "Cost (USD)",
+   "usage.time": "Time",
+   "usage.source": "Source",
+-  "usage.requestId": "Request ID"
++  "usage.requestId": "Request ID",
++  "apigxKey.scope.menu": "Source scope & routing",
++  "apigxKey.scope.title": "Source scope & routing",
++  "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
++  "apigxKey.scope.routeMode": "Default routing strategy",
++  "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++  "apigxKey.scope.routeMode.latency": "Prefer low latency",
++  "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
++  "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
++  "apigxKey.scope.pinnedOffering": "Pinned source (offering ID)",
++  "apigxKey.scope.pinnedOfferingPlaceholder": "Empty = not pinned",
++  "apigxKey.scope.allowedModels": "Allowed models",
++  "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
++  "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 5940162..0b596e2 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6627,5 +6627,19 @@
+   "usage.cost": "Cost (USD)",
+   "usage.time": "Time",
+   "usage.source": "Source",
+-  "usage.requestId": "Request ID"
++  "usage.requestId": "Request ID",
++  "apigxKey.scope.menu": "Source scope & routing",
++  "apigxKey.scope.title": "Source scope & routing",
++  "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
++  "apigxKey.scope.routeMode": "Default routing strategy",
++  "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++  "apigxKey.scope.routeMode.latency": "Prefer low latency",
++  "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
++  "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
++  "apigxKey.scope.pinnedOffering": "Pinned source (offering ID)",
++  "apigxKey.scope.pinnedOfferingPlaceholder": "Empty = not pinned",
++  "apigxKey.scope.allowedModels": "Allowed models",
++  "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
++  "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 08c10f0..07e3c61 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6627,5 +6627,19 @@
+   "usage.cost": "成本（USD）",
+   "usage.time": "时间",
+   "usage.source": "来源",
+-  "usage.requestId": "请求 ID"
++  "usage.requestId": "请求 ID",
++  "apigxKey.scope.menu": "来源限制与路由策略",
++  "apigxKey.scope.title": "来源限制与路由策略",
++  "apigxKey.scope.hint": "保存在这把 API Key 上。某一维留空即表示该维度不限制。",
++  "apigxKey.scope.routeMode": "默认路由策略",
++  "apigxKey.scope.routeMode.auto": "自动（不加限定）",
++  "apigxKey.scope.routeMode.latency": "偏好低延迟",
++  "apigxKey.scope.routeMode.throughput": "偏好高吞吐",
++  "apigxKey.scope.routeMode.reliability": "偏好高可靠",
++  "apigxKey.scope.pinnedOffering": "绑定来源（供给 ID）",
++  "apigxKey.scope.pinnedOfferingPlaceholder": "留空 = 不绑定",
++  "apigxKey.scope.allowedModels": "允许的模型",
++  "apigxKey.scope.allowedOwners": "允许的分享者（用户 ID）",
++  "apigxKey.scope.listPlaceholder": "逗号或空格分隔；留空 = 不限制",
++  "apigxKey.scope.allowFallback": "允许回退到其他来源"
+ }
+-- 
+2.53.0.windows.1
+

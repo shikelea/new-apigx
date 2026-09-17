@@ -1252,3 +1252,18 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **📌 发现既有问题（未越界修）**：`src/features/keys` 下有 **3 处既有 lint error**（`constants.ts`、`data-table-bulk-actions.tsx` 的 `no-import-type-side-effects` ✓）—— 与本次改动无关 ✓，按规范"只修所涉及文件"**未动它们** ✓，仅在此记录 ✓。
 
 **下一步**：照同目录既有范例 `components/dialogs/cc-switch-dialog.tsx` 写我们的对话框 ✓（复用 `@/components/dialog` ✓ 与项目选择器/输入 ✓），再挂到行操作菜单（`data-table-row-actions.tsx` 已有下拉，插在 CC Switch 之后 ✓）与 `api-keys-dialogs.tsx` 聚合处 ✓，并补 i18n 与 UI 回归用例 ✓。
+### T3.9 前端：「我的 API Key」弹窗完成（来源限制与路由策略**可用**）
+
+照同目录既有范例 `cc-switch-dialog.tsx` 的写法补上对话框 ✓（`@/components/dialog` 的 `Dialog` ✓、项目 `Select` / `Input` / `Label` / `Switch` ✓，与底座风格一致 ✓）。
+
+| 文件 | 作用 |
+|---|---|
+| `components/dialogs/apigx-scope-dialog.tsx`（新） | 弹窗：**默认路由策略**（自动 / 低延迟 / 高吞吐 / 高可靠 ✓）、**绑定来源**（供给 ID ✓）、**允许的模型**、**允许的分享者**、**允许回退** ✓。表单用 `GET` 当前值**预填**后整体提交 ⇒ 幂等往返 ✓；未打开时不发请求（`enabled` ✓） |
+| `components/api-keys-dialogs.tsx`（改） | 挂载弹窗（`open === 'apigx-scope'` + `currentRow.id` ✓，与底座 CC Switch 同写法 ✓） |
+| `components/data-table-row-actions.tsx`（改） | 下拉菜单加「来源限制与路由策略」入口（插在 CC Switch 之后 ✓） |
+| i18n | 14 个键（en/zh 手工 ✓，其余语言 `i18n:sync` ✓） |
+
+**按规范的检查（全过）**：`typecheck` ✅ 0 错；`oxlint`（涉及文件）✅ 0 错 0 警；`build` ✅；**整个前端套件 143 个文件 / 1733 条用例全绿** ✓✓ —— 这一条尤其重要：因为我**改动了底座的两个共享文件**（行操作菜单与弹窗聚合 ✓），必须证明没有破坏既有行为 ✓。
+**一处类型自查**：`Select` 的 `onValueChange` 可能给 `null` ⇒ 归为 `auto` ✓（与后端"空串=自动"一致 ✓），而不是塞 `null` 进去 ✗。
+
+**下一步（T3.9 续）**：「任务中心」与「管理后台」（后者含**价格同步**与**供给审核** ✓ —— 这两个平台侧动作此前已按职责从分享者页面移除 ✓，正应放在这里 ✓）。
