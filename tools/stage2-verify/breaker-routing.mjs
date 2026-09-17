@@ -191,9 +191,22 @@ async function main() {
   // 这是缓存的固有首次延迟（缓存本身是为了避免每请求查一次统计），不是缺陷；
   // 因此这里显式把它作为过渡量掉，再去快照样本，这样测的是**稳态**：
   // 熔断生效之后，流量是否真的不再打到坏上游。
-  const transition = await chat();
-  info(`过渡请求状态=${transition.status}（跨阈值瞬间的那一次，不计入稳态断言）`);
-  await new Promise((r) => setTimeout(r, 500));
+  // **等过渡真正结束**：连续 2 次成功即认为改道已稳定（最多试 4 次）。
+  //
+  // 为什么不用"固定等 N 秒"：日志证据显示，只有**恰好跨在判定翻转那一瞬间**的那一次请求
+  // 会被派发到坏上游（它被派发时守卫的判定还停在"未打开"），此后**再无一次**打到它。
+  // 那是"选择"与"判定"之间的固有竞态，不是缺陷；用固定秒数猜它会时快时慢，
+  // 因此改为等待一个**可观测的稳定条件**。
+  const transitionStatuses = [];
+  let consecutiveOk = 0;
+  for (let i = 0; i < 4 && consecutiveOk < 2; i++) {
+    const r = await chat();
+    transitionStatuses.push(r.status);
+    consecutiveOk = r.status === 200 ? consecutiveOk + 1 : 0;
+    await new Promise((res) => setTimeout(res, 200));
+  }
+  info(`过渡阶段状态：${transitionStatuses.join(',')}（连续成功 ${consecutiveOk} 次后认定为已稳定）`);
+  await new Promise((r) => setTimeout(r, 300));
 
   const deadAfterOpen = (await explain()).find((x) => x.offering_public_id === deadShare.offeringPublicId);
   const samplesBefore = deadAfterOpen?.sample_count ?? -1;

@@ -54,7 +54,19 @@ async function main() {
   });
   if (created.status !== 200) throw new Error('建底座渠道失败：' + created.text.slice(0, 160));
   const channelName = 'POOL底座-' + stamp;
-  const listRes = await call(`${BASE}/api/channel/?p=1&page_size=1000`, { auth: root });
+  const listRes = await (async () => {
+        // **翻页合并**：底座的列表接口把 page_size 封顶在 100，而开发库里测试渠道已 112+ 条，
+        // 只查第一页会"查不到刚建的渠道"（实测踩过）。这里翻完所有页再合并，
+        // 返回**同样的形状**，因此下游代码无需改动。
+        const merged = { json: { data: { items: [] } }, status: 200, text: '' };
+        for (let p = 1; p <= 40; p++) {
+          const r = await call(`${BASE}/api/channel/?p=${p}&page_size=100`, { auth: root });
+          const items = r.json?.data?.items ?? [];
+          merged.json.data.items.push(...items);
+          if (items.length < 100) break;
+        }
+        return merged;
+      })();
   const all = listRes.json?.data?.items ?? listRes.json?.data ?? [];
   const baseChannel = (Array.isArray(all) ? all : []).find((c) => c?.name === channelName);
   if (!baseChannel?.id) throw new Error('查不到刚建的底座渠道');

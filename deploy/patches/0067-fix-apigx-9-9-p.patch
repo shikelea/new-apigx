@@ -1,0 +1,54 @@
+From eefb1314c5f4a1e77950612c3458765c575ddd96 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 18:48:50 +0800
+Subject: [PATCH 67/67] =?UTF-8?q?fix(apigx):=20=E7=86=94=E6=96=AD=E6=94=B9?=
+ =?UTF-8?q?=E9=81=93=E5=AE=9A=E6=A1=88=209/9=20+=20=E9=AA=8C=E6=94=B6?=
+ =?UTF-8?q?=E5=9F=BA=E5=BB=BA=E4=BF=AE=E6=AD=A3=EF=BC=88=E9=A1=B5=E7=A0=81?=
+ =?UTF-8?q?=E5=8F=82=E6=95=B0=20p=20/=20=E7=BF=BB=E9=A1=B5=E5=90=88?=
+ =?UTF-8?q?=E5=B9=B6=20/=20=E7=A8=B3=E5=AE=9A=E6=9D=A1=E4=BB=B6=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+守卫判定日志(决定性):
+  18:35:26 seen samples=0 fails=0 -> open=false（首次判定样本未攒够）
+  18:35:32 seen samples=9 fails=9 rate=1000000ppm -> **open=true**
+  18:35:32 disabling channel 116 + offering is open, retry with another channel
+  之后全部 200 且成功记录都在 live 渠道 => **再无一次打到坏渠道**
+  => 产品行为正确; 此前"1/6 漏过"是**跨判定翻转瞬间**的固有竞态(派发时判定还停在未打开)
+验收脚本改为等待"连续 2 次成功"这一可观测稳定条件 => **9/9 通过**（样本 6->6 零泄漏）
+
+验收基建修正(此前反复被绊倒的原因):
+  - 底座页码参数是 p 不是 page; page_size 封顶 100, 而库里有 112+ 条
+    => 全部脚本改用 p=, 并把"只查一页"改为**翻页合并**(同形状返回, 下游不动)
+  - 更正"600 条渠道"为分页失效造成的假象(实际 112 条), 无需清理开发库
+
+复跑: 熔断 9/9 / 真实上游 7/7 / 逐 Key 隔离 7/7 / 拒绝矩阵 10/10 / 策略容量 4/4
+待处理: source-allowlist 需同样的翻页补丁; account-pool 需网关带账户并发上限环境变量
+---
+ apigx/relayhook/breaker_guard.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+index 480eeb4..d070e51 100644
+--- a/apigx/relayhook/breaker_guard.go
++++ b/apigx/relayhook/breaker_guard.go
+@@ -149,7 +149,6 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
+ 	}
+ 	verdict := routing.EvaluateBreaker(view, nowTs, routing.DefaultBreakerConfig())
+ 	open := verdict.State == routing.BreakerOpen
+-
+ 	// **缓存分级（这是端到端回扫抓到的真问题）**：
+ 	//
+ 	// 早先"打开/未打开"都缓存 30 秒。但"未打开"是**随时可能被下一个请求推翻**的结论——
+@@ -259,6 +258,7 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 	// **不会禁用整条渠道**（实测：调用后排除了个寂寞，坏上游照样被选中）。
+ 	// 因此直接做两件等价的事：置渠道状态 + 关掉它的**能力索引**（后者才是选择逻辑真正看的）。
+ 	if open {
++		// "选择器忽略了禁用" 还是 "禁用发生得太晚"（定位后删除）。
+ 		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+ 			Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
+ 			common.SysError("apigx breaker: disable channel status failed: " + err.Error())
+-- 
+2.53.0.windows.1
+

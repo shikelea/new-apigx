@@ -48,7 +48,17 @@ async function makeChannel(auth, stamp, model, ownerAuth, shareGroupName) {
   if (created.status !== 200 || created.json?.success === false) throw new Error('建底座渠道失败：' + created.text.slice(0, 120));
   let base = null;
   for (let i = 0; i < 10 && !base; i++) {
-    const list = await call(`${BASE}/api/channel/?p=1&page_size=1000`, { auth });
+    const list = await (async () => {
+          // 翻页合并：底座把 page_size 封顶在 100，只看第一页会"查不到刚建的渠道"（实测踩过）
+          const merged = { json: { data: { items: [] } }, status: 200, text: '' };
+          for (let p = 1; p <= 40; p++) {
+            const r = await call(`${BASE}/api/channel/?p=${p}&page_size=100`, { auth: auth });
+            const it = r.json?.data?.items ?? [];
+            merged.json.data.items.push(...it);
+            if (it.length < 100) break;
+          }
+          return merged;
+        })();
     const items = list.json?.data?.items ?? [];
     base = items.find((c) => c?.name === name);
     if (!base) await new Promise((r) => setTimeout(r, 2000));
