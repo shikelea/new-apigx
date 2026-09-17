@@ -1,0 +1,232 @@
+From a991e8d942e4a283d959aebff33676f74435e091 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 15:03:21 +0800
+Subject: [PATCH 50/50] =?UTF-8?q?fix(apigx):=20=E5=9B=9E=E9=80=80=E6=8A=95?=
+ =?UTF-8?q?=E5=BD=B1=E5=B1=82=E7=9A=84=E6=9D=83=E9=87=8D=E5=B1=95=E5=BC=80?=
+ =?UTF-8?q?=EF=BC=88=E4=BF=9D=E7=95=99=E6=9C=BA=E5=88=B6=EF=BC=89=EF=BC=8C?=
+ =?UTF-8?q?=E5=B9=B6=E8=AE=B0=E5=BD=95=E8=AF=AD=E4=B9=89=E5=8F=98=E6=9B=B4?=
+ =?UTF-8?q?=E5=86=B3=E7=AD=96=EF=BC=88T2.6=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+背景: 本轮把"按权重展开多 Key 列表"接进投影，全量测试立刻抓到回归
+  (两个含失效 Key 的用例挂掉)。根因: 展开槽位下标被误用于索引原始 Key 列表,
+  一旦有凭据解不开被跳过, 两套下标错位 -> 状态映射到另一把 Key。
+更重要的判断: stage-1 既有语义是 "Key 按 (weight DESC, id ASC) 排列"(权重只决定顺序),
+  而按占比展开把语义变成 "权重 = 流量占比" —— 这是**用户可观察的行为变更**
+  (列表变长、索引空间变化, 运行期状态/逐 Key 统计/失效隔离都要迁移),
+  应当有意识决策并配套说明, 而不是顺手改掉。
+处置: 投影保持原语义(回退展开与相关测试); T2.6 的机制保留并单独测试
+  (BuildWeightedKeyIndexes / SaturatedKeyIndexes / MergeKeyStatusList, 3 个用例),
+  展开规则为"权重全等=未配置(不展开)、不等才按比例、权重 0 视为 1、单 Key 上限 16"。
+  语义变更作为待决策项写进 TASK_LOG。
+apigx + middleware 全量通过(含 channelpool 恢复全绿)
+---
+ apigx/channelpool/key_weight.go      | 42 +++++++++++++----
+ apigx/channelpool/projection.go      | 24 ++++------
+ apigx/channelpool/projection_test.go | 70 ++--------------------------
+ 3 files changed, 46 insertions(+), 90 deletions(-)
+
+diff --git a/apigx/channelpool/key_weight.go b/apigx/channelpool/key_weight.go
+index 82c59ce..0b8cc58 100644
+--- a/apigx/channelpool/key_weight.go
++++ b/apigx/channelpool/key_weight.go
+@@ -50,24 +50,46 @@ func BuildWeightedKeyIndexes(keys []KeyWeight) []int {
+ 	copy(ordered, keys)
+ 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Index < ordered[j].Index })
+ 
+-	total := 0
+-	expanded := make([]int, 0, len(ordered))
+-	for _, key := range ordered {
+-		times := key.Weight
+-		if times <= 0 {
+-			times = 1
++	// **权重全等 = 未配置加权**：保持"一把 Key 一个槽位"，
++	// 既不膨胀底座列表、也不搅动索引空间（索引一变，运行期状态与逐 Key 统计都要迁移）。
++	// 只有权重**确实不同**时才做按比例展开。
++	allEqual := true
++	for i := 1; i < len(ordered); i++ {
++		if effectiveWeight(ordered[i].Weight) != effectiveWeight(ordered[0].Weight) {
++			allEqual = false
++			break
+ 		}
+-		if times > maxWeightedKeyExpansion {
+-			times = maxWeightedKeyExpansion
++	}
++	if allEqual {
++		indexes := make([]int, 0, len(ordered))
++		for _, key := range ordered {
++			indexes = append(indexes, key.Index)
+ 		}
+-		for range times {
++		return indexes
++	}
++
++	expanded := make([]int, 0, len(ordered))
++	for _, key := range ordered {
++		for range int(effectiveWeight(key.Weight)) {
+ 			expanded = append(expanded, key.Index)
+ 		}
+-		total += int(times)
+ 	}
+ 	return expanded
+ }
+ 
++// effectiveWeight 把权重归一为"至少出现一次"的取值：
++// 权重 0/负数视为 1（**权重 0 不等于没有机会**，与底座对渠道权重的 +10 平滑同一精神），
++// 并施加展开上限（防止权重写错把列表撑爆）。
++func effectiveWeight(weight int64) int64 {
++	if weight <= 0 {
++		return 1
++	}
++	if weight > maxWeightedKeyExpansion {
++		return maxWeightedKeyExpansion
++	}
++	return weight
++}
++
+ // KeyLoad 是一把 Key 的容量占用情况。
+ type KeyLoad struct {
+ 	Index int
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index b2a95b7..a62dcb6 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -168,14 +168,14 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 	indexToStable := make(map[int]string, len(keys))
+ 	indexToKeyValue := make(map[int]string, len(keys))
+ 
+-	// 先收集可解密的 Key（失败的跳过并记录），再按**权重展开**（T2.6）：
+-	// 底座没有 per-Key 权重，而它的轮询/随机都作用在"一份列表"上，
+-	// 因此把权重 3 的 Key 在列表里放 3 次即可得到加权轮询/加权随机。
++	// 当前投影保持**一把 Key 一个槽位**，权重只影响列表顺序（见 `AvailableUpstreamKeys`
++	// 的 weight DESC 排序）。
+ 	//
+-	// 展开后**每个重复槽位仍映射回同一把 Key**，所以密钥归属、逐 Key 统计、
+-	// 失效隔离都不受影响（它们都靠索引映射回 StableKeyID）。
+-	plaintexts := make([]string, 0, len(keys))
+-	weights := make([]KeyWeight, 0, len(keys))
++	// T2.6 的"按权重分配流量"机制已经实现并单独测试（`BuildWeightedKeyIndexes`），
++	// 但**尚未接在这里**：展开会改变底座键列表的索引空间，而索引空间一变，
++	// 运行期状态、逐 Key 统计与失效隔离都要跟着迁移——更重要的是，它把
++	// "权重 = 顺序" 改成 "权重 = 流量占比"，属于**用户可观察的语义变更**，
++	// 需要有意识地决策并配套说明，不能顺手改掉（详见 TASK_LOG 的 T2.6 条目）。
+ 	for i := range keys {
+ 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
+ 		if err != nil {
+@@ -184,13 +184,9 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 				keys[i].ID, keys[i].StableKeyID, err))
+ 			continue
+ 		}
+-		weights = append(weights, KeyWeight{Index: len(plaintexts), Weight: keys[i].Weight})
+-		plaintexts = append(plaintexts, plain)
+-	}
+-	for _, slot := range BuildWeightedKeyIndexes(weights) {
+-		indexToStable[len(secrets)] = keys[slot].StableKeyID
+-		indexToKeyValue[len(secrets)] = plaintexts[slot]
+-		secrets = append(secrets, plaintexts[slot])
++		indexToStable[len(secrets)] = keys[i].StableKeyID
++		indexToKeyValue[len(secrets)] = plain
++		secrets = append(secrets, plain)
+ 	}
+ 	if len(secrets) == 0 {
+ 		return nil, ErrNoUsableKey
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index 0db31e4..bbce75f 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -110,10 +110,11 @@ func TestProjectKeyPoolWritesBaseMultiKeyChannel(t *testing.T) {
+ 	assert.Equal(t, 3, projection.KeyCount)
+ 
+ 	// 底座渠道应进入多 Key 模式，且 Key 按 (weight DESC, id ASC) 排列
++	// （"按权重分配流量"的展开机制见 key_weight.go，尚未接进投影）。
+ 	var loaded basemodel.Channel
+ 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
+ 	assert.True(t, loaded.ChannelInfo.IsMultiKey, "必须切到多 Key 模式")
+-	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize)
++	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize, "当前投影仍是一把 Key 一个槽位（权重只影响顺序）")
+ 	assert.Equal(t, constant.MultiKeyModePolling, loaded.ChannelInfo.MultiKeyMode)
+ 
+ 	lines := loaded.GetKeys()
+@@ -829,8 +830,8 @@ func TestBuildWeightedKeyIndexesProportionalToWeight(t *testing.T) {
+ 	assert.Equal(t, 2, countIndex(zero, 1))
+ 
+ 	// 展开上限：权重写错（例如 10000）不得把列表撑爆
+-	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}})
+-	assert.Len(t, huge, 16, "单 Key 展开次数应有上限")
++	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}, {Index: 1, Weight: 1}})
++	assert.Len(t, huge, 17, "权重写错时展开次数必须被上限截断（16 + 1）")
+ 
+ 	// 顺序确定：与传入顺序无关，按索引升序展开
+ 	reordered := BuildWeightedKeyIndexes([]KeyWeight{{Index: 1, Weight: 1}, {Index: 0, Weight: 3}})
+@@ -881,66 +882,3 @@ func countIndex(indexes []int, target int) int {
+ 	}
+ 	return count
+ }
+-
+-// 接线：投影出的底座多 Key 列表必须是**按权重展开**的，且每个槽位仍映射回同一把 Key
+-// （否则逐 Key 统计与失效隔离会被打乱）。
+-func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
+-	db := setupProjectionEnv(t)
+-	ResetMappingCacheForTest()
+-	t.Cleanup(ResetMappingCacheForTest)
+-
+-	const owner int64 = 9951
+-	const baseChannelID int64 = 9897
+-	require.NoError(t, db.Create(&basemodel.Channel{
+-		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+-	}).Error)
+-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "加权组", PublicID: "wg1"}
+-	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
+-	channel := &apigxmodel.Channel{
+-		PublicID: "wc1", OwnerUserID: owner, ShareGroupID: group.ID,
+-		Name: "加权渠道", BaseChannelID: baseChannelID, KeyPoolMode: apigxmodel.KeyPoolModePolling,
+-	}
+-	require.NoError(t, apigxmodel.CreateChannel(db, channel))
+-
+-	// 两把 Key：权重 3:1
+-	for i, spec := range []struct {
+-		stable string
+-		secret string
+-		weight int64
+-	}{{"stable-a", "sk-aaa", 3}, {"stable-b", "sk-bbb", 1}} {
+-		encrypted, err := secretbox.Encrypt(spec.secret)
+-		require.NoError(t, err)
+-		fingerprint, err := secretbox.Fingerprint(spec.secret)
+-		require.NoError(t, err)
+-		require.NoError(t, db.Create(&apigxmodel.UpstreamKey{
+-			ChannelID: channel.ID, StableKeyID: spec.stable, Name: spec.stable,
+-			SecretRef: encrypted, SecretFingerprint: fingerprint,
+-			Status: apigxmodel.UpstreamKeyStatusEnabled, Weight: spec.weight,
+-			CredentialVersion: 1, CreatedAt: common.GetTimestamp() + int64(i),
+-		}).Error)
+-	}
+-
+-	// 投影（含写库）：池模式已在建渠道时设为轮询
+-	projection, err := ProjectKeyPool(db, channel.ID)
+-	require.NoError(t, err)
+-	require.NotNil(t, projection)
+-	assert.Equal(t, 4, projection.KeyCount, "权重 3:1 应展开成 4 个槽位")
+-
+-	var base basemodel.Channel
+-	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+-	assert.Equal(t, 4, len(strings.Split(base.Key, "\n")), "投影出的底座 key 列表应有 4 项")
+-	assert.Equal(t, 4, base.ChannelInfo.MultiKeySize)
+-
+-	// 展开后每个槽位都映射回同一把 Key
+-	countA, countB := 0, 0
+-	for index := range 4 {
+-		switch projection.IndexToStableKey[index] {
+-		case "stable-a":
+-			countA++
+-		case "stable-b":
+-			countB++
+-		}
+-	}
+-	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
+-	assert.Equal(t, 1, countB)
+-}
+-- 
+2.53.0.windows.1
+
