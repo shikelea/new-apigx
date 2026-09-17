@@ -249,7 +249,7 @@ func Decide(strategy Strategy, candidates []Candidate, opts Options) (Decision, 
 	}
 	// 冷启动候选排在成熟候选之后，并且**只在抽样允许时**才可能被选中
 	if len(cold) > 0 && opts.ColdStartSharePpm > 0 && opts.ColdStartRollPpm < opts.ColdStartSharePpm {
-		coldRanked, _ := rankCandidates(StrategyAuto, cold, opts)
+		coldRanked := rankColdByCapacity(cold)
 		if len(coldRanked) > 0 {
 			decision.ColdStart = true
 			decision.Chosen = &coldRanked[0].Candidate
@@ -267,12 +267,17 @@ func Decide(strategy Strategy, candidates []Candidate, opts Options) (Decision, 
 }
 
 // decideColdStart 在没有成熟候选时，按剩余容量在冷启动候选里分配。
+//
+// **这里不能复用 `rankAuto`**：综合打分的可靠性维度要求有样本，
+// 于是"零样本的新供给"会被它跳过 —— 结果是既进不了正式排名、也进不了冷启动排名，
+// 什么都不发生（这个缺陷由应用排名的接口用例发现）。
+// 而计划书明确要求：没有成熟候选时**按剩余容量分配**，不会因没有历史数据永久饿死新渠道。
 func decideColdStart(strategy Strategy, cold []Candidate, opts Options, decision Decision) Decision {
 	if len(cold) == 0 {
 		decision.Reason = "no candidate has quality samples"
 		return decision
 	}
-	ranked, _ := rankCandidates(StrategyAuto, cold, opts)
+	ranked := rankColdByCapacity(cold)
 	if len(ranked) == 0 {
 		decision.Reason = "cold-start candidates lack comparable metrics"
 		return decision
@@ -510,4 +515,29 @@ type autoItem struct {
 	capacity    float64
 	hasLatency  bool
 	hasThrough  bool
+}
+
+// rankColdByCapacity 在冷启动场景按**剩余容量**排名。
+//
+// 剩余容量未配置上限的候选视为"最充裕"（未配置 ≠ 没有余量，与综合打分里的处理一致）。
+// 排名理由里如实带上样本数，界面据此显示"样本不足"。
+func rankColdByCapacity(cold []Candidate) []Ranked {
+	ranked := make([]Ranked, 0, len(cold))
+	for _, candidate := range cold {
+		remaining := candidate.RemainingCapacity()
+		if candidate.CapacityLimit <= 0 {
+			remaining = 1 << 40 // 未配置上限：视为远大于任何有限余量
+		}
+		ranked = append(ranked, Ranked{
+			Candidate: candidate,
+			Score:     float64(remaining),
+			Reasons: []string{fmt.Sprintf("cold_start_remaining_capacity=%d samples=%d",
+				candidate.RemainingCapacity(), candidate.Quality.SampleCount)},
+		})
+	}
+	if len(ranked) == 0 {
+		return nil
+	}
+	sortByScore(ranked)
+	return ranked
 }

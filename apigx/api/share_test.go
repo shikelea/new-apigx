@@ -812,3 +812,57 @@ func TestRouteExplainEndpoint(t *testing.T) {
 	assert.Equal(t, true, first["insufficient"], "无样本必须显式标出样本不足")
 	assert.Equal(t, false, first["price_known"], "没有价格快照时必须标为价格未知")
 }
+
+// ---- 应用路由排名（T2.7 生效路径） ----
+
+func TestRouteApplyEndpoint(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8801
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "应用组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"apply-x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+
+	// ① 普通用户不得应用（跨分享者的排序是平台侧动作）
+	rec, _ = env.doWithRole(t, http.MethodPost, "/api/route-apply", owner,
+		`{"model":"apply-x","dry_run":false}`, common.RoleCommonUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "分享者不得自行改写跨分享者的路由权重")
+
+	// ② dry_run（默认）：只预览，不写库
+	rec, body = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	assert.Equal(t, true, data["dry_run"])
+	assert.EqualValues(t, 0, data["updated"], "dry_run 不得写库")
+
+	var baseBefore basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", baseChannelID).First(&baseBefore).Error)
+	assert.Equal(t, 0, baseBefore.GetWeight(), "dry_run 之后权重应保持原样")
+
+	// ③ 显式 dry_run=false：写入权重
+	rec, body = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x","dry_run":false}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, false, data["dry_run"])
+	assert.EqualValues(t, 1, data["updated"], "应更新 1 条底座渠道")
+
+	var baseAfter basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", baseChannelID).First(&baseAfter).Error)
+	assert.Positive(t, baseAfter.GetWeight(), "投影后应写入权重")
+	assert.Zero(t, *baseAfter.Priority, "默认投影**不得**改动 priority（避免抢占平台/他人优先级）")
+
+	// ④ 缺 model → 400；未知策略 → 400
+	rec, _ = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"dry_run":true}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec, _ = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x","strategy":"bogus"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

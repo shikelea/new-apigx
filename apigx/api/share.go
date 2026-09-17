@@ -74,6 +74,9 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 
 	// 可解释路由结果（T2.9）：只读，不写库、不投影
 	r.GET("/route-explain", h.explainRoute)
+	// 应用路由排名（T2.7 生效路径）：把名次写成底座渠道权重。**平台侧动作**——
+	// 跨分享者的排序不能由某个分享者决定。
+	r.POST("/route-apply", h.applyRouteRanking)
 
 	usage := r.Group("/usage")
 	{
@@ -1285,4 +1288,92 @@ func parseStrategyQuery(raw string) (routing.Strategy, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// applyRouteRanking 把路由策略算出的名次**投影到底座渠道权重**（T2.7 生效路径）。
+//
+// # 为什么是平台侧动作
+//
+// 排序是**跨分享者**的（同一模型的供给来自不同分享者）。让某个分享者能改这份权重，
+// 等于让他能抢别人的流量。因此要求平台审核权限（与发布审核同一门槛）。
+//
+// # 为什么默认先 dry_run
+//
+// 投影会**改动真实选路行为**。默认只预览（返回解释但不写库），
+// 需要显式 `dry_run=false` 才落库——这种"会改变生产行为"的操作不该因为少写一个参数就发生。
+func (h *handler) applyRouteRanking(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	var req struct {
+		Model    string `json:"model"`
+		Strategy string `json:"strategy"`
+		Group    string `json:"group"`
+		// DryRun 为 true（默认）时只返回将要发生的事，不写库。
+		DryRun *bool `json:"dry_run"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	modelName := strings.TrimSpace(req.Model)
+	if modelName == "" {
+		fail(c, http.StatusBadRequest, "invalid_body", "model is required")
+		return
+	}
+	strategy, strategyOK := parseStrategyQuery(req.Strategy)
+	if !strategyOK {
+		fail(c, http.StatusBadRequest, "invalid_strategy", "unknown routing strategy")
+		return
+	}
+	dryRun := true
+	if req.DryRun != nil {
+		dryRun = *req.DryRun
+	}
+	group := strings.TrimSpace(req.Group)
+	if group == "" {
+		group = "default"
+	}
+
+	candidates, public, err := routing.AssembleCandidates(h.db, capacity.New(common.RDB), modelName,
+		routing.AssembleOptions{})
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	// 先按熔断摘除不可用候选，再决策（与解释接口同一套判定，避免两处口径不一致）
+	now := common.GetTimestamp()
+	for i := range candidates {
+		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
+			candidates[i].Allowed = false
+			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
+		}
+	}
+	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid_strategy", err.Error())
+		return
+	}
+	explanation := routing.Explain(routing.ExplainInput{Decision: decision, Candidates: candidates, Public: public})
+
+	result := gin.H{"dry_run": true, "explanation": explanation, "updated": 0}
+	if dryRun {
+		ok(c, result)
+		return
+	}
+	applyResult, applyErr := routing.ApplyRankingToBaseChannels(h.db, decision, group, routing.DefaultApplyOptions())
+	if applyErr != nil {
+		failFromRepo(c, applyErr)
+		return
+	}
+	skipped := make([]gin.H, 0, len(applyResult.Skipped))
+	for _, item := range applyResult.Skipped {
+		skipped = append(skipped, gin.H{"offering_id_public": item.OfferingID, "reason": item.Reason})
+	}
+	ok(c, gin.H{
+		"dry_run":     false,
+		"explanation": explanation,
+		"updated":     applyResult.Updated,
+		"skipped":     skipped,
+	})
 }
