@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */import { api } from '@/lib/api'
 
-import type { GetPlazaParams, PlazaListResponse } from './types'
+import type { GetPlazaParams, PlazaListResponse, RouteExplainResponse } from './types'
 
 // 模型广场数据访问层。
 //
@@ -25,5 +25,16 @@ import type { GetPlazaParams, PlazaListResponse } from './types'
 // （见 web/AGENTS.md 3.9），因此这里不吞异常、也不弹提示。
 export async function getPlaza(params: GetPlazaParams = {}): Promise<PlazaListResponse> {
   const res = await api.get('/api/apigx/plaza', { params })
+  return res.data
+}
+
+/**
+ * 取某模型的可解释路由结果（只读）。
+ *
+ * 计划书（§4 模型详情）要求展示「价格与质量对比」，这份响应正好逐候选给出
+ * 延迟、可靠性下界、样本数与价格，以及被排除的原因。
+ */
+export async function getRouteExplain(model: string, strategy?: string): Promise<RouteExplainResponse> {
+  const res = await api.get('/api/apigx/route-explain', { params: { model, strategy } })
   return res.data
 }

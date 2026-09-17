@@ -56,3 +56,43 @@ export interface GetPlazaParams {
   page?: number
   page_size?: number
 }
+
+/**
+ * 「这个模型为什么选了/没选某条来源」的单个候选。
+ *
+ * 字段与后端 `routing.CandidateExplanation` 一致；比例类字段单位为 **ppm（百万分比）**，
+ * 价格类字段单位为 **微美元**，展示时由 `lib/format.ts` 统一换算。
+ */
+export interface RouteExplainCandidate {
+  offering_public_id: string
+  channel_public_id: string
+  owner_user_id: number
+  model_name: string
+  rank: number
+  selected: boolean
+  score: number
+  reasons?: string[]
+  sample_count: number
+  success_rate_ppm: number
+  reliability_lower_bound_ppm: number
+  latency_ms_p50: number
+  insufficient: boolean
+  stale: boolean
+  price_known: boolean
+  input_price_micro: number
+  output_price_micro: number
+  /** 被排除的原因（仅在被排除时返回） */
+  excluded_reason?: string
+}
+
+/** `GET /api/apigx/route-explain` 的响应。 */
+export interface RouteExplainResponse {
+  success: boolean
+  message?: string
+  data?: {
+    strategy: string
+    candidates: RouteExplainCandidate[] | null
+    cold_start: boolean
+    reason?: string
+  }
+}

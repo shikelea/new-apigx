@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -82,7 +83,11 @@ export function Plaza() {
             {cards.map((card) => (
               <Card key={card.model}>
                 <CardHeader>
-                  <CardTitle className='break-all text-base'>{card.model}</CardTitle>
+                  <CardTitle className='break-all text-base'>
+                    <Link to='/plaza/$model' params={{ model: card.model }} className='hover:underline'>
+                      {card.model}
+                    </Link>
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className='space-y-3'>
                   <div className='text-muted-foreground text-sm'>

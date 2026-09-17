@@ -6539,5 +6539,17 @@
   "plaza.sources": "{{count}} 个来源",
   "plaza.sources_plural": "{{count}} 个来源",
   "plaza.capabilities": "能力",
-  "plaza.error": "广场加载失败"
+  "plaza.error": "广场加载失败",
+  "plaza.detail.sources": "分享来源",
+  "plaza.detail.channel": "渠道",
+  "plaza.detail.owner": "分享者",
+  "plaza.detail.compare": "价格与质量对比",
+  "plaza.detail.rank": "名次",
+  "plaza.detail.quality": "可靠性（下界）",
+  "plaza.detail.latency": "延迟 P50",
+  "plaza.detail.price": "价格（输入 / 输出，USD）",
+  "plaza.detail.status": "状态",
+  "plaza.detail.selected": "已选中",
+  "plaza.detail.unknownPrice": "价格未知",
+  "plaza.detail.noSource": "该模型暂无可用来源"
 }

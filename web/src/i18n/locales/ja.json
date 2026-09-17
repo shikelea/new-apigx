@@ -6539,5 +6539,17 @@
   "plaza.sources": "{{count}} source",
   "plaza.sources_plural": "{{count}} sources",
   "plaza.capabilities": "Capabilities",
-  "plaza.error": "Failed to load the plaza"
+  "plaza.error": "Failed to load the plaza",
+  "plaza.detail.sources": "Sources",
+  "plaza.detail.channel": "Channel",
+  "plaza.detail.owner": "Provider",
+  "plaza.detail.compare": "Price & quality comparison",
+  "plaza.detail.rank": "Rank",
+  "plaza.detail.quality": "Reliability (lower bound)",
+  "plaza.detail.latency": "Latency P50",
+  "plaza.detail.price": "Price (input / output, USD)",
+  "plaza.detail.status": "Status",
+  "plaza.detail.selected": "Selected",
+  "plaza.detail.unknownPrice": "Price unknown",
+  "plaza.detail.noSource": "No available source for this model"
 }
