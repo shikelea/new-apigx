@@ -1,0 +1,356 @@
+From 0e16ae239a97f1be34e70151edc53e1fa2dcb7a1 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 15:28:03 +0800
+Subject: [PATCH 54/54] =?UTF-8?q?feat(apigx):=20=E7=86=94=E6=96=AD?=
+ =?UTF-8?q?=E5=AE=9E=E6=97=B6=E7=94=9F=E6=95=88=EF=BC=88T2.8=20=E5=AE=8C?=
+ =?UTF-8?q?=E6=88=90=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/relayhook/breaker_guard.go: 在**每次尝试的准入点**(与来源准入同一处)判断供给是否熔断打开,
+  是则返回**可重试**错误, 让底座用自己的重选机制换渠道 —— 不自己写候选循环, 也不永久禁用渠道
+- **读不到统计时不熔断**(fail-open): 统计读失败不代表上游坏了; 因统计故障摘掉健康渠道更糟。
+  与"准入失败要失败关闭"不矛盾 —— 那里守配额与安全, 这里守可用性判断
+- 判定加 30s TTL 缓存(每请求路径, 读质量桶); 开关运行时可读(APIGX_BREAKER_ENABLED, 默认关)
+- 测试 4/4: 打开则挡住且可重试 / 平台拒绝不触发(干净环境验证) / TTL 缓存与失效 / 非分享渠道不参与
+- ❗我的用例期望曾写错: 先写上游失败再叠平台拒绝然后断言"应放行", 但旧失败仍在同一分钟桶里,
+  失败率自然还高 —— 看着在测归因实则没测到; 已改为干净环境 + 补写上游失败以证明阈值确实生效
+- apigx + middleware 全量通过
+---
+ apigx/relayhook/breaker_guard.go      | 120 +++++++++++++++++
+ apigx/relayhook/breaker_guard_test.go | 178 ++++++++++++++++++++++++++
+ middleware/distributor.go             |   5 +
+ 3 files changed, 303 insertions(+)
+ create mode 100644 apigx/relayhook/breaker_guard.go
+ create mode 100644 apigx/relayhook/breaker_guard_test.go
+
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+new file mode 100644
+index 0000000..bd99d97
+--- /dev/null
++++ b/apigx/relayhook/breaker_guard.go
+@@ -0,0 +1,120 @@
++package relayhook
++
++import (
++	"errors"
++	"net/http"
++	"sync"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/channelpool"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/routing"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/gin-gonic/gin"
++	"gorm.io/gorm"
++)
++
++// 熔断的**实时生效**（T2.8 生效路径）。
++//
++// # 复用哪一层
++//
++// 判定逻辑在 `apigx/routing`（推导式，见那里的说明）。这里只做两件事：
++//  1. 在每次尝试的准入点，判断"当前选中的这条供给是否处于熔断打开"；
++//  2. 是则返回**可重试**错误，让底座用它自己的重选机制换一条渠道——
++//     **不自己写候选循环**（二开第一原则），也不永久禁用渠道。
++//
++// 为什么返回可重试而不是直接拒绝：熔断是"这条上游暂时不行"，不是"这个请求不该被服务"。
++// 底座有别的合格渠道时就该换一条；都没有时底座的既有逻辑会给出无可用渠道的结果。
++//
++// # 性能
++//
++// 判定要读质量桶，属于每请求都会走的路径，因此**加短 TTL 缓存**（30s）：
++// 熔断状态本身按分钟窗口变化，30 秒的滞后完全可接受；而省下的是每次尝试一次聚合查询。
++
++// breakerEnabled 每次读取环境变量（默认关闭，与其它 APIGX 开关一致）。
++//
++// 刻意不做成初始化时读取的包级变量：那样开关在进程启动后就固定了，
++// 既无法在测试里切换，也不便在运维侧临时关掉。
++func breakerEnabled() bool {
++	return common.GetEnvOrDefaultBool("APIGX_BREAKER_ENABLED", false)
++}
++
++const breakerCacheTTL = 30 * time.Second
++
++type cachedBreaker struct {
++	open      bool
++	expiresAt time.Time
++}
++
++var (
++	breakerCacheMu sync.RWMutex
++	// breakerCache 以**供给 ID** 为键：熔断是针对"某条供给（某渠道的某模型）"的。
++	breakerCache = map[int64]cachedBreaker{}
++)
++
++// InvalidateBreakerCache 清空熔断判定缓存（运维/测试用）。
++func InvalidateBreakerCache() {
++	breakerCacheMu.Lock()
++	breakerCache = map[int64]cachedBreaker{}
++	breakerCacheMu.Unlock()
++}
++
++// CheckBreakerAllows 判断当前选中的渠道上、该模型对应的供给是否被熔断。
++//
++// 返回 nil 表示放行。
++func CheckBreakerAllows(c *gin.Context, channelID int, modelName string) *types.NewAPIError {
++	if !breakerEnabled() || c == nil || channelID <= 0 || modelName == "" {
++		return nil
++	}
++	db := channelpool.CurrentDB()
++	if db == nil {
++		return nil
++	}
++	shareChannelID, ok := channelpool.ShareChannelIDByBase(db, channelID)
++	if !ok {
++		return nil // 平台自建渠道不参与熔断
++	}
++	offeringID, found, err := apigxmodel.FindOfferingByUpstreamModel(db, shareChannelID, modelName)
++	if err != nil || !found {
++		return nil // 没有供给：交给其它准入判定处理
++	}
++
++	if !breakerOpenCached(db, offeringID) {
++		return nil
++	}
++	common.SysLog("apigx breaker: offering is open, retry with another channel")
++	return types.NewErrorWithStatusCode(
++		errors.New("upstream source is temporarily unhealthy, retry with another channel"),
++		types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable,
++		types.ErrOptionWithNoRecordErrorLog())
++}
++
++// breakerOpenCached 带短 TTL 缓存地判断某供给是否熔断打开。
++//
++// **读不到统计时不熔断**：统计读失败（数据库抖动）不代表上游坏了，
++// 因统计故障把一个健康渠道摘掉，比"短暂用到可能不健康的渠道"更糟。
++// 这条与"准入失败要失败关闭"不矛盾——那里守卫的是**配额与安全**，这里守卫的是**可用性判断**。
++func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
++	now := time.Now()
++	breakerCacheMu.RLock()
++	if cached, ok := breakerCache[offeringID]; ok && now.Before(cached.expiresAt) {
++		breakerCacheMu.RUnlock()
++		return cached.open
++	}
++	breakerCacheMu.RUnlock()
++
++	nowTs := common.GetTimestamp()
++	view, err := apigxmodel.ResolveQualityView(db, offeringID, apigxmodel.QualityWindowSixHour, nowTs)
++	if err != nil {
++		common.SysError("apigx breaker: resolve quality view failed: " + err.Error())
++		return false
++	}
++	verdict := routing.EvaluateBreaker(view, nowTs, routing.DefaultBreakerConfig())
++	open := verdict.State == routing.BreakerOpen
++
++	breakerCacheMu.Lock()
++	breakerCache[offeringID] = cachedBreaker{open: open, expiresAt: now.Add(breakerCacheTTL)}
++	breakerCacheMu.Unlock()
++	return open
++}
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+new file mode 100644
+index 0000000..d1488fd
+--- /dev/null
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -0,0 +1,178 @@
++package relayhook
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/gin-gonic/gin"
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++// 熔断的实时生效（T2.8 生效路径）测试。
++//
++// 这一层只做"挡不挡"的判断，判定逻辑在 `apigx/routing`（有自己的单元测试）。
++// 这里验证的是接进准入点后的行为：打开的供给被挡住且**可重试**（换渠道而不是判死）、
++// 平台拒绝不触发、开关可关、判定有短 TTL 缓存。
++
++type breakerTestEnv struct {
++	db            *gorm.DB
++	baseChannelID int
++	shareChannel  *apigxmodel.Channel
++	offeringID    int64
++	seq           atomic.Int64
++}
++
++var breakerSeq atomic.Int64
++
++func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
++	t.Helper()
++	dsn := filepath.Join(t.TempDir(), "apigx_breaker_test.db")
++	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, apigxmodel.Migrate(db))
++
++	env := &breakerTestEnv{db: db, baseChannelID: int(800000 + breakerSeq.Add(1))}
++	const owner int64 = 991001
++
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "熔断组", PublicID: "bg-" + t.Name()}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	channel := &apigxmodel.Channel{
++		PublicID: "bc-" + t.Name(), OwnerUserID: owner, ShareGroupID: group.ID,
++		Name: "熔断渠道", BaseChannelID: int64(env.baseChannelID),
++	}
++	require.NoError(t, apigxmodel.CreateChannel(db, channel))
++	env.shareChannel = channel
++
++	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "breaker-model"}
++	require.NoError(t, apigxmodel.CreateModelOffering(db, owner, offering))
++	env.offeringID = offering.ID
++	return env
++}
++
++func (e *breakerTestEnv) newContext(t *testing.T) *gin.Context {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++	return c
++}
++
++// recordFailures 写入 n 条**上游失败**样本（同一分钟桶）。
++func (e *breakerTestEnv) recordFailures(t *testing.T, n int) {
++	t.Helper()
++	now := common.GetTimestamp()
++	for range n {
++		require.NoError(t, apigxmodel.RecordQualitySample(e.db, apigxmodel.QualitySample{
++			OfferingID: e.offeringID, BucketTs: now - now%60,
++			Outcome: apigxmodel.QualityOutcomeUpstream, LatencyMs: 100,
++		}))
++	}
++}
++
++// recordPlatformRejects 写入 n 条**平台拒绝**样本（我们不希望它触发熔断）。
++func (e *breakerTestEnv) recordPlatformRejects(t *testing.T, n int) {
++	t.Helper()
++	now := common.GetTimestamp()
++	for range n {
++		require.NoError(t, apigxmodel.RecordQualitySample(e.db, apigxmodel.QualitySample{
++			OfferingID: e.offeringID, BucketTs: now - now%60,
++			Outcome: apigxmodel.QualityOutcomeRejected, LatencyMs: 20,
++		}))
++	}
++}
++
++// 熔断打开的供给必须被挡住，让底座换一条渠道；平台拒绝不触发；开关可关。
++func TestBreakerGuardBlocksOpenOffering(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	InvalidateBreakerCache()
++	t.Cleanup(InvalidateBreakerCache)
++
++	c := env.newContext(t)
++
++	// ① 还没有样本：不熔断（样本不足不给结论）
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "breaker-model"))
++
++	// ② 制造"上游持续失败"：20 次上游失败、无成功
++	env.recordFailures(t, 20)
++	InvalidateBreakerCache()
++	err := CheckBreakerAllows(c, env.baseChannelID, "breaker-model")
++	require.NotNil(t, err, "熔断打开时必须挡住该供给")
++	assert.Equal(t, http.StatusServiceUnavailable, err.StatusCode)
++	// **可重试**：交给底座换渠道，而不是把请求判死
++	assert.False(t, types.IsSkipRetryError(err), "熔断应当可重试（换一条渠道），而不是终止请求")
++
++	// ④ 开关关闭时不生效
++	t.Setenv("APIGX_BREAKER_ENABLED", "false")
++	InvalidateBreakerCache()
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "breaker-model"), "开关关闭时不生效")
++}
++
++// **归因红线**：平台自身的拒绝（准入/容量/配额）与用户取消**不得触发熔断**。
++//
++// 注意必须用**干净的环境**验证这一点：如果先写了上游失败再补平台拒绝，
++// 那些失败仍在同一个分钟桶里、失败率自然还是高的——那验证不了归因是否正确
++// （初版就是这么写的，读起来像在测归因，实际在测"旧失败还在不在"）。
++func TestBreakerIgnoresPlatformRejections(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	InvalidateBreakerCache()
++	t.Cleanup(InvalidateBreakerCache)
++	c := env.newContext(t)
++
++	env.recordPlatformRejects(t, 40)
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "breaker-model"),
++		"只有平台拒绝时绝不允许熔断：那会把健康渠道误判为上游故障")
++
++	// 补上真正的上游失败后才熔断（证明阈值本身是生效的，上一步不是因为"从来没生效"）
++	env.recordFailures(t, 20)
++	InvalidateBreakerCache()
++	assert.NotNil(t, CheckBreakerAllows(c, env.baseChannelID, "breaker-model"))
++}
++
++// 判定带短 TTL 缓存（否则每次尝试都要聚合一次统计桶）。
++func TestBreakerVerdictIsCached(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	InvalidateBreakerCache()
++	t.Cleanup(InvalidateBreakerCache)
++	c := env.newContext(t)
++
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "breaker-model"))
++
++	// 缓存已记录"关闭"：即使立刻写入大量失败，TTL 内仍按缓存放行
++	env.recordFailures(t, 20)
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "breaker-model"),
++		"TTL 内应命中缓存（熔断状态按分钟窗口变化，30 秒滞后可接受）")
++
++	// 失效后立即反映真实状态
++	InvalidateBreakerCache()
++	assert.NotNil(t, CheckBreakerAllows(c, env.baseChannelID, "breaker-model"))
++
++	// TTL 到期的行为由缓存有效期决定；这里顺带确认缓存确实有时间上限
++	assert.Positive(t, breakerCacheTTL, "缓存必须有 TTL")
++	assert.LessOrEqual(t, breakerCacheTTL, 60*time.Second, "TTL 不应过长（熔断要能较快反映真实状态）")
++}
++
++// 平台自建渠道（没有对应供给）不参与熔断。
++func TestBreakerGuardSkipsNonShareChannels(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	c := env.newContext(t)
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID+999, "breaker-model"), "非分享渠道不熔断")
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "no-such-model"), "没有供给的模型不熔断")
++	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, ""), "缺模型名不熔断")
++}
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 854d4db..1ec4ae6 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -754,6 +754,11 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
+ 		return sourceErr
+ 	}
++	// 熔断生效（T2.8）：该供给处于"熔断打开"时返回**可重试**错误，
++	// 由底座的重选机制换一条渠道——不自己写候选循环，也不永久禁用渠道。
++	if breakerErr := relayhook.CheckBreakerAllows(c, channel.Id, modelName); breakerErr != nil {
++		return breakerErr
++	}
+ 	return nil
+ }
+ 
+-- 
+2.53.0.windows.1
+
