@@ -239,6 +239,17 @@ const server = http.createServer(async (req, res) => {
   const bodyText = await readBody(req);
 
   // 控制面不记录，避免污染取证数据
+  if (url.pathname === '/_control/state' && req.method === 'GET') {
+    sendJson(res, 200, {
+      ok: true,
+      startedAt: state.startedAt,
+      profile: state.profile,
+      requestCount: state.requests.length,
+      keyCounts: state.keyCounts,
+    });
+    return true;
+  }
+
   if (url.pathname.startsWith('/_control/')) {
     const handled = await handleControl(req, res, url, bodyText);
     if (!handled) sendJson(res, 404, { ok: false, error: 'unknown control endpoint' });
@@ -347,16 +358,6 @@ const server = http.createServer(async (req, res) => {
     }
     sendJson(res, 200, { code: 0, message: 'SUCCEED', data: { task_id: taskId, task_status: status, task_status_msg: '' } });
     return;
-  }
-  if (url.pathname === '/_control/state' && req.method === 'GET') {
-    sendJson(res, 200, {
-      ok: true,
-      startedAt: state.startedAt,
-      profile: state.profile,
-      requestCount: state.requests.length,
-      keyCounts: state.keyCounts,
-    });
-    return true;
   }
 
   if (url.pathname === '/v1/video/generations') {
