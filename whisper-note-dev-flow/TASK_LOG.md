@@ -895,3 +895,14 @@
 **阶段 3 期间发现并修复的底座缺陷**：**D-021**（图片尺寸越界会被上游默默出图 ⇒ 已加校验）、**D-022**（kling 插件 `parseTaskResult` 状态映射方向错 ⇒ **任何 kling 视频任务永久卡 queued**，对真实 Kling 同样成立 ⇒ 已修）。
 
 **夹具注意事项（供复跑）**：视频 E2E 会注入失败，**熔断会因此禁用该渠道**（行为正确）⇒ 复跑前需恢复渠道；kling 插件要求上游密钥为 `accessKey|secretKey` 格式。
+### T3.6 复跑夹具：三项前置条件（本轮实测，均非产品缺陷）
+
+为了让视频 E2E **可重复跑**，本轮把夹具前置条件全部试出来了；记录于此，避免下次重走：
+
+| 前置条件 | 现象 | 处理 |
+|---|---|---|
+| **渠道会被自动禁用** | `No available channel for model kling-v1 ... has no enabled channel serving it` | 视频 E2E **刻意注入失败**，底座（以及我们自己的熔断）会因此**禁用该渠道**——行为正确。复跑前需 `update channels set status=1` + `update abilities set enabled=true`（**在网关停止时改**，否则会被内存缓存回写），再重启网关；或本次起网关时**不开熔断** |
+| **kling 插件要求密钥形状** | `invalid api_key, required format is accessKey|secretKey at tokenFor` | 上游凭据必须是 `accessKey|secretKey` 形状；且**旧格式钥匙要停用**（底座按轮询轮换，否则一半概率失败） |
+| **未配置价格的模型会走兜底价** | `insufficient_user_quota`（`kling-v1` 无价 ⇒ 预扣 `$18.75`） | 测试账户需有足够余额；**同时这是一条值得记的产品事实**：`model price not found: kling-v1` ⇒ 底座走兜底价计费。阶段 2 的"价格未知不算零"是针对**展示与路由**的；**计费侧的兜底**是否需要收紧（未知价格时拒绝或明确标注）建议后续单独确认 |
+
+**结论**：T3.6 的**实质验收证据已在打通那一轮取得**（提交 / 轮询到 `completed` / 失败 `failed` / 不误报 / **正确用户与原渠道 `user=1 channel=142`** / **跨用户 400** / **取消 404 且显式声明**，其余库中 `SUCCESS`×4、`FAILURE`×1）✓；本轮把"如何复跑"的前置条件补齐 ✓。**D-022（kling 状态映射方向）仍是阶段 3 最有价值的修复**：它让**任何** kling 视频任务永久卡住，对真实 Kling 同样成立。
