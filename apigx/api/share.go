@@ -13,6 +13,7 @@ package apigxapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -749,6 +750,10 @@ type platformKeyPreferencesRequest struct {
 	AllowedModelIDs     []string `json:"allowed_model_ids"`
 	AllowedOwnerUserIDs []int64  `json:"allowed_owner_user_ids"`
 	AllowFallback       *bool    `json:"allow_fallback"`
+	// DefaultRouteMode 是「默认路由策略」（计划书 §9.1：保存到平台 Key 的偏好）。
+	// 空串与 "auto" 都表示自动（不加限定）；latency / throughput / reliability 会把它
+	// 变成**请求级候选限定**（见 relayhook.EligibleBaseChannelsForStrategy）。
+	DefaultRouteMode *string `json:"default_route_mode"`
 }
 
 func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
@@ -778,6 +783,7 @@ func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
 		"allowed_model_ids":      key.AllowedModels(),
 		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
 		"allow_fallback":         key.AllowFallback,
+		"default_route_mode":     key.DefaultRouteMode,
 	})
 }
 
@@ -806,6 +812,18 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
 		}
 		if req.PinnedOfferingID != nil {
 			k.PinnedOfferingID = *req.PinnedOfferingID
+		}
+		if req.DefaultRouteMode != nil {
+			// 只接受已知取值或空串（空串=自动）：**不接受拼错的策略名**——
+			// 否则用户以为设了策略、实际永远不会生效（静默失效）。
+			// 这里返回错误（由上层映射为 400），而不是直接写响应：本函数是回调，只负责改字段。
+			mode := strings.ToLower(strings.TrimSpace(*req.DefaultRouteMode))
+			switch mode {
+			case "", "auto", "latency", "throughput", "reliability":
+				k.DefaultRouteMode = mode
+			default:
+				return fmt.Errorf("%w: unknown default_route_mode %q", apigxmodel.ErrInvalidArgument, mode)
+			}
 		}
 		if req.AllowFallback != nil {
 			k.AllowFallback = *req.AllowFallback
@@ -836,6 +854,7 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
 		"allowed_model_ids":      key.AllowedModels(),
 		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
 		"allow_fallback":         key.AllowFallback,
+		"default_route_mode":     key.DefaultRouteMode,
 	})
 }
 

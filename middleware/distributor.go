@@ -52,6 +52,15 @@ func Distribute() func(c *gin.Context) {
 		if !enforceTokenModelLimit(c, modelRequest.Model) {
 			return
 		}
+		// APIGX 默认路由策略（T2.7 用户侧）：按调用者平台 Key 的策略算出**合格渠道集合**，
+		// 作为请求级过滤器交给底座——复用底座既有的候选过滤机制，不改写选择器。
+		// 策略为空/auto 或算不出候选时**不加限定**（宁可退回默认选路）。
+		if allowedChannels, ok := relayhook.EligibleBaseChannelsForStrategy(c, modelRequest.Model); ok {
+			constraints.AddFilter(taskdto.ChannelFilter{
+				Kind:              taskdto.FilterAllowedChannelIds,
+				AllowedChannelIds: allowedChannels,
+			})
+		}
 		if pin, found, overridden := constraints.ResolvedPin(); found {
 			for _, lost := range overridden {
 				logger.LogWarn(c, fmt.Sprintf(

@@ -39,6 +39,10 @@ const (
 	FilterRequestPath        ChannelFilterKind = "request_path"
 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
 	FilterResponsesWebSocket ChannelFilterKind = "responses_websocket"
+	// FilterAllowedChannelIds 只保留列出的渠道 ID。用于**请求级**的候选限定：
+	// 调用方（例如 APIGX 的路由策略）已经算好"本次该用哪些渠道"，这里只表达结果，
+	// 不把排序逻辑塞进选择器（台账 D-020）。
+	FilterAllowedChannelIds ChannelFilterKind = "allowed_channel_ids"
 )
 
 type ChannelFilter struct {
@@ -47,6 +51,9 @@ type ChannelFilter struct {
 	TaskPluginKey          string
 	TaskPluginKeys         []string
 	TaskPluginChannelTypes []int
+	// AllowedChannelIds 仅当 Kind == FilterAllowedChannelIds 时使用；**空列表表示不允许任何渠道**
+	// （与"没有这个过滤器"是两回事：前者是明确的"没有合格候选"）。
+	AllowedChannelIds []int
 }
 
 type ChannelConstraints struct {
