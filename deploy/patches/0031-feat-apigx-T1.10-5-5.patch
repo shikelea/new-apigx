@@ -1,0 +1,181 @@
+From b37e054fb9604c9c7b27cb47d42f11c0eb373c08 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:07:49 +0800
+Subject: [PATCH 31/31] =?UTF-8?q?feat(apigx):=20=E5=85=81=E8=AE=B8?=
+ =?UTF-8?q?=E6=A8=A1=E5=9E=8B=E4=B8=8E=E5=9B=BA=E5=AE=9A=E6=9D=A5=E6=BA=90?=
+ =?UTF-8?q?=E7=9A=84=E6=89=A7=E8=A1=8C=E4=BE=A7=EF=BC=88T1.10=20=E5=AE=8C?=
+ =?UTF-8?q?=E6=88=90=EF=BC=8C=E7=AB=AF=E5=88=B0=E7=AB=AF=205/5=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- relayhook: CheckSourceAllowed 依次判定 允许模型 / 固定来源 / 允许来源,
+  三者共用 denyOrRetry(可回退->让底座重选; 不可回退->403 并中止上下文)
+- channelpool.ShareChannelIDByOffering: 由供给定位其渠道(固定来源判定)
+- 调用点补模型名(SetupContextForSelectedChannel 自带该参数), 未新增挂载点
+- 端到端: allowed_model_ids 不含->403 model_not_allowed; 含->200;
+  固定来源正确->200; 固定来源不可用->403 pinned_source_unavailable; 复原->200
+- apigx + middleware 全量通过
+---
+ apigx/channelpool/policy_source.go | 12 +++++
+ apigx/relayhook/source_guard.go    | 81 ++++++++++++++++++++----------
+ middleware/distributor.go          |  2 +-
+ 3 files changed, 68 insertions(+), 27 deletions(-)
+
+diff --git a/apigx/channelpool/policy_source.go b/apigx/channelpool/policy_source.go
+index 4a1377d..6cf0d7f 100644
+--- a/apigx/channelpool/policy_source.go
++++ b/apigx/channelpool/policy_source.go
+@@ -147,3 +147,15 @@ func ShareChannelPublicInfoByBase(db *gorm.DB, baseChannelID int) (publicID stri
+ 	}
+ 	return shareChannel.PublicID, shareChannel.OwnerUserID, true
+ }
++
++// ShareChannelIDByOffering 由供给 ID 找出它所属的分享渠道（用于「固定来源」判定）。
++func ShareChannelIDByOffering(db *gorm.DB, offeringID int64) (int64, bool) {
++	if db == nil || offeringID <= 0 {
++		return 0, false
++	}
++	var offering apigxmodel.ModelOffering
++	if err := db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
++		return 0, false
++	}
++	return offering.ChannelID, true
++}
+diff --git a/apigx/relayhook/source_guard.go b/apigx/relayhook/source_guard.go
+index 4b8ebdb..7794f87 100644
+--- a/apigx/relayhook/source_guard.go
++++ b/apigx/relayhook/source_guard.go
+@@ -3,6 +3,7 @@ package relayhook
+ import (
+ 	"errors"
+ 	"net/http"
++	"slices"
+ 	"sync"
+ 	"time"
+ 
+@@ -87,54 +88,82 @@ func ResetPreferenceCacheForTest() {
+ 	prefCacheMu.Unlock()
+ }
+ 
+-// CheckSourceAllowed 判断当前请求所选渠道是否被该平台 Key 的「允许来源」允许。
++// CheckSourceAllowed 判断当前请求所选渠道/模型是否被该平台 Key 的偏好允许。
++//
++// 依次判定三件事：
++//  1. **允许模型**：Key 配了允许模型列表时，请求的模型必须在列表内；
++//  2. **固定来源**：范围模式为「固定来源」时，选中的渠道必须正是被固定的那条供给所属渠道；
++//  3. **允许来源**：Key 限定来源时，选中渠道的分享者必须在允许列表内。
+ //
+ // 返回 nil 表示放行；否则返回应当抛给底座重试/中止流程的错误。
+-func CheckSourceAllowed(c *gin.Context, channelID int) *types.NewAPIError {
++// 「可回退」时返回**可重试**错误让底座重选渠道；不可回退时直接写出 403 并中止上下文。
++func CheckSourceAllowed(c *gin.Context, channelID int, modelName string) *types.NewAPIError {
+ 	if !sourceGuardEnabled || c == nil || channelID <= 0 {
+ 		return nil
+ 	}
+ 	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
+ 	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
+ 	if tokenID <= 0 || userID <= 0 {
+-		// 没有平台 Key 上下文（例如内部调用）：不施加来源限制
++		// 没有平台 Key 上下文（例如内部调用）：不施加限制
+ 		return nil
+ 	}
+ 
+ 	db := channelpool.CurrentDB()
+ 	key, found := loadPreferences(db, int64(userID), int64(tokenID))
+-	if !found || key == nil || key.ScopeMode != apigxmodel.ScopeModeAllowedOwners {
++	if !found || key == nil {
+ 		return nil
+ 	}
+ 
+-	ownerID, isOurChannel := channelpool.ShareChannelOwnerByBase(db, channelID)
+-	if isOurChannel {
+-		if allowed, _ := key.AllowsOwner(ownerID); allowed {
+-			return nil
++	// ① 允许模型
++	if allowedModels := key.AllowedModels(); len(allowedModels) > 0 && modelName != "" {
++		if !slices.Contains(allowedModels, modelName) {
++			return denyOrRetry(c, key, "model_not_allowed",
++				"this API key is not allowed to use the requested model")
++		}
++	}
++
++	// ② 固定来源
++	if key.ScopeMode == apigxmodel.ScopeModePinned {
++		pinnedChannelID, ok := channelpool.ShareChannelIDByOffering(db, key.PinnedOfferingID)
++		if !ok {
++			common.SysLog("apigx source guard: pinned offering is not available")
++			return denyOrRetry(c, key, "pinned_source_unavailable", "the pinned source is not available")
++		}
++		if selectedID, isOurChannel := channelpool.ShareChannelIDByBase(db, channelID); !isOurChannel || selectedID != pinnedChannelID {
++			return denyOrRetry(c, key, "pinned_source_mismatch", "the selected source is not the pinned one")
++		}
++	}
++
++	// ③ 允许来源
++	if key.ScopeMode == apigxmodel.ScopeModeAllowedOwners {
++		ownerID, isOurChannel := channelpool.ShareChannelOwnerByBase(db, channelID)
++		if isOurChannel {
++			if allowed, _ := key.AllowsOwner(ownerID); allowed {
++				return nil
++			}
++		} else {
++			// 不是分享渠道：限制来源的 Key 不得借道管理员自建渠道
++			common.SysLog("apigx source guard: key restricts sources but selected channel is not a share channel")
+ 		}
+-	} else {
+-		// 不是分享渠道：限制来源的 Key 不得借道管理员自建渠道
+-		common.SysLog("apigx source guard: key restricts sources but selected channel is not a share channel")
++		return denyOrRetry(c, key, "source_not_allowed",
++			"this API key is not allowed to use the selected source")
+ 	}
++	return nil
++}
+ 
++// denyOrRetry 按「是否允许回退」决定拒绝方式。
++//
++// 可回退：返回可重试错误（**不中止上下文**），让底座重新选择渠道；
++// 不可回退：直接写出 403 并中止上下文——因为 `Distribute` 调用
++// `SetupContextForSelectedChannel` 时**忽略返回值**，只返回错误阻止不了请求继续
++// （容量钩子有效正是因为它直接 abort）。
++func denyOrRetry(c *gin.Context, key *apigxmodel.APIKey, code string, message string) *types.NewAPIError {
+ 	if key.AllowFallback {
+-		// 可回退：交给底座重试并重新选择渠道（不设置 SkipRetry、**不中止上下文**，
+-		// 否则底座就没有机会重选）。
+-		return types.NewErrorWithStatusCode(
+-			errors.New("source not allowed for this key, retry with another channel"),
++		return types.NewErrorWithStatusCode(errors.New(message+", retry with another channel"),
+ 			types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden, types.ErrOptionWithNoRecordErrorLog())
+ 	}
+-	// 不可回退：明确的拒绝。
+-	//
+-	// **必须在这里直接写出响应并中止上下文**，原因有二：
+-	//  1. `Distribute` 调用 `SetupContextForSelectedChannel` 时**忽略了返回值**，
+-	//     只返回错误并不会阻止请求继续（容量钩子之所以有效，正是因为它直接 abort）；
+-	//  2. 若让错误沿中继链路传播，它会被当成**渠道故障**——实测会把健康渠道自动禁用
+-	//     （后续请求变成 `model_not_found 503`），这是把"准入判断"误当成"上游故障"的典型后果。
+-	abortJSON(c, http.StatusForbidden, "source_not_allowed",
+-		"this API key is not allowed to use the selected source")
+-	return types.NewErrorWithStatusCode(
+-		errors.New("source not allowed for this key"),
++	abortJSON(c, http.StatusForbidden, code, message)
++	return types.NewErrorWithStatusCode(errors.New(message),
+ 		types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden,
+ 		types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+ }
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 09c3e15..d13d101 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -722,7 +722,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 	}
+ 	// APIGX 平台 Key 的「允许来源」准入（T1.10）：不可回退时直接拒绝；可回退时返回可重试错误，
+ 	// 由底座的重试机制重新选择渠道（复用底座重选，不自己写候选循环）。
+-	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id); sourceErr != nil {
++	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
+ 		return sourceErr
+ 	}
+ 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
+-- 
+2.53.0.windows.1
+
