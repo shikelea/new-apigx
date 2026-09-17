@@ -547,3 +547,46 @@ func TestRecordKeyOutcomeDoesNotTouchBaseChannel(t *testing.T) {
 	assert.Equal(t, 1, base.ChannelInfo.MultiKeyPollingIndex, "统计回填不得重置轮询游标")
 	assert.Equal(t, 2, base.ChannelInfo.MultiKeySize)
 }
+
+// **回归测试**：隔离之后索引空间会分歧。
+//
+// 底座隔离索引 0 之后继续用索引 1；而若按「当前可用的 Key」重算映射，
+// 已失效的那把会被过滤掉、另一把就变成了索引 0 —— 底座的索引 1 于是找不到对应凭据，
+// 统计落空（若索引碰巧对齐，更会静默记到错误的凭据上）。
+// 映射必须以**底座渠道实际的 Key 列表**为准。
+func TestRecordKeyOutcomeAfterIsolationStillMapsCorrectly(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9601
+	const baseChannelID int64 = 9393
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
+	}).Error)
+
+	// 权重相同 -> 投影顺序为 id 升序：索引 0 = stable-a，索引 1 = stable-b
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-iso-one-aaaaaa", "sk-iso-two-bbbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	// 模拟「索引 0 已被隔离」：我们这边标为失效 + 底座状态表标为不可用
+	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
+		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").
+		Updates(map[string]any{"status": apigxmodel.UpstreamKeyStatusInvalid}).Error)
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", int(baseChannelID)).First(&base).Error)
+	base.ChannelInfo.MultiKeyStatusList = map[int]int{0: common.ChannelStatusAutoDisabled}
+	require.NoError(t, db.Model(&basemodel.Channel{}).Where("id = ?", int(baseChannelID)).
+		Update("channel_info", base.ChannelInfo).Error)
+
+	// 底座这时用的是索引 1 —— 统计必须落到 stable-b 上
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 1, KeyOutcome{Success: true}))
+
+	var b apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&b).Error)
+	assert.Positive(t, b.LastOKAt, "索引 1 的成功统计必须落到 stable-b（旧实现会因索引分歧而漏记）")
+
+	var a apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&a).Error)
+	assert.Zero(t, a.LastOKAt, "不得记到已隔离的那把上")
+}

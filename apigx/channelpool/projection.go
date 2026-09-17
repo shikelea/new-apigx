@@ -71,16 +71,70 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 	return built.Projection, nil
 }
 
-// BuildKeyPoolProjection **只读**地构建投影：读取池子、解密、算出索引映射，**不写任何东西**。
+// MapBaseKeyIndexes 依据**底座渠道实际的 Key 列表**，把索引映射回我们的稳定凭据 ID。
 //
-// 统计回填必须走这条路径。早期实现里统计直接调 `ProjectKeyPool`，等于**每次请求结束都重写
-// 底座渠道并清空它按下标的状态表**——既慢又错误（会把底座的 Key 健康状态与轮询游标抹掉）。
-func BuildKeyPoolProjection(db *gorm.DB, shareChannelID int64) (*Projection, error) {
-	built, err := buildPool(db, shareChannelID)
-	if err != nil {
+// # 为什么不能按「当前可用的 Key」重算
+//
+// 早期实现用「重新构建一次投影」来翻译索引，于是**一旦有 Key 被排除，索引空间就分歧**：
+// 底座隔离索引 0 之后继续用索引 1，而重建时会过滤掉已失效的那把，使另一把变成索引 0——
+// 于是底座的索引 1 在我们这边根本不存在。行为上是安全地报错（不猜索引），
+// 但后果是统计漏记；更危险的是两套索引**碰巧对齐**时会把统计静默记到错误的凭据上。
+//
+// 正确做法：以底座渠道**当前的 Key 列表**为唯一事实来源逐位匹配。这样无论底座
+// 隔离、删除还是重排过哪一把，任何索引都能被正确翻译。
+//
+// 匹配方式是**按凭据明文比对**（底座列表里存的就是明文），因此不依赖顺序。
+func MapBaseKeyIndexes(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+	if db == nil {
+		return nil, errors.New("channelpool: nil db")
+	}
+	var shareChannel apigxmodel.Channel
+	if err := db.Where("id = ?", shareChannelID).First(&shareChannel).Error; err != nil {
 		return nil, err
 	}
-	return built.Projection, nil
+	if shareChannel.BaseChannelID <= 0 {
+		return nil, fmt.Errorf("channelpool: share channel %d has no base channel", shareChannelID)
+	}
+
+	var baseChannel basemodel.Channel
+	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
+		return nil, err
+	}
+
+	// 我们这边**全部存活**的 Key（含已失效/冷却中的）：底座列表里可能仍然留着它们，
+	// 索引必须能被翻译，否则统计又一次落空。
+	var ours []apigxmodel.UpstreamKey
+	if err := db.Where("channel_id = ?", shareChannelID).Find(&ours).Error; err != nil {
+		return nil, err
+	}
+	secretToStable := make(map[string]string, len(ours))
+	for i := range ours {
+		plain, err := secretbox.Decrypt(ours[i].SecretRef)
+		if err != nil {
+			common.SysError(fmt.Sprintf("channelpool: cannot decrypt key id=%d stable=%s: %v",
+				ours[i].ID, ours[i].StableKeyID, err))
+			continue
+		}
+		secretToStable[plain] = ours[i].StableKeyID
+	}
+
+	baseKeys := baseChannel.GetKeys()
+	indexToStable := make(map[int]string, len(baseKeys))
+	indexToKeyValue := make(map[int]string, len(baseKeys))
+	for i, secret := range baseKeys {
+		stable, ok := secretToStable[secret]
+		if !ok {
+			// 底座列表里有我们认不出来的凭据（例如人工改过渠道）：不猜，跳过该索引
+			continue
+		}
+		indexToStable[i] = stable
+		indexToKeyValue[i] = secret
+	}
+	return &Projection{
+		IndexToStableKey: indexToStable,
+		IndexToKeyValue:  indexToKeyValue,
+		KeyCount:         len(baseKeys),
+	}, nil
 }
 
 // builtPool 是一次构建的中间结果（含仅进程内可用的凭据明文）。
@@ -152,6 +206,16 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	baseChannel.ChannelInfo.MultiKeyDisabledReason = nil
 	baseChannel.ChannelInfo.MultiKeyDisabledTime = nil
 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
+
+	// 池子重新有可用凭据时，把**因全池失效而被自动停用**的渠道恢复过来。
+	//
+	// 底座的语义是「全部 Key 都不可用才停掉整个渠道」（handlerMultiKeyUpdate），
+	// 因此当分享者恢复或新增一把 Key 并 apply 之后，渠道本身也必须跟着恢复——
+	// 否则会出现「池里有可用 Key、渠道却仍然全池停摆」的矛盾状态（端到端验证时即如此）。
+	// 只恢复**自动禁用**的渠道：人工禁用的是管理员的决定，不能被我们悄悄改回来。
+	if baseChannel.Status == common.ChannelStatusAutoDisabled {
+		baseChannel.Status = common.ChannelStatusEnabled
+	}
 
 	// 复用底座的更新路径：它会重算 MultiKeySize 并按当前 Key 列表裁剪越界的索引状态。
 	if err := baseChannel.Update(); err != nil {

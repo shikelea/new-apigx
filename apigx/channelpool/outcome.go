@@ -50,9 +50,9 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
 		return err
 	}
 
-	// **只读**构建：统计回填绝不能写底座渠道（早期实现走 ProjectKeyPool，等于每次请求
-	// 结束都重写底座渠道并清空它按下标的状态表与轮询游标）。
-	projection, err := BuildKeyPoolProjection(db, shareChannel.ID)
+	// 索引映射**以底座渠道实际的 Key 列表为准**（见 MapBaseKeyIndexes 的注释）：
+	// 按「当前可用 Key」重算会在隔离/删除之后让两套索引分歧，导致统计落空或记错凭据。
+	projection, err := MapBaseKeyIndexes(db, shareChannel.ID)
 	if err != nil {
 		return err
 	}
