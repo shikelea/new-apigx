@@ -1,0 +1,250 @@
+From 4aa65d7fd701096903799762e708bd0cd89c7797 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:16:32 +0800
+Subject: [PATCH 42/42] =?UTF-8?q?feat(apigx):=20=E6=8E=A5=E9=80=9A?=
+ =?UTF-8?q?=E5=BA=95=E5=BA=A7=E4=BB=B7=E6=A0=BC=E6=9D=A5=E6=BA=90=20+=20?=
+ =?UTF-8?q?=E6=8C=89=E6=AC=A1=E8=AE=A1=E4=BB=B7=EF=BC=88T2.2=20=E6=94=B6?=
+ =?UTF-8?q?=E5=B0=BE=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/price/base_source.go: 读底座既有价格设置, 不自建价目表
+  (GetModelPrice 按次价 / GetModelRatio+GetCompletionRatio / GetCacheRatio / GetCreateCacheRatio
+   / GetBillingExpr)。自建第二份价目表会立刻产生"两处价格不一致"
+  * 刻意**不混入请求期倍率**(group ratio/effectiveQuota): 那是"谁付多少"的计费系数,
+    不是模型单价; 混进去会让"同模型同渠道的价格"随请求变化, 无法沉淀为快照
+- 按次计价(model_price)**不能静默丢掉**(丢了=把按次收费的模型当免费):
+  PerRequestUSD -> 「请求次数」维度(UnitScale=/次), PricingMode 如实记为按次;
+  实测 0.5 USD/次 = 500000 微美元/次; 0/负数/离谱值均被拒
+- 测试: apigx/price 10/10(新增 2)
+- apigx + middleware 全量通过
+---
+ apigx/price/base_source.go  | 92 +++++++++++++++++++++++++++++++++++++
+ apigx/price/mapping.go      | 17 +++++++
+ apigx/price/mapping_test.go | 35 ++++++++++++++
+ apigx/price/sync.go         | 22 +++++++--
+ 4 files changed, 162 insertions(+), 4 deletions(-)
+ create mode 100644 apigx/price/base_source.go
+
+diff --git a/apigx/price/base_source.go b/apigx/price/base_source.go
+new file mode 100644
+index 0000000..bae9789
+--- /dev/null
++++ b/apigx/price/base_source.go
+@@ -0,0 +1,92 @@
++package price
++
++import (
++	"strconv"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/setting/billing_setting"
++	"github.com/QuantumNous/new-api/setting/ratio_setting"
++)
++
++// 从**底座既有价格设置**读取价格读数（T2.2 收尾）。
++//
++// # 为什么不自己维护一份价格表
++//
++// 底座的 `setting/ratio_setting` 与 `setting/billing_setting` 已经承载了模型价格：
++//   - `GetModelPrice`     按次价（USD/次，`model_price`）
++//   - `GetModelRatio`     输入倍率；`GetCompletionRatio` 输出倍率
++//   - `GetCacheRatio` / `GetCreateCacheRatio` 缓存读/写倍率
++//   - `GetBillingExpr`    计价表达式（USD per 1M tokens）
++//
++// 管理员在底座后台维护的价目表、以及底座自身的同步任务写进去的结果，都会反映在这些入口上。
++// 我们的职责是**把它们读出来、按我们的口径落成带来源与版本的快照**，
++// 而不是再建一份价目表——那会立刻产生"两处价格不一致"的问题。
++//
++// 注意：这里**不使用 `effectiveQuota`/group ratio 等请求期放大系数**。
++// 那些是"某个用户在某次请求上实际付多少"的倍率，属于计费链路，不是**模型单价**；
++// 把它们混进单价会让"同一模型在同一渠道的价格"随请求而变，无法作为快照沉淀。
++
++// ReadModelPriceFromBase 读取某模型在底座设置里的价格读数。
++//
++// 返回 false 表示底座**没有**这个模型的价格（此时调用方必须按"价格未知"处理，
++// 绝不能当成 0 元）。
++func ReadModelPriceFromBase(modelName string) (Reading, bool) {
++	if modelName == "" {
++		return Reading{}, false
++	}
++
++	// ① 按次价优先：底座把它表达为独立的 model_price，与 token 价互斥
++	if perRequest, ok := ratio_setting.GetModelPrice(modelName, false); ok && perRequest > 0 {
++		return Reading{
++			UpstreamModelID: modelName,
++			PerRequestUSD:   perRequest,
++			Source:          apigxmodel.PriceRuleSourceBuiltinPreset,
++			SourceRef:       SourceRefFor("new-api/model_price", modelName),
++		}, true
++	}
++
++	// ② token 倍率
++	modelRatio, ok, _ := ratio_setting.GetModelRatio(modelName)
++	if !ok || modelRatio <= 0 {
++		return Reading{}, false
++	}
++	completionRatio := ratio_setting.GetCompletionRatio(modelName)
++	cacheRatio, _ := ratio_setting.GetCacheRatio(modelName)
++	createCacheRatio, _ := ratio_setting.GetCreateCacheRatio(modelName)
++
++	// 倍率 → USD/1M tokens（用**运行时** QuotaPerUnit，与底座口径一致）
++	perMillion := func(ratio float64) float64 {
++		if common.QuotaPerUnit <= 0 {
++			return 0
++		}
++		return ratio * 1_000_000 / common.QuotaPerUnit
++	}
++
++	return Reading{
++		UpstreamModelID:         modelName,
++		InputUSDPerMillion:      perMillion(modelRatio),
++		OutputUSDPerMillion:     perMillion(modelRatio * completionRatio),
++		CacheReadUSDPerMillion:  perMillion(modelRatio * cacheRatio),
++		CacheWriteUSDPerMillion: perMillion(modelRatio * createCacheRatio),
++		Source:                  apigxmodel.PriceRuleSourceBuiltinPreset,
++		SourceRef:               SourceRefFor("new-api/model_ratio", modelName),
++		RawRecord: "model_ratio=" + strconv.FormatFloat(modelRatio, 'f', -1, 64) +
++			";completion_ratio=" + strconv.FormatFloat(completionRatio, 'f', -1, 64),
++	}, true
++}
++
++// ReadModelPriceFromBillingExpr 读取某模型**计价表达式**的存在性（USD per 1M tokens 口径）。
++//
++// 表达式本身由底座的计费引擎解释；这里只用来判定"底座是否已经为这个模型配了价格"，
++// 从而区分「价格未知」与「价格为 0」。表达式内部的具体数值不在本阶段解析——
++// 那需要复刻计费引擎的语法，属于"造轮子"，我们不做。
++func ReadModelPriceFromBillingExpr(modelName string) (expr string, ok bool) {
++	if modelName == "" {
++		return "", false
++	}
++	if expression, found := billing_setting.GetBillingExpr(modelName); found {
++		return expression, true
++	}
++	return billing_setting.GetBuiltinBillingExpr(modelName)
++}
+diff --git a/apigx/price/mapping.go b/apigx/price/mapping.go
+index ed9332d..a0e9d4c 100644
+--- a/apigx/price/mapping.go
++++ b/apigx/price/mapping.go
+@@ -141,3 +141,20 @@ func ChannelScope(shareChannelID int64) (scopeType int, scopeID int64) {
+ func UpstreamKeyScope(upstreamKeyID int64) (scopeType int, scopeID int64) {
+ 	return apigxmodel.PriceScopeUpstreamKey, upstreamKeyID
+ }
++
++// perRequestItems 构造「按次计价」分项（USD/次 → 微美元/次）。
++//
++// 与 token 价同样遵守"0 不等于免费"：价格为 0 时返回错误而不是生成 0 元分项。
++func perRequestItems(usdPerRequest float64) ([]apigxmodel.PriceRuleItem, error) {
++	if math.IsNaN(usdPerRequest) || math.IsInf(usdPerRequest, 0) || usdPerRequest <= 0 {
++		return nil, fmt.Errorf("%w: invalid per-request price %v", apigxmodel.ErrInvalidArgument, usdPerRequest)
++	}
++	micro := usdPerRequest * 1_000_000
++	if micro > float64(maxUnitPriceMicro) {
++		return nil, fmt.Errorf("%w: %v USD per request is implausible", ErrPriceOutOfRange, usdPerRequest)
++	}
++	return []apigxmodel.PriceRuleItem{{
++		Dimension: DimensionRequestCount, UnitScale: UnitScalePerRequest,
++		UnitPriceMicro: int64(math.Round(micro)), Currency: "USD",
++	}}, nil
++}
+diff --git a/apigx/price/mapping_test.go b/apigx/price/mapping_test.go
+index d854315..2489dd1 100644
+--- a/apigx/price/mapping_test.go
++++ b/apigx/price/mapping_test.go
+@@ -241,3 +241,38 @@ func seedOffering(t *testing.T, db *gorm.DB, ownerUserID, channelID int64, upstr
+ 	require.NoError(t, apigxmodel.CreateModelOffering(db, ownerUserID, offering))
+ 	return offering.ID
+ }
++
++// 按次计价（底座 model_price）**不能被静默丢掉**：丢了等于把按次收费的模型当免费。
++func TestSyncChannelPricesHandlesPerRequestPricing(t *testing.T) {
++	db := newPriceTestDB(t)
++	const owner int64 = 7501
++	channel := seedShareChannel(t, db, owner, "F渠道")
++
++	report, err := SyncChannelPrices(db, owner, channel, []Reading{
++		{UpstreamModelID: "per-request-model", PerRequestUSD: 0.5,
++			Source: apigxmodel.PriceRuleSourceBuiltinPreset, SourceRef: "new-api/model_price/per-request-model"},
++	})
++	require.NoError(t, err)
++	assert.Equal(t, 1, report.Applied)
++
++	rule, items, err := apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeChannel, channel, 0)
++	require.NoError(t, err)
++	require.Len(t, items, 1)
++	assert.Equal(t, DimensionRequestCount, items[0].Dimension, "按次价必须是「请求次数」维度")
++	assert.Equal(t, UnitScalePerRequest, items[0].UnitScale)
++	assert.EqualValues(t, 500_000, items[0].UnitPriceMicro, "0.5 USD/次 = 500000 微美元/次")
++	assert.Equal(t, apigxmodel.PriceModePerRequest, rule.PricingMode, "计价方式要如实记成「按次」")
++	assert.Equal(t, apigxmodel.PriceRuleSourceBuiltinPreset, rule.Source)
++}
++
++// 按次价离谱时同样拒绝写入。
++func TestPerRequestPriceRejectsImplausibleAndZero(t *testing.T) {
++	_, err := perRequestItems(0)
++	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument, "0 不是「免费」，是没配")
++
++	_, err = perRequestItems(-1)
++	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
++
++	_, err = perRequestItems(5_000_000)
++	assert.ErrorIs(t, err, ErrPriceOutOfRange)
++}
+diff --git a/apigx/price/sync.go b/apigx/price/sync.go
+index 05647d4..0c59748 100644
+--- a/apigx/price/sync.go
++++ b/apigx/price/sync.go
+@@ -31,6 +31,9 @@ type Reading struct {
+ 	OutputUSDPerMillion     float64
+ 	CacheReadUSDPerMillion  float64
+ 	CacheWriteUSDPerMillion float64
++	// PerRequestUSD 按次价（USD/次，对应底座的 `model_price`）。
++	// 与 token 价**互斥**：底座也是二选一表达。两者都给时以按次价为准（与底座一致）。
++	PerRequestUSD float64
+ 	// Source 价格来源（`PriceRuleSource*`）。
+ 	Source int
+ 	// SourceRef 来源标识（如 "models.dev/openai/gpt-4o"）。
+@@ -84,9 +87,16 @@ func SyncChannelPrices(db *gorm.DB, ownerUserID, shareChannelID int64, readings
+ 		if modelID == "" {
+ 			continue
+ 		}
+-		items, mapErr := ItemsFromUSDPerMillion(
+-			reading.InputUSDPerMillion, reading.OutputUSDPerMillion,
+-			reading.CacheReadUSDPerMillion, reading.CacheWriteUSDPerMillion)
++		var items []apigxmodel.PriceRuleItem
++		var mapErr error
++		if reading.PerRequestUSD > 0 {
++			// 按次计价：**不能静默丢掉**（丢了就等于把"按次收费"的模型当成免费）
++			items, mapErr = perRequestItems(reading.PerRequestUSD)
++		} else {
++			items, mapErr = ItemsFromUSDPerMillion(
++				reading.InputUSDPerMillion, reading.OutputUSDPerMillion,
++				reading.CacheReadUSDPerMillion, reading.CacheWriteUSDPerMillion)
++		}
+ 		if mapErr != nil {
+ 			// 口径错误（如把"每 1K"当"每 1M"）：**不写任何版本**，只报告
+ 			report.Skipped = append(report.Skipped, modelID)
+@@ -104,12 +114,16 @@ func SyncChannelPrices(db *gorm.DB, ownerUserID, shareChannelID int64, readings
+ 		if currency == "" {
+ 			currency = "USD"
+ 		}
++		pricingMode := apigxmodel.PriceModePerDimension
++		if reading.PerRequestUSD > 0 {
++			pricingMode = apigxmodel.PriceModePerRequest
++		}
+ 		// 有对应供给、或调用方给了价格读数的模型，视为"模型已知"；
+ 		// 真正未知的模型（既无供给又无价格）根本不会出现在 readings 里。
+ 		result, ingestErr := apigxmodel.IngestSourcePrice(db, apigxmodel.SourcePriceIngest{
+ 			ScopeType: scopeType, ScopeID: scopeID,
+ 			Source: reading.Source, SourceRef: reading.SourceRef,
+-			Currency: currency, PricingMode: apigxmodel.PriceModePerDimension,
++			Currency: currency, PricingMode: pricingMode,
+ 			Items: items, RawRecord: reading.RawRecord,
+ 			ModelKnown: true,
+ 			FxRateID:   reading.FxRateID, FxRateMicro: reading.FxRateMicro,
+-- 
+2.53.0.windows.1
+
