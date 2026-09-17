@@ -479,3 +479,47 @@
   - [x] 技术债台账 → `docs/architecture/tech-debt.md`：16 条，其中 TD-07/TD-08/TD-09/TD-10/TD-11 为**写第一行业务代码前必须解决**的高优先级项
 
 **阶段 0 完成后的下一轮（已规划，未启动）**：阶段 1 文本共享闭环 —— 见 `PROJECT_STATUS.md` 路线图；其详细子任务在 T0.10 闸门评审通过后写入本文件顶部。
+
+## 阶段 2 验收汇总（2026-09-17）
+
+> 逐条对应计划书 §「阶段 2：价格与质量路由」的验收要求。**每条都给出可复跑的脚本/测试与实际观测**；
+> 并且标注该脚本**依赖的网关开关**——缺一个开关会表现为"功能失效"，极易误判成回归（本阶段踩过）。
+
+### 验收条目 → 证据
+
+| 计划书验收条目 | 证据 | 结果 |
+|---|---|---|
+| 价格未知不算零 | 接口用例 `TestPriceRuleEndpointsEnforceAcceptanceInvariants`：无快照时 `price_known=false` + `reason=no_accepted_snapshot`，且不可用维度**不出现在** `dimensions` 里 | ✅ |
+| 人工覆盖不被同步改写 | 同一用例：设人工价并锁定后发起同步 → `applied=0`、`notes=manual_override`、**不产生新版本** | ✅ |
+| 单渠道同步不污染全局或其他分享者 | 同一用例：渠道 B 同步后渠道 A 仍为"未知"；另 `apigx/price` 单测验证三作用域互不串价且都不为零 | ✅ |
+| 非美元价格按保存的汇率归一 | `apigx/price` 单测：18000 CNY / 7.2 = 2500 微美元；缺汇率时快照生效但 USD 显式未知（**不是 0**） | ✅ |
+| 受限供给不进入未授权候选 | 阶段 1 `plaza.mjs`（14/14，草稿/私有分组不进广场）+ `source-allowlist.mjs`（5/5） | ✅ |
+| **满载排除** | `channel-policy-limit.mjs`（4/4，策略驱动，无需重启）；决策层单测复现计划书例子（A 更快但 4/4 满载 → 选有余量的 B） | ✅ |
+| **原子预留** | 阶段 1 `capacity-limit.mjs`（40 并发抢 5 槽位恰好发放 5 个）+ `account-pool-limit.mjs`（4/4，同账户多 Key 不叠加） | ✅ |
+| **各策略** | `apigx/routing` 单测 15/15（五种策略 + 冷启动 + 同分共享 Rank + 不强行排名） | ✅ |
+| **窗口更新与安全回退** | `apigx/capacity` 单测（只增不减/带下限调整/窗口过期/TTL）+ 真实链路 TPM 调整实测 | ✅ |
+| 显示样本不足及陈旧数据 | `apigx/model` 质量视图单测（<20 样本 `Insufficient`；超 15 分钟 `Stale`；窗口内无样本时视图为空而**不是成功率 0%**）+ `route-explain` 输出如实标注 | ✅ |
+| 熔断（计划书 §阶段2 工作项） | `breaker-routing.mjs` **端到端 9/9**：坏上游被摘出、归因正确、**熔断后不再收到新样本**、熔断后请求全部成功 | ✅ |
+| 五种路由的实际生效 | 决策 15/15 + `weight-distribution.mjs`（权重 100:50 投影后实测样本增量 16:3）+ `route-apply` 接口用例 | ✅ |
+| Key 加权 | `key-weight-distribution.mjs`：权重 3:1 → 上游侧 **12:4（比值 3.00）**，16/16 成功 | ✅ |
+| 精确 TPM 与预留调整 | `tpm-adjust.mjs`：`total_tokens=46` 而渠道 TPM 计数=92（该分钟两次请求），**远小于最坏情况 8202**；开关关闭时保持 8202（单测） | ✅ |
+
+### 端到端脚本 × 必需网关开关（跑验收前先按此开）
+
+| 脚本 | 必需开关 |
+|---|---|
+| `stage1-verify/capacity-limit.mjs` | `APIGX_CAPACITY_ENABLED` + `APIGX_CHANNEL_CONCURRENCY_LIMIT` |
+| `stage1-verify/account-pool-limit.mjs` | `APIGX_CAPACITY_ENABLED` + `APIGX_UPSTREAM_ACCOUNT_CONCURRENCY_LIMIT` |
+| `stage1-verify/channel-policy-limit.mjs` | `APIGX_CAPACITY_ENABLED` |
+| `stage1-verify/key-isolation.mjs` | `APIGX_KEY_STATS_ENABLED` |
+| `stage1-verify/rejection-matrix.mjs` | 无 |
+| `stage2-verify/breaker-routing.mjs` | `APIGX_QUALITY_STATS_ENABLED` + `APIGX_BREAKER_ENABLED` |
+| `stage2-verify/weight-distribution.mjs` | `APIGX_QUALITY_STATS_ENABLED` |
+| `stage2-verify/key-weight-distribution.mjs` | 无（投影本身即可） |
+| `stage2-verify/tpm-adjust.mjs` | `APIGX_TPM_ADJUST_ENABLED`（核对反例时关闭） |
+
+📌 **已知脚本缺陷（不是产品问题）**：`capacity-limit.mjs` 默认用共享模型名 `stub/model-x-202609`，而开发库已积累大量同模型渠道 → 请求会落到**平台自建渠道**上，而上限只对分享渠道生效，表现为"完全没限流"。待改成每次唯一模型。
+
+### 工程教训
+
+见 `CODE_STYLE.md` 第 26–32 条（"静默失效"六种形态、索引空间风险、验证前先确认二进制、脚本开关前置条件、测试设计三条、三库差异、JSON 列写法）。
