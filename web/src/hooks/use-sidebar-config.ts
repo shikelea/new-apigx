@@ -53,7 +53,8 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
   },
   personal: {
     enabled: true,
-    topup: true,
+    // 我们不做钱包/充值（用量免费计量，价格由平台统一管理）
+    topup: false,
     personal: true,
     security: true,
   },
@@ -61,10 +62,12 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
     enabled: true,
     channel: true,
     models: true,
-    redemption: true,
+    // 我们不做兑换码
+    redemption: false,
     user: true,
     setting: true,
-    subscription: true,
+    // 我们不做订阅
+    subscription: false,
   },
 }
 
