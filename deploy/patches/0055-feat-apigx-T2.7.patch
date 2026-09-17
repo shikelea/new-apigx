@@ -1,0 +1,260 @@
+From 093bd09284fdcd997229a8cb4f7cd92a7e0584c7 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 15:31:57 +0800
+Subject: [PATCH 55/55] =?UTF-8?q?feat(apigx):=20=E8=B7=AF=E7=94=B1?=
+ =?UTF-8?q?=E6=8E=92=E5=90=8D=E5=BA=94=E7=94=A8=E6=8E=A5=E5=8F=A3=EF=BC=88?=
+ =?UTF-8?q?T2.7=20=E7=94=9F=E6=95=88=E8=B7=AF=E5=BE=84=EF=BC=89+=20?=
+ =?UTF-8?q?=E4=BF=AE=E5=86=B7=E5=90=AF=E5=8A=A8=E6=8E=92=E5=90=8D=E7=BC=BA?=
+ =?UTF-8?q?=E9=99=B7?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- POST /api/apigx/route-apply {model,strategy,group,dry_run}: 把名次写成底座渠道权重
+  * **平台侧动作**(排序跨分享者, 分享者能改就等于抢别人的流量) -> 要求审核权限; 普通用户 403
+  * **默认 dry_run**: 只预览不写库, 需显式 false 才落库(改变生产选路行为不该因少写参数而发生)
+  * 默认只写 weight 不动 priority; 返回解释 + 更新条数 + 跳过明细
+- ❗接口用例抓到 T2.7 自身缺陷: 冷启动复用了 rankAuto, 而它要求有样本 =>
+  **零样本的新供给既进不了正式排名也进不了冷启动排名, 什么都不发生**
+  (表现为"应用路由后一条渠道都没更新"); 与计划书"没有成熟候选时按剩余容量分配、
+  不会因没有历史数据永久饿死新渠道"直接冲突。已改为冷启动专用的容量排名
+- 测试: 403 越权 / dry_run 不写库 / 显式应用后权重写入且 priority 不变 / 缺参数与未知策略 400
+- apigx + middleware 全量通过
+---
+ apigx/api/share.go      | 91 +++++++++++++++++++++++++++++++++++++++++
+ apigx/api/share_test.go | 54 ++++++++++++++++++++++++
+ apigx/routing/decide.go | 34 ++++++++++++++-
+ 3 files changed, 177 insertions(+), 2 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index a40a0d3..6c2c2b7 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -74,6 +74,9 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 
+ 	// 可解释路由结果（T2.9）：只读，不写库、不投影
+ 	r.GET("/route-explain", h.explainRoute)
++	// 应用路由排名（T2.7 生效路径）：把名次写成底座渠道权重。**平台侧动作**——
++	// 跨分享者的排序不能由某个分享者决定。
++	r.POST("/route-apply", h.applyRouteRanking)
+ 
+ 	usage := r.Group("/usage")
+ 	{
+@@ -1286,3 +1289,91 @@ func parseStrategyQuery(raw string) (routing.Strategy, bool) {
+ 		return 0, false
+ 	}
+ }
++
++// applyRouteRanking 把路由策略算出的名次**投影到底座渠道权重**（T2.7 生效路径）。
++//
++// # 为什么是平台侧动作
++//
++// 排序是**跨分享者**的（同一模型的供给来自不同分享者）。让某个分享者能改这份权重，
++// 等于让他能抢别人的流量。因此要求平台审核权限（与发布审核同一门槛）。
++//
++// # 为什么默认先 dry_run
++//
++// 投影会**改动真实选路行为**。默认只预览（返回解释但不写库），
++// 需要显式 `dry_run=false` 才落库——这种"会改变生产行为"的操作不该因为少写一个参数就发生。
++func (h *handler) applyRouteRanking(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	var req struct {
++		Model    string `json:"model"`
++		Strategy string `json:"strategy"`
++		Group    string `json:"group"`
++		// DryRun 为 true（默认）时只返回将要发生的事，不写库。
++		DryRun *bool `json:"dry_run"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	modelName := strings.TrimSpace(req.Model)
++	if modelName == "" {
++		fail(c, http.StatusBadRequest, "invalid_body", "model is required")
++		return
++	}
++	strategy, strategyOK := parseStrategyQuery(req.Strategy)
++	if !strategyOK {
++		fail(c, http.StatusBadRequest, "invalid_strategy", "unknown routing strategy")
++		return
++	}
++	dryRun := true
++	if req.DryRun != nil {
++		dryRun = *req.DryRun
++	}
++	group := strings.TrimSpace(req.Group)
++	if group == "" {
++		group = "default"
++	}
++
++	candidates, public, err := routing.AssembleCandidates(h.db, capacity.New(common.RDB), modelName,
++		routing.AssembleOptions{})
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	// 先按熔断摘除不可用候选，再决策（与解释接口同一套判定，避免两处口径不一致）
++	now := common.GetTimestamp()
++	for i := range candidates {
++		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
++			candidates[i].Allowed = false
++			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
++		}
++	}
++	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())
++	if err != nil {
++		fail(c, http.StatusBadRequest, "invalid_strategy", err.Error())
++		return
++	}
++	explanation := routing.Explain(routing.ExplainInput{Decision: decision, Candidates: candidates, Public: public})
++
++	result := gin.H{"dry_run": true, "explanation": explanation, "updated": 0}
++	if dryRun {
++		ok(c, result)
++		return
++	}
++	applyResult, applyErr := routing.ApplyRankingToBaseChannels(h.db, decision, group, routing.DefaultApplyOptions())
++	if applyErr != nil {
++		failFromRepo(c, applyErr)
++		return
++	}
++	skipped := make([]gin.H, 0, len(applyResult.Skipped))
++	for _, item := range applyResult.Skipped {
++		skipped = append(skipped, gin.H{"offering_id_public": item.OfferingID, "reason": item.Reason})
++	}
++	ok(c, gin.H{
++		"dry_run":     false,
++		"explanation": explanation,
++		"updated":     applyResult.Updated,
++		"skipped":     skipped,
++	})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index e9d7090..bc37566 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -812,3 +812,57 @@ func TestRouteExplainEndpoint(t *testing.T) {
+ 	assert.Equal(t, true, first["insufficient"], "无样本必须显式标出样本不足")
+ 	assert.Equal(t, false, first["price_known"], "没有价格快照时必须标为价格未知")
+ }
++
++// ---- 应用路由排名（T2.7 生效路径） ----
++
++func TestRouteApplyEndpoint(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 8801
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	groupID := env.createGroup(t, owner, "应用组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"apply-x"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
++
++	// ① 普通用户不得应用（跨分享者的排序是平台侧动作）
++	rec, _ = env.doWithRole(t, http.MethodPost, "/api/route-apply", owner,
++		`{"model":"apply-x","dry_run":false}`, common.RoleCommonUser)
++	assert.Equal(t, http.StatusForbidden, rec.Code, "分享者不得自行改写跨分享者的路由权重")
++
++	// ② dry_run（默认）：只预览，不写库
++	rec, body = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	assert.Equal(t, true, data["dry_run"])
++	assert.EqualValues(t, 0, data["updated"], "dry_run 不得写库")
++
++	var baseBefore basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", baseChannelID).First(&baseBefore).Error)
++	assert.Equal(t, 0, baseBefore.GetWeight(), "dry_run 之后权重应保持原样")
++
++	// ③ 显式 dry_run=false：写入权重
++	rec, body = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x","dry_run":false}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, false, data["dry_run"])
++	assert.EqualValues(t, 1, data["updated"], "应更新 1 条底座渠道")
++
++	var baseAfter basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", baseChannelID).First(&baseAfter).Error)
++	assert.Positive(t, baseAfter.GetWeight(), "投影后应写入权重")
++	assert.Zero(t, *baseAfter.Priority, "默认投影**不得**改动 priority（避免抢占平台/他人优先级）")
++
++	// ④ 缺 model → 400；未知策略 → 400
++	rec, _ = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"dry_run":true}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	rec, _ = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x","strategy":"bogus"}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++}
+diff --git a/apigx/routing/decide.go b/apigx/routing/decide.go
+index 0151225..92b4ca0 100644
+--- a/apigx/routing/decide.go
++++ b/apigx/routing/decide.go
+@@ -249,7 +249,7 @@ func Decide(strategy Strategy, candidates []Candidate, opts Options) (Decision,
+ 	}
+ 	// 冷启动候选排在成熟候选之后，并且**只在抽样允许时**才可能被选中
+ 	if len(cold) > 0 && opts.ColdStartSharePpm > 0 && opts.ColdStartRollPpm < opts.ColdStartSharePpm {
+-		coldRanked, _ := rankCandidates(StrategyAuto, cold, opts)
++		coldRanked := rankColdByCapacity(cold)
+ 		if len(coldRanked) > 0 {
+ 			decision.ColdStart = true
+ 			decision.Chosen = &coldRanked[0].Candidate
+@@ -267,12 +267,17 @@ func Decide(strategy Strategy, candidates []Candidate, opts Options) (Decision,
+ }
+ 
+ // decideColdStart 在没有成熟候选时，按剩余容量在冷启动候选里分配。
++//
++// **这里不能复用 `rankAuto`**：综合打分的可靠性维度要求有样本，
++// 于是"零样本的新供给"会被它跳过 —— 结果是既进不了正式排名、也进不了冷启动排名，
++// 什么都不发生（这个缺陷由应用排名的接口用例发现）。
++// 而计划书明确要求：没有成熟候选时**按剩余容量分配**，不会因没有历史数据永久饿死新渠道。
+ func decideColdStart(strategy Strategy, cold []Candidate, opts Options, decision Decision) Decision {
+ 	if len(cold) == 0 {
+ 		decision.Reason = "no candidate has quality samples"
+ 		return decision
+ 	}
+-	ranked, _ := rankCandidates(StrategyAuto, cold, opts)
++	ranked := rankColdByCapacity(cold)
+ 	if len(ranked) == 0 {
+ 		decision.Reason = "cold-start candidates lack comparable metrics"
+ 		return decision
+@@ -511,3 +516,28 @@ type autoItem struct {
+ 	hasLatency  bool
+ 	hasThrough  bool
+ }
++
++// rankColdByCapacity 在冷启动场景按**剩余容量**排名。
++//
++// 剩余容量未配置上限的候选视为"最充裕"（未配置 ≠ 没有余量，与综合打分里的处理一致）。
++// 排名理由里如实带上样本数，界面据此显示"样本不足"。
++func rankColdByCapacity(cold []Candidate) []Ranked {
++	ranked := make([]Ranked, 0, len(cold))
++	for _, candidate := range cold {
++		remaining := candidate.RemainingCapacity()
++		if candidate.CapacityLimit <= 0 {
++			remaining = 1 << 40 // 未配置上限：视为远大于任何有限余量
++		}
++		ranked = append(ranked, Ranked{
++			Candidate: candidate,
++			Score:     float64(remaining),
++			Reasons: []string{fmt.Sprintf("cold_start_remaining_capacity=%d samples=%d",
++				candidate.RemainingCapacity(), candidate.Quality.SampleCount)},
++		})
++	}
++	if len(ranked) == 0 {
++		return nil
++	}
++	sortByScore(ranked)
++	return ranked
++}
+-- 
+2.53.0.windows.1
+
