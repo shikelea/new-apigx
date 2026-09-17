@@ -1,0 +1,217 @@
+From 9fd6c3236ed1742f0816decdbaf28bc5416d7704 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 11:12:33 +0800
+Subject: [PATCH 15/15] =?UTF-8?q?feat(apigx):=20Key=20=E6=B1=A0=E6=8A=95?=
+ =?UTF-8?q?=E5=BD=B1=E8=A7=A6=E5=8F=91=E6=8E=A5=E5=8F=A3=EF=BC=88T1.5?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- POST /api/apigx/channels/:id/apply: 把当前 Key 池投影到底座渠道使改动生效
+- 刻意做成显式动作: 投影会重写底座 Key 列表并清空其按下标状态表,
+  自动执行会在分享者没预期时改变行为
+- 空池 409 no_usable_key(渠道将不再接收新请求, 必须让分享者看到); 越权 404;
+  响应只回数量, 不带任何凭据
+- 接口层测试 11/11(含 3 个新用例); apigx 全量通过
+---
+ apigx/api/share.go      | 45 ++++++++++++++++++++
+ apigx/api/share_test.go | 93 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 138 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index a052283..ebae595 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -17,6 +17,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+ 	"github.com/QuantumNous/new-api/common"
+@@ -44,6 +45,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.DELETE("/:id", h.deleteChannel)
+ 		channels.POST("/:id/keys", h.createUpstreamKey)
+ 		channels.GET("/:id/keys", h.listUpstreamKeys)
++		channels.POST("/:id/apply", h.applyChannelPool)
+ 	}
+ 
+ 	keys := r.Group("/keys")
+@@ -491,3 +493,46 @@ func (h *handler) deleteUpstreamKey(c *gin.Context) {
+ 	}
+ 	ok(c, gin.H{"deleted": id})
+ }
++
++// ---------------------------------------------------------------------------
++// 应用 Key 池（投影到底座渠道）
++// ---------------------------------------------------------------------------
++
++// applyChannelPool 把当前 Key 池投影到底座渠道，使分享者的改动生效。
++//
++// 为什么需要这个显式动作：投影会**重写底座渠道的 Key 列表并清空它按索引存放的状态**
++// （索引会变，旧状态套到别的凭据上就是隐性故障）。因此它不应该在每次加/删 Key 时自动发生，
++// 而应由分享者确认后触发——也便于把「改了但没生效」这件事说清楚。
++//
++// 返回 409 表示池内没有可用凭据：这不是参数错误，而是**渠道将不会接收新请求**
++// （计划书 §9.2），必须让分享者看到。
++func (h *handler) applyChannelPool(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	// 归属校验：不属于自己的渠道一律 404（与不存在等价）
++	shareChannel, err := apigxmodel.GetChannel(h.db, owner, id)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++
++	projection, err := channelpool.ProjectKeyPool(h.db, shareChannel.ID)
++	if err != nil {
++		if errors.Is(err, channelpool.ErrNoUsableKey) {
++			fail(c, http.StatusConflict, "no_usable_key",
++				"no usable upstream key in this channel; the channel will not accept new requests")
++			return
++		}
++		failFromRepo(c, err)
++		return
++	}
++
++	// 只回数量，不回任何凭据信息
++	ok(c, gin.H{"channel_id": shareChannel.ID, "applied_keys": projection.KeyCount})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 6704296..58528a2 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -8,10 +8,13 @@ import (
+ 	"path/filepath"
+ 	"strconv"
+ 	"strings"
++	"sync/atomic"
+ 	"testing"
+ 
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
++	"github.com/QuantumNous/new-api/common"
++	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/glebarez/sqlite"
+ 	"github.com/stretchr/testify/assert"
+@@ -29,6 +32,11 @@ const (
+ 	plainSecret = "sk-upstream-PLAINTEXT-must-never-leak"
+ )
+ 
++// baseChannelSeq 为每个用例分配唯一的底座渠道 ID（base_channel_id 上有唯一索引）。
++var baseChannelSeq atomic.Int64
++
++func nextBaseChannelID() int64 { return 100000 + baseChannelSeq.Add(1) }
++
+ type testEnv struct {
+ 	db     *gorm.DB
+ 	engine *gin.Engine
+@@ -45,6 +53,12 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { _ = sqlDB.Close() })
+ 	require.NoError(t, apigxmodel.Migrate(db))
++	// 投影会调用底座的 channel.Update()（并同步 abilities），因此接口层测试也要有底座表，
++	// 且底座的全局 DB 必须指向同一个库（生产由启动路径设置）。
++	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
++	previousDB := basemodel.DB
++	basemodel.DB = db
++	t.Cleanup(func() { basemodel.DB = previousDB })
+ 
+ 	// 主密钥
+ 	previous, had := os.LookupEnv(secretbox.KeyEnvVar)
+@@ -330,3 +344,82 @@ func TestDeleteUpstreamKeyTwice(t *testing.T) {
+ 	rec, _ = env.do(t, http.MethodDelete, "/api/keys/"+strconv.FormatInt(keyID, 10), owner, "")
+ 	assert.Equal(t, http.StatusNotFound, rec.Code)
+ }
++
++// ---- 应用 Key 池（投影触发接口） ----
++
++func TestApplyChannelPoolProjectsKeysIntoBaseChannel(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 8101
++
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座影子渠道", Key: "placeholder", Status: common.ChannelStatusEnabled,
++	}).Error)
++
++	groupID := env.createGroup(t, owner, "应用测试组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	for _, spec := range []struct{ stable, secret string }{
++		{"s1", "sk-apply-one-aaaaa"},
++		{"s2", "sk-apply-two-bbbbb"},
++	} {
++		rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
++			`{"stable_key_id":"`+spec.stable+`","name":"`+spec.stable+`","key":"`+spec.secret+`"}`)
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	}
++
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/apply", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	assert.Equal(t, float64(2), data["applied_keys"])
++	// 响应绝不能带出任何凭据信息
++	assert.NotContains(t, rec.Body.String(), "sk-apply")
++	assert.NotContains(t, rec.Body.String(), "enc:v1:")
++
++	var base basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", int(baseChannelID)).First(&base).Error)
++	assert.True(t, base.ChannelInfo.IsMultiKey)
++	assert.Equal(t, 2, base.ChannelInfo.MultiKeySize)
++	keys := base.GetKeys()
++	require.Len(t, keys, 2)
++	assert.NotContains(t, keys, "placeholder", "底座原有的占位 Key 必须被投影结果替换")
++}
++
++// 池内没有可用凭据时必须明确拒绝（409）：这会让渠道不再接收新请求，分享者必须知道。
++func TestApplyChannelPoolRejectsWhenNoUsableKey(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 8102
++
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++
++	groupID := env.createGroup(t, owner, "空池组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/apply", owner, "")
++	assert.Equal(t, http.StatusConflict, rec.Code, "空池必须返回 409 而不是静默成功")
++	assert.Contains(t, rec.Body.String(), "no_usable_key")
++}
++
++// 越权应用别人的渠道必须 404（与不存在等价）。
++func TestApplyChannelPoolIsOwnerScoped(t *testing.T) {
++	env := newTestEnv(t, true)
++	const ownerA, ownerB int64 = 8103, 8104
++
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++
++	groupA := env.createGroup(t, ownerA, "A 的组")
++	channelA := env.createChannel(t, ownerA, groupA, baseChannelID)
++
++	rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelA, 10)+"/apply", ownerB, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++
++	// 未登录同样被拒
++	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelA, 10)+"/apply", 0, "")
++	assert.Equal(t, http.StatusUnauthorized, rec.Code)
++}
+-- 
+2.53.0.windows.1
+
