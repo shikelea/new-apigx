@@ -1,0 +1,350 @@
+From ca4e069de3ee6e9b36d11ff5495afefe392836e0 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 17:13:04 +0800
+Subject: [PATCH 63/63] =?UTF-8?q?feat(apigx):=20=E7=94=A8=E6=88=B7?=
+ =?UTF-8?q?=E6=8C=89=E8=AF=B7=E6=B1=82=E9=80=89=E6=8B=A9=E8=B7=AF=E7=94=B1?=
+ =?UTF-8?q?=E7=AD=96=E7=95=A5=EF=BC=88T2.7=20=E7=94=A8=E6=88=B7=E4=BE=A7?=
+ =?UTF-8?q?=E5=AE=8C=E6=88=90=EF=BC=8C=E9=98=B6=E6=AE=B5=202=20=E6=9C=80?=
+ =?UTF-8?q?=E5=90=8E=E4=B8=80=E7=8E=AF=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 复用底座的**请求级候选过滤器**机制(GetChannelConstraints -> 选择时应用), 不改写选择器:
+  新增 dto.FilterAllowedChannelIds(台账 D-020) + 加入 filterEvalOrder + 按 ch.Id 判定;
+  middleware/distributor 在选择之前把"按平台 Key 策略算出的合格渠道集合"加成过滤器
+- 策略来源: apigx_api_keys.DefaultRouteMode(字段本就在, **无需改 schema**),
+  经偏好接口 default_route_mode 设置; **未知策略名 400**(否则用户以为设了却永不生效)
+- 只保留"最优名次那一档": 策略决定谁合格, **权重**继续在合格者之间分散流量
+  (避免策略退化成"永远只用一条"); 算不出来就不加限定(宁可退回默认选路)
+- 合格集合按(模型,策略)缓存 30 秒(每请求路径)
+- 端到端实测(两条健康供给, A 更优): reliability -> A=10/B=0(只落更优来源), 10/10 成功;
+  auto -> A=1/B=9(两条都用); 未知策略名 -> 400。测量用替身日志的凭据指纹(不留明文)
+- apigx + middleware + model 全量通过(11 个包)
+---
+ apigx/api/share.go                |  19 ++++
+ apigx/relayhook/route_strategy.go | 181 ++++++++++++++++++++++++++++++
+ dto/channel_constraints.go        |   7 ++
+ middleware/distributor.go         |   9 ++
+ model/channel_constraint.go       |   7 ++
+ 5 files changed, 223 insertions(+)
+ create mode 100644 apigx/relayhook/route_strategy.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index e838cf5..3cb4029 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -13,6 +13,7 @@ package apigxapi
+ 
+ import (
+ 	"errors"
++	"fmt"
+ 	"net/http"
+ 	"strconv"
+ 	"strings"
+@@ -749,6 +750,10 @@ type platformKeyPreferencesRequest struct {
+ 	AllowedModelIDs     []string `json:"allowed_model_ids"`
+ 	AllowedOwnerUserIDs []int64  `json:"allowed_owner_user_ids"`
+ 	AllowFallback       *bool    `json:"allow_fallback"`
++	// DefaultRouteMode 是「默认路由策略」（计划书 §9.1：保存到平台 Key 的偏好）。
++	// 空串与 "auto" 都表示自动（不加限定）；latency / throughput / reliability 会把它
++	// 变成**请求级候选限定**（见 relayhook.EligibleBaseChannelsForStrategy）。
++	DefaultRouteMode *string `json:"default_route_mode"`
+ }
+ 
+ func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
+@@ -778,6 +783,7 @@ func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
+ 		"allowed_model_ids":      key.AllowedModels(),
+ 		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
+ 		"allow_fallback":         key.AllowFallback,
++		"default_route_mode":     key.DefaultRouteMode,
+ 	})
+ }
+ 
+@@ -807,6 +813,18 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
+ 		if req.PinnedOfferingID != nil {
+ 			k.PinnedOfferingID = *req.PinnedOfferingID
+ 		}
++		if req.DefaultRouteMode != nil {
++			// 只接受已知取值或空串（空串=自动）：**不接受拼错的策略名**——
++			// 否则用户以为设了策略、实际永远不会生效（静默失效）。
++			// 这里返回错误（由上层映射为 400），而不是直接写响应：本函数是回调，只负责改字段。
++			mode := strings.ToLower(strings.TrimSpace(*req.DefaultRouteMode))
++			switch mode {
++			case "", "auto", "latency", "throughput", "reliability":
++				k.DefaultRouteMode = mode
++			default:
++				return fmt.Errorf("%w: unknown default_route_mode %q", apigxmodel.ErrInvalidArgument, mode)
++			}
++		}
+ 		if req.AllowFallback != nil {
+ 			k.AllowFallback = *req.AllowFallback
+ 		}
+@@ -836,6 +854,7 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
+ 		"allowed_model_ids":      key.AllowedModels(),
+ 		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
+ 		"allow_fallback":         key.AllowFallback,
++		"default_route_mode":     key.DefaultRouteMode,
+ 	})
+ }
+ 
+diff --git a/apigx/relayhook/route_strategy.go b/apigx/relayhook/route_strategy.go
+new file mode 100644
+index 0000000..4a3e1ff
+--- /dev/null
++++ b/apigx/relayhook/route_strategy.go
+@@ -0,0 +1,181 @@
++package relayhook
++
++import (
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/apigx/channelpool"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/routing"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/gin-gonic/gin"
++	"gorm.io/gorm"
++)
++
++// 用户按请求选择路由策略（T2.7 用户侧，阶段 2 的最后一环）。
++//
++// # 做法：只算"合格集合"，不改底座选择器
++//
++// 底座的选渠道发生在 `CacheGetRandomSatisfiedChannel` 内部，我们**不改写它**；
++// 但底座已经提供了**请求级候选过滤器**（`dto.ChannelFilter`，经
++// `service.GetChannelConstraints(c)` 收集、在选择时统一应用）。因此这里只做一件事：
++// 按调用者（平台 Key）的默认路由策略算出**本次该用哪些渠道**，由分发器加成过滤器。
++//
++// 这与计划书的措辞一致：「在满足硬限制的授权候选中，按调用者所选策略分别使用延迟 P50、
++// 吞吐中位数或可靠性置信下界**排序**」「只选符合请求要求的渠道」。
++//
++// # 为什么返回"集合"而不是"一个渠道"
++//
++// 只保留**同分（同一 Rank）**的候选：策略决定"谁合格"，而**权重**继续负责在合格者之间
++// 分散流量（计划书：渠道权重用于相近评分的流量分散）。这样策略不会退化成"永远只用一条"。
++//
++// 本函数**不引入对 service 的依赖**（那会形成 import 循环）：只返回渠道 ID，加过滤器由 middleware 完成。
++
++// routeStrategyCacheTTL 是"合格集合"的缓存时长：算一次要读候选+质量+价格，
++// 属每请求路径，故按 (模型, 策略) 缓存。
++const routeStrategyCacheTTL = 30 * time.Second
++
++type cachedStrategyChannels struct {
++	channelIDs []int
++	expiresAt  time.Time
++}
++
++var (
++	routeStrategyCacheMu sync.RWMutex
++	routeStrategyCache   = map[string]cachedStrategyChannels{}
++)
++
++// InvalidateRouteStrategyCache 清空策略合格集合缓存（策略变化或测试时用）。
++func InvalidateRouteStrategyCache() {
++	routeStrategyCacheMu.Lock()
++	routeStrategyCache = map[string]cachedStrategyChannels{}
++	routeStrategyCacheMu.Unlock()
++}
++
++// routeStrategyFilterEnabled 是"按 Key 的默认路由策略限定候选"的开关（默认关闭）。
++func routeStrategyFilterEnabled() bool {
++	return common.GetEnvOrDefaultBool("APIGX_ROUTE_STRATEGY_ENABLED", false)
++}
++
++// EligibleBaseChannelsForStrategy 按调用者平台 Key 的默认路由策略算出本次的合格渠道集合。
++//
++// 返回 ok=false 表示**不要加限定**（未开启、未配置策略、策略为 auto、或算不出候选）——
++// 宁可退回底座默认选路，也不要因为算不出来就把请求打成"没有合格渠道"。
++func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, bool) {
++	if !routeStrategyFilterEnabled() || c == nil || strings.TrimSpace(modelName) == "" {
++		return nil, false
++	}
++	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
++	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
++	if tokenID <= 0 || userID <= 0 {
++		return nil, false
++	}
++	db := channelpool.CurrentDB()
++	if db == nil {
++		return nil, false
++	}
++	key, found := loadPreferences(db, int64(userID), int64(tokenID))
++	if !found || key == nil {
++		return nil, false
++	}
++	strategy, ok := parseRouteStrategy(key.DefaultRouteMode)
++	if !ok {
++		return nil, false // 空/auto/无法识别：不加限定
++	}
++
++	cacheKey := modelName + "|" + key.DefaultRouteMode
++	now := time.Now()
++	routeStrategyCacheMu.RLock()
++	cached, exists := routeStrategyCache[cacheKey]
++	routeStrategyCacheMu.RUnlock()
++	if exists && now.Before(cached.expiresAt) {
++		if len(cached.channelIDs) == 0 {
++			return nil, false
++		}
++		return cached.channelIDs, true
++	}
++
++	channelIDs := computeEligibleBaseChannels(db, modelName, strategy)
++	routeStrategyCacheMu.Lock()
++	routeStrategyCache[cacheKey] = cachedStrategyChannels{channelIDs: channelIDs, expiresAt: now.Add(routeStrategyCacheTTL)}
++	routeStrategyCacheMu.Unlock()
++	if len(channelIDs) == 0 {
++		return nil, false
++	}
++	return channelIDs, true
++}
++
++// computeEligibleBaseChannels 算出"最优名次那一档"对应的底座渠道 ID。
++//
++// 与解释接口、应用接口**共用同一套候选装配与熔断口径**，避免出现
++// "解释里它在候选里、实际选路却不考虑它"这类不一致。
++func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing.Strategy) []int {
++	candidates, _, err := routing.AssembleCandidates(db, capacity.New(common.RDB), modelName, routing.AssembleOptions{})
++	if err != nil || len(candidates) == 0 {
++		return nil
++	}
++	now := common.GetTimestamp()
++	for i := range candidates {
++		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
++			candidates[i].Allowed = false
++			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
++		}
++	}
++	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())
++	if err != nil || len(decision.Ranked) == 0 {
++		return nil
++	}
++	topRank := decision.Ranked[0].Rank
++	channelIDs := make([]int, 0, len(decision.Ranked))
++	seen := map[int]struct{}{}
++	for i := range decision.Ranked {
++		ranked := decision.Ranked[i]
++		if ranked.Rank != topRank {
++			continue
++		}
++		baseChannelID := baseChannelIDForShareChannel(db, ranked.Candidate.ShareChannelID)
++		if baseChannelID <= 0 {
++			continue
++		}
++		if _, dup := seen[baseChannelID]; dup {
++			continue
++		}
++		seen[baseChannelID] = struct{}{}
++		channelIDs = append(channelIDs, baseChannelID)
++	}
++	return channelIDs
++}
++
++// baseChannelIDForShareChannel 把我们的分享渠道映射为它绑定的底座渠道 ID。
++func baseChannelIDForShareChannel(db *gorm.DB, shareChannelID int64) int {
++	if db == nil || shareChannelID <= 0 {
++		return 0
++	}
++	var channel apigxmodel.Channel
++	if err := db.Where("id = ?", shareChannelID).First(&channel).Error; err != nil {
++		return 0
++	}
++	if channel.BaseChannelID <= 0 {
++		return 0
++	}
++	return int(channel.BaseChannelID)
++}
++
++// parseRouteStrategy 把平台 Key 上的默认路由模式解析为策略。
++//
++// 「空」与「auto」都表示**不加限定**（计划书：最后使用系统默认 auto）。
++func parseRouteStrategy(mode string) (routing.Strategy, bool) {
++	switch strings.ToLower(strings.TrimSpace(mode)) {
++	case "latency":
++		return routing.StrategyLatency, true
++	case "throughput":
++		return routing.StrategyThroughput, true
++	case "reliability":
++		return routing.StrategyReliability, true
++	default:
++		return 0, false
++	}
++}
+diff --git a/dto/channel_constraints.go b/dto/channel_constraints.go
+index a1848bc..b34795a 100644
+--- a/dto/channel_constraints.go
++++ b/dto/channel_constraints.go
+@@ -39,6 +39,10 @@ const (
+ 	FilterRequestPath        ChannelFilterKind = "request_path"
+ 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
+ 	FilterResponsesWebSocket ChannelFilterKind = "responses_websocket"
++	// FilterAllowedChannelIds 只保留列出的渠道 ID。用于**请求级**的候选限定：
++	// 调用方（例如 APIGX 的路由策略）已经算好"本次该用哪些渠道"，这里只表达结果，
++	// 不把排序逻辑塞进选择器（台账 D-020）。
++	FilterAllowedChannelIds ChannelFilterKind = "allowed_channel_ids"
+ )
+ 
+ type ChannelFilter struct {
+@@ -47,6 +51,9 @@ type ChannelFilter struct {
+ 	TaskPluginKey          string
+ 	TaskPluginKeys         []string
+ 	TaskPluginChannelTypes []int
++	// AllowedChannelIds 仅当 Kind == FilterAllowedChannelIds 时使用；**空列表表示不允许任何渠道**
++	// （与"没有这个过滤器"是两回事：前者是明确的"没有合格候选"）。
++	AllowedChannelIds []int
+ }
+ 
+ type ChannelConstraints struct {
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 1ec4ae6..fe681dd 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -52,6 +52,15 @@ func Distribute() func(c *gin.Context) {
+ 		if !enforceTokenModelLimit(c, modelRequest.Model) {
+ 			return
+ 		}
++		// APIGX 默认路由策略（T2.7 用户侧）：按调用者平台 Key 的策略算出**合格渠道集合**，
++		// 作为请求级过滤器交给底座——复用底座既有的候选过滤机制，不改写选择器。
++		// 策略为空/auto 或算不出候选时**不加限定**（宁可退回默认选路）。
++		if allowedChannels, ok := relayhook.EligibleBaseChannelsForStrategy(c, modelRequest.Model); ok {
++			constraints.AddFilter(taskdto.ChannelFilter{
++				Kind:              taskdto.FilterAllowedChannelIds,
++				AllowedChannelIds: allowedChannels,
++			})
++		}
+ 		if pin, found, overridden := constraints.ResolvedPin(); found {
+ 			for _, lost := range overridden {
+ 				logger.LogWarn(c, fmt.Sprintf(
+diff --git a/model/channel_constraint.go b/model/channel_constraint.go
+index 9e797ce..1c95d76 100644
+--- a/model/channel_constraint.go
++++ b/model/channel_constraint.go
+@@ -11,6 +11,9 @@ var filterEvalOrder = []dto.ChannelFilterKind{
+ 	dto.FilterRequestPath,
+ 	dto.FilterTaskPluginIdentity,
+ 	dto.FilterResponsesWebSocket,
++	// 放在最后：它是最"具体"的限定（调用方已经算好可用渠道集合），
++	// 放在最后能让前面的过滤器先给出更精确的归因原因。
++	dto.FilterAllowedChannelIds,
+ }
+ 
+ // ChannelSatisfiesFilters reports whether ch passes every filter.
+@@ -106,6 +109,10 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
+ 		return filter.TaskPluginKey == "" || slices.Contains(filter.TaskPluginChannelTypes, ch.Type)
+ 	case dto.FilterResponsesWebSocket:
+ 		return (ch.Type == constant.ChannelTypeOpenAI || ch.Type == constant.ChannelTypeCodex) && ch.GetSetting().ResponsesWebSocketEnabled
++	case dto.FilterAllowedChannelIds:
++		// **空列表表示"不允许任何渠道"**（明确的"没有合格候选"），
++		// 而不是"没有这个限定"——调用方要表达"没算出来"就不该加这个过滤器。
++		return slices.Contains(filter.AllowedChannelIds, ch.Id)
+ 	default:
+ 		return true
+ 	}
+-- 
+2.53.0.windows.1
+
