@@ -964,3 +964,27 @@ func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
 	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
 	assert.Equal(t, 1, countB)
 }
+
+// 上游 Base URL 归一化：真实 API 回扫发现的形态（用户填 `.../v1` 会被底座再拼一层）。
+func TestNormalizeUpstreamBaseURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"去掉结尾多余的 v1（最常见）", "https://tokenrhythm.studio/v1", "https://tokenrhythm.studio"},
+		{"去掉结尾斜杠与 v1", "https://tokenrhythm.studio/v1/", "https://tokenrhythm.studio"},
+		{"带路径前缀的 v1", "https://host/api/v1", "https://host/api"},
+		{"根形式保持不变", "https://tokenrhythm.studio", "https://tokenrhythm.studio"},
+		{"结尾斜杠被规范化", "https://host/", "https://host"},
+		{"不敢猜的形态原样保留", "https://host/api", "https://host/api"},
+		{"本地地址也适用", "http://127.0.0.1:8100/v1", "http://127.0.0.1:8100"},
+		{"空串安全", "", ""},
+		{"只有 v1 时不改坏", "/v1", "/v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, NormalizeUpstreamBaseURL(tc.in))
+		})
+	}
+}

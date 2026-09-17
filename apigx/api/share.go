@@ -276,11 +276,13 @@ func (h *handler) createChannel(c *gin.Context) {
 		return
 	}
 	channel := &apigxmodel.Channel{
-		OwnerUserID:   owner,
-		ShareGroupID:  req.ShareGroupID,
-		Name:          strings.TrimSpace(req.Name),
-		Protocol:      req.Protocol,
-		BaseURL:       req.BaseURL,
+		OwnerUserID:  owner,
+		ShareGroupID: req.ShareGroupID,
+		Name:         strings.TrimSpace(req.Name),
+		Protocol:     req.Protocol,
+		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
+		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
+		BaseURL:       channelpool.NormalizeUpstreamBaseURL(req.BaseURL),
 		BaseChannelID: req.BaseChannelID,
 		KeyPoolMode:   0, // 默认轮询（计划书 §3.5）
 		HealthState:   0,
