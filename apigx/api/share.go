@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/relayhook"
+	"github.com/QuantumNous/new-api/apigx/routing"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
@@ -70,6 +71,9 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		plaza.GET("", h.listPlaza)
 		plaza.GET("/:publicId", h.getPlazaItem)
 	}
+
+	// 可解释路由结果（T2.9）：只读，不写库、不投影
+	r.GET("/route-explain", h.explainRoute)
 
 	usage := r.Group("/usage")
 	{
@@ -1226,4 +1230,59 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 		out["unverified_capabilities"] = item.UnverifiedCapabilities
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// 可解释路由结果（T2.9）
+// ---------------------------------------------------------------------------
+
+// explainRoute 回答"这个模型为什么选了/没选某条来源"。**只读**，不影响任何路由状态。
+//
+// 输出经 `routing.Explain` 逐字段挑选，只含对外标识与指标数值——
+// 不含底座渠道 ID、上游 Key、内部作用域 ID（有泄露扫描用例守着）。
+func (h *handler) explainRoute(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid {
+		return
+	}
+	modelName := strings.TrimSpace(c.Query("model"))
+	if modelName == "" {
+		fail(c, http.StatusBadRequest, "invalid_query", "model is required")
+		return
+	}
+	strategy, valid := parseStrategyQuery(c.Query("strategy"))
+	if !valid {
+		fail(c, http.StatusBadRequest, "invalid_strategy", "unknown routing strategy")
+		return
+	}
+
+	candidates, public, err := routing.AssembleCandidates(h.db, capacity.New(common.RDB), modelName,
+		routing.AssembleOptions{})
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	explanation, err := routing.ExplainForStrategy(strategy, candidates, public, routing.DefaultOptions())
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid_strategy", err.Error())
+		return
+	}
+	ok(c, explanation)
+}
+
+// parseStrategyQuery 解析策略查询参数；空值取系统默认 auto（计划书：最后使用系统默认 auto）。
+func parseStrategyQuery(raw string) (routing.Strategy, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "auto":
+		return routing.StrategyAuto, true
+	case "latency":
+		return routing.StrategyLatency, true
+	case "throughput":
+		return routing.StrategyThroughput, true
+	case "reliability":
+		return routing.StrategyReliability, true
+	case "pinned":
+		return routing.StrategyPinned, true
+	default:
+		return 0, false
+	}
 }

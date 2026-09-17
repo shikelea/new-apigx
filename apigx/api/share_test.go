@@ -743,3 +743,72 @@ func TestCapacityPolicyUpdatePersistsAllDimensions(t *testing.T) {
 	assert.EqualValues(t, 4, stored.TpmMode)
 	assert.EqualValues(t, 2, stored.PolicyVersion, "版本号应递增")
 }
+
+// ---- 可解释路由结果接口（T2.9） ----
+
+func TestRouteExplainEndpoint(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8701
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "解释组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	// 两条已发布供给 + 一条仍是草稿（草稿不得出现在候选里）
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"explain-x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	publishedID := int64(body["data"].(map[string]any)["id"].(float64))
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, publishedID))
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, publishedID))
+
+	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"explain-draft"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// 先直接验证仓储：已发布供给应能被按模型名查到（先分清是仓储还是装配的问题）
+	offerings, repoErr := apigxmodel.ListPublishedOfferingsByModel(env.db, "explain-x")
+	require.NoError(t, repoErr)
+	require.Len(t, offerings, 1, "仓储应能按模型名查到已发布供给")
+	// 缺 model 参数 → 400
+	rec, _ = env.do(t, http.MethodGet, "/api/route-explain", owner, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 未认证 → 401
+	rec, _ = env.do(t, http.MethodGet, "/api/route-explain?model=explain-x", 0, "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// 未知策略 → 400（不静默退回 auto）
+	rec, _ = env.do(t, http.MethodGet, "/api/route-explain?model=explain-x&strategy=nonsense", owner, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 正常解释：草稿供给不在候选里，且输出只有对外标识
+	rec, body = env.do(t, http.MethodGet, "/api/route-explain?model=explain-x", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	candidates, _ := data["candidates"].([]any)
+	require.Len(t, candidates, 1, "只有已发布供给进入候选（草稿不得出现）")
+	first, _ := candidates[0].(map[string]any)
+	assert.NotEmpty(t, first["offering_public_id"])
+	assert.NotEmpty(t, first["channel_public_id"])
+	assert.Equal(t, "explain-x", first["model_name"])
+
+	// **泄露扫描**：响应不得含内部 ID / 凭据 / 底座渠道号
+	// **泄露扫描**：断言的是**内部标识的结构**与**有区分度的内部 ID**，
+	// 而不是"某个短数字没出现"——`owner_user_id=8701` 本身就含 "1"，
+	// 那种断言看着严格、实则毫无意义（初版就是这么写的）。
+	raw := rec.Body.String()
+	for _, forbidden := range []string{
+		`"channel_id"`, `"offering_id"`, `"base_channel_id"`, `"share_channel_id"`,
+		`"secret"`, `"upstream_key"`, "sk-", "enc:v1:",
+		strconv.FormatInt(baseChannelID, 10), // 底座渠道号（有区分度的长数字）
+	} {
+		assert.NotContains(t, raw, forbidden, "解释结果不得包含内部标识：%s", forbidden)
+	}
+
+	// 没有质量样本时如实标记（不伪装成"质量良好"）
+	assert.Equal(t, true, first["insufficient"], "无样本必须显式标出样本不足")
+	assert.Equal(t, false, first["price_known"], "没有价格快照时必须标为价格未知")
+}

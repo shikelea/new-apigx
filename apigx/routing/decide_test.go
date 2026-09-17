@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
@@ -399,4 +400,108 @@ func (e *routingTestEnv) seedChannelWithOffering(t *testing.T, ownerUserID int64
 	require.NoError(t, apigxmodel.CreateModelOffering(e.db, ownerUserID, offering))
 
 	return seededChannel{ShareChannelID: channel.ID, BaseChannelID: baseChannelID, OfferingID: offering.ID}
+}
+
+// ---- 可解释的路由结果（T2.9） ----
+
+// 对外说明必须**只有对外标识**：不得泄露底座渠道 ID、上游 Key、内部作用域 ID。
+func TestExplainExposesOnlyPublicIdentifiers(t *testing.T) {
+	winner := matureCandidate(11, 990_000, 200, 100)
+	winner.ShareChannelID = 555001 // 内部 ID，绝不应出现在输出里
+	loser := matureCandidate(12, 300_000, 900, 100)
+	loser.ShareChannelID = 555002
+
+	public := map[int64]CandidatePublicInfo{
+		11: {OfferingPublicID: "off-pub-A", ChannelPublicID: "ch-pub-A", OwnerUserID: 7, ModelName: "gpt-x"},
+		12: {OfferingPublicID: "off-pub-B", ChannelPublicID: "ch-pub-B", OwnerUserID: 8, ModelName: "gpt-x"},
+	}
+	explanation, err := ExplainForStrategy(StrategyReliability, []Candidate{loser, winner}, public, DefaultOptions())
+	require.NoError(t, err)
+
+	require.NotNil(t, explanation.Selected)
+	assert.Equal(t, "off-pub-A", explanation.Selected.OfferingPublicID)
+	assert.Equal(t, "ch-pub-A", explanation.Selected.ChannelPublicID, "只给对外渠道标识")
+	assert.True(t, explanation.Selected.Selected)
+	assert.Contains(t, explanation.Selected.Reasons[0], "wilson_lower_bound_ppm")
+
+	// 序列化后不得出现任何内部 ID 或凭据形态
+	raw, err := json.Marshal(explanation)
+	require.NoError(t, err)
+	text := string(raw)
+	for _, forbidden := range []string{"555001", "555002", "sk-", "channel_id", "upstream_key"} {
+		assert.NotContains(t, text, forbidden, "对外说明不得包含内部标识：%s", forbidden)
+	}
+}
+
+// **样本不足时不给成功率**：给了就会被当成结论。
+func TestExplainHidesSuccessRateWhenSamplesInsufficient(t *testing.T) {
+	cold := matureCandidate(21, 200_000, 150, 3) // 样本 3 < 阈值
+	cold.Quality.SuccessRatePpm = 1_000_000      // 即便 100% 成功也不该输出
+	public := map[int64]CandidatePublicInfo{21: {OfferingPublicID: "off-cold", ChannelPublicID: "ch-cold"}}
+
+	explanation, err := ExplainForStrategy(StrategyAuto, []Candidate{cold}, public, DefaultOptions())
+	require.NoError(t, err)
+	require.NotNil(t, explanation.Selected)
+	assert.True(t, explanation.Selected.Insufficient, "样本不足必须标出")
+	assert.Zero(t, explanation.Selected.SuccessRatePpm, "样本不足不得给出成功率")
+	assert.True(t, explanation.ColdStart)
+	assert.Contains(t, explanation.Reason, "insufficient samples")
+}
+
+// "为什么没选它"也要说清楚：被硬约束排除的候选带原因附在最后。
+func TestExplainReportsWhyCandidatesWereExcluded(t *testing.T) {
+	chosen := matureCandidate(31, 900_000, 200, 100)
+	full := matureCandidate(32, 999_000, 100, 100) // 质量最好但满载
+	full.CapacityLimit, full.CapacityInUse = 4, 4
+	denied := matureCandidate(33, 999_000, 100, 100)
+	denied.Allowed = false
+
+	public := map[int64]CandidatePublicInfo{
+		31: {OfferingPublicID: "off-31", ChannelPublicID: "ch-31"},
+		32: {OfferingPublicID: "off-32", ChannelPublicID: "ch-32"},
+		33: {OfferingPublicID: "off-33", ChannelPublicID: "ch-33"},
+	}
+	explanation, err := ExplainForStrategy(StrategyReliability, []Candidate{full, denied, chosen}, public, DefaultOptions())
+	require.NoError(t, err)
+	require.NotNil(t, explanation.Selected)
+	assert.EqualValues(t, "off-31", explanation.Selected.OfferingPublicID)
+
+	reasons := map[string]string{}
+	for _, item := range explanation.Candidates {
+		if item.ExcludedReason != "" {
+			reasons[item.OfferingPublicID] = item.ExcludedReason
+		}
+	}
+	assert.Equal(t, ExcludeSaturated, reasons["off-32"], "满载应给出明确原因，用户才能理解\n为什么没用上质量最好的来源")
+	assert.Equal(t, ExcludeNotAllowed, reasons["off-33"])
+}
+
+// 价格未知与陈旧数据都要如实标出（未知 ≠ 零；陈旧 ≠ 当前）。
+func TestExplainSurfacesUnknownPriceAndStaleness(t *testing.T) {
+	candidate := matureCandidate(41, 900_000, 200, 100)
+	candidate.PriceKnown = false
+	candidate.Quality.Stale = true
+
+	public := map[int64]CandidatePublicInfo{41: {OfferingPublicID: "off-41", ChannelPublicID: "ch-41"}}
+	explanation, err := ExplainForStrategy(StrategyAuto, []Candidate{candidate}, public, DefaultOptions())
+	require.NoError(t, err)
+	require.Len(t, explanation.Candidates, 1)
+	item := explanation.Candidates[0]
+	assert.False(t, item.PriceKnown, "价格未知必须如实标记")
+	assert.Zero(t, item.InputPriceMicro, "未知价格不得给出 0 以外的任何暗示值（这里是未提供）")
+	assert.True(t, item.Stale, "陈旧数据必须标记")
+}
+
+// 查不到对外标识时**不退化输出内部 ID**。
+func TestExplainNeverFallsBackToInternalIDs(t *testing.T) {
+	candidate := matureCandidate(51, 900_000, 200, 100)
+	explanation, err := ExplainForStrategy(StrategyReliability, []Candidate{candidate}, map[int64]CandidatePublicInfo{}, DefaultOptions())
+	require.NoError(t, err)
+	require.Len(t, explanation.Candidates, 1)
+	assert.Empty(t, explanation.Candidates[0].OfferingPublicID, "没有对外标识就留空")
+	assert.Equal(t, "missing_public_info", explanation.Candidates[0].ExcludedReason)
+
+	raw, err := json.Marshal(explanation)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "51", "内部供给 ID 不得出现")
 }

@@ -261,3 +261,17 @@ func FindOfferingByUpstreamModel(db *gorm.DB, channelID int64, upstreamModelID s
 	}
 	return offering.ID, true, nil
 }
+
+// ListPublishedOfferingsByModel 列出某上游模型名下**已发布**的全部供给（跨分享者）。
+//
+// 用于可解释路由（T2.9）：候选集就是"这个模型当前所有已发布的供给"。
+// 只返回已发布（草稿/待审核/已驳回不对外），与广场的可见性判据保持一致。
+func ListPublishedOfferingsByModel(db *gorm.DB, upstreamModelID string) ([]ModelOffering, error) {
+	if db == nil || upstreamModelID == "" {
+		return nil, nil
+	}
+	var offerings []ModelOffering
+	err := db.Where("upstream_model_id = ? AND status = ?", upstreamModelID, OfferingStatusPublished).
+		Order("id ASC").Find(&offerings).Error
+	return offerings, err
+}
