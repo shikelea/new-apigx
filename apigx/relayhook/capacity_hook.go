@@ -382,6 +382,10 @@ func AcquireForAttempt(c *gin.Context, channelID int) bool {
 	}
 	if lease != nil {
 		c.Set(leaseContextKey, lease)
+		// 顺带刷新"哪些 Key 已满载"（T2.6）：让底座下次选 Key 时**跳过**满载的那把，
+		// 而不是把请求交给它再由准入拒绝。函数内部按渠道节流（默认 10 秒），
+		// 因此不会给每请求增加 N 次计数读取。
+		RefreshKeySaturation(channelpool.CurrentDB(), channelID)
 		// **持久记录出站尝试**（计划书 §9.2 要求的执行顺序）：进程若在中途退出，
 		// 事后就能凭这条记录知道"当时确实占用了容量"，进而做对账补偿。
 		// 记录失败不影响请求本身——容量租约仍在，TTL 与对账都会兜住。
