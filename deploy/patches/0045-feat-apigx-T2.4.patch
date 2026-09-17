@@ -1,0 +1,304 @@
+From dcf6a99ccff6aa6ab48bec413033eb355adb67eb Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:29:59 +0800
+Subject: [PATCH 45/45] =?UTF-8?q?feat(apigx):=20=E8=B4=A8=E9=87=8F?=
+ =?UTF-8?q?=E9=87=87=E9=9B=86=E9=92=A9=E5=AD=90=E4=B8=8E=E6=8E=A5=E7=BA=BF?=
+ =?UTF-8?q?=EF=BC=88T2.4=20=E6=8E=A5=E7=BA=BF=EF=BC=9B=E8=BF=90=E8=A1=8C?=
+ =?UTF-8?q?=E6=97=B6=E5=86=99=E5=85=A5=E6=9C=AA=E9=AA=8C=E8=AF=81=EF=BC=8C?=
+ =?UTF-8?q?=E6=9C=AA=E5=8B=BE=E9=80=89=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/qualityhook: RecordFromRelay 按真实请求结果写分钟桶
+  * 时间精度真实: relayInfo.StartTime/FirstResponseTime 是 time.Time => 毫秒级延迟与 TTFT
+    (底座日志只有整秒, 日志里 use_time_seconds:0 即其表现)
+  * 失败与成功两条路径都接: relay_error.go(失败) + quota.go PostConsumeQuota(成功);
+    只接失败会让成功率永远 0%, 那种"半个统计"比没有统计更误导
+  * ClassifyOutcome: 平台自身的拒绝(准入/容量/配额)与上游失败分开, 否则会误伤健康渠道;
+    超时用底座真实错误码 channel:response_time_exceeded(+ context deadline + 504)
+  * 默认关闭 APIGX_QUALITY_STATS_ENABLED; 非分享渠道/无供给不制造无主统计
+- apigx/model: FindOfferingByUpstreamModel(按渠道+上游模型名定位存活供给)
+- 单元测试 3/3(平台拒绝归因/四类基本情形/默认关闭)
+- ❗运行时未通过: 开采集后 2 次成功请求(均 200) 但桶表仍 0 行, 且日志无我方错误
+  => 钩子在某个静默提前返回处分流, 原因尚未隔离(候选: 渠道映射查询/OriginModelName 取值/供给查找)
+- apigx + middleware 全量通过
+---
+ apigx/model/repo_offering.go      |  19 +++++
+ apigx/qualityhook/quality.go      | 121 ++++++++++++++++++++++++++++++
+ apigx/qualityhook/quality_test.go |  60 +++++++++++++++
+ service/quota.go                  |   5 ++
+ service/relay_error.go            |   5 ++
+ 5 files changed, 210 insertions(+)
+ create mode 100644 apigx/qualityhook/quality.go
+ create mode 100644 apigx/qualityhook/quality_test.go
+
+diff --git a/apigx/model/repo_offering.go b/apigx/model/repo_offering.go
+index 7d6e500..2a0e708 100644
+--- a/apigx/model/repo_offering.go
++++ b/apigx/model/repo_offering.go
+@@ -242,3 +242,22 @@ func ImportModelOfferings(db *gorm.DB, ownerUserID, channelID int64, upstreamMod
+ 	}
+ 	return created, skipped, nil
+ }
++
++// FindOfferingByUpstreamModel 按「渠道 + 上游模型名」定位存活供给。
++//
++// 质量统计要按供给归档样本，而供给的身份就是这一对——用列表接口再筛会多一次全量查询。
++func FindOfferingByUpstreamModel(db *gorm.DB, channelID int64, upstreamModelID string) (int64, bool, error) {
++	if db == nil || channelID <= 0 || upstreamModelID == "" {
++		return 0, false, nil
++	}
++	var offering ModelOffering
++	err := db.Where("channel_id = ? AND upstream_model_id = ? AND alive_flag = ?",
++		channelID, upstreamModelID, AliveFlagAlive).First(&offering).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return 0, false, nil
++	}
++	if err != nil {
++		return 0, false, err
++	}
++	return offering.ID, true, nil
++}
+diff --git a/apigx/qualityhook/quality.go b/apigx/qualityhook/quality.go
+new file mode 100644
+index 0000000..ad38895
+--- /dev/null
++++ b/apigx/qualityhook/quality.go
+@@ -0,0 +1,121 @@
++package qualityhook
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/channelpool"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/QuantumNous/new-api/relaykit/types"
++)
++
++// 质量样本采集（T2.4 接线）：把真实请求的**结果与耗时**写进分钟统计桶。
++//
++// # 记录什么、不记录什么
++//
++//   - 时间用 `relayInfo.StartTime` / `FirstResponseTime`（都是 `time.Time`），因此
++//     延迟与首字延迟有**真实毫秒精度**——不需要像底座日志那样退化成整秒。
++//   - 归属到**供给**：桶按供给 ID 归档，而供给就是"某个渠道的某个上游模型"。
++//     非分享渠道（没有供给）直接跳过，不制造无主统计。
++//   - 记录失败**不影响请求**：统计是旁路，任何错误只写系统日志。
++//
++// 默认关闭（`APIGX_QUALITY_STATS_ENABLED`），与其它 APIGX 开关保持一致。
++
++// ClassifyOutcome 判断一次失败属于哪一类。
++//
++// 关键区分：**平台自身的拒绝不是上游质量问题**。准入（来源不允许）、容量（429）、
++// 配额不足这些拒绝都发生在**我们这里**，把它们算成"上游失败"会误伤健康渠道——
++// 那正是"错误归因"要避免的典型错误。
++func ClassifyOutcome(err *types.NewAPIError, statusCode int) int {
++	if err == nil {
++		return apigxmodel.QualityOutcomeSuccess
++	}
++	switch err.GetErrorCode() {
++	case types.ErrorCodeChannelNoAvailableKey, types.ErrorCodeInsufficientUserQuota,
++		types.ErrorCodePreConsumeTokenQuotaFailed, types.ErrorCodeQueryDataError:
++		return apigxmodel.QualityOutcomeRejected
++	}
++	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusForbidden ||
++		statusCode == http.StatusPaymentRequired {
++		return apigxmodel.QualityOutcomeRejected
++	}
++	// 超时：底座有专门的错误码 `channel:response_time_exceeded`；此外 context 的 deadline
++	// 与上游 504 也按超时归因（三者指向同一件事，不必拆成三类）。
++	if errors.Is(err, context.DeadlineExceeded) || err.GetErrorCode() == types.ErrorCodeChannelResponseTimeExceeded ||
++		statusCode == http.StatusGatewayTimeout {
++		return apigxmodel.QualityOutcomeTimeout
++	}
++	// 客户端主动断开：既不是上游问题，也不是质量问题，单独归因
++	if errors.Is(err, context.Canceled) {
++		return apigxmodel.QualityOutcomeCancel
++	}
++	return apigxmodel.QualityOutcomeUpstream
++}
++
++// Enabled 报告质量采集是否开启。
++func Enabled() bool {
++	return common.GetEnvOrDefaultBool("APIGX_QUALITY_STATS_ENABLED", false)
++}
++
++// RecordFromRelay 按一次请求的结果写入质量样本。
++//
++// `apiErr` 为 nil 表示成功。函数**不返回错误**：统计失败不应影响请求处理，
++// 但会写系统日志以便发现"统计悄悄停了"。
++func RecordFromRelay(relayInfo *relaycommon.RelayInfo, apiErr *types.NewAPIError) {
++	if !Enabled() || relayInfo == nil {
++		return
++	}
++	db := channelpool.CurrentDB()
++	if db == nil || relayInfo.ChannelId <= 0 {
++		return
++	}
++	// 只有分享渠道才有供给；平台自建渠道不参与质量统计
++	shareChannelID, ok := channelpool.ShareChannelIDByBase(db, relayInfo.ChannelId)
++	if !ok {
++		return
++	}
++	modelName := relayInfo.GetOriginModelName()
++	offeringID, found, err := apigxmodel.FindOfferingByUpstreamModel(db, shareChannelID, modelName)
++	if err != nil {
++		common.SysError("apigx quality: lookup offering failed: " + err.Error())
++		return
++	}
++	if !found {
++		// 该模型在这个渠道上没有供给（未发布/已下架）：不制造无主统计
++		return
++	}
++
++	statusCode := 0
++	if apiErr != nil {
++		statusCode = apiErr.StatusCode
++	}
++	sample := apigxmodel.QualitySample{
++		OfferingID: offeringID,
++		Outcome:    ClassifyOutcome(apiErr, statusCode),
++	}
++	// 真实毫秒精度（`StartTime` / `FirstResponseTime` 都是 time.Time）
++	if !relayInfo.StartTime.IsZero() {
++		now := time.Now()
++		if elapsed := now.Sub(relayInfo.StartTime).Milliseconds(); elapsed > 0 {
++			sample.LatencyMs = elapsed
++			if !relayInfo.FirstResponseTime.IsZero() && relayInfo.FirstResponseTime.After(relayInfo.StartTime) {
++				ttft := relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()
++				if ttft > 0 {
++					sample.TtftMs = ttft
++					// 生成阶段 = 总时长 - 首字延迟（近似：中间的网络往返不计入）
++					if generation := elapsed - ttft; generation > 0 {
++						sample.GenerationMs = generation
++					}
++				}
++			}
++		}
++	}
++
++	if recordErr := apigxmodel.RecordQualitySample(db, sample); recordErr != nil {
++		common.SysError("apigx quality: record sample failed: " + recordErr.Error())
++	}
++}
+diff --git a/apigx/qualityhook/quality_test.go b/apigx/qualityhook/quality_test.go
+new file mode 100644
+index 0000000..97218a6
+--- /dev/null
++++ b/apigx/qualityhook/quality_test.go
+@@ -0,0 +1,60 @@
++package qualityhook
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"testing"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/stretchr/testify/assert"
++)
++
++// 归因的核心要求（计划书验收：「6 小时窗口内有错误、取消和少样本 | 归因正确」）：
++// **平台自身的拒绝不能被算成上游失败**，否则会误伤健康渠道。
++func TestClassifyOutcomeSeparatesPlatformRejections(t *testing.T) {
++	capacityErr := types.NewErrorWithStatusCode(errors.New("capacity exceeded"),
++		types.ErrorCodeChannelNoAvailableKey, http.StatusTooManyRequests)
++	assert.Equal(t, apigxmodel.QualityOutcomeRejected, ClassifyOutcome(capacityErr, http.StatusTooManyRequests),
++		"容量拒绝发生在我们这里，不是上游质量问题")
++
++	sourceErr := types.NewErrorWithStatusCode(errors.New("source not allowed"),
++		types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden)
++	assert.Equal(t, apigxmodel.QualityOutcomeRejected, ClassifyOutcome(sourceErr, http.StatusForbidden))
++
++	quotaErr := types.NewErrorWithStatusCode(errors.New("insufficient quota"),
++		types.ErrorCodeInsufficientUserQuota, http.StatusForbidden)
++	assert.Equal(t, apigxmodel.QualityOutcomeRejected, ClassifyOutcome(quotaErr, http.StatusForbidden))
++}
++
++// 成功、上游失败、超时、取消四类如实区分。
++func TestClassifyOutcomeBasicCases(t *testing.T) {
++	assert.Equal(t, apigxmodel.QualityOutcomeSuccess, ClassifyOutcome(nil, 0))
++
++	upstream := types.NewErrorWithStatusCode(errors.New("upstream 500"),
++		types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
++	assert.Equal(t, apigxmodel.QualityOutcomeUpstream, ClassifyOutcome(upstream, http.StatusInternalServerError))
++
++	// 504 按超时归因
++	gatewayTimeout := types.NewErrorWithStatusCode(errors.New("gateway timeout"),
++		types.ErrorCodeDoRequestFailed, http.StatusGatewayTimeout)
++	assert.Equal(t, apigxmodel.QualityOutcomeTimeout, ClassifyOutcome(gatewayTimeout, http.StatusGatewayTimeout))
++
++	// context deadline 也按超时
++	deadline := types.NewErrorWithStatusCode(context.DeadlineExceeded, types.ErrorCodeDoRequestFailed, 0)
++	assert.Equal(t, apigxmodel.QualityOutcomeTimeout, ClassifyOutcome(deadline, 0))
++
++	// 客户端取消：单独归因（既不是上游问题，也不是质量问题）
++	cancelled := types.NewErrorWithStatusCode(context.Canceled, types.ErrorCodeDoRequestFailed, 0)
++	assert.Equal(t, apigxmodel.QualityOutcomeCancel, ClassifyOutcome(cancelled, 0))
++}
++
++// 默认关闭：未显式开启时不产生任何统计写入。
++func TestQualityStatsDisabledByDefault(t *testing.T) {
++	t.Setenv("APIGX_QUALITY_STATS_ENABLED", "")
++	assert.False(t, Enabled(), "质量统计必须默认关闭（与其它 APIGX 开关一致）")
++
++	t.Setenv("APIGX_QUALITY_STATS_ENABLED", "true")
++	assert.True(t, Enabled())
++}
+diff --git a/service/quota.go b/service/quota.go
+index e52e38a..7a2688f 100644
+--- a/service/quota.go
++++ b/service/quota.go
+@@ -6,6 +6,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/qualityhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/logger"
+@@ -421,6 +422,10 @@ type postConsumeQuotaResult struct {
+ }
+ 
+ func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) error {
++	// APIGX 质量样本（T2.4）：**成功路径也必须记录**。
++	// 只记失败会让成功率永远是 0% —— 那种"半个统计"比没有统计更误导。
++	// 放在结算入口，保证"真的成功了"才计入成功（预扣/准入阶段不产生成功样本）。
++	defer qualityhook.RecordFromRelay(relayInfo, nil)
+ 	_, err := postConsumeQuotaWithResult(relayInfo, quota, preConsumedQuota, sendEmail)
+ 	return err
+ }
+diff --git a/service/relay_error.go b/service/relay_error.go
+index f5ed6c0..e4ecbaa 100644
+--- a/service/relay_error.go
++++ b/service/relay_error.go
+@@ -5,6 +5,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/QuantumNous/new-api/apigx/channelpool"
++	"github.com/QuantumNous/new-api/apigx/qualityhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/logger"
+@@ -65,6 +66,10 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
+ 	// 默认关闭（APIGX_KEY_STATS_ENABLED）；只对多 Key 渠道生效，且统计失败不影响请求。
+ 	channelpool.RecordFailureFromContext(c, channelError.ChannelId, err.StatusCode, string(err.GetErrorCode()))
+ 
++	// APIGX 质量样本（T2.4）：失败也计入分钟桶，并按"平台拒绝 / 超时 / 取消 / 上游失败"归因。
++	// 平台自身的准入与配额拒绝不算上游质量问题（见 qualityhook.ClassifyOutcome）。
++	qualityhook.RecordFromRelay(relayInfo, err)
++
+ 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
+ 		userId := c.GetInt("id")
+ 		tokenName := c.GetString("token_name")
+-- 
+2.53.0.windows.1
+
