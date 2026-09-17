@@ -28,7 +28,11 @@
 
 **任务清单**（工作包定义见 `docs/stage0/gate-review.md` 第 3 节）：
 - [x] T1.2 授权收敛（TD-08）：pin / 非 pin 走同一授权函数 → `new-api/middleware/distributor.go`；回归测试 `middleware/task_plugin_origin_task_test.go`；运行时回归 `tools/stage1-verify/td08-pin-model-limit.mjs`。证据：修复前 pin 下未授权模型 HTTP 200 且到达上游，修复后 403 且 0 次出站；临时禁用修复时回归测试 FAIL（证明测试有效）；middleware 全量测试通过、全仓构建通过。台账登记 D-001/D-002。
-- [ ] T1.1 平台 Key 接入（按底座现状：明文存储 + 等值查找；用 `authz.SecretView` 约束可见性；明文不进日志）
+- [x] T1.1 平台 Key 接入（按底座现状：明文存储 + 等值查找；用 `authz.SecretView` 约束可见性；明文不进日志）→ `docs/stage1/platform-key-notes.md`（待补）；验收脚本 `tools/stage1-verify/platform-key.mjs`
+  - [x] **按 TD-07 沿用底座现状**（明文 `tokens.key` + 等值查找），这是**有意识记录的偏离**，不是缺陷；本次工作包要证明的是"这个决定没有带来额外风险面"。
+  - [x] **端到端验收 7/7**：① 等值查找可用（明文直接用于真实请求，HTTP 200）；② 所有者可读明文（48 字符）；③ **他人拿不到明文**；④ 拒绝响应**不含明文**；⑤ **越权响应与「不存在」的响应逐字节一致**（不泄露存在性）；⑥ 他人令牌列表不含该令牌。
+  - [x] **直接查库核对**：`tokens.key` 确实等于明文（属预期）；**`logs` 表中明文出现次数 = 0**（明文不进日志 ✓）。
+  - ✅ **重要发现（底座约定，与 T1.12 相关）**：底座的旧接口在失败时返回 **HTTP 200 + `{"success":false,"message":"record not found"}`**，而不是 4xx（`POST /api/token/:id/key` 越权时即如此）。归属隔离本身是**正确**的（`model.GetTokenByIds(id, userId)` 按 owner 过滤），但它**不符合计划书 §9.1 的错误码约定**。结论：**我们自己的接口（`apigx/**`）继续用规范状态码**（404/401/429/503），底座旧接口的状态码问题在 T1.12 里统一登记与处理。
 - [x] T1.3 领域表落地（**三库矩阵全部通过**）
   - [x] 27 张表代码：`new-api/apigx/model/{base,models_identity,models_metering,migrate}.go`（`apigx_` 前缀，包名 `apigxmodel`）；`ExpectedTableCount = 27` 作为契约常量
   - [x] 测试守门：`migrate_test.go`（建表数量 = 27 / SQLite 连续迁移幂等 / 反射扫描字段类型只允许 int64·int·string·bool·gorm.DeletedAt）；`migrate_matrix_test.go`（DSN 驱动的三库矩阵，未配置的方言**明确 SKIP 并打印原因**；MySQL 额外断言引擎必须是 InnoDB）
