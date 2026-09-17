@@ -1,0 +1,231 @@
+From 5ee208ddbfcc2aeb4b41c502b84d15ed0925908a Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 20:35:51 +0800
+Subject: [PATCH 74/74] =?UTF-8?q?feat(apigx):=20=E6=96=B9=E5=90=91?=
+ =?UTF-8?q?=E7=BA=A0=E6=AD=A3=20=E2=80=94=E2=80=94=20=E5=BC=BA=E5=88=B6?=
+ =?UTF-8?q?=E4=BB=B7=E6=A0=BC=E9=97=B8=E9=97=A8=20+=20=E6=B8=85=E6=8E=89?=
+ =?UTF-8?q?=E6=A0=87=E7=AD=BE=E5=99=AA=E9=9F=B3=20+=20=E5=89=8D=E7=AB=AF?=
+ =?UTF-8?q?=E5=B7=A5=E4=BD=9C=E6=B5=81(T3.9)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户四条裁决的落地:
+  ① 强制要求设置价格(与底座"价格未配置即暂时无法使用"一致):
+     publishOffering 现在要求**已有被接受的价格**(供给或渠道作用域), 否则 400 price_not_configured
+     两个既有用例已按"先配价格再发布"调整 ✓
+  ② 按 new-api: **不做结果代理**(保留上游签名直链); 相关"待决事项"从能力矩阵删除
+  ③ 前端 = 改 new-api 现有前端(与计划书 §5.2"保留可用表单与后台组件, 重做分享广场及分享者工作流"一致)
+     已读 web/AGENTS.md 并确认项目内有 shadcn-ui 技能 => 前端是本期范围内工作, 见 T3.9
+  ④ 清除"declared/待联调"这类无意义文字: 能力矩阵状态收敛为两态 supported/unsupported ✓
+
+我的偏离与纠正: 此前把精力放在给能力打标签上, 而计划书 §4/§5 早已写清页面与前端复用策略
+  => T3.9 前端工作流已按 §4 的 8 个页面逐条列出并对应到我方接口, 建议从"模型广场+模型详情"起
+---
+ apigx/api/capabilities.go | 46 +++++++++++++--------------------------
+ apigx/api/share.go        | 34 +++++++++++++++++++++++++++++
+ apigx/api/share_test.go   | 21 +++++++++++-------
+ 3 files changed, 62 insertions(+), 39 deletions(-)
+
+diff --git a/apigx/api/capabilities.go b/apigx/api/capabilities.go
+index fe22138..bc668b6 100644
+--- a/apigx/api/capabilities.go
++++ b/apigx/api/capabilities.go
+@@ -6,21 +6,12 @@ import (
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+-// 能力矩阵：把「六类能力各自支持到什么程度」做成**机器可读的唯一事实来源**。
++// 能力矩阵：**支持范围的事实来源**（端点、是否支持、已知限制）。
+ //
+-// # 为什么要做成接口，而不是只写在文档里
+-//
+-// 计划书对阶段 3 有两条要求：**支持范围逐项记录**，以及**尚未支持的维度不能在界面宣称已生效**。
+-// 若这些只存在于文档或某个前端的硬编码里，界面迟早会与真实能力**漂移**（宣称了没做的、或漏掉了限制）。
+-// 因此这里把矩阵固定在**后端一处**：界面、文档、验收脚本都从这里取，谁也不能各自发挥。
+-//
+-// # 状态取值（刻意只有三种）
+-//
+-//   - `supported`：已用**真实上游**端到端验证过（证据写在 evidence 里）；
+-//   - `declared`：**未取得真实凭据**，仅以底座适配器 + 替身验证了协议与计量 —— **不得**在界面宣称"已验证"；
+-//   - `unsupported`：明确不支持（端点不存在或不接受该操作），界面**必须**显示能力限制。
+-//
+-// `pending_decisions` 列出"能力本身可用、但产品策略未定"的事项，避免界面把它们说成"完全可用"。
++// 依据计划书：支持范围逐项记录；尚未支持的维度不能在界面宣称已生效。
++// 因此界面/文档/验收脚本都从这里取，避免各自发挥。取值只有两种：
++//   - `supported`：可用（并列出已知限制）；
++//   - `unsupported`：明确不支持，界面必须显示能力限制。
+ type capabilityEntry struct {
+ 	Capability  string   `json:"capability"`
+ 	Endpoints   []string `json:"endpoints"`
+@@ -42,33 +33,31 @@ var capabilityMatrix = []capabilityEntry{
+ 		Status:   "supported",
+ 		Evidence: "真实上游端到端：生成 200、用量含配额、非法尺寸 400；尺寸语法与范围已加固（台账 D-021）",
+ 		Limitations: []string{
+-			"图片编辑端点存在但未与真实上游联调",
+ 			"上游返回**签名直链**（有效期内持有者可直接访问）：若要求“结果仅授权者可见”，需我方代理或转存",
+ 		},
+ 	},
+ 	{
+ 		Capability: "embedding", Endpoints: []string{"/v1/embeddings"},
+-		Status:   "declared",
+-		Evidence: "未取得真实厂商凭据：以底座适配器 + 替身验证了协议往返、usage 计量与规格拒绝",
++		Status:   "supported",
++		Evidence: "复用底座适配器；已验协议往返、usage 计量与规格拒绝",
+ 	},
+ 	{
+ 		Capability: "rerank", Endpoints: []string{"/v1/rerank"},
+-		Status:   "declared",
+-		Evidence: "未取得真实厂商凭据：以底座适配器 + 替身验证了查询/文档往返、计量与空文档拒绝",
++		Status:   "supported",
++		Evidence: "复用底座适配器；已验查询/文档往返、计量与空文档拒绝",
+ 	},
+ 	{
+ 		Capability: "audio", Endpoints: []string{"/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech"},
+-		Status:   "declared",
+-		Evidence: "未取得真实厂商凭据：以底座适配器 + 替身验证了转写往返与计量；缺文件已改为 4xx（台账 D-024）",
++		Status:   "supported",
++		Evidence: "复用底座适配器；已验转写往返与计量；缺文件返回 4xx（台账 D-024）",
+ 	},
+ 	{
+ 		Capability: "video", Endpoints: []string{"/v1/videos", "/v1/videos/:id", "/v1/videos/:id/content", "/v1/videos/:id/cancel"},
+-		Status:   "declared",
+-		Evidence: "按指定使用底座内置 kling 插件 + 替身模拟：提交/轮询/终态/绑定/跨用户/结果访问 8/8（台账 D-022 修复了状态映射导致的永久卡住）",
++		Status:   "supported",
++		Evidence: "复用底座内置 kling 任务插件：提交/轮询/终态/绑定/跨用户/结果访问 8/8（台账 D-022）",
+ 		Limitations: []string{
+ 			"**不支持取消**：`/v1/videos/:id/cancel` 返回 404 —— 界面必须显示该能力限制，不得显示“可取消”",
+ 			"通用任务 API `/v1/tasks` 在本配置下**未启用**（404）",
+-			"真实厂商联调未取得凭据",
+ 		},
+ 	},
+ }
+@@ -82,13 +71,8 @@ func (h *handler) listCapabilities(c *gin.Context) {
+ 		"matrix": capabilityMatrix,
+ 		// 状态语义也一并给出，避免调用方自行猜测取值含义
+ 		"status_legend": gin.H{
+-			"supported":   "已用真实上游端到端验证",
+-			"declared":    "未取得真实凭据；仅以底座适配器+替身验证协议与计量，界面不得宣称“已验证”",
+-			"unsupported": "明确不支持，界面必须显示能力限制",
+-		},
+-		"pending_decisions": []gin.H{
+-			{"topic": "unknown_price_billing", "detail": "未配置价格的模型当前按 0 计（日志有实证）；拒绝 / 兜底价并标注 / 允许但标记未计费，三种策略待定"},
+-			{"topic": "result_proxy", "detail": "图片与视频结果为上游签名直链；是否加我方代理以使“结果仅授权者可见”待定"},
++			"supported":   "可用（限制见 limitations）",
++			"unsupported": "明确不支持",
+ 		},
+ 	})
+ }
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 4f9c862..2a23842 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -1095,6 +1095,14 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 	if !valid {
+ 		return
+ 	}
++	// **强制要求设置价格**（与底座一致：底座在价格未配置时直接判定"模型暂时无法使用"）。
++	// 分享者在发布供给前必须已有**被接受的价格**（供给作用域或渠道作用域皆可），
++	// 否则这份供给不该出现在广场里、也不该被计费型调用选中。
++	if !h.offeringHasAcceptedPrice(id) {
++		fail(c, http.StatusBadRequest, "price_not_configured",
++			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
++		return
++	}
+ 	if err := apigxmodel.PublishModelOffering(h.db, owner, id); err != nil {
+ 		failFromRepo(c, err)
+ 		return
+@@ -1102,6 +1110,32 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
+ }
+ 
++// offeringHasAcceptedPrice 判断该供给是否已有**被接受**的价格（供给作用域或它所属渠道作用域）。
++//
++// 与底座"价格未配置即不可用"的语义对齐；这里只做**存在性**判断，不参与具体计价。
++func (h *handler) offeringHasAcceptedPrice(offeringID int64) bool {
++	var offering apigxmodel.ModelOffering
++	if err := h.db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
++		return false
++	}
++	scopes := []struct {
++		scopeType int
++		scopeID   int64
++	}{
++		{apigxmodel.PriceScopeOffering, offeringID},
++		{apigxmodel.PriceScopeChannel, offering.ChannelID},
++	}
++	for _, scope := range scopes {
++		if scope.scopeID <= 0 {
++			continue
++		}
++		if _, _, err := apigxmodel.GetEffectivePriceRule(h.db, scope.scopeType, scope.scopeID, 0); err == nil {
++			return true
++		}
++	}
++	return false
++}
++
+ func (h *handler) rejectOffering(c *gin.Context) {
+ 	owner, valid := h.ownerID(c)
+ 	if !valid || !requirePlatformReviewer(c) {
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index d9f58d9..66fc43b 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -598,6 +598,12 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 
+ 	// **非管理员不得发布**（否则「待审核」形同虚设）
++	// **先配置价格再发布**：与产品规则一致 —— 底座在价格未配置时判定"模型暂时无法使用"，
++	// 因此供给发布前必须已有被接受的价格（本用例顺带覆盖该闸门）。
++	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
++	require.Equal(t, http.StatusOK, rec.Code, "配置价格应当成功")
++
+ 	rec, _ = env.doWithRole(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "", common.RoleCommonUser)
+ 	assert.Equal(t, http.StatusForbidden, rec.Code, "普通用户不得自行发布")
+ 	assert.Contains(t, rec.Body.String(), "review_required")
+@@ -659,6 +665,12 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 
+ 	// 提交 + 发布后才可见
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	// **先配置价格再发布**：与产品规则一致 —— 底座在价格未配置时判定"模型暂时无法使用"，
++	// 因此供给发布前必须已有被接受的价格（本用例顺带覆盖该闸门）。
++	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
++	require.Equal(t, http.StatusOK, rec.Code, "配置价格应当成功")
++
+ 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 
+@@ -982,7 +994,7 @@ func TestCapabilityMatrixIsHonest(t *testing.T) {
+ 		entry, _ := item.(map[string]any)
+ 		name, _ := entry["capability"].(string)
+ 		require.NotEmpty(t, name)
+-		require.Contains(t, []string{"supported", "declared", "unsupported"}, entry["status"],
++		require.Contains(t, []string{"supported", "unsupported"}, entry["status"],
+ 			"状态取值必须受控（三类），否则界面无法据它决定怎么显示")
+ 		require.NotEmpty(t, entry["evidence"], "%s 必须给出证据说明，否则界面只能靠猜", name)
+ 		byCap[name] = entry
+@@ -993,10 +1005,6 @@ func TestCapabilityMatrixIsHonest(t *testing.T) {
+ 		assert.Contains(t, byCap, name, "六类能力都要在矩阵里")
+ 	}
+ 
+-	// **诚实性断言**：视频与其余三类未取得真实凭据 ⇒ 不得标成 supported
+-	assert.Equal(t, "declared", byCap["video"]["status"], "视频用底座插件+替身验证，不得宣称真实上游已验证")
+-	assert.Equal(t, "declared", byCap["embedding"]["status"])
+-
+ 	// 明确不支持项必须在矩阵里出现（否则界面会显示成"可用"）
+ 	limits, _ := byCap["video"]["limitations"].([]any)
+ 	joined := ""
+@@ -1005,7 +1013,4 @@ func TestCapabilityMatrixIsHonest(t *testing.T) {
+ 	}
+ 	assert.Contains(t, joined, "不支持取消", "视频不支持取消必须写进矩阵，界面据此显示能力限制")
+ 
+-	// 未决事项也要暴露（能力可用但策略未定，不能被说成"完全可用"）
+-	pending, _ := data["pending_decisions"].([]any)
+-	assert.GreaterOrEqual(t, len(pending), 2, "未知价格计费、结果代理等待决事项必须暴露")
+ }
+-- 
+2.53.0.windows.1
+
