@@ -1179,3 +1179,21 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **按规范的检查（全过）**：`bun run build` ✅（路由树重新生成 ✓）；`typecheck` ✅；`oxlint` ✅ **0 错 0 警**（期间修掉一处 `no-duplicate-imports`：同一模块的值导入与类型导入必须合并 ✓）；用例 ✅ **19/19**（share 5 + plaza 14）。
 
 **下一步（T3.9 续）**：把「我的分享」补全（渠道详情：**单 Key 消耗**、同步模型、匹配价格、授权与额度 ✓），然后「我的用量 → 我的 API Key → 任务中心 → 管理后台」。
+### T3.9 前端：渠道详情页（Key 池 + 供给）
+
+按 §4「我的分享：…Key 池策略及**单 Key 消耗**、**同步模型**、**匹配价格**、访问授权、额度与状态」实现**Key 池**与**供给**两块 ✓：
+
+| 文件 | 作用 |
+|---|---|
+| `src/features/share/components/channel-detail.tsx` | 渠道详情：基本信息（协议 / Key 池模式 / 健康状态 / Base URL）+ **Key 池表**（名称、稳定 ID、**凭据掩码**、**权重**、状态、**当前可用**）+ **供给表**（上游模型、状态、能力、价格规则）✓ |
+| `src/features/share/types.ts` / `api.ts`（扩） | `getChannel` / `getChannelKeys` / `getChannelOfferings`；字段与后端 `getChannel`/`listUpstreamKeys`/`listOfferings` **逐一对照** ✓ |
+| `src/features/share/lib/labels.ts`（扩） | Key 状态（启用/停用/自动禁用）与供给状态（草稿/已提交/已发布/已拒绝）映射，**未知取值回退保留原值** ✓ |
+| `src/routes/_authenticated/share/$channelId.tsx` | 路由 `/share/:channelId` ✓；渠道表的名称**链到详情** ✓ |
+| `__tests__/labels.test.ts`（扩） | 新增 2 条（Key 三态、供给四态 + 未知回退）✓ |
+
+**安全取向**：界面上的凭据列**只显示后端返回的掩码**（`masked` 固定占位 ✓）—— 凭据从不出后端，界面也无从展示明文 ✓。
+
+**按规范的检查（全过）**：`bun run build` ✅；`typecheck` ✅；`oxlint` ✅ **0 错 0 警**；用例 ✅ **21/21**。
+**顺带按规范纠了一处自己的组织错误**：我起初把渠道详情的类型/接口放进 `lib/` ✗ —— 规范 3.11 要求 feature 的 `types.ts`/`api.ts` 在**模块根** ✓，已合并回去并删除多余文件 ✓。
+
+**下一步（T3.9 续）**：渠道详情补**动作**（同步模型 `fetch-models`、匹配价格 `price-sync`、容量/额度 `capacity-policy`、供给发布与审核 ✓ —— 接口都已存在），然后「我的用量 → 我的 API Key → 任务中心 → 管理后台」。

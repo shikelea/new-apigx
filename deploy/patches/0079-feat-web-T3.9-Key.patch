@@ -1,0 +1,777 @@
+From b4d005ed46e7add691151d87db91dc5e114678b8 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:27:49 +0800
+Subject: [PATCH 79/79] =?UTF-8?q?feat(web):=20T3.9=20=E6=B8=A0=E9=81=93?=
+ =?UTF-8?q?=E8=AF=A6=E6=83=85=E9=A1=B5=EF=BC=88Key=20=E6=B1=A0=20+=20?=
+ =?UTF-8?q?=E4=BE=9B=E7=BB=99=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- components/channel-detail.tsx: 基本信息 + **Key 池表**(名称/稳定ID/**凭据掩码**/**权重**/状态/**当前可用**)
+  + **供给表**(上游模型/状态/能力/价格规则)
+- types.ts/api.ts(扩): getChannel/getChannelKeys/getChannelOfferings; 字段与后端逐一对照
+- lib/labels.ts(扩): Key 状态三态 + 供给状态四态映射, 未知取值回退保留原值
+- routes/_authenticated/share/$channelId.tsx: /share/:channelId; 渠道表名称链到详情
+- __tests__/labels.test.ts(扩): +2 条(Key/供给状态与未知回退)
+- 安全取向: 凭据列只显示后端返回的掩码(凭据从不出后端)
+- 按规范纠错: 起初把类型/接口放进 lib/ 不符合规范 3.11(feature 的 types.ts/api.ts 应在模块根), 已合并回去
+
+检查(全过): build ✅ / typecheck ✅ / oxlint 0 错 0 警 ✅ / 用例 21/21 ✅
+下一步: 渠道详情补动作(fetch-models/price-sync/capacity-policy/供给发布审核) -> 我的用量 -> 我的 API Key -> 任务中心 -> 管理后台
+---
+ .../features/share/__tests__/labels.test.ts   |  18 ++-
+ web/src/features/share/api.ts                 |  24 +++-
+ .../share/components/channel-detail.tsx       | 135 ++++++++++++++++++
+ web/src/features/share/index.tsx              |  11 +-
+ web/src/features/share/lib/labels.ts          |  20 +++
+ web/src/features/share/types.ts               |  55 +++++++
+ web/src/i18n/locales/en.json                  |  27 +++-
+ web/src/i18n/locales/fr.json                  |  27 +++-
+ web/src/i18n/locales/ja.json                  |  27 +++-
+ web/src/i18n/locales/ru.json                  |  27 +++-
+ web/src/i18n/locales/vi.json                  |  27 +++-
+ web/src/i18n/locales/zh-TW.json               |  27 +++-
+ web/src/i18n/locales/zh.json                  |  27 +++-
+ web/src/routeTree.gen.ts                      |  22 +++
+ .../_authenticated/share/$channelId.tsx       |  29 ++++
+ 15 files changed, 493 insertions(+), 10 deletions(-)
+ create mode 100644 web/src/features/share/components/channel-detail.tsx
+ create mode 100644 web/src/routes/_authenticated/share/$channelId.tsx
+
+diff --git a/web/src/features/share/__tests__/labels.test.ts b/web/src/features/share/__tests__/labels.test.ts
+index 6f871de..5d761a9 100644
+--- a/web/src/features/share/__tests__/labels.test.ts
++++ b/web/src/features/share/__tests__/labels.test.ts
+@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import { describe, expect, it } from 'vitest'
+ 
+-import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from '../lib/labels'
++import { healthLabelKey, keyPoolModeLabelKey, keyStatusLabelKey, offeringStatusLabelKey, visibilityLabelKey } from '../lib/labels'
+ 
+ describe('分享枚举文案映射', () => {
+   it('轮询与随机分别映射到各自文案键', () => {
+@@ -46,4 +46,20 @@ describe('分享枚举文案映射', () => {
+     expect(healthLabelKey(2)).toBe('share.health.unavailable')
+     expect(healthLabelKey(5)).toBe('share.health.unknown:5')
+   })
++})
++describe('Key 与供给状态文案映射', () => {
++  it('Key 三态映射，未知回退保留原值', () => {
++    expect(keyStatusLabelKey(0)).toBe('share.keyStatus.enabled')
++    expect(keyStatusLabelKey(1)).toBe('share.keyStatus.disabled')
++    expect(keyStatusLabelKey(2)).toBe('share.keyStatus.autoDisabled')
++    expect(keyStatusLabelKey(9)).toBe('share.keyStatus.unknown:9')
++  })
++
++  it('供给四态映射，未知回退保留原值', () => {
++    expect(offeringStatusLabelKey(0)).toBe('share.offeringStatus.draft')
++    expect(offeringStatusLabelKey(1)).toBe('share.offeringStatus.submitted')
++    expect(offeringStatusLabelKey(2)).toBe('share.offeringStatus.published')
++    expect(offeringStatusLabelKey(3)).toBe('share.offeringStatus.rejected')
++    expect(offeringStatusLabelKey(8)).toBe('share.offeringStatus.unknown:8')
++  })
+ })
+\ No newline at end of file
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 049c612..4a45769 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -17,7 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import { api } from '@/lib/api'
+ 
+-import type { ShareChannelListResponse, ShareGroupListResponse } from './types'
++import type {
++  ChannelDetailResponse,
++  OfferingListResponse,
++  ShareChannelListResponse,
++  ShareGroupListResponse,
++  UpstreamKeyListResponse,
++} from './types'
+ 
+ // 「我的分享」数据访问层：只做请求与类型，错误交给 Query 失败回调（规范 3.9）。
+ export async function getShareGroups(): Promise<ShareGroupListResponse> {
+@@ -28,4 +34,20 @@ export async function getShareGroups(): Promise<ShareGroupListResponse> {
+ export async function getShareChannels(): Promise<ShareChannelListResponse> {
+   const res = await api.get('/api/apigx/channels')
+   return res.data
++}
++// 渠道详情的数据访问：渠道本身、它的 Key 池、它的供给。
++// 说明：Key 池接口**只返回掩码**（凭据永不出后端），因此界面无法也不应展示明文。
++export async function getChannel(channelId: number): Promise<ChannelDetailResponse> {
++  const res = await api.get(`/api/apigx/channels/${channelId}`)
++  return res.data
++}
++
++export async function getChannelKeys(channelId: number): Promise<UpstreamKeyListResponse> {
++  const res = await api.get(`/api/apigx/channels/${channelId}/keys`)
++  return res.data
++}
++
++export async function getChannelOfferings(channelId: number): Promise<OfferingListResponse> {
++  const res = await api.get(`/api/apigx/channels/${channelId}/offerings`)
++  return res.data
+ }
+\ No newline at end of file
+diff --git a/web/src/features/share/components/channel-detail.tsx b/web/src/features/share/components/channel-detail.tsx
+new file mode 100644
+index 0000000..4e4cd1f
+--- /dev/null
++++ b/web/src/features/share/components/channel-detail.tsx
+@@ -0,0 +1,135 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useQuery } from '@tanstack/react-query'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { ErrorState } from '@/components/error-state'
++import { LoadingState } from '@/components/loading-state'
++import { Badge } from '@/components/ui/badge'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++
++import { getChannel, getChannelKeys, getChannelOfferings } from '../api'
++import { healthLabelKey, keyPoolModeLabelKey, keyStatusLabelKey, offeringStatusLabelKey } from '../lib/labels'
++import type { Offering, UpstreamKey } from '../types'
++
++/** 渠道详情：Key 池与供给。凭据只显示掩码（后端从不返回明文）。 */
++export function ChannelDetailView(props: { channelId: number }) {
++  const { t } = useTranslation()
++
++  const channelQuery = useQuery({ queryKey: ['apigx-channel', props.channelId], queryFn: () => getChannel(props.channelId) })
++  const keysQuery = useQuery({ queryKey: ['apigx-channel-keys', props.channelId], queryFn: () => getChannelKeys(props.channelId) })
++  const offeringsQuery = useQuery({
++    queryKey: ['apigx-channel-offerings', props.channelId],
++    queryFn: () => getChannelOfferings(props.channelId),
++  })
++
++  if (channelQuery.isPending || keysQuery.isPending || offeringsQuery.isPending) {
++    return <LoadingState />
++  }
++  if (channelQuery.isError || keysQuery.isError || offeringsQuery.isError) {
++    return (
++      <ErrorState
++        onRetry={() => {
++          void channelQuery.refetch()
++          void keysQuery.refetch()
++          void offeringsQuery.refetch()
++        }}
++      />
++    )
++  }
++
++  const channel = channelQuery.data?.data
++  const keys = keysQuery.data?.data?.items ?? []
++  const offerings = offeringsQuery.data?.data?.items ?? []
++
++  const keyColumns: StaticDataTableColumn<UpstreamKey>[] = [
++    { id: 'name', header: t('share.key.name'), cell: (row) => row.name },
++    { id: 'stable_key_id', header: t('share.key.stableId'), cell: (row) => row.stable_key_id },
++    { id: 'credential', header: t('share.key.credential'), cell: (row) => row.masked },
++    { id: 'weight', header: t('share.key.weight'), cell: (row) => String(row.weight) },
++    { id: 'status', header: t('share.key.status'), cell: (row) => t(keyStatusLabelKey(row.status)) },
++    {
++      id: 'usable',
++      header: t('share.key.usable'),
++      cell: (row) => (row.usable ? <Badge>{t('share.key.usableYes')}</Badge> : <Badge variant='outline'>{t('share.key.usableNo')}</Badge>),
++    },
++  ]
++
++  const offeringColumns: StaticDataTableColumn<Offering>[] = [
++    { id: 'model', header: t('share.offering.model'), cell: (row) => row.upstream_model_id },
++    { id: 'status', header: t('share.offering.status'), cell: (row) => t(offeringStatusLabelKey(row.status)) },
++    { id: 'capabilities', header: t('share.offering.capabilities'), cell: (row) => (row.capabilities ?? []).join(', ') },
++    { id: 'price_rule', header: t('share.offering.priceRule'), cell: (row) => String(row.price_rule_id) },
++  ]
++
++  if (!channel) {
++    return <EmptyState title={t('share.detail.missing')} />
++  }
++
++  return (
++    <div className='space-y-6'>
++      <Card>
++        <CardHeader>
++          <CardTitle className='break-all'>{channel.name}</CardTitle>
++        </CardHeader>
++        <CardContent className='grid gap-2 text-sm sm:grid-cols-2'>
++          <div>
++            {t('share.channel.protocol')}: {channel.protocol}
++          </div>
++          <div>
++            {t('share.channel.keyPoolMode')}: {t(keyPoolModeLabelKey(channel.key_pool_mode))}
++          </div>
++          <div>
++            {t('share.channel.health')}: {t(healthLabelKey(channel.health_state))}
++          </div>
++          <div className='break-all'>
++            {t('share.channel.baseUrl')}: {channel.base_url}
++          </div>
++        </CardContent>
++      </Card>
++
++      <Card>
++        <CardHeader>
++          <CardTitle>{t('share.keyPool')}</CardTitle>
++        </CardHeader>
++        <CardContent>
++          {keys.length === 0 ? (
++            <EmptyState title={t('share.keyPool.empty')} />
++          ) : (
++            <StaticDataTable columns={keyColumns} data={keys} getRowKey={(row) => row.id} />
++          )}
++        </CardContent>
++      </Card>
++
++      <Card>
++        <CardHeader>
++          <CardTitle>{t('share.offerings')}</CardTitle>
++        </CardHeader>
++        <CardContent>
++          {offerings.length === 0 ? (
++            <EmptyState title={t('share.offerings.empty')} />
++          ) : (
++            <StaticDataTable columns={offeringColumns} data={offerings} getRowKey={(row) => row.id} />
++          )}
++        </CardContent>
++      </Card>
++    </div>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index 6cea9b1..fa9df72 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */import { useQuery } from '@tanstack/react-query'
++import { Link } from '@tanstack/react-router'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
+@@ -64,7 +65,15 @@ export function MyShares() {
+   ]
+ 
+   const channelColumns: StaticDataTableColumn<ShareChannel>[] = [
+-    { id: 'name', header: t('share.channel.name'), cell: (row) => row.name },
++    {
++      id: 'name',
++      header: t('share.channel.name'),
++      cell: (row) => (
++        <Link to='/share/$channelId' params={{ channelId: String(row.id) }} className='hover:underline'>
++          {row.name}
++        </Link>
++      ),
++    },
+     { id: 'protocol', header: t('share.channel.protocol'), cell: (row) => row.protocol },
+     {
+       id: 'key_pool_mode',
+diff --git a/web/src/features/share/lib/labels.ts b/web/src/features/share/lib/labels.ts
+index eb535d2..72f952c 100644
+--- a/web/src/features/share/lib/labels.ts
++++ b/web/src/features/share/lib/labels.ts
+@@ -50,4 +50,24 @@ export function healthLabelKey(state: number): string {
+     2: 'share.health.unavailable',
+   }
+   return map[state] ?? `share.health.unknown:${state}`
++}
++/** 上游 Key 状态：0=启用 / 1=停用 / 2=自动禁用（未知回退保留原值）。 */
++export function keyStatusLabelKey(status: number): string {
++  const map: Record<number, string> = {
++    0: 'share.keyStatus.enabled',
++    1: 'share.keyStatus.disabled',
++    2: 'share.keyStatus.autoDisabled',
++  }
++  return map[status] ?? `share.keyStatus.unknown:${status}`
++}
++
++/** 供给状态（未知回退保留原值）。 */
++export function offeringStatusLabelKey(status: number): string {
++  const map: Record<number, string> = {
++    0: 'share.offeringStatus.draft',
++    1: 'share.offeringStatus.submitted',
++    2: 'share.offeringStatus.published',
++    3: 'share.offeringStatus.rejected',
++  }
++  return map[status] ?? `share.offeringStatus.unknown:${status}`
+ }
+\ No newline at end of file
+diff --git a/web/src/features/share/types.ts b/web/src/features/share/types.ts
+index 04e606a..e29a2b7 100644
+--- a/web/src/features/share/types.ts
++++ b/web/src/features/share/types.ts
+@@ -53,4 +53,59 @@ export interface ShareGroupListResponse {
+ export interface ShareChannelListResponse {
+   success: boolean
+   data?: { items: ShareChannel[] }
++}
++// 渠道详情相关类型（字段与后端 `getChannel` / `listUpstreamKeys` / `listOfferings` 一致）。
++
++export interface ChannelDetail {
++  id: number
++  public_id: string
++  name: string
++  protocol: string
++  base_url: string
++  key_pool_mode: number
++  health_state: number
++  health_reason: string
++}
++
++/** 上游 Key。注意：**凭据本身永不返回**，`masked` 固定为掩码占位。 */
++export interface UpstreamKey {
++  id: number
++  stable_key_id: string
++  name: string
++  /** 0=启用 / 1=停用 / 2=自动禁用（冷却中） */
++  status: number
++  /** 权重（= 流量占比；同池内归一） */
++  weight: number
++  cooldown_until: number
++  expires_at: number
++  credential_version: number
++  /** 后端判定的"当前是否可用"（含停用、过期、冷却） */
++  usable: boolean
++  masked: string
++}
++
++/** 供给（某渠道发布的某上游模型）。 */
++export interface Offering {
++  id: number
++  public_id: string
++  upstream_model_id: string
++  status: number
++  revision: number
++  capabilities?: string[]
++  price_rule_id: number
++}
++
++export interface ChannelDetailResponse {
++  success: boolean
++  data?: ChannelDetail
++}
++
++export interface UpstreamKeyListResponse {
++  success: boolean
++  data?: { items: UpstreamKey[] }
++}
++
++export interface OfferingListResponse {
++  success: boolean
++  data?: { items: Offering[] }
+ }
+\ No newline at end of file
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index a5d8649..07f8bd5 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6572,5 +6572,30 @@
+   "share.visibility.private": "Private",
+   "share.health.healthy": "Healthy",
+   "share.health.degraded": "Degraded",
+-  "share.health.unavailable": "Unavailable"
++  "share.health.unavailable": "Unavailable",
++  "share.keyPool": "Key pool",
++  "share.keyPool.empty": "No upstream key yet",
++  "share.key.name": "Name",
++  "share.key.stableId": "Stable key ID",
++  "share.key.credential": "Credential",
++  "share.key.weight": "Weight",
++  "share.key.status": "Status",
++  "share.key.usable": "Usable",
++  "share.key.usableYes": "Yes",
++  "share.key.usableNo": "No",
++  "share.keyStatus.enabled": "Enabled",
++  "share.keyStatus.disabled": "Disabled",
++  "share.keyStatus.autoDisabled": "Auto disabled",
++  "share.offerings": "Offerings",
++  "share.offerings.empty": "No offering yet",
++  "share.offering.model": "Upstream model",
++  "share.offering.status": "Status",
++  "share.offering.capabilities": "Capabilities",
++  "share.offering.priceRule": "Price rule",
++  "share.offeringStatus.draft": "Draft",
++  "share.offeringStatus.submitted": "Submitted",
++  "share.offeringStatus.published": "Published",
++  "share.offeringStatus.rejected": "Rejected",
++  "share.channel.baseUrl": "Base URL",
++  "share.detail.missing": "Channel not found"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 793382d..835abf3 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6572,5 +6572,30 @@
+   "share.visibility.private": "Private",
+   "share.health.healthy": "Healthy",
+   "share.health.degraded": "Degraded",
+-  "share.health.unavailable": "Unavailable"
++  "share.health.unavailable": "Unavailable",
++  "share.keyPool": "Key pool",
++  "share.keyPool.empty": "No upstream key yet",
++  "share.key.name": "Name",
++  "share.key.stableId": "Stable key ID",
++  "share.key.credential": "Credential",
++  "share.key.weight": "Weight",
++  "share.key.status": "Status",
++  "share.key.usable": "Usable",
++  "share.key.usableYes": "Yes",
++  "share.key.usableNo": "No",
++  "share.keyStatus.enabled": "Enabled",
++  "share.keyStatus.disabled": "Disabled",
++  "share.keyStatus.autoDisabled": "Auto disabled",
++  "share.offerings": "Offerings",
++  "share.offerings.empty": "No offering yet",
++  "share.offering.model": "Upstream model",
++  "share.offering.status": "Status",
++  "share.offering.capabilities": "Capabilities",
++  "share.offering.priceRule": "Price rule",
++  "share.offeringStatus.draft": "Draft",
++  "share.offeringStatus.submitted": "Submitted",
++  "share.offeringStatus.published": "Published",
++  "share.offeringStatus.rejected": "Rejected",
++  "share.channel.baseUrl": "Base URL",
++  "share.detail.missing": "Channel not found"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 9a849c1..122ffde 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6572,5 +6572,30 @@
+   "share.visibility.private": "Private",
+   "share.health.healthy": "Healthy",
+   "share.health.degraded": "Degraded",
+-  "share.health.unavailable": "Unavailable"
++  "share.health.unavailable": "Unavailable",
++  "share.keyPool": "Key pool",
++  "share.keyPool.empty": "No upstream key yet",
++  "share.key.name": "Name",
++  "share.key.stableId": "Stable key ID",
++  "share.key.credential": "Credential",
++  "share.key.weight": "Weight",
++  "share.key.status": "Status",
++  "share.key.usable": "Usable",
++  "share.key.usableYes": "Yes",
++  "share.key.usableNo": "No",
++  "share.keyStatus.enabled": "Enabled",
++  "share.keyStatus.disabled": "Disabled",
++  "share.keyStatus.autoDisabled": "Auto disabled",
++  "share.offerings": "Offerings",
++  "share.offerings.empty": "No offering yet",
++  "share.offering.model": "Upstream model",
++  "share.offering.status": "Status",
++  "share.offering.capabilities": "Capabilities",
++  "share.offering.priceRule": "Price rule",
++  "share.offeringStatus.draft": "Draft",
++  "share.offeringStatus.submitted": "Submitted",
++  "share.offeringStatus.published": "Published",
++  "share.offeringStatus.rejected": "Rejected",
++  "share.channel.baseUrl": "Base URL",
++  "share.detail.missing": "Channel not found"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 2c5e23c..6190e8e 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6572,5 +6572,30 @@
+   "share.visibility.private": "Private",
+   "share.health.healthy": "Healthy",
+   "share.health.degraded": "Degraded",
+-  "share.health.unavailable": "Unavailable"
++  "share.health.unavailable": "Unavailable",
++  "share.keyPool": "Key pool",
++  "share.keyPool.empty": "No upstream key yet",
++  "share.key.name": "Name",
++  "share.key.stableId": "Stable key ID",
++  "share.key.credential": "Credential",
++  "share.key.weight": "Weight",
++  "share.key.status": "Status",
++  "share.key.usable": "Usable",
++  "share.key.usableYes": "Yes",
++  "share.key.usableNo": "No",
++  "share.keyStatus.enabled": "Enabled",
++  "share.keyStatus.disabled": "Disabled",
++  "share.keyStatus.autoDisabled": "Auto disabled",
++  "share.offerings": "Offerings",
++  "share.offerings.empty": "No offering yet",
++  "share.offering.model": "Upstream model",
++  "share.offering.status": "Status",
++  "share.offering.capabilities": "Capabilities",
++  "share.offering.priceRule": "Price rule",
++  "share.offeringStatus.draft": "Draft",
++  "share.offeringStatus.submitted": "Submitted",
++  "share.offeringStatus.published": "Published",
++  "share.offeringStatus.rejected": "Rejected",
++  "share.channel.baseUrl": "Base URL",
++  "share.detail.missing": "Channel not found"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 4af4120..d977eff 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6572,5 +6572,30 @@
+   "share.visibility.private": "Private",
+   "share.health.healthy": "Healthy",
+   "share.health.degraded": "Degraded",
+-  "share.health.unavailable": "Unavailable"
++  "share.health.unavailable": "Unavailable",
++  "share.keyPool": "Key pool",
++  "share.keyPool.empty": "No upstream key yet",
++  "share.key.name": "Name",
++  "share.key.stableId": "Stable key ID",
++  "share.key.credential": "Credential",
++  "share.key.weight": "Weight",
++  "share.key.status": "Status",
++  "share.key.usable": "Usable",
++  "share.key.usableYes": "Yes",
++  "share.key.usableNo": "No",
++  "share.keyStatus.enabled": "Enabled",
++  "share.keyStatus.disabled": "Disabled",
++  "share.keyStatus.autoDisabled": "Auto disabled",
++  "share.offerings": "Offerings",
++  "share.offerings.empty": "No offering yet",
++  "share.offering.model": "Upstream model",
++  "share.offering.status": "Status",
++  "share.offering.capabilities": "Capabilities",
++  "share.offering.priceRule": "Price rule",
++  "share.offeringStatus.draft": "Draft",
++  "share.offeringStatus.submitted": "Submitted",
++  "share.offeringStatus.published": "Published",
++  "share.offeringStatus.rejected": "Rejected",
++  "share.channel.baseUrl": "Base URL",
++  "share.detail.missing": "Channel not found"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 016223b..bf2f107 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6572,5 +6572,30 @@
+   "share.visibility.private": "Private",
+   "share.health.healthy": "Healthy",
+   "share.health.degraded": "Degraded",
+-  "share.health.unavailable": "Unavailable"
++  "share.health.unavailable": "Unavailable",
++  "share.keyPool": "Key pool",
++  "share.keyPool.empty": "No upstream key yet",
++  "share.key.name": "Name",
++  "share.key.stableId": "Stable key ID",
++  "share.key.credential": "Credential",
++  "share.key.weight": "Weight",
++  "share.key.status": "Status",
++  "share.key.usable": "Usable",
++  "share.key.usableYes": "Yes",
++  "share.key.usableNo": "No",
++  "share.keyStatus.enabled": "Enabled",
++  "share.keyStatus.disabled": "Disabled",
++  "share.keyStatus.autoDisabled": "Auto disabled",
++  "share.offerings": "Offerings",
++  "share.offerings.empty": "No offering yet",
++  "share.offering.model": "Upstream model",
++  "share.offering.status": "Status",
++  "share.offering.capabilities": "Capabilities",
++  "share.offering.priceRule": "Price rule",
++  "share.offeringStatus.draft": "Draft",
++  "share.offeringStatus.submitted": "Submitted",
++  "share.offeringStatus.published": "Published",
++  "share.offeringStatus.rejected": "Rejected",
++  "share.channel.baseUrl": "Base URL",
++  "share.detail.missing": "Channel not found"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index f788452..a81f908 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6572,5 +6572,30 @@
+   "share.visibility.private": "仅自己",
+   "share.health.healthy": "正常",
+   "share.health.degraded": "降级",
+-  "share.health.unavailable": "不可用"
++  "share.health.unavailable": "不可用",
++  "share.keyPool": "Key 池",
++  "share.keyPool.empty": "还没有上游 Key",
++  "share.key.name": "名称",
++  "share.key.stableId": "稳定 Key ID",
++  "share.key.credential": "凭据",
++  "share.key.weight": "权重",
++  "share.key.status": "状态",
++  "share.key.usable": "当前可用",
++  "share.key.usableYes": "可用",
++  "share.key.usableNo": "不可用",
++  "share.keyStatus.enabled": "启用",
++  "share.keyStatus.disabled": "停用",
++  "share.keyStatus.autoDisabled": "自动禁用",
++  "share.offerings": "供给",
++  "share.offerings.empty": "还没有供给",
++  "share.offering.model": "上游模型",
++  "share.offering.status": "状态",
++  "share.offering.capabilities": "能力",
++  "share.offering.priceRule": "价格规则",
++  "share.offeringStatus.draft": "草稿",
++  "share.offeringStatus.submitted": "已提交",
++  "share.offeringStatus.published": "已发布",
++  "share.offeringStatus.rejected": "已拒绝",
++  "share.channel.baseUrl": "Base URL",
++  "share.detail.missing": "渠道不存在"
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index 40076c9..d180f66 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -49,6 +49,7 @@ import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authent
+ import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
+ import { Route as AuthenticatedSecurityIndexRouteImport } from './routes/_authenticated/security/index'
+ import { Route as AuthenticatedShareIndexRouteImport } from './routes/_authenticated/share/index'
++import { Route as AuthenticatedShareChannelIdRouteImport } from './routes/_authenticated/share/$channelId'
+ import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
+ import { Route as AuthenticatedSystemInfoIndexRouteImport } from './routes/_authenticated/system-info/index'
+ import { Route as AuthenticatedSystemSettingsIndexRouteImport } from './routes/_authenticated/system-settings/index'
+@@ -283,6 +284,12 @@ const AuthenticatedShareIndexRoute = AuthenticatedShareIndexRouteImport.update({
+   path: '/share/',
+   getParentRoute: () => AuthenticatedRouteRoute,
+ } as any)
++const AuthenticatedShareChannelIdRoute =
++  AuthenticatedShareChannelIdRouteImport.update({
++    id: '/share/$channelId',
++    path: '/share/$channelId',
++    getParentRoute: () => AuthenticatedRouteRoute,
++  } as any)
+ const AuthenticatedSubscriptionsIndexRoute =
+   AuthenticatedSubscriptionsIndexRouteImport.update({
+     id: '/subscriptions/',
+@@ -455,6 +462,7 @@ export interface FileRoutesByFullPath {
+   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
+   '/models/$section': typeof AuthenticatedModelsSectionRoute
+   '/plaza/$model': typeof AuthenticatedPlazaModelRoute
++  '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/channels/': typeof AuthenticatedChannelsIndexRoute
+@@ -518,6 +526,7 @@ export interface FileRoutesByTo {
+   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
+   '/models/$section': typeof AuthenticatedModelsSectionRoute
+   '/plaza/$model': typeof AuthenticatedPlazaModelRoute
++  '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/channels': typeof AuthenticatedChannelsIndexRoute
+@@ -585,6 +594,7 @@ export interface FileRoutesById {
+   '/_authenticated/errors/$error': typeof AuthenticatedErrorsErrorRoute
+   '/_authenticated/models/$section': typeof AuthenticatedModelsSectionRoute
+   '/_authenticated/plaza/$model': typeof AuthenticatedPlazaModelRoute
++  '/_authenticated/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
+@@ -651,6 +661,7 @@ export interface FileRouteTypes {
+     | '/errors/$error'
+     | '/models/$section'
+     | '/plaza/$model'
++    | '/share/$channelId'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
+     | '/channels/'
+@@ -714,6 +725,7 @@ export interface FileRouteTypes {
+     | '/errors/$error'
+     | '/models/$section'
+     | '/plaza/$model'
++    | '/share/$channelId'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
+     | '/channels'
+@@ -780,6 +792,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/errors/$error'
+     | '/_authenticated/models/$section'
+     | '/_authenticated/plaza/$model'
++    | '/_authenticated/share/$channelId'
+     | '/_authenticated/usage-logs/$section'
+     | '/_authenticated/usage-logs/audit'
+     | '/_authenticated/channels/'
+@@ -1117,6 +1130,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedShareIndexRouteImport
+       parentRoute: typeof AuthenticatedRouteRoute
+     }
++    '/_authenticated/share/$channelId': {
++      id: '/_authenticated/share/$channelId'
++      path: '/share/$channelId'
++      fullPath: '/share/$channelId'
++      preLoaderRoute: typeof AuthenticatedShareChannelIdRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/subscriptions/': {
+       id: '/_authenticated/subscriptions/'
+       path: '/subscriptions'
+@@ -1379,6 +1399,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedErrorsErrorRoute: typeof AuthenticatedErrorsErrorRoute
+   AuthenticatedModelsSectionRoute: typeof AuthenticatedModelsSectionRoute
+   AuthenticatedPlazaModelRoute: typeof AuthenticatedPlazaModelRoute
++  AuthenticatedShareChannelIdRoute: typeof AuthenticatedShareChannelIdRoute
+   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
+   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
+   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
+@@ -1408,6 +1429,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedErrorsErrorRoute: AuthenticatedErrorsErrorRoute,
+   AuthenticatedModelsSectionRoute: AuthenticatedModelsSectionRoute,
+   AuthenticatedPlazaModelRoute: AuthenticatedPlazaModelRoute,
++  AuthenticatedShareChannelIdRoute: AuthenticatedShareChannelIdRoute,
+   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
+   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
+   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
+diff --git a/web/src/routes/_authenticated/share/$channelId.tsx b/web/src/routes/_authenticated/share/$channelId.tsx
+new file mode 100644
+index 0000000..3e5605b
+--- /dev/null
++++ b/web/src/routes/_authenticated/share/$channelId.tsx
+@@ -0,0 +1,29 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { createFileRoute } from '@tanstack/react-router'
++
++import { ChannelDetailView } from '@/features/share/components/channel-detail'
++
++function ShareChannelDetail() {
++  const params = Route.useParams()
++  return <ChannelDetailView channelId={Number(params.channelId)} />
++}
++
++export const Route = createFileRoute('/_authenticated/share/$channelId')({
++  component: ShareChannelDetail,
++})
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+
