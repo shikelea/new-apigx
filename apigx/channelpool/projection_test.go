@@ -107,29 +107,31 @@ func TestProjectKeyPoolWritesBaseMultiKeyChannel(t *testing.T) {
 
 	projection, err := ProjectKeyPool(db, shareChannel.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 3, projection.KeyCount)
+	assert.Equal(t, 7, projection.KeyCount, "权重 1:5:1 → 7 个槽位（权重 = 流量占比）")
 
-	// 底座渠道应进入多 Key 模式，且 Key 按 (weight DESC, id ASC) 排列
-	// （"按权重分配流量"的展开机制见 key_weight.go，尚未接进投影）。
+	// 底座渠道应进入多 Key 模式，且 Key 按权重**展开**（权重 = 流量占比，见 T2.6）
 	var loaded basemodel.Channel
 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
 	assert.True(t, loaded.ChannelInfo.IsMultiKey, "必须切到多 Key 模式")
-	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize, "当前投影仍是一把 Key 一个槽位（权重只影响顺序）")
+	assert.Equal(t, 7, loaded.ChannelInfo.MultiKeySize, "权重 1:5:1 应展开为 7 个槽位（权重 = 流量占比）")
 	assert.Equal(t, constant.MultiKeyModePolling, loaded.ChannelInfo.MultiKeyMode)
 
 	lines := loaded.GetKeys()
-	require.Len(t, lines, 3)
-	assert.Equal(t, []string{"sk-second-bbbbbbb", "sk-first-aaaaaaaa", "sk-third-ccccccc"}, lines,
-		"权重高的排前面；权重相同按 ID 升序，保证顺序确定")
+	require.Len(t, lines, 7)
+	assert.Equal(t, []string{"sk-second-bbbbbbb", "sk-second-bbbbbbb", "sk-second-bbbbbbb", "sk-second-bbbbbbb",
+		"sk-second-bbbbbbb", "sk-first-aaaaaaaa", "sk-third-ccccccc"}, lines,
+		"权重高的占更多槽位；权重相同按 ID 升序，保证顺序确定")
 
-	// 索引 → 稳定 ID 的映射必须与写入顺序一致
+	// 索引 → 稳定 ID 的映射必须与写入顺序一致（前 5 个槽位都是权重 5 的那把）
 	assert.Equal(t, "stable-b", mustStable(t, projection, 0))
-	assert.Equal(t, "stable-a", mustStable(t, projection, 1))
-	assert.Equal(t, "stable-c", mustStable(t, projection, 2))
+	assert.Equal(t, "stable-b", mustStable(t, projection, 4))
+	assert.Equal(t, "stable-a", mustStable(t, projection, 5))
+	assert.Equal(t, "stable-c", mustStable(t, projection, 6))
 
+	// 同一把 Key 有多个槽位时，按稳定 ID 反查只给出一个（首个）槽位
 	idx, ok := projection.IndexOfStableKeyID("stable-c")
 	assert.True(t, ok)
-	assert.Equal(t, 2, idx)
+	assert.Equal(t, 6, idx)
 }
 
 func mustStable(t *testing.T, p *Projection, index int) string {
@@ -444,13 +446,18 @@ func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
 		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
 	}).Error)
 
+	// **等权**：本用例要验证的是"失效 Key 被跳过、换用另一把"，
+	// 因此两把 Key 权重相同（等权时不做加权展开，一把一个槽位，见 T2.6）。
+	// 若给成 1:5，权重高的那把会有 5 个槽位，标记掉索引 0 之后底座跳到索引 1——
+	// **还是同一把 Key**，那验证的就不是本用例想验证的事了。
 	secrets := []string{"sk-low-aaaaaaaaa", "sk-high-bbbbbbbb"}
-	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, []int64{1, 5})
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, []int64{1, 1})
 	projection, err := ProjectKeyPool(db, shareChannel.ID)
 	require.NoError(t, err)
 
-	// 投影后索引 0 = 权重更高的 stable-b
-	assert.Equal(t, "stable-b", mustStable(t, projection, 0))
+	// 等权 → 按 ID 升序，索引 0 = stable-a
+	assert.Equal(t, "stable-a", mustStable(t, projection, 0))
+	assert.Equal(t, "stable-b", mustStable(t, projection, 1))
 
 	// 让索引 0 的凭据被上游拒绝
 	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{
@@ -467,7 +474,7 @@ func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
 	key, index, apiErr := base.GetNextEnabledKey()
 	require.Nil(t, apiErr)
 	assert.Equal(t, 1, index, "底座必须跳过已失效的索引 0")
-	assert.Equal(t, "sk-low-aaaaaaaaa", key)
+	assert.Equal(t, "sk-high-bbbbbbbb", key, "应换用另一把 Key（索引 1）")
 }
 
 // 成功路径：关闭时空操作；开启后把 LastOKAt 记到**本次实际使用的那把**凭据上。
@@ -881,4 +888,79 @@ func countIndex(indexes []int, target int) int {
 		}
 	}
 	return count
+}
+
+// 加权投影：权重按占比展开，且**每个槽位仍映射回同一把 Key**；
+// 解不开的凭据被跳过时**下标不得串位**（阶段 1 曾在此处出过回归）。
+func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
+	db := setupProjectionEnv(t)
+	ResetMappingCacheForTest()
+	t.Cleanup(ResetMappingCacheForTest)
+
+	const owner int64 = 9951
+	const baseChannelID int64 = 9897
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "加权组", PublicID: "wg1"}
+	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
+	channel := &apigxmodel.Channel{
+		PublicID: "wc1", OwnerUserID: owner, ShareGroupID: group.ID,
+		Name: "加权渠道", BaseChannelID: baseChannelID, KeyPoolMode: apigxmodel.KeyPoolModePolling,
+	}
+	require.NoError(t, apigxmodel.CreateChannel(db, channel))
+
+	// 两把 Key：权重 3:1；**外加一把解不开的凭据**放在中间，专门验证下标不串位
+	entries := []struct {
+		stable string
+		secret string
+		weight int64
+		broken bool
+	}{
+		{"stable-a", "sk-aaa", 3, false},
+		{"stable-broken", "sk-broken", 1, true},
+		{"stable-b", "sk-bbb", 1, false},
+	}
+	for i, spec := range entries {
+		secretRef := ""
+		if spec.broken {
+			secretRef = "enc:v1:deadbeef:deadbeef" // 解不开：会被跳过
+		} else {
+			encrypted, err := secretbox.Encrypt(spec.secret)
+			require.NoError(t, err)
+			secretRef = encrypted
+		}
+		fingerprint, err := secretbox.Fingerprint(spec.secret + "-" + spec.stable)
+		require.NoError(t, err)
+		require.NoError(t, db.Create(&apigxmodel.UpstreamKey{
+			ChannelID: channel.ID, StableKeyID: spec.stable, Name: spec.stable,
+			SecretRef: secretRef, SecretFingerprint: fingerprint,
+			Status: apigxmodel.UpstreamKeyStatusEnabled, Weight: spec.weight,
+			CredentialVersion: 1, CreatedAt: common.GetTimestamp() + int64(i),
+		}).Error)
+	}
+
+	projection, err := ProjectKeyPool(db, channel.ID)
+	require.NoError(t, err)
+	require.NotNil(t, projection)
+	assert.Equal(t, 4, projection.KeyCount, "权重 3:1（解不开的那把被跳过）应展开为 4 个槽位")
+
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+	assert.Equal(t, 4, len(strings.Split(base.Key, "\n")))
+	assert.Equal(t, 4, base.ChannelInfo.MultiKeySize)
+
+	countA, countB := 0, 0
+	for index := range 4 {
+		switch projection.IndexToStableKey[index] {
+		case "stable-a":
+			countA++
+		case "stable-b":
+			countB++
+		case "stable-broken":
+			t.Fatalf("解不开的凭据不得出现在投影里")
+		}
+	}
+	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
+	assert.Equal(t, 1, countB)
 }

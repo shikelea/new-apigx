@@ -168,14 +168,20 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 	indexToStable := make(map[int]string, len(keys))
 	indexToKeyValue := make(map[int]string, len(keys))
 
-	// 当前投影保持**一把 Key 一个槽位**，权重只影响列表顺序（见 `AvailableUpstreamKeys`
-	// 的 weight DESC 排序）。
+	// 先收集可解密的 Key（失败的跳过并记录），再按**权重展开**（T2.6）：
+	// 底座没有 per-Key 权重，而它的轮询/随机都作用在"一份列表"上，
+	// 因此把权重 3 的 Key 在列表里放 3 次即可得到**加权轮询/加权随机**。
 	//
-	// T2.6 的"按权重分配流量"机制已经实现并单独测试（`BuildWeightedKeyIndexes`），
-	// 但**尚未接在这里**：展开会改变底座键列表的索引空间，而索引空间一变，
-	// 运行期状态、逐 Key 统计与失效隔离都要跟着迁移——更重要的是，它把
-	// "权重 = 顺序" 改成 "权重 = 流量占比"，属于**用户可观察的语义变更**，
-	// 需要有意识地决策并配套说明，不能顺手改掉（详见 TASK_LOG 的 T2.6 条目）。
+	// 语义说明（本阶段明确采用）：**权重 = 流量占比**——计划书说「Key 权重只在选 Key 时
+	// 使用」「渠道权重用于流量分散」；而 stage-1 时期"权重只决定顺序"在轮询下等价于等权，
+	// 表达不出"某把 Key 多分担一些"。
+	//
+	// `plaintexts` 与 `stableIDs` 必须**同步追加**：跳过的 Key 会让两套下标与 `keys` 错位，
+	// 早期实现直接拿展开槽位去索引 `keys`，遇到解不开的凭据就会把状态映射到**另一把 Key** 上
+	// （那个回归曾被全量测试抓到：含失效 Key 的用例挂在索引映射上）。
+	plaintexts := make([]string, 0, len(keys))
+	stableIDs := make([]string, 0, len(keys))
+	weights := make([]KeyWeight, 0, len(keys))
 	for i := range keys {
 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
 		if err != nil {
@@ -184,9 +190,14 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 				keys[i].ID, keys[i].StableKeyID, err))
 			continue
 		}
-		indexToStable[len(secrets)] = keys[i].StableKeyID
-		indexToKeyValue[len(secrets)] = plain
-		secrets = append(secrets, plain)
+		weights = append(weights, KeyWeight{Index: len(plaintexts), Weight: keys[i].Weight})
+		stableIDs = append(stableIDs, keys[i].StableKeyID)
+		plaintexts = append(plaintexts, plain)
+	}
+	for _, slot := range BuildWeightedKeyIndexes(weights) {
+		indexToStable[len(secrets)] = stableIDs[slot]
+		indexToKeyValue[len(secrets)] = plaintexts[slot]
+		secrets = append(secrets, plaintexts[slot])
 	}
 	if len(secrets) == 0 {
 		return nil, ErrNoUsableKey
