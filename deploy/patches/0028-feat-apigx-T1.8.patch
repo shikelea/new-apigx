@@ -1,0 +1,672 @@
+From dedebfcc365ec3611ccfd9468e5c6118fd5edbe1 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 12:58:27 +0800
+Subject: [PATCH 28/28] =?UTF-8?q?feat(apigx):=20=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?=E4=BE=9B=E7=BB=99=E5=AD=98=E5=82=A8=E4=B8=8E=E5=8F=91=E5=B8=83?=
+ =?UTF-8?q?=E6=B5=81=E7=A8=8B=EF=BC=88T1.8=20=E5=89=8D=E5=8D=8A=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/model/repo_offering.go: 供给按(渠道+上游模型名)唯一(墓碑式唯一索引);
+  新供给从草稿开始; 状态机 草稿->待审核->已发布/已驳回; 已发布不能被提交退回待审核;
+  能力声明独立存储(E4: 底座按模型名前缀硬编码能力)并递增修订号
+- api: 渠道下 添加/列出 供给; 能力更新; 提交/发布/驳回/删除
+- 审核门槛: 发布/驳回要求 role >= RoleAdminUser, 否则 403 review_required(测试固定)
+- failFromRepo 增加唯一约束冲突 -> 409 conflict(三方言文本匹配), 不再落 500
+- 测试: 仓储 2 用例 + 接口 1 生命周期用例; apigx+middleware 全量通过
+- 待做: 一键获取(底座 fetchChannelUpstreamModelIDs 未导出, 需 3 行导出包装+台账) 与端到端
+---
+ apigx/api/share.go           | 205 +++++++++++++++++++++++++++++++++++
+ apigx/api/share_test.go      |  90 +++++++++++++++
+ apigx/model/repo_offering.go | 196 +++++++++++++++++++++++++++++++++
+ apigx/model/repo_test.go     |  87 +++++++++++++++
+ 4 files changed, 578 insertions(+)
+ create mode 100644 apigx/model/repo_offering.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 08b753c..d7ea717 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -50,6 +50,17 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.GET("/:id/keys", h.listUpstreamKeys)
+ 		channels.POST("/:id/apply", h.applyChannelPool)
+ 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
++		channels.POST("/:id/offerings", h.createOffering)
++		channels.GET("/:id/offerings", h.listOfferings)
++	}
++
++	offerings := r.Group("/offerings")
++	{
++		offerings.PATCH("/:id/capabilities", h.updateOfferingCapabilities)
++		offerings.POST("/:id/submit", h.submitOffering)
++		offerings.POST("/:id/publish", h.publishOffering)
++		offerings.POST("/:id/reject", h.rejectOffering)
++		offerings.DELETE("/:id", h.deleteOffering)
+ 	}
+ 
+ 	usage := r.Group("/usage")
+@@ -112,6 +123,10 @@ func failFromRepo(c *gin.Context, err error) {
+ 		fail(c, http.StatusNotFound, "not_found", "resource not found")
+ 	case errors.Is(err, apigxmodel.ErrInvalidArgument):
+ 		fail(c, http.StatusBadRequest, "invalid_argument", err.Error())
++	case isDuplicateError(err):
++		// 唯一约束冲突（如「同一渠道同一模型重复发布」）应是对外可理解的 **409**，
++		// 而不是 500。三种方言的错误文本不同，因此按文本匹配（各驱动未提供统一的哨兵错误）。
++		fail(c, http.StatusConflict, "conflict", "resource already exists")
+ 	default:
+ 		common.SysError("apigx api: " + err.Error())
+ 		fail(c, http.StatusInternalServerError, "internal_error", "internal error")
+@@ -841,3 +856,193 @@ func quotaToMicroUSD(quota int) int64 {
+ 	}
+ 	return int64(float64(quota) / common.QuotaPerUnit * 1_000_000)
+ }
++
++// ---------------------------------------------------------------------------
++// 模型供给与发布流程（T1.8）
++// ---------------------------------------------------------------------------
++
++type createOfferingRequest struct {
++	UpstreamModelID  string                 `json:"upstream_model_id"`
++	CanonicalModelID *int64                 `json:"canonical_model_id"`
++	Capabilities     *apigxmodel.Capability `json:"capabilities"`
++}
++
++func (h *handler) createOffering(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	channelID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req createOfferingRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	offering := &apigxmodel.ModelOffering{
++		ChannelID:       channelID,
++		UpstreamModelID: strings.TrimSpace(req.UpstreamModelID),
++	}
++	if req.CanonicalModelID != nil {
++		offering.CanonicalModelID = *req.CanonicalModelID
++	}
++	if req.Capabilities != nil {
++		encoded, encErr := common.Marshal(*req.Capabilities)
++		if encErr != nil {
++			fail(c, http.StatusBadRequest, "invalid_body", "invalid capabilities")
++			return
++		}
++		offering.Capabilities = string(encoded)
++	}
++	if err := apigxmodel.CreateModelOffering(h.db, owner, offering); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{
++		"id": offering.ID, "public_id": offering.PublicID,
++		"upstream_model_id": offering.UpstreamModelID, "status": offering.Status,
++	})
++}
++
++func (h *handler) listOfferings(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	channelID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	list, err := apigxmodel.ListModelOfferingsByChannel(h.db, owner, channelID)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	items := make([]gin.H, 0, len(list))
++	for i := range list {
++		item := &list[i]
++		items = append(items, gin.H{
++			"id": item.ID, "public_id": item.PublicID,
++			"upstream_model_id": item.UpstreamModelID,
++			"status":            item.Status, "revision": item.Revision,
++			"capabilities": item.CapabilityOf(), "price_rule_id": item.PriceRuleID,
++		})
++	}
++	ok(c, gin.H{"items": items})
++}
++
++type updateCapabilitiesRequest struct {
++	Capabilities *apigxmodel.Capability `json:"capabilities"`
++}
++
++func (h *handler) updateOfferingCapabilities(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req updateCapabilitiesRequest
++	if err := c.ShouldBindJSON(&req); err != nil || req.Capabilities == nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "capabilities is required")
++		return
++	}
++	if err := apigxmodel.UpdateModelOfferingCapabilities(h.db, owner, id, *req.Capabilities); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id})
++}
++
++// submitOffering 分享者提交审核（草稿或已驳回 → 待审核）。
++func (h *handler) submitOffering(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.SubmitModelOffering(h.db, owner, id); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPending})
++}
++
++// requirePlatformReviewer 判定当前身份是否有权做审核动作（发布 / 驳回）。
++//
++// 审核**必须**由平台侧完成：如果分享者能自行发布，"待审核"就形同虚设
++// （计划书 §12 要求新公开资源先审核）。
++func requirePlatformReviewer(c *gin.Context) bool {
++	if c.GetInt("role") < common.RoleAdminUser {
++		fail(c, http.StatusForbidden, "review_required",
++			"this action requires platform review privileges")
++		return false
++	}
++	return true
++}
++
++func (h *handler) publishOffering(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.PublishModelOffering(h.db, owner, id); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
++}
++
++func (h *handler) rejectOffering(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.RejectModelOffering(h.db, owner, id); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusRejected})
++}
++
++func (h *handler) deleteOffering(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.DeleteModelOffering(h.db, owner, id); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"deleted": id})
++}
++
++// isDuplicateError 判定是否为唯一约束冲突（SQLite / MySQL / PostgreSQL 的文本各不相同）。
++func isDuplicateError(err error) bool {
++	if err == nil {
++		return false
++	}
++	msg := strings.ToLower(err.Error())
++	return strings.Contains(msg, "unique constraint failed") ||
++		strings.Contains(msg, "duplicate entry") ||
++		strings.Contains(msg, "duplicate key value")
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 9e49955..c0d39f8 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -80,6 +80,13 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
+ 	engine := gin.New()
+ 	api := engine.Group("/api")
+ 	api.Use(func(c *gin.Context) {
++		// 默认给管理员角色：审核类动作（发布/驳回）要求平台侧身份
++		c.Set("role", common.RoleAdminUser)
++		if raw := c.GetHeader("X-Test-Role"); raw != "" {
++			if role, convErr := strconv.Atoi(raw); convErr == nil {
++				c.Set("role", role)
++			}
++		}
+ 		if raw := c.GetHeader("X-Test-User"); raw != "" {
+ 			if id, convErr := strconv.Atoi(raw); convErr == nil {
+ 				c.Set("id", id)
+@@ -91,6 +98,11 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
+ }
+ 
+ func (e *testEnv) do(t *testing.T, method, path string, userID int64, body string) (*httptest.ResponseRecorder, map[string]any) {
++	return e.doWithRole(t, method, path, userID, body, 0)
++}
++
++// doWithRole 允许指定角色（0 表示使用默认的管理员角色）。
++func (e *testEnv) doWithRole(t *testing.T, method, path string, userID int64, body string, role int) (*httptest.ResponseRecorder, map[string]any) {
+ 	t.Helper()
+ 	var reader *strings.Reader
+ 	if body == "" {
+@@ -105,6 +117,9 @@ func (e *testEnv) do(t *testing.T, method, path string, userID int64, body strin
+ 	if userID > 0 {
+ 		req.Header.Set("X-Test-User", strconv.FormatInt(userID, 10))
+ 	}
++	if role > 0 {
++		req.Header.Set("X-Test-Role", strconv.Itoa(role))
++	}
+ 	rec := httptest.NewRecorder()
+ 	e.engine.ServeHTTP(rec, req)
+ 
+@@ -540,3 +555,78 @@ func TestPlatformKeyPreferencesAPI(t *testing.T) {
+ 	assert.EqualValues(t, 1, count, "owner 的偏好记录不受他人操作影响")
+ 	_ = tokenID
+ }
++
++// ---- 模型供给与发布流程接口（T1.8） ----
++
++func TestOfferingLifecycleThroughAPI(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner, other int64 = 8401, 8402
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	groupID := env.createGroup(t, owner, "供给组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	// 手工添加：新供给是草稿，不对外可见
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"gpt-x","capabilities":{"streaming":true}}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	offeringID := int64(data["id"].(float64))
++	assert.Equal(t, float64(0), data["status"], "新供给必须是草稿")
++
++	// 重复添加同一模型 → 409（唯一约束应映射为冲突而不是 500）
++	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"gpt-x"}`)
++	assert.Equal(t, http.StatusConflict, rec.Code, "重复供给应返回 409")
++
++	// 列表
++	rec, body = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	items, _ := body["data"].(map[string]any)["items"].([]any)
++	require.Len(t, items, 1)
++
++	// 归属隔离：他人读不到、也不能提交
++	rec, _ = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", other, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", other, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++
++	// 提交审核：草稿 → 待审核
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	// **非管理员不得发布**（否则「待审核」形同虚设）
++	rec, _ = env.doWithRole(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "", common.RoleCommonUser)
++	assert.Equal(t, http.StatusForbidden, rec.Code, "普通用户不得自行发布")
++	assert.Contains(t, rec.Body.String(), "review_required")
++
++	// 管理员发布 → 已发布
++	rec, body = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, float64(2), data["status"])
++
++	// 能力更新递增修订号
++	rec, _ = env.do(t, http.MethodPatch, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/capabilities", owner,
++		`{"capabilities":{"streaming":true,"tools":true}}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	rec, body = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner, "")
++	items, _ = body["data"].(map[string]any)["items"].([]any)
++	first, _ := items[0].(map[string]any)
++	assert.Equal(t, float64(2), first["revision"])
++	caps, _ := first["capabilities"].(map[string]any)
++	assert.Equal(t, true, caps["tools"])
++
++	// 已发布不能被"提交"退回待审核
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", owner, "")
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++
++	// 删除后同一模型可重新发布
++	rec, _ = env.do(t, http.MethodDelete, "/api/offerings/"+strconv.FormatInt(offeringID, 10), owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"gpt-x"}`)
++	assert.Equal(t, http.StatusOK, rec.Code, "软删除后应可重新发布")
++}
+diff --git a/apigx/model/repo_offering.go b/apigx/model/repo_offering.go
+new file mode 100644
+index 0000000..630ae26
+--- /dev/null
++++ b/apigx/model/repo_offering.go
+@@ -0,0 +1,196 @@
++package apigxmodel
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 模型供给条目（`apigx_model_offerings`）：
++// **同一个上游模型名，在不同分享渠道上就是不同的供给**——价格、能力、限额都可以不同。
++//
++// 唯一性用 `OfferingKeyHash`（渠道 + 上游模型名）表达，并与 `AliveFlag` 组成唯一索引：
++// 存活期间同一渠道内同一模型只有一条供给；软删除后可重新发布（与其它表同一套墓碑语义）。
++
++// OfferingStatus 取值：供给的发布状态。
++const (
++	// OfferingStatusDraft 草稿（分享者在编辑，不对外可见）。
++	OfferingStatusDraft int = 0
++	// OfferingStatusPending 待审核（已提交，等待平台审核）。
++	OfferingStatusPending int = 1
++	// OfferingStatusPublished 已发布（对外可见、可被路由）。
++	OfferingStatusPublished int = 2
++	// OfferingStatusRejected 已驳回（审核未通过，分享者可修改后重新提交）。
++	OfferingStatusRejected int = 3
++)
++
++// Capability 描述一个模型在**这条供给**上实际支持的能力。
++//
++// 底座的 `relaykit` 转换器是按**模型名前缀**硬编码能力的，没有"按供给声明能力"的位置；
++// 因此 APIGX 必须自己承载它（见 docs/architecture/baseline.md 的 E4）。
++type Capability struct {
++	Streaming bool `json:"streaming"`
++	Vision    bool `json:"vision"`
++	Tools     bool `json:"tools"`
++	Reasoning bool `json:"reasoning"`
++}
++
++// OfferingKeyHashFor 计算供给的业务键哈希（渠道 + 上游模型名）。
++//
++// 用哈希而不是把两列一起放进唯一索引，是为了让「墓碑」语义只依赖一个列：
++// 软删除时把 AliveFlag 置为本行 ID 即可放行业务键。
++func OfferingKeyHashFor(channelID int64, upstreamModelID string) string {
++	sum := sha256.Sum256([]byte(fmt.Sprintf("apigx:offering:%d:%s", channelID, upstreamModelID)))
++	return hex.EncodeToString(sum[:])
++}
++
++// CreateModelOffering 新增一条供给（已校验渠道归属）。
++//
++// 新供给一律从**草稿**开始：发布需要显式动作（提交审核 → 平台发布），
++// 避免"加了模型就自动对外可见"。
++func CreateModelOffering(db *gorm.DB, ownerUserID int64, offering *ModelOffering) error {
++	if offering == nil || offering.ChannelID <= 0 {
++		return fmt.Errorf("%w: channel_id is required", ErrInvalidArgument)
++	}
++	if _, err := GetChannel(db, ownerUserID, offering.ChannelID); err != nil {
++		return err
++	}
++	if offering.UpstreamModelID == "" {
++		return fmt.Errorf("%w: upstream_model_id is required", ErrInvalidArgument)
++	}
++	if offering.Capabilities == "" {
++		encoded, err := common.Marshal(Capability{})
++		if err != nil {
++			return err
++		}
++		offering.Capabilities = string(encoded)
++	}
++	if offering.PublicID == "" {
++		offering.PublicID = newPublicID()
++	}
++	offering.OfferingKeyHash = OfferingKeyHashFor(offering.ChannelID, offering.UpstreamModelID)
++	offering.Status = OfferingStatusDraft
++	offering.Revision = 1
++	offering.AliveFlag = AliveFlagAlive
++	touchTimestamps(true, &offering.CreatedAt, &offering.UpdatedAt)
++	return db.Create(offering).Error
++}
++
++// GetModelOffering 按所有者读取供给。
++func GetModelOffering(db *gorm.DB, ownerUserID, id int64) (*ModelOffering, error) {
++	var offering ModelOffering
++	if err := db.Where("id = ?", id).First(&offering).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil, ErrNotFound
++		}
++		return nil, err
++	}
++	// 归属经渠道传递（供给没有 owner 列）
++	if _, err := GetChannel(db, ownerUserID, offering.ChannelID); err != nil {
++		return nil, ErrNotFound
++	}
++	return &offering, nil
++}
++
++// ListModelOfferingsByChannel 列出某渠道下的全部存活供给（已校验渠道归属）。
++func ListModelOfferingsByChannel(db *gorm.DB, ownerUserID, channelID int64) ([]ModelOffering, error) {
++	if _, err := GetChannel(db, ownerUserID, channelID); err != nil {
++		return nil, err
++	}
++	var offerings []ModelOffering
++	err := db.Where("channel_id = ?", channelID).Order("id ASC").Find(&offerings).Error
++	return offerings, err
++}
++
++// UpdateModelOfferingCapabilities 更新能力声明并递增修订号（能力是路由与展示的依据）。
++func UpdateModelOfferingCapabilities(db *gorm.DB, ownerUserID, id int64, caps Capability) error {
++	offering, err := GetModelOffering(db, ownerUserID, id)
++	if err != nil {
++		return err
++	}
++	encoded, err := common.Marshal(caps)
++	if err != nil {
++		return err
++	}
++	return db.Model(&ModelOffering{}).Where("id = ? AND alive_flag = ?", offering.ID, AliveFlagAlive).
++		Updates(map[string]any{
++			"capabilities": string(encoded),
++			"revision":     offering.Revision + 1,
++			"updated_at":   common.GetTimestamp(),
++		}).Error
++}
++
++// SubmitModelOffering 把草稿（或已驳回）提交为待审核。
++//
++// 状态机刻意做窄：**已发布的供给不能靠提交动作改状态**（改价/改能力应当走修订流程），
++// 否则一次误点就会让已对外可见的供给退回待审核、对使用者表现为"模型突然消失"。
++func SubmitModelOffering(db *gorm.DB, ownerUserID, id int64) error {
++	return transitionOffering(db, ownerUserID, id, []int{OfferingStatusDraft, OfferingStatusRejected}, OfferingStatusPending)
++}
++
++// PublishModelOffering 平台审核通过（待审核 → 已发布）。
++func PublishModelOffering(db *gorm.DB, ownerUserID, id int64) error {
++	return transitionOffering(db, ownerUserID, id, []int{OfferingStatusPending}, OfferingStatusPublished)
++}
++
++// RejectModelOffering 平台驳回（待审核 → 已驳回）。
++func RejectModelOffering(db *gorm.DB, ownerUserID, id int64) error {
++	return transitionOffering(db, ownerUserID, id, []int{OfferingStatusPending}, OfferingStatusRejected)
++}
++
++func transitionOffering(db *gorm.DB, ownerUserID, id int64, from []int, to int) error {
++	offering, err := GetModelOffering(db, ownerUserID, id)
++	if err != nil {
++		return err
++	}
++	allowed := false
++	for _, candidate := range from {
++		if offering.Status == candidate {
++			allowed = true
++			break
++		}
++	}
++	if !allowed {
++		return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, to)
++	}
++	now := common.GetTimestamp()
++	updates := map[string]any{"status": to, "updated_at": now}
++	if to == OfferingStatusPublished {
++		updates["verified_at"] = now
++	}
++	return db.Model(&ModelOffering{}).Where("id = ? AND alive_flag = ?", offering.ID, AliveFlagAlive).
++		Updates(updates).Error
++}
++
++// DeleteModelOffering 软删除供给（墓碑语义：同一模型可被重新添加）。
++func DeleteModelOffering(db *gorm.DB, ownerUserID, id int64) error {
++	offering, err := GetModelOffering(db, ownerUserID, id)
++	if err != nil {
++		return err
++	}
++	now := common.GetTimestamp()
++	res := db.Model(&ModelOffering{}).
++		Where("id = ? AND alive_flag = ?", offering.ID, AliveFlagAlive).
++		Updates(map[string]any{"deleted_at": softDeletedAt(now), "alive_flag": offering.ID, "updated_at": now})
++	if res.Error != nil {
++		return res.Error
++	}
++	if res.RowsAffected == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// CapabilityOf 解析供给的能力声明。
++func (o *ModelOffering) CapabilityOf() Capability {
++	var caps Capability
++	if o == nil || o.Capabilities == "" {
++		return caps
++	}
++	_ = common.UnmarshalJsonStr(o.Capabilities, &caps)
++	return caps
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 334f968..70f6cdc 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -422,3 +422,90 @@ func TestAPIKeyPreferencesUpsertAndValidation(t *testing.T) {
+ 	_, err = GetAPIKeyByToken(db, 12002, token)
+ 	assert.ErrorIs(t, err, ErrNotFound)
+ }
++
++// ---- 模型供给与发布流程（T1.8） ----
++
++func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
++	db := newRepoDB(t)
++	const owner, other int64 = 13001, 13002
++	_, channel := seedGroupAndChannel(t, db, owner)
++
++	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "gpt-x", CanonicalModelID: 0}
++	require.NoError(t, CreateModelOffering(db, owner, offering))
++	assert.Equal(t, OfferingStatusDraft, offering.Status, "新供给必须从草稿开始（不得自动对外可见）")
++	assert.NotEmpty(t, offering.PublicID)
++	assert.EqualValues(t, 1, offering.Revision)
++	assert.Equal(t, OfferingKeyHashFor(channel.ID, "gpt-x"), offering.OfferingKeyHash)
++
++	// 同一渠道同一模型不可重复
++	dup := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "gpt-x"}
++	require.Error(t, CreateModelOffering(db, owner, dup), "存活期间同一模型不得重复发布")
++
++	// 归属：他人读不到、也改不了
++	_, err := GetModelOffering(db, other, offering.ID)
++	assert.ErrorIs(t, err, ErrNotFound)
++	assert.ErrorIs(t, SubmitModelOffering(db, other, offering.ID), ErrNotFound)
++
++	// 状态机：草稿 → 待审核 → 已发布
++	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
++	got, err := GetModelOffering(db, owner, offering.ID)
++	require.NoError(t, err)
++	assert.Equal(t, OfferingStatusPending, got.Status)
++
++	// 待审核不能被重复提交
++	assert.ErrorIs(t, SubmitModelOffering(db, owner, offering.ID), ErrInvalidArgument)
++
++	require.NoError(t, PublishModelOffering(db, owner, offering.ID))
++	got, err = GetModelOffering(db, owner, offering.ID)
++	require.NoError(t, err)
++	assert.Equal(t, OfferingStatusPublished, got.Status)
++	assert.Positive(t, got.VerifiedAt, "发布时应记录核验时间")
++
++	// **已发布的供给不能被"提交"动作退回待审核**：那会让使用者看到模型突然消失
++	assert.ErrorIs(t, SubmitModelOffering(db, owner, offering.ID), ErrInvalidArgument)
++
++	// 能力声明的更新应递增修订号
++	require.NoError(t, UpdateModelOfferingCapabilities(db, owner, offering.ID, Capability{Streaming: true, Tools: true}))
++	got, err = GetModelOffering(db, owner, offering.ID)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2, got.Revision)
++	assert.True(t, got.CapabilityOf().Tools)
++	assert.False(t, got.CapabilityOf().Vision)
++
++	// 删除后同一模型可以重新发布（墓碑语义）
++	require.NoError(t, DeleteModelOffering(db, owner, offering.ID))
++	assert.ErrorIs(t, DeleteModelOffering(db, owner, offering.ID), ErrNotFound, "重复删除返回未找到")
++	again := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "gpt-x"}
++	require.NoError(t, CreateModelOffering(db, owner, again), "软删除后同一模型应可重新发布")
++	assert.Equal(t, OfferingStatusDraft, again.Status)
++}
++
++func TestListModelOfferingsByChannelScopesByOwner(t *testing.T) {
++	db := newRepoDB(t)
++	const ownerA, ownerB int64 = 13101, 13102
++	_, channelA := seedGroupAndChannel(t, db, ownerA)
++	_, channelB := seedGroupAndChannel(t, db, ownerB)
++
++	require.NoError(t, CreateModelOffering(db, ownerA, &ModelOffering{ChannelID: channelA.ID, UpstreamModelID: "m1"}))
++	require.NoError(t, CreateModelOffering(db, ownerA, &ModelOffering{ChannelID: channelA.ID, UpstreamModelID: "m2"}))
++
++	list, err := ListModelOfferingsByChannel(db, ownerA, channelA.ID)
++	require.NoError(t, err)
++	assert.Len(t, list, 2)
++
++	// 用别人的渠道 ID 查询被拒（归属经渠道传递）
++	_, err = ListModelOfferingsByChannel(db, ownerB, channelA.ID)
++	assert.ErrorIs(t, err, ErrNotFound)
++	_, err = ListModelOfferingsByChannel(db, ownerA, channelB.ID)
++	assert.ErrorIs(t, err, ErrNotFound)
++
++	// 驳回流程
++	target := list[0]
++	require.NoError(t, SubmitModelOffering(db, ownerA, target.ID))
++	require.NoError(t, RejectModelOffering(db, ownerA, target.ID))
++	got, err := GetModelOffering(db, ownerA, target.ID)
++	require.NoError(t, err)
++	assert.Equal(t, OfferingStatusRejected, got.Status)
++	// 驳回后可以修改并重新提交
++	require.NoError(t, SubmitModelOffering(db, ownerA, target.ID))
++}
+-- 
+2.53.0.windows.1
+
