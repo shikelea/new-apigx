@@ -87,6 +87,11 @@ export function useSidebarData(): SidebarData {
             icon: Settings2,
           },
           {
+            title: t('taskCenter.title'),
+            url: '/task-center',
+            icon: ListTodo,
+          },
+          {
             title: t('Chat'),
             icon: MessageSquare,
             type: 'chat-presets',

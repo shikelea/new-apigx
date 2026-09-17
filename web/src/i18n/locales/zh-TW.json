@@ -6670,5 +6670,22 @@
   "apigxPlatform.channelId": "Channel ID",
   "apigxPlatform.noOffering": "No offering in this channel",
   "apigxPlatform.publish": "Publish",
-  "apigxPlatform.reject": "Reject"
+  "apigxPlatform.reject": "Reject",
+  "taskCenter.title": "Task center",
+  "taskCenter.myTasks": "My tasks",
+  "taskCenter.empty": "No task yet",
+  "taskCenter.submitTime": "Submit time",
+  "taskCenter.taskId": "Task ID",
+  "taskCenter.action": "Type",
+  "taskCenter.status": "Status",
+  "taskCenter.progress": "Progress",
+  "taskCenter.quota": "Quota used",
+  "taskCenter.failReason": "Failure reason",
+  "taskCenter.artifacts": "Result",
+  "taskCenter.status.notStart": "Not started",
+  "taskCenter.status.submitted": "Submitted",
+  "taskCenter.status.queued": "Queued",
+  "taskCenter.status.inProgress": "In progress",
+  "taskCenter.status.success": "Succeeded",
+  "taskCenter.status.failure": "Failed"
 }
