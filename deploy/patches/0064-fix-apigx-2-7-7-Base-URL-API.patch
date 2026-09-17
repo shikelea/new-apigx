@@ -1,0 +1,153 @@
+From 935a4a449fde8e57eef6e4f2c59a11ba8b031537 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 17:49:21 +0800
+Subject: [PATCH 64/64] =?UTF-8?q?fix(apigx):=20=E9=98=B6=E6=AE=B5=202=20?=
+ =?UTF-8?q?=E5=9B=9E=E6=89=AB=E2=80=94=E2=80=94=E7=9C=9F=E5=AE=9E=E4=B8=8A?=
+ =?UTF-8?q?=E6=B8=B8=E7=AB=AF=E5=88=B0=E7=AB=AF=207/7=20+=20=E4=BF=AE?=
+ =?UTF-8?q?=E5=A4=8D=20Base=20URL=20=E5=BD=92=E4=B8=80=E5=8C=96=EF=BC=88?=
+ =?UTF-8?q?=E5=90=AB=E7=9C=9F=E5=AE=9E=20API=20=E8=AF=81=E6=8D=AE=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+回扫结论: 真实第三方上游(tokenrhythm.studio, glm-5.3-flash)下端到端可用 7/7
+  - HTTP 200 / 真实补全 / 真实 usage(19+24=43) / 平台记账(model=glm-5.3-flash) /
+    可解释路由候选可见 / **价格未知!=零** / 样本不足如实标注
+
+发现并修复的真问题:
+  1. **上游 Base URL 写法导致 404**: 底座会在 base_url 后再拼 /v1/chat/completions,
+     而用户自然填 "API 基址"(https://host/v1) => /v1/v1/... => 上游 404「接口不存在」,
+     表现极像"上游不支持"。用真实请求确证(https://host/v1 200 vs https://host/v1/v1/... 404)
+     - 新增 channelpool.NormalizeUpstreamBaseURL(去掉结尾多余一层 /v1; 保守: 只在结尾恰为 /v1 时处理、
+       只处理一层、不猜 /api 这类等价形态), 在我们的渠道接口写入时归一化; 用例 9 个子情形
+     - 仍存边界(如实记录): **底座渠道**的 base_url 由平台侧设置, 不经过我们的归一化 =>
+       平台建渠道时仍需填根形式; 建议后续在平台入口做同样归一化
+  2. **验收脚本弱断言(假阳性)**: real-upstream.mjs 的用量断言只取最近一条并判 Boolean(model),
+     会被历史记录命中(实测匹配到 stub 旧记录); 已改为必须匹配本次真实模型
+     —— 再次印证 CODE_STYLE 第 30 条"假阳性断言比没有断言更危险"
+
+非问题(如实记录): 真实上游的非标准字段(reasoning_content 等)被如实透传;
+  上游 404 时平台把该次失败归因为上游失败并记账, 符合 T2.8 归因红线
+---
+ apigx/api/share.go                   | 12 ++++---
+ apigx/channelpool/projection_test.go | 24 +++++++++++++
+ apigx/channelpool/url_normalize.go   | 52 ++++++++++++++++++++++++++++
+ 3 files changed, 83 insertions(+), 5 deletions(-)
+ create mode 100644 apigx/channelpool/url_normalize.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 3cb4029..1b28075 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -276,11 +276,13 @@ func (h *handler) createChannel(c *gin.Context) {
+ 		return
+ 	}
+ 	channel := &apigxmodel.Channel{
+-		OwnerUserID:   owner,
+-		ShareGroupID:  req.ShareGroupID,
+-		Name:          strings.TrimSpace(req.Name),
+-		Protocol:      req.Protocol,
+-		BaseURL:       req.BaseURL,
++		OwnerUserID:  owner,
++		ShareGroupID: req.ShareGroupID,
++		Name:         strings.TrimSpace(req.Name),
++		Protocol:     req.Protocol,
++		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
++		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
++		BaseURL:       channelpool.NormalizeUpstreamBaseURL(req.BaseURL),
+ 		BaseChannelID: req.BaseChannelID,
+ 		KeyPoolMode:   0, // 默认轮询（计划书 §3.5）
+ 		HealthState:   0,
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index c843c5d..9c90604 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -964,3 +964,27 @@ func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
+ 	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
+ 	assert.Equal(t, 1, countB)
+ }
++
++// 上游 Base URL 归一化：真实 API 回扫发现的形态（用户填 `.../v1` 会被底座再拼一层）。
++func TestNormalizeUpstreamBaseURL(t *testing.T) {
++	cases := []struct {
++		name string
++		in   string
++		want string
++	}{
++		{"去掉结尾多余的 v1（最常见）", "https://tokenrhythm.studio/v1", "https://tokenrhythm.studio"},
++		{"去掉结尾斜杠与 v1", "https://tokenrhythm.studio/v1/", "https://tokenrhythm.studio"},
++		{"带路径前缀的 v1", "https://host/api/v1", "https://host/api"},
++		{"根形式保持不变", "https://tokenrhythm.studio", "https://tokenrhythm.studio"},
++		{"结尾斜杠被规范化", "https://host/", "https://host"},
++		{"不敢猜的形态原样保留", "https://host/api", "https://host/api"},
++		{"本地地址也适用", "http://127.0.0.1:8100/v1", "http://127.0.0.1:8100"},
++		{"空串安全", "", ""},
++		{"只有 v1 时不改坏", "/v1", "/v1"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			assert.Equal(t, tc.want, NormalizeUpstreamBaseURL(tc.in))
++		})
++	}
++}
+diff --git a/apigx/channelpool/url_normalize.go b/apigx/channelpool/url_normalize.go
+new file mode 100644
+index 0000000..4c3489f
+--- /dev/null
++++ b/apigx/channelpool/url_normalize.go
+@@ -0,0 +1,52 @@
++package channelpool
++
++import "strings"
++
++// NormalizeUpstreamBaseURL 把用户填写的上游 Base URL 规范成**底座期望的形式**。
++//
++// # 为什么需要它（真实 API 回扫发现）
++//
++// 用户自然会填"API 基址"这种写法——OpenAI 官方文档就把 `https://api.openai.com/v1`
++// 称作 base URL。但底座的 OpenAI 适配器会在 base_url 之后再拼 `/v1/chat/completions`，
++// 于是 `https://host/v1` 会变成 `https://host/v1/v1/chat/completions` →
++// 上游返回 404（实测真实上游的响应体是它自己的 `{"message":"接口不存在"}`）。
++//
++// 这种错**很难自查**：平台侧一切正常、上游也确实被访问到了，只有一个 404，
++// 而错误信息来自上游、看起来像"上游不支持"。因此这里主动归一化：
++// 对会在后面拼 `/v1/...` 的协议族，把结尾多余的 `/v1` 去掉一层。
++//
++// # 保守边界
++//
++// 只在**结尾恰好是 `/v1`**（允许结尾斜杠）时处理，且只处理一层：
++//   - `https://host/v1`      → `https://host`
++//   - `https://host/v1/`     → `https://host`
++//   - `https://host/api/v1`  → `https://host/api`（该路径下 OpenAI 兼容端点通常就是 /api/v1/...）
++//   - `https://host`         → 原样
++//   - `https://host/api`     → 原样（不敢猜它是不是等价于 /v1）
++//
++// 非 OpenAI 系的协议（如 Anthropic 用 `/v1/messages`）同样由各自适配器拼 `/v1/...`，
++// 因此一视同仁；若将来遇到"上游根路径本身就含 /v1 且适配器不再拼"的情况，
++// 应由调用方显式关闭归一化，而不是在这里猜。
++func NormalizeUpstreamBaseURL(raw string) string {
++	trimmed := strings.TrimSpace(raw)
++	if trimmed == "" {
++		return trimmed
++	}
++	// 去掉结尾斜杠（保留协议部分的 `//`）
++	withoutTrailing := strings.TrimRight(trimmed, "/")
++	if withoutTrailing == "" {
++		return trimmed
++	}
++	if !strings.HasSuffix(withoutTrailing, "/v1") {
++		return withoutTrailing
++	}
++	base := strings.TrimRight(strings.TrimSuffix(withoutTrailing, "/v1"), "/")
++	if base == "" {
++		return withoutTrailing
++	}
++	// 只处理带协议或明显是主机名的情况，避免把相对路径改坏
++	if !strings.Contains(base, "://") && !strings.Contains(base, ".") && !strings.HasPrefix(base, "localhost") {
++		return withoutTrailing
++	}
++	return base
++}
+-- 
+2.53.0.windows.1
+
