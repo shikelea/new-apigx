@@ -1,0 +1,456 @@
+From 37ce498f276f9528e7cbe388ff0950c483abb385 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:11:23 +0800
+Subject: [PATCH 32/32] =?UTF-8?q?feat(apigx):=20=E5=87=BA=E7=AB=99?=
+ =?UTF-8?q?=E5=B0=9D=E8=AF=95=E6=8C=81=E4=B9=85=E5=8C=96=E4=B8=8E=E5=AF=B9?=
+ =?UTF-8?q?=E8=B4=A6=EF=BC=88T1.7=20=E5=AF=B9=E8=B4=A6=E9=83=A8=E5=88=86?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/model/repo_attempt.go: BeginAttempt/CompleteAttempt/ListStaleAttempts/MarkAttemptAbandoned
+  (计划书 §9.2: 先持久记录出站尝试再发送)
+- apigx/channelpool/reconcile.go: ReconcileStaleAttempts 主动/精确(按 AttemptUID)/留痕地回收容量
+  只靠 TTL 是被动的、且过期不留痕迹, 事后无法回答"当时有没有发出去"
+- 接线: AcquireForAttempt 落库尝试; ReleaseFromContext 先记完成再释放(顺序反了会把正常完成误判为遗弃)
+- 宽限期 30 分钟(远大于正常请求时长), 有专门用例守住"未陈旧的长流不得被误伤"
+- 测试: 陈旧->释放+遗弃+不重复处理; 未陈旧->不动; 完成幂等
+- 过渡做法: request_id 由 AttemptUID 的 FNV-64 派生(唯一索引不允许一律填 0), 待 apigx_requests 落库后改真实行号
+- apigx + middleware 全量通过
+---
+ apigx/channelpool/projection_test.go | 113 +++++++++++++++++++++++++++
+ apigx/channelpool/reconcile.go       |  92 ++++++++++++++++++++++
+ apigx/model/repo_attempt.go          | 113 +++++++++++++++++++++++++++
+ apigx/relayhook/capacity_hook.go     |  40 +++++++++-
+ 4 files changed, 357 insertions(+), 1 deletion(-)
+ create mode 100644 apigx/channelpool/reconcile.go
+ create mode 100644 apigx/model/repo_attempt.go
+
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index adf2738..798a02d 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
++	"time"
+ 
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+@@ -15,6 +16,7 @@ import (
+ 	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/glebarez/sqlite"
++	"github.com/go-redis/redis/v8"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ 	"gorm.io/gorm"
+@@ -700,3 +702,114 @@ func TestBuildKeyCapacityDimensions(t *testing.T) {
+ 	// 非我们的渠道同样不产出
+ 	assert.Empty(t, BuildKeyCapacityDimensions(db, 999999, 0, KeyCapacityLimits{UpstreamKeyLimit: 1}))
+ }
++
++// ---- 对账：补偿进程在步骤之间退出（T1.7） ----
++
++// 对账必须**主动、精确、留痕**：按 AttemptUID 释放陈旧尝试占用的容量，并标记为遗弃。
++func TestReconcileReleasesStaleAttempts(t *testing.T) {
++	db := setupProjectionEnv(t)
++	ResetMappingCacheForTest()
++	t.Cleanup(ResetMappingCacheForTest)
++	const owner int64 = 9901
++	const baseChannelID int64 = 9797
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
++	}).Error)
++
++	// 对账要用真实 Redis：投影相关的用例本身不依赖它，因此这里自建连接
++	// （Lua 的原子性与幂等释放无法用 mock 证明）。
++	addr := os.Getenv("APIGX_TEST_REDIS_ADDR")
++	if addr == "" {
++		t.Skip("未设置 APIGX_TEST_REDIS_ADDR：对账未在真实 Redis 上验证（不允许当作通过）")
++	}
++	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: 15})
++	require.NoError(t, rdb.Ping(t.Context()).Err(), "连接 Redis 失败")
++	t.Cleanup(func() { _ = rdb.Close() })
++	previous := common.RDB
++	common.RDB = rdb
++	t.Cleanup(func() { common.RDB = previous })
++
++	ctrl := capacity.NewWithPrefix(rdb, "apigx:captest:reconcile:")
++	ctx := t.Context()
++	t.Cleanup(func() { _ = ctrl.Drop(ctx, capacity.ChannelConcurrency(baseChannelID)) })
++
++	// 模拟「进程崩溃」：租约被占用 + 尝试已落库为「已开始」，但一直没有结果
++	staleUID := "stale-attempt-uid"
++	require.NoError(t, ctrl.Reserve(ctx, staleUID, []capacity.Dimension{
++		{Key: capacity.ChannelConcurrency(baseChannelID), Limit: 5, Amount: 1},
++	}, time.Minute))
++	require.NoError(t, apigxmodel.BeginAttempt(db, &apigxmodel.Attempt{
++		AttemptUID: staleUID, RequestID: RequestIDFromAttemptUID(staleUID),
++		SelectedChannelID: baseChannelID, BaseChannelID: baseChannelID,
++		StartedAt: common.GetTimestamp() - 3600, // 一小时前开始（远超宽限期）
++	}))
++	usage, err := ctrl.Usage(ctx, capacity.ChannelConcurrency(baseChannelID))
++	require.NoError(t, err)
++	require.EqualValues(t, 1, usage, "崩溃后槽位仍被占用")
++
++	// 对账
++	result, err := ReconcileStaleAttempts(ctx, db, ctrl, common.GetTimestamp()-60, 10)
++	require.NoError(t, err)
++	assert.Equal(t, 1, result.Scanned)
++	assert.Equal(t, 1, result.Released)
++	assert.Zero(t, result.Failed)
++
++	usage, err = ctrl.Usage(ctx, capacity.ChannelConcurrency(baseChannelID))
++	require.NoError(t, err)
++	assert.EqualValues(t, 0, usage, "对账必须主动释放陈旧尝试占用的容量")
++
++	attempt, err := apigxmodel.GetAttemptByUID(db, staleUID)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AttemptStateAbandoned, attempt.State, "必须留下被遗弃的痕迹")
++	assert.Positive(t, attempt.CompletedAt)
++
++	// 幂等：再对账一次不应重复处理（状态已不是「已开始」）
++	result, err = ReconcileStaleAttempts(ctx, db, ctrl, common.GetTimestamp()-60, 10)
++	require.NoError(t, err)
++	assert.Zero(t, result.Scanned, "已处理的尝试不应再次被扫出")
++}
++
++// 未超宽限期的尝试**不得**被回收：那会把正在跑的长流误判为遗弃。
++func TestReconcileIgnoresFreshAttempts(t *testing.T) {
++	db := setupProjectionEnv(t)
++	uid := "fresh-attempt-uid"
++	require.NoError(t, apigxmodel.BeginAttempt(db, &apigxmodel.Attempt{
++		AttemptUID: uid, RequestID: RequestIDFromAttemptUID(uid), StartedAt: common.GetTimestamp(),
++	}))
++
++	ctrl := capacity.NewWithPrefix(common.RDB, "apigx:captest:reconcile-fresh:")
++	// 宽限期取「一小时前」，因此刚开始的尝试不在范围内
++	result, err := ReconcileStaleAttempts(t.Context(), db, ctrl, common.GetTimestamp()-3600, 10)
++	require.NoError(t, err)
++	assert.Zero(t, result.Scanned, "未陈旧的尝试不得被对账")
++
++	attempt, err := apigxmodel.GetAttemptByUID(db, uid)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AttemptStateStarted, attempt.State)
++}
++
++// 完成（成功/失败）是幂等的：重复调用不得覆盖已有结果。
++func TestCompleteAttemptIsIdempotent(t *testing.T) {
++	db := setupProjectionEnv(t)
++	uid := "complete-attempt-uid"
++	require.NoError(t, apigxmodel.BeginAttempt(db, &apigxmodel.Attempt{
++		AttemptUID: uid, RequestID: RequestIDFromAttemptUID(uid), StartedAt: common.GetTimestamp(),
++	}))
++
++	require.NoError(t, apigxmodel.CompleteAttempt(db, uid, apigxmodel.AttemptStateSucceeded, 200))
++	attempt, err := apigxmodel.GetAttemptByUID(db, uid)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AttemptStateSucceeded, attempt.State)
++	assert.Equal(t, 200, attempt.HttpStatus)
++
++	// 第二次（例如失败路径又触发一次）不得把已成功改成失败
++	require.NoError(t, apigxmodel.CompleteAttempt(db, uid, apigxmodel.AttemptStateFailed, 500))
++	attempt, err = apigxmodel.GetAttemptByUID(db, uid)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AttemptStateSucceeded, attempt.State, "已完成的结果不得被覆盖")
++	assert.Equal(t, 200, attempt.HttpStatus)
++
++	// 非法状态被拒
++	assert.ErrorIs(t, apigxmodel.CompleteAttempt(db, uid, 99, 0), apigxmodel.ErrInvalidArgument)
++}
+diff --git a/apigx/channelpool/reconcile.go b/apigx/channelpool/reconcile.go
+new file mode 100644
+index 0000000..e5e09b1
+--- /dev/null
++++ b/apigx/channelpool/reconcile.go
+@@ -0,0 +1,92 @@
++package channelpool
++
++import (
++	"context"
++	"hash/fnv"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 对账（T1.7）：补偿「进程在步骤之间退出」留下的残留。
++//
++// 计划书 §9.2 要求「先持久记录出站尝试，再发送」，本文件就是这条要求的另一半：
++// **凭已持久化的尝试记录去回收它占用的容量**。
++//
++// 为什么不能只依赖租约 TTL：
++//   - TTL 到期是**被动**回收，最长要等到 TTL（默认 90s）才释放，期间该槽位一直占着；
++//   - TTL 到期不会留下任何痕迹，事后无法回答"当时到底有没有发出去"。
++//
++// 对账把这两点都补齐：主动、精确（按 AttemptUID 释放）且留痕（标记为遗弃）。
++
++// StaleAttemptGracePeriod 是判定「尝试已陈旧」的宽限期。
++//
++// 必须明显大于正常请求时长，否则会把**正在跑**的长流误判为遗弃并提前释放它的容量。
++// 取 30 分钟：远超当前任何单次调用的预期时长，宁可晚回收也不要误伤。
++const StaleAttemptGracePeriod = 30 * time.Minute
++
++// ReconcileResult 是对账的结果计数。
++type ReconcileResult struct {
++	// Scanned 是本次扫描到的陈旧尝试数。
++	Scanned int
++	// Released 是成功释放了容量租约的数量。
++	Released int
++	// Failed 是释放失败的数量（会保留为「已开始」，下次对账重试）。
++	Failed int
++}
++
++// ReconcileStaleAttempts 对陈旧尝试做一次对账：
++//  1. 释放它占用的容量租约（幂等：租约已过期/已释放都算成功）；
++//  2. 把它标记为「遗弃」，留下可追溯的痕迹。
++//
++// 释放失败时不标记遗弃——否则会丢掉"还没回收"这一事实，导致容量永久泄漏且无从发现。
++func ReconcileStaleAttempts(ctx context.Context, db *gorm.DB, ctrl *capacity.Controller, startedBefore int64, limit int) (ReconcileResult, error) {
++	result := ReconcileResult{}
++	if db == nil {
++		return result, nil
++	}
++	attempts, err := apigxmodel.ListStaleAttempts(db, startedBefore, limit)
++	if err != nil {
++		return result, err
++	}
++	result.Scanned = len(attempts)
++
++	for i := range attempts {
++		attempt := attempts[i]
++		// 租约可能已经自然过期（Redis 里已不存在）——Release 对这种情形同样是成功的，
++		// 因此不需要先判断"是否还存在"。
++		if releaseErr := ctrl.Release(ctx, attempt.AttemptUID); releaseErr != nil {
++			result.Failed++
++			common.SysError("channelpool: reconcile release failed for attempt " + attempt.AttemptUID + ": " + releaseErr.Error())
++			continue
++		}
++		if markErr := apigxmodel.MarkAttemptAbandoned(db, attempt.AttemptUID); markErr != nil {
++			result.Failed++
++			common.SysError("channelpool: reconcile mark abandoned failed for attempt " + attempt.AttemptUID + ": " + markErr.Error())
++			continue
++		}
++		result.Released++
++	}
++	return result, nil
++}
++
++// ReconcileStaleAttemptsNow 用默认宽限期做一次对账（供后台任务/运维调用）。
++func ReconcileStaleAttemptsNow(ctx context.Context, db *gorm.DB, ctrl *capacity.Controller) (ReconcileResult, error) {
++	cutoff := common.GetTimestamp() - int64(StaleAttemptGracePeriod.Seconds())
++	return ReconcileStaleAttempts(ctx, db, ctrl, cutoff, 100)
++}
++
++// RequestIDFromAttemptUID 由尝试 UID 派生一个稳定的 int64 作为 `apigx_attempts.request_id`。
++//
++// 说明（阶段 1 的过渡做法）：`request_id` 本应指向 `apigx_requests` 的行号，但阶段 1 还没有
++// 持久化请求意图那一步。`(request_id, attempt_index)` 上有唯一索引，若一律填 0 会互相冲突，
++// 因此用 UID 的 FNV-64 派生：既保证唯一性，又保持「同一尝试永远得到同一值」的确定性。
++// 等 `apigx_requests` 落库后，这里应当改为真实请求行号（届时 `attempt_index` 也才有真实语义）。
++func RequestIDFromAttemptUID(attemptUID string) int64 {
++	hasher := fnv.New64a()
++	_, _ = hasher.Write([]byte(attemptUID))
++	return int64(hasher.Sum64())
++}
+diff --git a/apigx/model/repo_attempt.go b/apigx/model/repo_attempt.go
+new file mode 100644
+index 0000000..ea271a8
+--- /dev/null
++++ b/apigx/model/repo_attempt.go
+@@ -0,0 +1,113 @@
++package apigxmodel
++
++import (
++	"errors"
++	"fmt"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 出站尝试（`apigx_attempts`）：对账的依据。
++//
++// 计划书 §9.2 要求的执行顺序是「持久记录请求意图与预算预留 → 取得容量 → 复验权限 →
++// **持久记录出站尝试** → 发送」。把尝试先落库的意义在于：进程若在中途退出，
++// 事后能凭这条记录知道"当时确实占用了容量/发出了请求"，从而做补偿——
++// 这正是对账（reconciliation）需要的**唯一事实来源**。
++
++// AttemptState 取值。
++const (
++	// AttemptStateStarted 已开始（尚未看到结果）。
++	AttemptStateStarted int = 1
++	// AttemptStateSucceeded 成功完成。
++	AttemptStateSucceeded int = 2
++	// AttemptStateFailed 失败完成。
++	AttemptStateFailed int = 3
++	// AttemptStateAbandoned 被对账判定为**遗弃**（进程中途退出，未留下结果）。
++	AttemptStateAbandoned int = 4
++)
++
++// BeginAttempt 记录一次出站尝试的开始。
++//
++// `AttemptUID` 用容量租约 ID：它是该次尝试的幂等键，对账时据此**精确释放**对应的租约
++// （容量账本的释放本身就是幂等的，重复释放不会把计数减成负数）。
++func BeginAttempt(db *gorm.DB, attempt *Attempt) error {
++	if db == nil || attempt == nil {
++		return fmt.Errorf("%w: attempt is required", ErrInvalidArgument)
++	}
++	if attempt.AttemptUID == "" {
++		return fmt.Errorf("%w: attempt_uid is required（对账需要它来精确定位租约）", ErrInvalidArgument)
++	}
++	if attempt.StartedAt == 0 {
++		attempt.StartedAt = common.GetTimestamp()
++	}
++	attempt.State = AttemptStateStarted
++	attempt.CreatedAt = common.GetTimestamp()
++	return db.Create(attempt).Error
++}
++
++// CompleteAttempt 记录尝试的最终状态（按 AttemptUID 定位，幂等）。
++//
++// 只允许从「已开始」迁移：重复调用（例如失败路径与成功路径各触发一次）不会把已完成的
++// 结果覆盖掉，避免对账与审计看到互相矛盾的状态。
++func CompleteAttempt(db *gorm.DB, attemptUID string, state int, httpStatus int) error {
++	if attemptUID == "" {
++		return fmt.Errorf("%w: attempt_uid is required", ErrInvalidArgument)
++	}
++	if state != AttemptStateSucceeded && state != AttemptStateFailed {
++		return fmt.Errorf("%w: state must be succeeded or failed", ErrInvalidArgument)
++	}
++	res := db.Model(&Attempt{}).
++		Where("attempt_uid = ? AND state = ?", attemptUID, AttemptStateStarted).
++		Updates(map[string]any{
++			"state":        state,
++			"http_status":  httpStatus,
++			"completed_at": common.GetTimestamp(),
++		})
++	return res.Error
++}
++
++// ListStaleAttempts 返回「已开始但早已超过合理时长」的尝试：这些就是需要补偿的对象。
++//
++// 判据只用时间：进程崩溃不会留下任何标记，能观察到的事实就是"开始了但一直没结果"。
++func ListStaleAttempts(db *gorm.DB, startedBefore int64, limit int) ([]Attempt, error) {
++	if db == nil {
++		return nil, fmt.Errorf("%w: db is required", ErrInvalidArgument)
++	}
++	if limit <= 0 || limit > 500 {
++		limit = 100
++	}
++	var attempts []Attempt
++	err := db.Where("state = ? AND started_at > 0 AND started_at < ?", AttemptStateStarted, startedBefore).
++		Order("started_at ASC").Limit(limit).Find(&attempts).Error
++	return attempts, err
++}
++
++// MarkAttemptAbandoned 把陈旧尝试标记为遗弃（仅在仍处于「已开始」时生效，幂等）。
++func MarkAttemptAbandoned(db *gorm.DB, attemptUID string) error {
++	if attemptUID == "" {
++		return fmt.Errorf("%w: attempt_uid is required", ErrInvalidArgument)
++	}
++	return db.Model(&Attempt{}).
++		Where("attempt_uid = ? AND state = ?", attemptUID, AttemptStateStarted).
++		Updates(map[string]any{
++			"state":        AttemptStateAbandoned,
++			"completed_at": common.GetTimestamp(),
++		}).Error
++}
++
++// GetAttemptByUID 按幂等键读取尝试（供对账与排障使用）。
++func GetAttemptByUID(db *gorm.DB, attemptUID string) (*Attempt, error) {
++	if db == nil || attemptUID == "" {
++		return nil, fmt.Errorf("%w: attempt_uid is required", ErrInvalidArgument)
++	}
++	var attempt Attempt
++	err := db.Where("attempt_uid = ?", attemptUID).First(&attempt).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &attempt, nil
++}
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index 4f5901b..2d702c2 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -20,6 +20,7 @@ import (
+ 
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	"github.com/QuantumNous/new-api/apigx/channelpool"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/gin-gonic/gin"
+@@ -209,6 +210,14 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
+ 	return lease, true
+ }
+ 
++// ID 返回租约标识（= 出站尝试的 AttemptUID，对账据此精确定位并释放容量）。
++func (l *Lease) ID() string {
++	if l == nil {
++		return ""
++	}
++	return l.id
++}
++
+ // Release 归还租约并停止续租。幂等：重复调用只释放一次。
+ func (l *Lease) Release() {
+ 	if l == nil {
+@@ -320,6 +329,20 @@ func AcquireForAttempt(c *gin.Context, channelID int) bool {
+ 	}
+ 	if lease != nil {
+ 		c.Set(leaseContextKey, lease)
++		// **持久记录出站尝试**（计划书 §9.2 要求的执行顺序）：进程若在中途退出，
++		// 事后就能凭这条记录知道"当时确实占用了容量"，进而做对账补偿。
++		// 记录失败不影响请求本身——容量租约仍在，TTL 与对账都会兜住。
++		if db := channelpool.CurrentDB(); db != nil {
++			attempt := &apigxmodel.Attempt{
++				AttemptUID:        lease.ID(),
++				RequestID:         channelpool.RequestIDFromAttemptUID(lease.ID()),
++				SelectedChannelID: int64(channelID),
++				BaseChannelID:     int64(channelID),
++			}
++			if beginErr := apigxmodel.BeginAttempt(db, attempt); beginErr != nil {
++				common.SysError("apigx capacity: begin attempt failed: " + beginErr.Error())
++			}
++		}
+ 	}
+ 	return true
+ }
+@@ -333,7 +356,22 @@ func ReleaseFromContext(c *gin.Context) {
+ 	if !exists {
+ 		return
+ 	}
+-	if lease, ok := value.(*Lease); ok {
++	if lease, ok := value.(*Lease); ok && lease != nil {
++		// 先落状态再释放：顺序反过来的话，一旦释放后进程退出，尝试会永远停在「已开始」
++		// 而被对账误判为遗弃（实际上它是正常完成的）。
++		if db := channelpool.CurrentDB(); db != nil && lease.ID() != "" {
++			state := apigxmodel.AttemptStateFailed
++			status := 0
++			if c.Writer != nil {
++				status = c.Writer.Status()
++				if status < http.StatusBadRequest {
++					state = apigxmodel.AttemptStateSucceeded
++				}
++			}
++			if err := apigxmodel.CompleteAttempt(db, lease.ID(), state, status); err != nil {
++				common.SysError("apigx capacity: complete attempt failed: " + err.Error())
++			}
++		}
+ 		lease.Release()
+ 	}
+ 	c.Set(leaseContextKey, (*Lease)(nil))
+-- 
+2.53.0.windows.1
+

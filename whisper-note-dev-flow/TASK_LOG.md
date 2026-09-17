@@ -123,6 +123,12 @@
     - 修掉的真缺陷：原先租约只在请求开始时取一次 → **重试换到别的渠道后，租约还挂在旧渠道上，新渠道根本没做容量检查**。
     - 顺带说明：**候选重选不需要我们自己写循环**——底座的重试循环已经是「重新选渠道」的实现，我们只需保证每次尝试都预留。
     - 验证：策略库渠道上限 4/4、账户池上限 4/4 均在新位置下通过（重构位置属于高风险改动，故两条链路都重跑）。
+  - [x] **对账（reconciliation）已完成**：`apigx/model/repo_attempt.go`（出站尝试持久化：`BeginAttempt`/`CompleteAttempt`/`ListStaleAttempts`/`MarkAttemptAbandoned`）+ `apigx/channelpool/reconcile.go`（`ReconcileStaleAttempts`）。执行顺序按计划书 §9.2：**先持久记录出站尝试，再发送**；进程中途退出后，凭这条记录**主动、精确（按 `AttemptUID` 释放）、留痕（标记遗弃）**地回收容量。
+    - **为什么不能只靠租约 TTL**：TTL 是被动回收（最长等到 90s），且过期不留痕迹、事后无法回答"当时到底有没有发出去"。
+    - 接线：`AcquireForAttempt` 取到租约即落库尝试；`ReleaseFromContext` 先记完成状态再释放（顺序反了会让正常完成的尝试被误判为遗弃）。
+    - **宽限期 30 分钟**：必须远大于正常请求时长，否则会把正在跑的长流误判为遗弃。有专门用例守这条（未陈旧的尝试不得被对账）。
+    - 测试通过：陈旧 → 容量被释放 + 留遗弃痕迹 + 再次对账不重复处理；未陈旧 → 不动；完成状态幂等（重复调用不覆盖已有结果）。
+    - 📌 过渡做法（已记录在代码注释）：`apigx_attempts.request_id` 本应指向 `apigx_requests` 行号，但阶段 1 尚未持久化请求意图；而 `(request_id, attempt_index)` 上有唯一索引，一律填 0 会互相冲突，故用 `AttemptUID` 的 FNV-64 派生（唯一且确定）。等 `apigx_requests` 落库后应改为真实行号。
   - [ ] **未完成**：① 候选重选（当前该渠道满载即 429）② **上游 Key / 上游账户池维度**（需渠道→Key/账户映射，仓储层未实现；这是防容量叠加的关键维度）③ RPM/TPM 与预算维度 ④ 上限来源改为 `apigx_capacity_policies` 并替换「未配置=不约束」的过渡行为 ⑤ 对账 ⑥ 异步任务槽位接入
   - 记录：`docs/stage1/capacity-notes.md`
 - [x] T1.8 模型获取与供给发布（一键获取 + 手工添加 + 待发布流程）→ 验收脚本 `tools/stage1-verify/fetch-models.mjs`
