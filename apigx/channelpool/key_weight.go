@@ -50,22 +50,44 @@ func BuildWeightedKeyIndexes(keys []KeyWeight) []int {
 	copy(ordered, keys)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Index < ordered[j].Index })
 
-	total := 0
+	// **权重全等 = 未配置加权**：保持"一把 Key 一个槽位"，
+	// 既不膨胀底座列表、也不搅动索引空间（索引一变，运行期状态与逐 Key 统计都要迁移）。
+	// 只有权重**确实不同**时才做按比例展开。
+	allEqual := true
+	for i := 1; i < len(ordered); i++ {
+		if effectiveWeight(ordered[i].Weight) != effectiveWeight(ordered[0].Weight) {
+			allEqual = false
+			break
+		}
+	}
+	if allEqual {
+		indexes := make([]int, 0, len(ordered))
+		for _, key := range ordered {
+			indexes = append(indexes, key.Index)
+		}
+		return indexes
+	}
+
 	expanded := make([]int, 0, len(ordered))
 	for _, key := range ordered {
-		times := key.Weight
-		if times <= 0 {
-			times = 1
-		}
-		if times > maxWeightedKeyExpansion {
-			times = maxWeightedKeyExpansion
-		}
-		for range times {
+		for range int(effectiveWeight(key.Weight)) {
 			expanded = append(expanded, key.Index)
 		}
-		total += int(times)
 	}
 	return expanded
+}
+
+// effectiveWeight 把权重归一为"至少出现一次"的取值：
+// 权重 0/负数视为 1（**权重 0 不等于没有机会**，与底座对渠道权重的 +10 平滑同一精神），
+// 并施加展开上限（防止权重写错把列表撑爆）。
+func effectiveWeight(weight int64) int64 {
+	if weight <= 0 {
+		return 1
+	}
+	if weight > maxWeightedKeyExpansion {
+		return maxWeightedKeyExpansion
+	}
+	return weight
 }
 
 // KeyLoad 是一把 Key 的容量占用情况。

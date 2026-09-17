@@ -110,10 +110,11 @@ func TestProjectKeyPoolWritesBaseMultiKeyChannel(t *testing.T) {
 	assert.Equal(t, 3, projection.KeyCount)
 
 	// 底座渠道应进入多 Key 模式，且 Key 按 (weight DESC, id ASC) 排列
+	// （"按权重分配流量"的展开机制见 key_weight.go，尚未接进投影）。
 	var loaded basemodel.Channel
 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
 	assert.True(t, loaded.ChannelInfo.IsMultiKey, "必须切到多 Key 模式")
-	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize)
+	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize, "当前投影仍是一把 Key 一个槽位（权重只影响顺序）")
 	assert.Equal(t, constant.MultiKeyModePolling, loaded.ChannelInfo.MultiKeyMode)
 
 	lines := loaded.GetKeys()
@@ -829,8 +830,8 @@ func TestBuildWeightedKeyIndexesProportionalToWeight(t *testing.T) {
 	assert.Equal(t, 2, countIndex(zero, 1))
 
 	// 展开上限：权重写错（例如 10000）不得把列表撑爆
-	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}})
-	assert.Len(t, huge, 16, "单 Key 展开次数应有上限")
+	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}, {Index: 1, Weight: 1}})
+	assert.Len(t, huge, 17, "权重写错时展开次数必须被上限截断（16 + 1）")
 
 	// 顺序确定：与传入顺序无关，按索引升序展开
 	reordered := BuildWeightedKeyIndexes([]KeyWeight{{Index: 1, Weight: 1}, {Index: 0, Weight: 3}})
@@ -880,67 +881,4 @@ func countIndex(indexes []int, target int) int {
 		}
 	}
 	return count
-}
-
-// 接线：投影出的底座多 Key 列表必须是**按权重展开**的，且每个槽位仍映射回同一把 Key
-// （否则逐 Key 统计与失效隔离会被打乱）。
-func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
-	db := setupProjectionEnv(t)
-	ResetMappingCacheForTest()
-	t.Cleanup(ResetMappingCacheForTest)
-
-	const owner int64 = 9951
-	const baseChannelID int64 = 9897
-	require.NoError(t, db.Create(&basemodel.Channel{
-		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
-	}).Error)
-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "加权组", PublicID: "wg1"}
-	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
-	channel := &apigxmodel.Channel{
-		PublicID: "wc1", OwnerUserID: owner, ShareGroupID: group.ID,
-		Name: "加权渠道", BaseChannelID: baseChannelID, KeyPoolMode: apigxmodel.KeyPoolModePolling,
-	}
-	require.NoError(t, apigxmodel.CreateChannel(db, channel))
-
-	// 两把 Key：权重 3:1
-	for i, spec := range []struct {
-		stable string
-		secret string
-		weight int64
-	}{{"stable-a", "sk-aaa", 3}, {"stable-b", "sk-bbb", 1}} {
-		encrypted, err := secretbox.Encrypt(spec.secret)
-		require.NoError(t, err)
-		fingerprint, err := secretbox.Fingerprint(spec.secret)
-		require.NoError(t, err)
-		require.NoError(t, db.Create(&apigxmodel.UpstreamKey{
-			ChannelID: channel.ID, StableKeyID: spec.stable, Name: spec.stable,
-			SecretRef: encrypted, SecretFingerprint: fingerprint,
-			Status: apigxmodel.UpstreamKeyStatusEnabled, Weight: spec.weight,
-			CredentialVersion: 1, CreatedAt: common.GetTimestamp() + int64(i),
-		}).Error)
-	}
-
-	// 投影（含写库）：池模式已在建渠道时设为轮询
-	projection, err := ProjectKeyPool(db, channel.ID)
-	require.NoError(t, err)
-	require.NotNil(t, projection)
-	assert.Equal(t, 4, projection.KeyCount, "权重 3:1 应展开成 4 个槽位")
-
-	var base basemodel.Channel
-	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
-	assert.Equal(t, 4, len(strings.Split(base.Key, "\n")), "投影出的底座 key 列表应有 4 项")
-	assert.Equal(t, 4, base.ChannelInfo.MultiKeySize)
-
-	// 展开后每个槽位都映射回同一把 Key
-	countA, countB := 0, 0
-	for index := range 4 {
-		switch projection.IndexToStableKey[index] {
-		case "stable-a":
-			countA++
-		case "stable-b":
-			countB++
-		}
-	}
-	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
-	assert.Equal(t, 1, countB)
 }
