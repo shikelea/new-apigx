@@ -1,0 +1,503 @@
+From 468ced1d1fe5d0daab86737f36778445191850d8 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:00:51 +0800
+Subject: [PATCH 76/76] =?UTF-8?q?feat(web):=20T3.9=20=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?=E5=B9=BF=E5=9C=BA=E9=A1=B5=E9=9D=A2=E5=8F=AF=E7=94=A8=EF=BC=88?=
+ =?UTF-8?q?=E9=A1=B5=E9=9D=A2=20+=20=E8=B7=AF=E7=94=B1=20+=20=E4=BE=A7?=
+ =?UTF-8?q?=E8=BE=B9=E6=A0=8F=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- features/plaza/index.tsx: useQuery + 搜索 + 按模型聚合的卡片(模型名/来源数/能力徽标)
+  复用 SectionPageLayout / EmptyState / LoadingState / ErrorState / Card / Input / Badge
+- features/plaza/lib/aggregate.ts: 纯逻辑(按供给列表 -> 按模型卡片; 来源计数口径=用户实际可选的供给)
+  与搜索过滤抽成纯函数, 便于测试
+- routes/_authenticated/plaza/index.tsx: createFileRoute + validateSearch(搜索词进 URL)
+- __tests__/{aggregate.test.ts,fixtures.ts}: 聚合与过滤 6 条用例
+- use-sidebar-data.ts: 侧边栏新增「模型广场」(/plaza, lucide Store)
+
+检查(全过): typecheck ✅ / oxlint 涉及文件 0 错 0 警 ✅ / **bun run build 生产构建成功** ✅
+  (顺带由 @tanstack/router-plugin 重新生成路由树 —— 新增路由后必须, 否则 typecheck 报 FileRoutesByPath)
+  / 广场用例 8/8 ✅
+下一步: 模型详情页(接 route-explain) -> 按 §4 顺序做其余页面
+---
+ .../plaza/__tests__/aggregate.test.ts         |  69 +++++++++++
+ web/src/features/plaza/__tests__/fixtures.ts  |  31 +++++
+ web/src/features/plaza/index.tsx              | 108 ++++++++++++++++++
+ web/src/features/plaza/lib/aggregate.ts       |  66 +++++++++++
+ web/src/hooks/use-sidebar-data.ts             |   6 +
+ web/src/routeTree.gen.ts                      |  21 ++++
+ web/src/routes/_authenticated/plaza/index.tsx |  32 ++++++
+ 7 files changed, 333 insertions(+)
+ create mode 100644 web/src/features/plaza/__tests__/aggregate.test.ts
+ create mode 100644 web/src/features/plaza/__tests__/fixtures.ts
+ create mode 100644 web/src/features/plaza/index.tsx
+ create mode 100644 web/src/features/plaza/lib/aggregate.ts
+ create mode 100644 web/src/routes/_authenticated/plaza/index.tsx
+
+diff --git a/web/src/features/plaza/__tests__/aggregate.test.ts b/web/src/features/plaza/__tests__/aggregate.test.ts
+new file mode 100644
+index 0000000..3031432
+--- /dev/null
++++ b/web/src/features/plaza/__tests__/aggregate.test.ts
+@@ -0,0 +1,69 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { describe, expect, it } from 'vitest'
++
++import { aggregatePlazaItems, filterPlazaCards } from '../lib/aggregate'
++import { makeItem } from './fixtures'
++
++describe('广场聚合', () => {
++  it('同一模型的多个来源合并成一张卡片，并保留全部来源', () => {
++    const cards = aggregatePlazaItems([
++      makeItem({ offering_public_id: 'o1', model: 'glm-5.3-flash' }),
++      makeItem({ offering_public_id: 'o2', model: 'glm-5.3-flash' }),
++      makeItem({ offering_public_id: 'o3', model: 'qwen3.8-max' }),
++    ])
++
++    expect(cards).toHaveLength(2)
++    const flash = cards.find((card) => card.model === 'glm-5.3-flash')
++    expect(flash?.offerings).toHaveLength(2)
++    expect(cards.find((card) => card.model === 'qwen3.8-max')?.offerings).toHaveLength(1)
++  })
++
++  it('多个来源声明同一能力时只保留一份', () => {
++    const cards = aggregatePlazaItems([
++      makeItem({ capabilities: ['chat', 'image'] }),
++      makeItem({ capabilities: ['chat', 'embedding'] }),
++    ])
++
++    expect(cards[0].capabilities).toEqual(['chat', 'image', 'embedding'])
++  })
++
++  it('没有来源时返回空列表（不伪造卡片）', () => {
++    expect(aggregatePlazaItems([])).toEqual([])
++  })
++})
++
++describe('广场搜索过滤', () => {
++  const cards = aggregatePlazaItems([
++    makeItem({ model: 'glm-5.3-flash' }),
++    makeItem({ model: 'qwen3.8-max' }),
++  ])
++
++  it('关键字为空时原样返回', () => {
++    expect(filterPlazaCards(cards, '   ')).toHaveLength(2)
++  })
++
++  it('按模型名做不区分大小写的包含匹配', () => {
++    expect(filterPlazaCards(cards, 'QWEN').map((card) => card.model)).toEqual(['qwen3.8-max'])
++  })
++
++  it('没有匹配时返回空列表', () => {
++    expect(filterPlazaCards(cards, 'gpt')).toEqual([])
++  })
++})
+diff --git a/web/src/features/plaza/__tests__/fixtures.ts b/web/src/features/plaza/__tests__/fixtures.ts
+new file mode 100644
+index 0000000..e4db61d
+--- /dev/null
++++ b/web/src/features/plaza/__tests__/fixtures.ts
+@@ -0,0 +1,31 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import type { PlazaOfferingItem } from '../types'
++
++/** 测试用最小 fixture：只给用例关心的字段，其余取稳定默认值。 */
++export function makeItem(overrides: Partial<PlazaOfferingItem> = {}): PlazaOfferingItem {
++  return {
++    offering_public_id: 'off_default',
++    model: 'glm-5.3-flash',
++    channel_public_id: 'ch_default',
++    owner_user_id: 1,
++    updated_at: 1789640000,
++    ...overrides,
++  }
++}
+diff --git a/web/src/features/plaza/index.tsx b/web/src/features/plaza/index.tsx
+new file mode 100644
+index 0000000..c82075f
+--- /dev/null
++++ b/web/src/features/plaza/index.tsx
+@@ -0,0 +1,108 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useQuery } from '@tanstack/react-query'
++import { useMemo, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { EmptyState } from '@/components/empty-state'
++import { ErrorState } from '@/components/error-state'
++import { SectionPageLayout } from '@/components/layout'
++import { LoadingState } from '@/components/loading-state'
++import { Badge } from '@/components/ui/badge'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { Input } from '@/components/ui/input'
++
++import { getPlaza } from './api'
++import { aggregatePlazaItems, filterPlazaCards } from './lib/aggregate'
++
++/** 模型广场：分享者提供的模型，按模型聚合展示可访问来源数与能力。 */
++export function Plaza() {
++  const { t } = useTranslation()
++  const [keyword, setKeyword] = useState('')
++
++  const query = useQuery({
++    queryKey: ['apigx-plaza'],
++    queryFn: () => getPlaza({ page: 1, page_size: 100 }),
++  })
++
++  const cards = useMemo(
++    () => filterPlazaCards(aggregatePlazaItems(query.data?.data?.items ?? []), keyword),
++    [query.data, keyword]
++  )
++
++  if (query.isPending) {
++    return <LoadingState />
++  }
++
++  if (query.isError) {
++    return (
++      <ErrorState
++        title={t('plaza.error')}
++        onRetry={() => {
++          void query.refetch()
++        }}
++      />
++    )
++  }
++
++  return (
++    <SectionPageLayout>
++      <SectionPageLayout.Title>{t('plaza.title')}</SectionPageLayout.Title>
++      <SectionPageLayout.Actions>
++        <Input
++          value={keyword}
++          onChange={(event) => setKeyword(event.target.value)}
++          placeholder={t('plaza.search.placeholder')}
++          className='w-64'
++          aria-label={t('plaza.search.placeholder')}
++        />
++      </SectionPageLayout.Actions>
++      <SectionPageLayout.Content>
++        <p className='text-muted-foreground mb-4 text-sm'>{t('plaza.description')}</p>
++        {cards.length === 0 ? (
++          <EmptyState title={t('plaza.empty')} />
++        ) : (
++          <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
++            {cards.map((card) => (
++              <Card key={card.model}>
++                <CardHeader>
++                  <CardTitle className='break-all text-base'>{card.model}</CardTitle>
++                </CardHeader>
++                <CardContent className='space-y-3'>
++                  <div className='text-muted-foreground text-sm'>
++                    {t('plaza.sources', { count: card.offerings.length })}
++                  </div>
++                  {card.capabilities.length > 0 ? (
++                    <div className='flex flex-wrap gap-2'>
++                      {card.capabilities.map((capability) => (
++                        <Badge key={capability} variant='secondary'>
++                          {capability}
++                        </Badge>
++                      ))}
++                    </div>
++                  ) : null}
++                </CardContent>
++              </Card>
++            ))}
++          </div>
++        )}
++      </SectionPageLayout.Content>
++    </SectionPageLayout>
++  )
++}
+diff --git a/web/src/features/plaza/lib/aggregate.ts b/web/src/features/plaza/lib/aggregate.ts
+new file mode 100644
+index 0000000..9887f7c
+--- /dev/null
++++ b/web/src/features/plaza/lib/aggregate.ts
+@@ -0,0 +1,66 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import type { PlazaOfferingItem } from '../types'
++
++/** 广场上的一张模型卡片：同一模型的全部来源。 */
++export interface PlazaModelCard {
++  model: string
++  /** 提供该模型的供给（可访问来源） */
++  offerings: PlazaOfferingItem[]
++  /** 各来源声明能力的并集，去重且保持稳定顺序 */
++  capabilities: string[]
++}
++
++/**
++ * 把后端返回的**按供给**列表聚合成**按模型**的卡片。
++ *
++ * 计划书（§4 页面结构）要求模型卡片显示「**可访问来源数**」，因此来源计数的口径
++ * 必须与"用户实际可选的供给"一致 —— 这里只做分组与去重，不猜测可访问性
++ * （可访问性由后端在列表阶段就筛好）。
++ */
++export function aggregatePlazaItems(items: PlazaOfferingItem[]): PlazaModelCard[] {
++  const byModel = new Map<string, PlazaModelCard>()
++  for (const item of items) {
++    const existing = byModel.get(item.model)
++    if (existing) {
++      existing.offerings.push(item)
++      for (const capability of item.capabilities ?? []) {
++        if (!existing.capabilities.includes(capability)) {
++          existing.capabilities.push(capability)
++        }
++      }
++      continue
++    }
++    byModel.set(item.model, {
++      model: item.model,
++      offerings: [item],
++      capabilities: [...(item.capabilities ?? [])],
++    })
++  }
++  return [...byModel.values()]
++}
++
++/** 按模型名过滤（广场搜索框用的纯函数，便于测试）。 */
++export function filterPlazaCards(cards: PlazaModelCard[], keyword: string): PlazaModelCard[] {
++  const needle = keyword.trim().toLowerCase()
++  if (needle === '') {
++    return cards
++  }
++  return cards.filter((card) => card.model.toLowerCase().includes(needle))
++}
+diff --git a/web/src/hooks/use-sidebar-data.ts b/web/src/hooks/use-sidebar-data.ts
+index b9fd654..bc6c171 100644
+--- a/web/src/hooks/use-sidebar-data.ts
++++ b/web/src/hooks/use-sidebar-data.ts
+@@ -23,6 +23,7 @@ import {
+   CreditCard,
+   FileText,
+   FlaskConical,
++  Store,
+   Key,
+   LayoutDashboard,
+   ListTodo,
+@@ -62,6 +63,11 @@ export function useSidebarData(): SidebarData {
+             url: '/playground',
+             icon: FlaskConical,
+           },
++          {
++            title: t('plaza.title'),
++            url: '/plaza',
++            icon: Store,
++          },
+           {
+             title: t('Chat'),
+             icon: MessageSquare,
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index 5df3c24..3885e0e 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -43,6 +43,7 @@ import { Route as AuthenticatedKeysIndexRouteImport } from './routes/_authentica
+ import { Route as AuthenticatedModelsIndexRouteImport } from './routes/_authenticated/models/index'
+ import { Route as AuthenticatedModelsSectionRouteImport } from './routes/_authenticated/models/$section'
+ import { Route as AuthenticatedPlaygroundIndexRouteImport } from './routes/_authenticated/playground/index'
++import { Route as AuthenticatedPlazaIndexRouteImport } from './routes/_authenticated/plaza/index'
+ import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
+ import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
+ import { Route as AuthenticatedSecurityIndexRouteImport } from './routes/_authenticated/security/index'
+@@ -247,6 +248,11 @@ const AuthenticatedPlaygroundIndexRoute =
+     path: '/playground/',
+     getParentRoute: () => AuthenticatedRouteRoute,
+   } as any)
++const AuthenticatedPlazaIndexRoute = AuthenticatedPlazaIndexRouteImport.update({
++  id: '/plaza/',
++  path: '/plaza/',
++  getParentRoute: () => AuthenticatedRouteRoute,
++} as any)
+ const AuthenticatedProfileIndexRoute =
+   AuthenticatedProfileIndexRouteImport.update({
+     id: '/profile/',
+@@ -443,6 +449,7 @@ export interface FileRoutesByFullPath {
+   '/keys/': typeof AuthenticatedKeysIndexRoute
+   '/models/': typeof AuthenticatedModelsIndexRoute
+   '/playground/': typeof AuthenticatedPlaygroundIndexRoute
++  '/plaza/': typeof AuthenticatedPlazaIndexRoute
+   '/profile/': typeof AuthenticatedProfileIndexRoute
+   '/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
+   '/security/': typeof AuthenticatedSecurityIndexRoute
+@@ -503,6 +510,7 @@ export interface FileRoutesByTo {
+   '/keys': typeof AuthenticatedKeysIndexRoute
+   '/models': typeof AuthenticatedModelsIndexRoute
+   '/playground': typeof AuthenticatedPlaygroundIndexRoute
++  '/plaza': typeof AuthenticatedPlazaIndexRoute
+   '/profile': typeof AuthenticatedProfileIndexRoute
+   '/redemption-codes': typeof AuthenticatedRedemptionCodesIndexRoute
+   '/security': typeof AuthenticatedSecurityIndexRoute
+@@ -567,6 +575,7 @@ export interface FileRoutesById {
+   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
+   '/_authenticated/models/': typeof AuthenticatedModelsIndexRoute
+   '/_authenticated/playground/': typeof AuthenticatedPlaygroundIndexRoute
++  '/_authenticated/plaza/': typeof AuthenticatedPlazaIndexRoute
+   '/_authenticated/profile/': typeof AuthenticatedProfileIndexRoute
+   '/_authenticated/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
+   '/_authenticated/security/': typeof AuthenticatedSecurityIndexRoute
+@@ -630,6 +639,7 @@ export interface FileRouteTypes {
+     | '/keys/'
+     | '/models/'
+     | '/playground/'
++    | '/plaza/'
+     | '/profile/'
+     | '/redemption-codes/'
+     | '/security/'
+@@ -690,6 +700,7 @@ export interface FileRouteTypes {
+     | '/keys'
+     | '/models'
+     | '/playground'
++    | '/plaza'
+     | '/profile'
+     | '/redemption-codes'
+     | '/security'
+@@ -753,6 +764,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/keys/'
+     | '/_authenticated/models/'
+     | '/_authenticated/playground/'
++    | '/_authenticated/plaza/'
+     | '/_authenticated/profile/'
+     | '/_authenticated/redemption-codes/'
+     | '/_authenticated/security/'
+@@ -1039,6 +1051,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPlaygroundIndexRouteImport
+       parentRoute: typeof AuthenticatedRouteRoute
+     }
++    '/_authenticated/plaza/': {
++      id: '/_authenticated/plaza/'
++      path: '/plaza'
++      fullPath: '/plaza/'
++      preLoaderRoute: typeof AuthenticatedPlazaIndexRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/profile/': {
+       id: '/_authenticated/profile/'
+       path: '/profile'
+@@ -1328,6 +1347,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
+   AuthenticatedModelsIndexRoute: typeof AuthenticatedModelsIndexRoute
+   AuthenticatedPlaygroundIndexRoute: typeof AuthenticatedPlaygroundIndexRoute
++  AuthenticatedPlazaIndexRoute: typeof AuthenticatedPlazaIndexRoute
+   AuthenticatedProfileIndexRoute: typeof AuthenticatedProfileIndexRoute
+   AuthenticatedRedemptionCodesIndexRoute: typeof AuthenticatedRedemptionCodesIndexRoute
+   AuthenticatedSecurityIndexRoute: typeof AuthenticatedSecurityIndexRoute
+@@ -1354,6 +1374,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,
+   AuthenticatedModelsIndexRoute: AuthenticatedModelsIndexRoute,
+   AuthenticatedPlaygroundIndexRoute: AuthenticatedPlaygroundIndexRoute,
++  AuthenticatedPlazaIndexRoute: AuthenticatedPlazaIndexRoute,
+   AuthenticatedProfileIndexRoute: AuthenticatedProfileIndexRoute,
+   AuthenticatedRedemptionCodesIndexRoute:
+     AuthenticatedRedemptionCodesIndexRoute,
+diff --git a/web/src/routes/_authenticated/plaza/index.tsx b/web/src/routes/_authenticated/plaza/index.tsx
+new file mode 100644
+index 0000000..d94d680
+--- /dev/null
++++ b/web/src/routes/_authenticated/plaza/index.tsx
+@@ -0,0 +1,32 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { createFileRoute } from '@tanstack/react-router'
++import z from 'zod'
++
++import { Plaza } from '@/features/plaza'
++
++// 搜索关键字放进 URL，刷新与分享链接都能还原当前视图（规范 3.8）。
++const plazaSearchSchema = z.object({
++  q: z.string().optional().catch(''),
++})
++
++export const Route = createFileRoute('/_authenticated/plaza/')({
++  validateSearch: plazaSearchSchema,
++  component: Plaza,
++})
+-- 
+2.53.0.windows.1
+

@@ -1131,3 +1131,18 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **另**：`bun run copyright:check` 报出的缺头文件**都不是本次新增的**（既有文件），与本次改动无关 ✓。
 
 **下一步（T3.9 续）**：广场**页面**（搜索 + 类型筛选 + 卡片/来源数）→ 路由 `src/routes/_authenticated/plaza/index.tsx` → 侧边栏条目（`useSidebarData`）→ 随后按 §4 顺序做**模型详情**。
+### T3.9 前端：模型广场**页面可用**（页面 + 路由 + 侧边栏）
+
+在上一轮数据层之上，本轮把广场做成**可访问的页面** ✓（仍在 `new-api/web/` 内改造，复用既有组件与页面壳 ✓）：
+
+| 文件 | 作用 |
+|---|---|
+| `src/features/plaza/index.tsx` | 广场页面：`useQuery(['apigx-plaza'])` + 搜索框 + 按模型聚合的卡片（模型名 / **来源数** / 能力徽标）✓ 复用 `SectionPageLayout`（`@/components/layout`）、`EmptyState`/`LoadingState`/`ErrorState`、`Card`/`Input`/`Badge` ✓ |
+| `src/features/plaza/lib/aggregate.ts` | **纯逻辑**：把后端"按供给"的列表聚合成"按模型"的卡片（来源计数口径 = 用户实际可选的供给 ✓），以及搜索过滤 —— 抽成纯函数便于测试 ✓ |
+| `src/routes/_authenticated/plaza/index.tsx` | 路由（`createFileRoute` + `validateSearch`，搜索词进 URL ✓，与既有路由写法一致 ✓） |
+| `src/features/plaza/__tests__/{aggregate.test.ts,fixtures.ts}` | 聚合与过滤的用例（6 条 ✓），fixture 最小化 ✓ |
+| `src/hooks/use-sidebar-data.ts` | 侧边栏新增「模型广场」（`/plaza`，lucide `Store` 图标 ✓，插入在 Playground 之后 ✓） |
+
+**按规范的检查（全过）**：`bun run typecheck` ✅；`bunx oxlint`（涉及文件）✅ **0 错 0 警**；**`bun run build` 生产构建成功** ✅（顺带由 `@tanstack/router-plugin` **重新生成路由树** ✓ —— 新增路由文件后这是必须的一步，否则 typecheck 会报 `FileRoutesByPath` 不认识新路径 ✓）；广场用例 ✅ **8/8 通过**（聚合 6 + 数据层 2 ✓）。
+
+**下一步（T3.9 续）**：**模型详情**页（能力与协议 / 分享来源表 / 价格与质量对比 / 调用配置 —— 接 `route-explain` ✓），然后按 §4 顺序做「我的分享 → 我的用量 → 我的 API Key → 任务中心 → 管理后台」。
