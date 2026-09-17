@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
@@ -534,6 +535,11 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 
 	attachQuotaSaturation(ctx, relayInfo, other)
+
+	// APIGX TPM 预留调整（T2.5）：这里同时拿得到 gin 上下文与**最终 usage**，
+	// 因此按 `实际 token - 预留量` 把差额退回窗口计数（预留用的是输出上限，通常远高于实际）。
+	// 失败只记日志，不影响请求。
+	relayhook.AdjustReservedTPM(ctx, int64(summary.PromptTokens+summary.CompletionTokens))
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,

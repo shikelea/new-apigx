@@ -59,7 +59,8 @@ func CheckRequestTPM(c *gin.Context, channelID int, promptTokens int, outputCap 
 
 	ctrl := capacity.New(common.RDB)
 	windowKey := capacity.ChannelTPM(int64(channelID), capacity.MinuteWindow(time.Now()))
-	if err := ctrl.IncrementWindow(c.Request.Context(), windowKey, limit, amount, capacity.WindowTTL(time.Minute)); err != nil {
+	windowTTL := capacity.WindowTTL(time.Minute)
+	if err := ctrl.IncrementWindow(c.Request.Context(), windowKey, limit, amount, windowTTL); err != nil {
 		var exceeded *capacity.ErrExceeded
 		if errors.As(err, &exceeded) {
 			common.SysLog("apigx capacity: channel tpm exceeded")
@@ -74,6 +75,9 @@ func CheckRequestTPM(c *gin.Context, channelID int, promptTokens int, outputCap 
 		return types.NewErrorWithStatusCode(errors.New("tpm ledger error"),
 			types.ErrorCodeQueryDataError, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
 	}
+	// 记下本次预留：拿到真实 usage 后按实际用量把差额退回去（T2.5），
+	// 否则渠道的每分钟额度会被"最坏情况"占满，表现为"没用到那么多也被限流"。
+	storeTPMReservation(c, tpmReservation{windowKey: windowKey, reserved: amount, ttl: windowTTL})
 	return nil
 }
 
