@@ -1,0 +1,63 @@
+From 1c981ff81f7512984e1affe81826e3037d6fe78b Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 07:40:32 +0800
+Subject: [PATCH 96/96] =?UTF-8?q?feat:=20=E6=8C=89=E6=88=91=E4=BB=AC?=
+ =?UTF-8?q?=E7=9A=84=E6=A8=A1=E5=9E=8B=E9=80=82=E9=85=8D=E5=AF=BC=E8=88=AA?=
+ =?UTF-8?q?=EF=BC=88=E9=92=B1=E5=8C=85/=E5=85=91=E6=8D=A2=E7=A0=81/?=
+ =?UTF-8?q?=E8=AE=A2=E9=98=85=E9=BB=98=E8=AE=A4=E9=9A=90=E8=97=8F=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户指出"依旧还有货币系统啊设置之类的没有适配"。
+
+我们模型的取向是**免费计量（usage_only）+ 平台统一管价**（计划书 §4 的页面清单里也没有钱包/订阅/充值），
+因此钱包/充值、兑换码、订阅这三项对使用者与运维都没有意义。
+
+**做法（改回底座自己的机制，不造轮子）**：
+- 一开始我直接删侧边栏条目，结果打破了 `sidebar-config.test.tsx`（它断言个人组顺序包含 Wallet）
+  => 说明底座本来就有**导航可见性配置**（`use-sidebar-config.ts`：URL -> section/module 映射 + 默认值）
+  => 改为只把三项的**默认可见性**关掉：
+     personal.topup=false（钱包/充值）、admin.redemption=false（兑换码）、admin.subscription=false（订阅）
+- 条目保留：管理员仍可在侧边栏设置里自行打开；Profile / Security / 渠道 / 模型 / 用户 / 系统设置 全部保留
+- 该配置由后端 `/api/status` 的 `SidebarModulesAdmin` 提供并与默认值合并；实测后端**值为空**（从未保存过）
+  => 新默认值直接生效
+
+检查: typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅
+  / **整个前端套件 146 文件 1750 用例全绿** ✅（含 sidebar-config 的 13 条）
+---
+ web/src/hooks/use-sidebar-config.ts | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/web/src/hooks/use-sidebar-config.ts b/web/src/hooks/use-sidebar-config.ts
+index 2939944..d0ec931 100644
+--- a/web/src/hooks/use-sidebar-config.ts
++++ b/web/src/hooks/use-sidebar-config.ts
+@@ -53,7 +53,8 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
+   },
+   personal: {
+     enabled: true,
+-    topup: true,
++    // 我们不做钱包/充值（用量免费计量，价格由平台统一管理）
++    topup: false,
+     personal: true,
+     security: true,
+   },
+@@ -61,10 +62,12 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
+     enabled: true,
+     channel: true,
+     models: true,
+-    redemption: true,
++    // 我们不做兑换码
++    redemption: false,
+     user: true,
+     setting: true,
+-    subscription: true,
++    // 我们不做订阅
++    subscription: false,
+   },
+ }
+ 
+-- 
+2.53.0.windows.1
+
