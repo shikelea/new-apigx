@@ -239,3 +239,38 @@ func TestGetAndValidOpenAIImageRequestNBounds(t *testing.T) {
 		require.Contains(t, err.Error(), boundErr)
 	})
 }
+
+// 尺寸约束：语法与范围（阶段 3 用真实上游发现：上游会对非法尺寸**默默出图**，
+// 于是错误要到出图后才发现，而那时已经计费）。
+func TestValidateImageSize(t *testing.T) {
+	cases := []struct {
+		size    string
+		wantErr bool
+	}{
+		{"1024x1024", false},
+		{"512x512", false},
+		{"1792x1024", false},
+		{"1x1", false},
+		{"4096x4096", false},
+		{"", false},         // 空串 = 用上游默认
+		{"999x999", false},  // 合法语法（上游支持与否属"支持范围"，不在这里判定）
+		{"abc", true},       // 缺分隔符
+		{"1024", true},      // 缺高度
+		{"1024x", true},     // 高度为空
+		{"x1024", true},     // 宽度为空
+		{"0x1024", true},    // 下界
+		{"1024x0", true},    // 下界
+		{"5000x5000", true}, // 上界
+		{"1024X1024", true}, // 大写 X 不接受（避免与上游解析差异）
+	}
+	for _, tc := range cases {
+		t.Run(tc.size, func(t *testing.T) {
+			err := validateImageSize(tc.size)
+			if tc.wantErr {
+				require.Error(t, err, "size=%q 应当被拒绝", tc.size)
+			} else {
+				require.NoError(t, err, "size=%q 应当被接受", tc.size)
+			}
+		})
+	}
+}

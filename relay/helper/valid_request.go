@@ -273,6 +273,19 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 		}
 	}
 
+	// **尺寸约束**：放在这里而不是各适配器里——数量 `n` 也是在这一处校验的，
+	// 同一类约束散到两处早晚会不一致。
+	//
+	// 为什么需要它（阶段 3 用真实上游发现）：真实的 `qwen-image-2.0` 对
+	// `size=999x999` 会**默默接受**并出图，于是"不支持的尺寸"要到出图后才发现——那时已经计费。
+	// 这里只做**语法与范围**校验（`宽x高`，各边 1..4096），不预先假定某家上游支持哪些档位；
+	// 某家具体支持哪些尺寸属"支持范围"，应当记录与展示，而不是在这里硬编码。
+	if imageRequest.Size != "" {
+		if err := validateImageSize(imageRequest.Size); err != nil {
+			return nil, err
+		}
+	}
+
 	// Provider parameters can override the top-level count. Validate before
 	// pricing so malformed multipliers return a client error, not a pricing
 	// failure after reservation has started.
@@ -409,4 +422,34 @@ func GetAndValidateGeminiBatchEmbeddingRequest(c *gin.Context) (*dto.GeminiBatch
 		return nil, err
 	}
 	return request, nil
+}
+
+// maxImageSizeEdge 是单边像素的允许上限。取 4096 是**语法与范围**的护栏
+// （防止明显离谱的输入进入计费），不代表任何上游的实际支持档位。
+const maxImageSizeEdge = 4096
+
+// validateImageSize 校验 `宽x高` 形式的尺寸参数。
+//
+// 只接受十进制整数与单个 `x` 分隔符；两侧必须落在 1..maxImageSizeEdge。
+// 空串放行（表示使用上游默认尺寸）。
+func validateImageSize(size string) error {
+	if strings.TrimSpace(size) == "" {
+		return nil // 空串 = 使用上游默认尺寸；调用处也会跳过，这里再兜一次保证函数自洽
+	}
+	parts := strings.Split(size, "x")
+	if len(parts) != 2 {
+		return fmt.Errorf("size must look like WIDTHxHEIGHT, got %q", size)
+	}
+	width, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return fmt.Errorf("size width must be an integer, got %q", parts[0])
+	}
+	height, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return fmt.Errorf("size height must be an integer, got %q", parts[1])
+	}
+	if width < 1 || width > maxImageSizeEdge || height < 1 || height > maxImageSizeEdge {
+		return fmt.Errorf("size must be between 1 and %d on each side, got %dx%d", maxImageSizeEdge, width, height)
+	}
+	return nil
 }

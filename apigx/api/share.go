@@ -916,6 +916,9 @@ func (h *handler) listUsage(c *gin.Context) {
 			"prompt_tokens":     entry.PromptTokens,
 			"completion_tokens": entry.CompletionTokens,
 			"total_tokens":      entry.PromptTokens + entry.CompletionTokens,
+			// 配额/费用：底座 logs 里有（阶段 3 实测图片请求 quota=38/张），
+			// 我们的视图此前没暴露，导致"我的用量"看不到花了多少。
+			"quota": entry.Quota,
 			// 底座以「quota」为记账单位；这里换算成微美元（1e-6 USD）便于使用者理解。
 			// 换算率用底座的 QuotaPerUnit（与计费同一来源，不自己写死）。
 			"cost_micro_usd": quotaToMicroUSD(entry.Quota),
