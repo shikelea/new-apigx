@@ -94,7 +94,7 @@ async function main() {
   dim(`令牌 id=${tk.id} key=${key.slice(0, 8)}…`);
 
   // 找渠道：谁提供 DISALLOWED_MODEL，谁提供 ALLOWED_MODEL
-  const chList = await call(`${BASE}/api/channel/?page=1&page_size=100`, { auth: dashAuth });
+  const chList = await call(`${BASE}/api/channel/?p=1&page_size=100`, { auth: dashAuth });
   const chs = chList.json?.data?.items ?? chList.json?.data ?? [];
   const findCh = (m) => (Array.isArray(chs) ? chs : []).find((c) => String(c?.models || '').split(',').map((x) => x.trim()).includes(m));
   const chDisallowed = findCh(DISALLOWED_MODEL);

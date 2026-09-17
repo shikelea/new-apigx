@@ -54,7 +54,7 @@ async function main() {
     method: 'POST', auth: root.auth,
     body: { mode: 'single', channel: { name: 'SRC底座-' + stamp, type: 1, key: 'placeholder', base_url: 'http://127.0.0.1:8100', models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
   });
-  const listRes = await call(`${BASE}/api/channel/?page=1&page_size=1000`, { auth: root.auth });
+  const listRes = await call(`${BASE}/api/channel/?p=1&page_size=1000`, { auth: root.auth });
   const all = listRes.json?.data?.items ?? listRes.json?.data ?? [];
   const baseChannel = (Array.isArray(all) ? all : []).find((c) => c?.name === 'SRC底座-' + stamp);
   if (!baseChannel?.id) throw new Error('查不到刚建的底座渠道');

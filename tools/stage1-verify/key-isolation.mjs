@@ -67,7 +67,7 @@ async function main() {
   }
   // 底座的建渠道接口只回 {success:true}，不回 id —— 按名字查回来（不猜响应结构）
   const channelName = `ISO底座-${stamp}`;
-  const listRes = await call(`${BASE}/api/channel/?page=1&page_size=1000`, { auth: root });
+  const listRes = await call(`${BASE}/api/channel/?p=1&page_size=1000`, { auth: root });
   const allChannels = listRes.json?.data?.items ?? listRes.json?.data ?? [];
   const created = (Array.isArray(allChannels) ? allChannels : []).find((c) => c?.name === channelName);
   if (!created?.id) {

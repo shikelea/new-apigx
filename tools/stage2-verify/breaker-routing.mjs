@@ -73,12 +73,13 @@ async function main() {
     body: { mode: 'single', channel: { name: deadChannelName, type: 1, key: 'sk-dead-' + stamp, base_url: 'http://127.0.0.1:9', models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
   });
 
-  // **逐页查找**（不要只查第一页）：开发库里测试渠道已积累 200+ 条，且底座的列表接口对
-  // `page_size` 可能有上限，只查第一页会"查不到刚建的渠道"（实测如此）。
+  // **逐页查找，且页数上限要够大**：开发库里测试渠道已积累 **600 条**（每页 100），
+  // 早先只查到第 6 页就停（600 条正好占满），而新建渠道排在第 7 页 ⇒ "查不到刚建的渠道"。
+  // 教训：**脚本里的翻页上限也是会被数据积累撞到的**，不要用"够用就行"的小常数。
   const findChannel = async (name) => {
     for (let attempt = 0; attempt < 10; attempt++) {
-      for (let page = 1; page <= 6; page++) {
-        const list = await call(`${BASE}/api/channel/?page=${page}&page_size=100`, { auth: root });
+      for (let page = 1; page <= 40; page++) {
+        const list = await call(`${BASE}/api/channel/?p=${page}&page_size=100`, { auth: root });
         const items = list.json?.data?.items ?? [];
         const hit = items.find((c) => c?.name === name);
         if (hit) return hit;

@@ -48,7 +48,7 @@ async function makeChannel(auth, stamp, model, ownerAuth, shareGroupName) {
   if (created.status !== 200 || created.json?.success === false) throw new Error('建底座渠道失败：' + created.text.slice(0, 120));
   let base = null;
   for (let i = 0; i < 10 && !base; i++) {
-    const list = await call(`${BASE}/api/channel/?page=1&page_size=1000`, { auth });
+    const list = await call(`${BASE}/api/channel/?p=1&page_size=1000`, { auth });
     const items = list.json?.data?.items ?? [];
     base = items.find((c) => c?.name === name);
     if (!base) await new Promise((r) => setTimeout(r, 2000));

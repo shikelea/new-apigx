@@ -78,7 +78,7 @@ async function main() {
         body: { mode: 'single', channel: { name, type: 1, key: 'sk-' + tag + '-' + stamp, base_url: 'http://127.0.0.1:8100', models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
       });
       for (let i = 0; i < 10; i++) {
-        const list = await call(`${BASE}/api/channel/?page=1&page_size=1000`, { auth: root });
+        const list = await call(`${BASE}/api/channel/?p=1&page_size=1000`, { auth: root });
         const hit = (list.json?.data?.items ?? []).find((c) => c?.name === name);
         if (hit) return hit;
         await new Promise((r) => setTimeout(r, 2000));

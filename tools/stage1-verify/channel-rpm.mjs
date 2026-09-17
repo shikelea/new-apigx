@@ -64,7 +64,7 @@ async function main() {
   });
   let base = null;
   for (let i = 0; i < 10 && !base; i++) {
-    const list = await call(`${BASE}/api/channel/?page=1&page_size=1000`, { auth: root });
+    const list = await call(`${BASE}/api/channel/?p=1&page_size=1000`, { auth: root });
     base = (list.json?.data?.items ?? []).find((c) => c?.name === channelName);
     if (!base) await new Promise((r) => setTimeout(r, 2000));
   }
