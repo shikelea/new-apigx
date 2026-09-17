@@ -14,7 +14,7 @@ const argv = process.argv.slice(2);
 const argOf = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const BASE = argOf('--base', 'http://127.0.0.1:3000');
 const STUB = argOf('--stub', 'http://127.0.0.1:8100');
-const MODEL = argOf('--model', 'stub/model-x-202609');
+const MODEL_ARG = argOf('--model', ''); // 留空则按运行生成独占模型名
 const KEY_A = argOf('--key-a', 'sk-iso-AAAA-1111111111');
 const KEY_B = argOf('--key-b', 'sk-iso-BBBB-2222222222');
 
@@ -45,6 +45,10 @@ async function main() {
   const check = (name, ok, detail) => { results.push({ name, ok }); (ok ? pass : fail)(`${name}${detail ? ' — ' + detail : ''}`); };
 
   const stamp = Date.now().toString().slice(-6);
+  // **独占模型名**：底座会在多个服务同一模型的渠道之间选择，用唯一模型名才能保证
+  // 请求一定走本次创建的渠道（否则断言的对象与真实被使用的渠道不是同一个）。
+  const MODEL = MODEL_ARG || ('stub/iso-' + stamp);
+  dim('本次独占模型：' + MODEL);
 
   // ---- 1) 建一条底座的影子渠道（指向替身，先放占位 Key）----
   const baseChannel = await call(`${BASE}/api/channel/`, {
@@ -115,6 +119,18 @@ async function main() {
   // ---- 5) 第一次请求：让上游返回 401 ----
   await call(`${STUB}/_control/reset`, { method: 'POST' });
   await call(`${STUB}/_control/profile`, { method: 'POST', body: { delayMs: 0, status: 401 } });
+  // 新建渠道的**模型→渠道路由能力**缓存在网关内存里（默认 60s 从库同步一次）。
+  // 已核实能力行确实写入了 abilities 表，因此这里只需等它进入网关缓存；
+  // 用轮询而不是固定 sleep：同步时机不确定，死等要么不够要么浪费。
+  let routable = false;
+  for (let i = 0; i < 20 && !routable; i++) {
+    const probe = await chat();
+    if (!probe.text.includes('model_not_found')) { routable = true; break; }
+    await new Promise((res) => setTimeout(res, 5000));
+  }
+  if (!routable) throw new Error('等待模型可路由超时：网关始终返回 model_not_found');
+  dim('新模型已进入网关路由缓存');
+
   const first = await chat();
   info(`第一次（上游 401）→ 客户端 HTTP ${first.status}`);
   check('上游 401 时请求失败', first.status !== 200, `HTTP ${first.status}`);
