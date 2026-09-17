@@ -1,0 +1,154 @@
+From e67bba4a9ad9f57af329013ac9bc4c0668df47a8 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 16:26:57 +0800
+Subject: [PATCH 59/59] =?UTF-8?q?fix(apigx):=20=E7=86=94=E6=96=AD=E6=94=B9?=
+ =?UTF-8?q?=E9=81=93=E6=89=93=E9=80=9A=EF=BC=88=E7=AB=AF=E5=88=B0=E7=AB=AF?=
+ =?UTF-8?q?=209/9=EF=BC=89+=20=E4=B8=A4=E6=AC=A1=E5=A4=B1=E8=B4=A5?=
+ =?UTF-8?q?=E5=B0=9D=E8=AF=95=E7=9A=84=E5=AE=9E=E8=AF=81=E7=BB=93=E8=AE=BA?=
+ =?UTF-8?q?=EF=BC=88T2.8/T2.10=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+最终机制: 熔断打开时置渠道状态为自动禁用 **+ 关闭能力索引**(UpdateAbilityStatus(channelID,false))
+  —— 后者才是选择逻辑真正看的; 恢复时只还原我们自己禁用的(判据=我们的标记仍在且渠道自动禁用)
+端到端 9/9: 坏上游被摘出(解释给出 breaker_open) / 归因 9 样本 /
+  **熔断后不再收到新样本(9→9)** / **熔断后请求全部成功(200×6)** / 健康供给未误伤
+
+两次失败尝试的实证结论(记录以免重走):
+  1. 只标记 Key 不可用: 只让"选中后立刻失败", **不改变选中概率**, 重试耗尽即 500
+  2. 压权重: 底座对权重有 **+10 平滑**, 1 与 1 的分配是 11:11(≈50%) => **权重无法表达"接近零"**;
+     且恢复时无从判断原值是否平台设置 => 方案已**回退**, 不留隐患
+  3. UpdateChannelStatus(id,"",...) 对**多 Key 渠道无效**: 走 handlerMultiKeyUpdate 找不到索引, 不禁用整条渠道(实测)
+顺带修口径不一致: route-explain 原先不应用熔断判定而 route-apply 应用 =>
+  解释里"它在候选里"、实际却不会用它; 已抽 applyBreakerToCandidates 统一
+
+apigx + middleware 全量通过
+---
+ apigx/api/share.go               | 27 +++++++++++-----
+ apigx/relayhook/breaker_guard.go | 53 ++++++++++++++++++++++++++++++++
+ 2 files changed, 72 insertions(+), 8 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index c2515f7..e838cf5 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -1271,6 +1271,9 @@ func (h *handler) explainRoute(c *gin.Context) {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
++	// **解释必须反映真实状态**：正在熔断的供给要显示为被摘出（原因 breaker_open），
++	// 否则用户看到"它在候选里"而实际请求根本不会用它——那是最难排查的一类不一致。
++	applyBreakerToCandidates(candidates)
+ 	explanation, err := routing.ExplainForStrategy(strategy, candidates, public, routing.DefaultOptions())
+ 	if err != nil {
+ 		fail(c, http.StatusBadRequest, "invalid_strategy", err.Error())
+@@ -1348,14 +1351,8 @@ func (h *handler) applyRouteRanking(c *gin.Context) {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
+-	// 先按熔断摘除不可用候选，再决策（与解释接口同一套判定，避免两处口径不一致）
+-	now := common.GetTimestamp()
+-	for i := range candidates {
+-		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
+-			candidates[i].Allowed = false
+-			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
+-		}
+-	}
++	// 按熔断摘除不可用候选，再决策（与解释接口共用同一函数，避免两处口径不一致）
++	applyBreakerToCandidates(candidates)
+ 	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())
+ 	if err != nil {
+ 		fail(c, http.StatusBadRequest, "invalid_strategy", err.Error())
+@@ -1569,3 +1566,17 @@ func (h *handler) syncChannelPrice(c *gin.Context) {
+ 		"skipped": report.Skipped, "notes": report.Notes,
+ 	})
+ }
++
++// applyBreakerToCandidates 按熔断结果把"打开"的候选置为不可用（含具体原因）。
++//
++// 抽成共用函数的原因：`route-explain` 与 `route-apply` 必须用**同一套口径**，
++// 否则会出现"解释里它在候选里、实际请求却不会用它"的最难排查类不一致。
++func applyBreakerToCandidates(candidates []routing.Candidate) {
++	now := common.GetTimestamp()
++	for i := range candidates {
++		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
++			candidates[i].Allowed = false
++			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
++		}
++	}
++}
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+index 2651b46..e34d0d2 100644
+--- a/apigx/relayhook/breaker_guard.go
++++ b/apigx/relayhook/breaker_guard.go
+@@ -175,13 +175,66 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 		next = channelpool.MergeKeyStatusList(indices, ours, nil, apigxmodel.StatusBreakerOpen)
+ 	}
+ 	channel.ChannelInfo.MultiKeyStatusList = next
++
++	// **刻意不动权重**：曾经的方案是"把熔断渠道的权重压到接近零"，但实测与底座语义相冲突——
++	// 底座对权重有 **+10 平滑**，权重 1 与 1 之间的分配是 11:11（≈50%），
++	// 也就是说**权重根本无法表达"接近零"**（要让它接近零，同层其他渠道的权重都得远大于 10，
++	// 而我们无权假设/改动别人的权重）。更危险的是"恢复"时无从判断原值是不是平台设置的。
++	// 因此这条被证据否掉，改走"让渠道在底座眼里不可选"（见下面的状态处理）。
+ 	if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+ 		Update("channel_info", channel.ChannelInfo).Error; err != nil {
+ 		common.SysError("apigx breaker: update channel marks failed: " + err.Error())
+ 		return
+ 	}
++	// **真正让底座不选中它**（修法①）：标记只让"选中后立刻失败"，不足以改道；
++	// 权重又因为底座的 +10 平滑而无法表达"接近零"（两者都被实测否掉）。
++	// 因此这里调用底座**自己的**渠道状态入口——它会同步更新能力索引，
++	// 于是该渠道在同模型下**根本不出现在候选里**，重试自然落到别的渠道。
++	// ⚠️ 不能直接用 `basemodel.UpdateChannelStatus`：我们的分享渠道是**多 Key 渠道**，
++	// 而它对多 Key 渠道会走 `handlerMultiKeyUpdate`——传入空 key 时找不到对应索引，
++	// **不会禁用整条渠道**（实测：调用后排除了个寂寞，坏上游照样被选中）。
++	// 因此直接做两件等价的事：置渠道状态 + 关掉它的**能力索引**（后者才是选择逻辑真正看的）。
++	if open {
++		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
++			Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
++			common.SysError("apigx breaker: disable channel status failed: " + err.Error())
++		}
++		if err := basemodel.UpdateAbilityStatus(channelID, false); err != nil {
++			common.SysError("apigx breaker: disable ability failed: " + err.Error())
++		}
++	} else {
++		// 恢复：**只还原我们自己禁用的**（判据 = 我们的多 Key 标记仍在 + 渠道处于自动禁用），
++		// 避免把底座因鉴权失败等原因禁用的渠道顺手恢复。
++		var now basemodel.Channel
++		if err := db.Where("id = ?", channelID).First(&now).Error; err == nil {
++			if now.Status == common.ChannelStatusAutoDisabled && hasOurBreakerMark(now.ChannelInfo.MultiKeyStatusList) {
++				if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
++					Update("status", common.ChannelStatusEnabled).Error; err != nil {
++					common.SysError("apigx breaker: restore channel status failed: " + err.Error())
++				}
++				if err := basemodel.UpdateAbilityStatus(channelID, true); err != nil {
++					common.SysError("apigx breaker: restore ability failed: " + err.Error())
++				}
++			}
++		}
++	}
++
+ 	// 必须刷新底座缓存：只改库不会被选择逻辑看到（阶段 1 已经踩过同一个坑）
+ 	if refreshed, err := basemodel.GetChannelById(channelID, true); err == nil && refreshed != nil {
+ 		basemodel.CacheUpdateChannel(refreshed)
+ 	}
++	// 权重写在渠道行上，但选择逻辑读的是能力索引里的权重 → 必须重建（与投影同一处理）
++	if basemodel.DB != nil {
++		basemodel.InitChannelCache()
++	}
++}
++
++// hasOurBreakerMark 判断状态表里是否还有我们写的熔断标记。
++func hasOurBreakerMark(statusList map[int]int) bool {
++	for _, status := range statusList {
++		if status == apigxmodel.StatusBreakerOpen {
++			return true
++		}
++	}
++	return false
+ }
+-- 
+2.53.0.windows.1
+

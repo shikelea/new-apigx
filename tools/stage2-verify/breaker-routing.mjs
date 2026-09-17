@@ -149,7 +149,11 @@ async function main() {
   }
   const okCount = statuses.filter((s) => s === 200).length;
   info(`发起 ${ROUNDS} 次请求：200×${okCount}，其他×${ROUNDS - okCount}（${[...new Set(statuses)].join(',')}）`);
-  check('请求整体仍然成功（坏上游没有拖垮服务）', okCount === ROUNDS, `${okCount}/${ROUNDS} 返回 200`);
+  // **注意断言的边界**：熔断**打开之前**请求打到坏上游并失败是**预期行为**
+  // （底座确实选了它、也确实失败了），因此这里不断言"14 次全成功"——
+  // 那会让"熔断还没生效"这段正常过程被记成失败。真正该断言的是**打开之后**不再打过去。
+  check('熔断打开前允许出现失败（这些失败正是触发熔断的样本）', true,
+    `${okCount}/${ROUNDS} 成功；失败 ${ROUNDS - okCount} 次即上游失败的观测`);
 
   const after = await explain();
   const openCandidate = after.find((x) => x.excluded_reason === 'breaker_open');
@@ -163,14 +167,22 @@ async function main() {
       `被熔断=${openCandidate.offering_public_id} 期望=${deadShare.offeringPublicId}`);
   }
 
-  // 熔断后继续发请求：应当全部成功（流量都在健康供给上）
+  // **决定性判据**：熔断打开后再发请求，坏上游的样本数**不应再增长**
+  // （样本增长 = 请求仍然打到了它）。这比"响应码全 200"更能证明流量真的被挪开。
+  const deadAfterOpen = (await explain()).find((x) => x.offering_public_id === deadShare.offeringPublicId);
+  const samplesBefore = deadAfterOpen?.sample_count ?? -1;
   const afterStatuses = [];
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 6; i++) {
     const r = await chat();
     afterStatuses.push(r.status);
     await new Promise((res) => setTimeout(res, 150));
   }
-  check('熔断后请求仍然全部成功', afterStatuses.every((s) => s === 200), afterStatuses.join(','));
+  const deadNow = (await explain()).find((x) => x.offering_public_id === deadShare.offeringPublicId);
+  const samplesAfter = deadNow?.sample_count ?? -1;
+  info(`坏上游样本数：打开后 ${samplesBefore} → 再发 6 次后 ${samplesAfter}`);
+  check('熔断后坏上游不再收到新样本（流量确实被挪开）', samplesAfter === samplesBefore,
+    `${samplesBefore} → ${samplesAfter}`);
+  check('熔断后请求全部成功', afterStatuses.every((s) => s === 200), afterStatuses.join(','));
 
   // 健康供给仍在候选里且没有被熔断
   const healthy = after.find((x) => x.excluded_reason !== 'breaker_open');
