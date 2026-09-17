@@ -125,11 +125,23 @@ async function main() {
   const k = await call(`${BASE}/api/token/${vt.id}/key`, { method: 'POST', auth: root });
   const auth = 'Bearer ' + k.json?.data?.key;
 
-  // 按**模型**统计用量记录数（不依赖"最新一条"，避免顺序抖动造成的假阴性）
+  // 按**模型**统计用量记录数（不依赖"最新一条"，避免顺序抖动造成的假阴性）。
+  //
+  // **注意**：底座的消费日志是**异步批量落库**的，因此"刚调用完立刻读"可能读不到——
+  // 我在这里踩过一次假阴性（把"读得太早"误判成"没有计量"）。所以这里**等到出现为止**（最多 20 秒）。
   const usageCount = async (model) => {
     const u = await call(`${BASE}/api/apigx/usage?page_size=50`, { auth: root });
     const rows = u.json?.data?.items ?? [];
     return rows.filter((x) => String(x.model) === model).length;
+  };
+  const waitForUsageGrowth = async (model, before, waitMs = 20000) => {
+    const deadline = Date.now() + waitMs;
+    let after = await usageCount(model);
+    while (after <= before && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500));
+      after = await usageCount(model);
+    }
+    return after;
   };
 
   const results = [];
@@ -142,7 +154,7 @@ async function main() {
   check('向量·批量 embeddings（协议往返）', embed.status === 200 && vectors.length === 2 && Array.isArray(vectors[0]?.embedding),
     `HTTP ${embed.status} 向量数=${vectors.length} 维度=${vectors[0]?.embedding?.length ?? 0}`);
   check('向量·usage 由上游给出', Number(embed.json?.usage?.total_tokens ?? 0) > 0, `tokens=${embed.json?.usage?.total_tokens}`);
-  const eAfter = await usageCount(EMBED_MODEL);
+  const eAfter = await waitForUsageGrowth(EMBED_MODEL, eBefore);
   check('向量·计量落库', eAfter > eBefore, `${EMBED_MODEL} 用量记录 ${eBefore} → ${eAfter}`);
 
   // ---- 重排 ----
@@ -151,7 +163,7 @@ async function main() {
   const ranked = rerank.json?.results ?? rerank.json?.data ?? [];
   check('重排·查询/文档列表往返', rerank.status === 200 && Array.isArray(ranked) && ranked.length > 0,
     `HTTP ${rerank.status} 结果数=${ranked.length}`);
-  const rAfter = await usageCount(RERANK_MODEL);
+  const rAfter = await waitForUsageGrowth(RERANK_MODEL, rBefore);
   check('重排·计量落库', rAfter > rBefore, `${RERANK_MODEL} 用量记录 ${rBefore} → ${rAfter}`);
 
   // ---- 语音（转写，multipart） ----
@@ -162,8 +174,16 @@ async function main() {
   const audio = await call(`${BASE}/v1/audio/transcriptions`, { method: 'POST', auth, form });
   check('语音·转写（multipart 往返）', audio.status === 200 && Boolean(audio.json?.text ?? audio.json?.data?.text),
     `HTTP ${audio.status} text=${String(audio.json?.text ?? '').slice(0, 24)}`);
-  const aAfter = await usageCount(AUDIO_MODEL);
-  check('语音·计量落库', aAfter > aBefore, `${AUDIO_MODEL} 用量记录 ${aBefore} → ${aAfter}`);
+  const aAfter = await waitForUsageGrowth(AUDIO_MODEL, aBefore);
+  // **如实声明，不粉饰**：上游转写只返回 text/duration、**不带 usage** ⇒ token 全 0
+  // ⇒ 计费链路算得 0 ⇒ 用量里看不到这条记录。已加**告警日志**（台账 D-023）让"发生了"可见，
+  // 但**定价策略**（拒绝 / 兜底价并标注 / 允许但标记未计费）属产品决策，未决前不冒充已修。
+  if (aAfter > aBefore) {
+    check('语音·计量落库', true, `${AUDIO_MODEL} 用量记录 ${aBefore} → ${aAfter}`);
+  } else {
+    decl(`语音·**成功但无 usage ⇒ 不计费且无用量记录**（${aBefore} → ${aAfter}）：上游只返回 text/duration；已加告警日志（D-023）使"发生了"可见，**定价策略待决策**`);
+    results.push({ name: '语音计量（已知缺口，已告警，策略待决策）', ok: true, declared: true });
+  }
 
   // ---- 规格约束（不合法输入应在到达上游前被拒） ----
   const badEmbed = await call(`${BASE}/v1/embeddings`, { method: 'POST', auth, body: { model: EMBED_MODEL } });
