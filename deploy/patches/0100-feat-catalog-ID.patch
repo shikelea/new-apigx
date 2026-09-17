@@ -1,0 +1,279 @@
+From 1fe047c9e9150a4f080bba214e2420df9a95c615 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 07:56:25 +0800
+Subject: [PATCH 100/100] =?UTF-8?q?feat(catalog):=20=E5=AF=B9=E5=A4=96?=
+ =?UTF-8?q?=E6=A0=87=E5=87=86=E6=A8=A1=E5=9E=8B=20ID=20=E4=B8=8E=E6=A8=A1?=
+ =?UTF-8?q?=E5=9E=8B=E4=BB=8B=E7=BB=8D=EF=BC=88=E5=8F=AA=E5=9C=A8=E6=98=A0?=
+ =?UTF-8?q?=E5=B0=84**=E5=B7=B2=E7=A1=AE=E8=AE=A4**=E6=97=B6=E7=BB=99?=
+ =?UTF-8?q?=E5=87=BA=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+接上一轮的地基，把模型目录接到用户可见处（§4 模型详情"模型介绍"、§8.2"客户端从可用目录获取标准 ID"）：
+
+- repo_catalog.go: 新增批量解析 ResolveCanonicalModels（广场一页涉及多个模型名，逐个查库不合适；
+  与单条版本同一套规则：只认已确认、命中多个时平台全局优先）
+- repo_plaza.go: 广场条目带 CanonicalAPIModelID 与 ModelDescription；
+  解析失败**不让广场整体 500**，退化为"只显示上游名"（目录是辅助能力）
+- share.go: 列表响应暴露 canonical_model_id / model_description
+- 前端: 卡片在**有标准 ID 时**显示它（告诉用户该用哪个名字调用）；详情在**有介绍时**显示（不可信文本按纯文本渲染）
+- 用例: TestPlazaCanonicalModelOnlyAfterConfirmation —— **候选阶段必须为空**、确认后才出现（含介绍）
+
+**本轮两次自我纠错（都记下来）**:
+1. 我的补丁脚本对 share.go 的一次替换**静默没生效**（锚点缩进对不上，String.replace 无匹配也返回原串），
+   脚本却打印了"成功" => 用例暴露出字段是 nil => 已改为**强制校验替换后文本存在**再写盘，并记下这个教训
+2. 用例失败时我先打印实际值定位（条目取对了、字段是 nil），而不是猜 => 直接指向"补丁没生效"
+
+检查: go build ✅ / apigx/model + apigx/api 用例 ✅ / typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅ / 广场用例 25/25 ✅
+---
+ apigx/api/share.go                            |  5 +-
+ apigx/api/share_test.go                       | 45 ++++++++++++
+ apigx/model/repo_catalog.go                   | 73 +++++++++++++++++++
+ apigx/model/repo_plaza.go                     | 17 +++++
+ .../plaza/components/model-detail.tsx         |  6 +-
+ web/src/features/plaza/index.tsx              |  4 +
+ web/src/features/plaza/types.ts               |  3 +
+ 7 files changed, 151 insertions(+), 2 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index b07fa64..f686284 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -1303,7 +1303,10 @@ func (h *handler) getPlazaItem(c *gin.Context) {
+ // 只输出对外可见字段：**不含**渠道内部 ID、上游地址、凭据、成本价或任何内部标识。
+ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
+ 	out := gin.H{
+-		"offering_public_id":          item.OfferingPublicID,
++		"offering_public_id": item.OfferingPublicID,
++		// 对外标准模型 ID 与介绍（仅当映射**已确认**时才有值；未命中为空，界面显示上游名）
++		"canonical_model_id":          item.CanonicalAPIModelID,
++		"model_description":           item.ModelDescription,
+ 		"sample_count":                item.SampleCount,
+ 		"reliability_lower_bound_ppm": item.ReliabilityLowerBoundPpm,
+ 		"latency_ms_p50":              item.LatencyMsP50,
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index e4c363f..e7d2960 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1106,3 +1106,48 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
+ 	assert.Equal(t, true, first["insufficient"], "没有样本时必须标为样本不足，而不是给出一个看起来可信的数字")
+ 	assert.Equal(t, float64(0), first["reliability_lower_bound_ppm"])
+ }
++
++// 对外标准模型 ID 与介绍：**只有映射已确认时**广场才显示（§8.2）。未确认时显示上游名，
++// 绝不把"候选"当结论 —— 否则客户端会按一个没人确认过的标准 ID 去调用。
++func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 9401
++
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "目录组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
++	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座目录", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
++
++	// 建供给会自动登记"候选"别名（见 repo_offering.go）
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"upstream-name-x"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
++
++	// 候选阶段：标准 ID 与介绍必须为空
++	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	items, _ := body["data"].(map[string]any)["items"].([]any)
++	require.NotEmpty(t, items)
++	first, _ := items[0].(map[string]any)
++	assert.Equal(t, "", first["canonical_model_id"], "未确认的映射不得对外给出标准模型 ID")
++	assert.Equal(t, "", first["model_description"])
++
++	// 确认映射后：标准 ID 与介绍出现
++	canonical := apigxmodel.CanonicalModel{APIModelID: "standard-model-1", Description: "这是标准模型的介绍", ModalityType: 1, Status: 1}
++	require.NoError(t, env.db.Create(&canonical).Error)
++	require.NoError(t, env.db.Model(&apigxmodel.ModelAlias{}).
++		Where("normalized_model_id = ?", "upstream-name-x").
++		Updates(map[string]any{"relation": apigxmodel.AliasRelationConfirmed,
++			"confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": canonical.ID}).Error)
++
++	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	items, _ = body["data"].(map[string]any)["items"].([]any)
++	first, _ = items[0].(map[string]any)
++	assert.Equal(t, "standard-model-1", first["canonical_model_id"])
++	assert.Equal(t, "这是标准模型的介绍", first["model_description"])
++}
+diff --git a/apigx/model/repo_catalog.go b/apigx/model/repo_catalog.go
+index e8c5974..5532b89 100644
+--- a/apigx/model/repo_catalog.go
++++ b/apigx/model/repo_catalog.go
+@@ -151,3 +151,76 @@ func ResolveCanonicalModel(db *gorm.DB, externalModelID string) (canonical Canon
+ 	}
+ 	return canonical, true, nil
+ }
++
++// ResolveCanonicalModels 批量解析（广场一页会涉及多个模型名，逐个查库不合适）。
++//
++// 与单条版本**同一套规则**：只认已确认、命中多个时优先平台全局范围。
++// 返回值以**调用方传入的原名**为键，未命中的名字不出现在结果里 —— 调用方据此显示上游名。
++func ResolveCanonicalModels(db *gorm.DB, externalModelIDs []string) (map[string]CanonicalModel, error) {
++	out := make(map[string]CanonicalModel, len(externalModelIDs))
++	if db == nil {
++		return out, errors.New("apigxmodel: nil db")
++	}
++
++	// 原名 -> 归一化键（保留原名做返回键，避免调用方再去归一化）
++	normalizedToOriginal := make(map[string]string, len(externalModelIDs))
++	normalizedIDs := make([]string, 0, len(externalModelIDs))
++	for _, raw := range externalModelIDs {
++		normalized := NormalizeModelIDForAlias(raw)
++		if normalized == "" {
++			continue
++		}
++		if _, seen := normalizedToOriginal[normalized]; !seen {
++			normalizedToOriginal[normalized] = raw
++			normalizedIDs = append(normalizedIDs, normalized)
++		}
++	}
++	if len(normalizedIDs) == 0 {
++		return out, nil
++	}
++
++	var aliases []ModelAlias
++	if err := db.Model(&ModelAlias{}).
++		Where("normalized_model_id IN ? AND confirmation_state = ? AND target_canonical_model_id > 0 AND deleted_at IS NULL",
++			normalizedIDs, AliasConfirmApproved).
++		Order("scope_type ASC, id ASC").
++		Find(&aliases).Error; err != nil {
++		return out, err
++	}
++	if len(aliases) == 0 {
++		return out, nil
++	}
++
++	// 归一化键 -> 目标标准模型 ID（先到先得：已按 scope_type 升序，平台全局优先）
++	targetByNormalized := make(map[string]int64, len(aliases))
++	targetIDs := make([]int64, 0, len(aliases))
++	for _, alias := range aliases {
++		if _, exists := targetByNormalized[alias.NormalizedModelID]; exists {
++			continue
++		}
++		targetByNormalized[alias.NormalizedModelID] = alias.TargetCanonicalModelID
++		targetIDs = append(targetIDs, alias.TargetCanonicalModelID)
++	}
++
++	var models []CanonicalModel
++	if err := db.Model(&CanonicalModel{}).Where("id IN ?", targetIDs).Find(&models).Error; err != nil {
++		return out, err
++	}
++	byID := make(map[int64]CanonicalModel, len(models))
++	for _, model := range models {
++		byID[model.ID] = model
++	}
++
++	for normalized, original := range normalizedToOriginal {
++		targetID, hit := targetByNormalized[normalized]
++		if !hit {
++			continue
++		}
++		model, found := byID[targetID]
++		if !found {
++			continue
++		}
++		out[original] = model
++	}
++	return out, nil
++}
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index ffd6277..4ed670f 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -30,6 +30,10 @@ const (
+ // 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
+ // 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
+ type PlazaItem struct {
++	// 对外**标准模型 ID** 与介绍：只有在"上游名 -> 标准模型"的映射**已确认**时才有值
++	// （§8.2：客户端从可用目录/调用示例获取标准 ID）。未命中时留空，界面显示上游名。
++	CanonicalAPIModelID string
++	ModelDescription    string
+ 	// 质量摘要（最近 6 小时窗口）：样本不足时 Insufficient 为 true，界面必须显示"样本不足"而不是编一个数字。
+ 	SampleCount              int64
+ 	ReliabilityLowerBoundPpm int64
+@@ -144,6 +148,17 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 		return nil, 0, err
+ 	}
+ 
++	// 一次性解析本页涉及的所有上游模型名（避免逐个查库）
++	upstreamIDs := make([]string, 0, len(rows))
++	for _, r := range rows {
++		upstreamIDs = append(upstreamIDs, r.UpstreamModelID)
++	}
++	canonicalByUpstream, resolveErr := ResolveCanonicalModels(db, upstreamIDs)
++	if resolveErr != nil {
++		// 目录是辅助能力：解析失败不该让广场整体 500，退化为"只显示上游名"
++		canonicalByUpstream = map[string]CanonicalModel{}
++	}
++
+ 	items := make([]PlazaItem, 0, len(rows))
+ 	for _, r := range rows {
+ 		declared := Capability{}
+@@ -164,6 +179,8 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 			Insufficient:             quality.Insufficient,
+ 			Stale:                    quality.Stale,
+ 			UpstreamModelID:          r.UpstreamModelID,
++			CanonicalAPIModelID:      canonicalByUpstream[r.UpstreamModelID].APIModelID,
++			ModelDescription:         canonicalByUpstream[r.UpstreamModelID].Description,
+ 			ChannelPublicID:          r.ChannelPublicID,
+ 			GroupPublicID:            r.GroupPublicID,
+ 			GroupName:                r.GroupName,
+diff --git a/web/src/features/plaza/components/model-detail.tsx b/web/src/features/plaza/components/model-detail.tsx
+index d8fa8e4..e71d7ee 100644
+--- a/web/src/features/plaza/components/model-detail.tsx
++++ b/web/src/features/plaza/components/model-detail.tsx
+@@ -67,7 +67,11 @@ export function ModelDetail(props: { model: string }) {
+         <CardHeader>
+           <CardTitle className='break-all'>{props.model}</CardTitle>
+         </CardHeader>
+-        <CardContent>
++        <CardContent className='space-y-3'>
++          {/* 模型介绍：只有映射已确认（拿到标准模型）时才有内容；不可信文本按纯文本渲染 */}
++          {offerings[0]?.model_description ? (
++            <p className='text-muted-foreground text-sm whitespace-pre-wrap'>{offerings[0].model_description}</p>
++          ) : null}
+           <div className='flex flex-wrap gap-2'>
+             {[...new Set(offerings.flatMap((item) => item.capabilities ?? []))].map((capability) => (
+               <Badge key={capability} variant='secondary'>
+diff --git a/web/src/features/plaza/index.tsx b/web/src/features/plaza/index.tsx
+index 755717e..18c6bc2 100644
+--- a/web/src/features/plaza/index.tsx
++++ b/web/src/features/plaza/index.tsx
+@@ -119,6 +119,10 @@ export function Plaza() {
+                   <div className='text-muted-foreground text-sm'>
+                     {t('plaza.sources', { count: card.offerings.length })}
+                   </div>
++                  {/* 对外标准模型 ID（仅映射已确认时才有）*/}
++                  {card.offerings[0]?.canonical_model_id ? (
++                    <div className='text-muted-foreground font-mono text-xs'>{card.offerings[0].canonical_model_id}</div>
++                  ) : null}
+                   {/* 质量摘要：取该模型**最好的一条来源**作为卡片上的代表值（样本不足/陈旧会如实显示） */}
+                   {card.offerings.length > 0 ? (
+                     <div className='text-muted-foreground text-xs'>
+diff --git a/web/src/features/plaza/types.ts b/web/src/features/plaza/types.ts
+index 4f46aa9..4dd280b 100644
+--- a/web/src/features/plaza/types.ts
++++ b/web/src/features/plaza/types.ts
+@@ -27,6 +27,9 @@ export interface PlazaOfferingItem {
+   offering_public_id: string
+   /** 对外标准模型 ID */
+   model: string
++  /** 对外**标准模型 ID** 与介绍：只有"上游名 → 标准模型"的映射**已确认**时才有值 */
++  canonical_model_id?: string
++  model_description?: string
+   /** 分享分组对外 ID 与名称（广场按"分享分组"组织） */
+   group_public_id?: string
+   group_name?: string
+-- 
+2.53.0.windows.1
+
