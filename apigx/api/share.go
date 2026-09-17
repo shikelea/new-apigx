@@ -580,9 +580,11 @@ func (h *handler) applyChannelPool(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 type capacityPolicyRequest struct {
-	// ConcurrencyMode 遵循四态：0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值。
+	// 各维度都遵循四态：0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值。
 	ConcurrencyMode  *int   `json:"concurrency_mode"`
 	ConcurrencyValue *int64 `json:"concurrency_value"`
+	RPMMode          *int   `json:"rpm_mode"`
+	RPMLimit         *int64 `json:"rpm_limit"`
 }
 
 // setChannelCapacityPolicy 为分享渠道设置容量策略（当前支持"并发"维度）。
@@ -623,6 +625,18 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
 		return
 	}
+	rpmValue := int64(0)
+	if req.RPMLimit != nil {
+		rpmValue = *req.RPMLimit
+	}
+	rpmMode := capacity.LimitModeUnset
+	if req.RPMMode != nil {
+		rpmMode = *req.RPMMode
+	}
+	if err := (capacity.Policy{Mode: rpmMode, Value: rpmValue}).Validate(); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
+		return
+	}
 
 	// 无论新建还是更新，都必须把策略**挂到渠道上**（`apigx_channels.capacity_policy_id`）。
 	// 只写策略行不建立这层引用的话，读取侧按渠道的 FK 找不到策略——上限静默不生效。
@@ -650,6 +664,8 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 		}
 		existing.MaxConcurrencyMode = policy.Mode
 		existing.MaxConcurrency = policy.Value
+		existing.RpmMode = rpmMode
+		existing.RpmLimit = rpmValue
 		if linkErr := linkPolicy(existing.ID); linkErr != nil {
 			failFromRepo(c, linkErr)
 			return
@@ -660,6 +676,7 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 			OwnerUserID: owner, ScopeType: apigxmodel.CapacityScopeChannel, ScopeID: shareChannel.ID,
 			PolicyVersion:      1,
 			MaxConcurrencyMode: policy.Mode, MaxConcurrency: policy.Value,
+			RpmMode: rpmMode, RpmLimit: rpmValue,
 		}
 		now := common.GetTimestamp()
 		created.CreatedAt, created.UpdatedAt = now, now

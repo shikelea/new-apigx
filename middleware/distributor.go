@@ -713,18 +713,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
 	}
-	// APIGX 共享容量控制（T1.7）：**每次尝试**都按当次选中的渠道与凭据预留容量。
-	// 放在这个函数里而不是 Distributor 里，是因为底座的失败重试会**重新选择渠道**并再次
-	// 经过这里——只有在这里预留，才能保证「本次真正使用的渠道与凭据」都被容量约束到，
-	// 也才能借用底座既有的重选机制（无需自己写一套候选循环）。
-	if !relayhook.AcquireForAttempt(c, channel.Id) {
-		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
-	}
-	// APIGX 平台 Key 的「允许来源」准入（T1.10）：不可回退时直接拒绝；可回退时返回可重试错误，
-	// 由底座的重试机制重新选择渠道（复用底座重选，不自己写候选循环）。
-	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
-		return sourceErr
-	}
+
 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, channel.GetBaseURL())
@@ -749,6 +738,21 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		c.Set("api_version", channel.Other)
 	case constant.ChannelTypeCoze:
 		c.Set("bot_id", channel.Other)
+	}
+	// APIGX 的准入与容量预留放在**函数末尾**，必须在渠道 Key 与 BaseURL 都已写入上下文之后：
+	// 这些检查可能**提前返回**（例如来源被拒但允许回退时返回可重试错误），
+	// 若放在中间就会留下"半成品上下文"——BaseURL/ChannelKey 未设置，
+	// 而 `Distribute` 调用本函数时**忽略返回值**，请求照旧发出去，
+	// 结果上游 URL 为空、报 `unsupported protocol scheme` 的 500。
+	// 放在末尾可保证：无论这里返回成功还是错误，上下文都是完整可用的。
+	//
+	// 位置说明：本函数是**每次尝试（含每次重试）**都会经过的点，因此容量预留
+	// 天然"按当次选中的渠道与凭据"进行，也借用了底座既有的重选机制。
+	if !relayhook.AcquireForAttempt(c, channel.Id) {
+		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+	}
+	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
+		return sourceErr
 	}
 	return nil
 }

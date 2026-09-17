@@ -189,9 +189,14 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
 		}
 	}
 
-	// 到这里才判断「是否完全没有维度」：所有维度来源（身份维度 + 上游凭据/账户池维度）
-	// 都已拼接完毕，任何一个被配置了就应当施加约束。
-	if len(dims) == 0 {
+	// RPM 与并发维度**分开处理**（速率计数不归还），因此必须在这里先解析它，
+	// 否则"只配了 RPM、没配任何并发维度"时会在下面的空维度判断处直接返回，
+	// 速率限制形同虚设——这是端到端验证抓到的第二个同类缺陷。
+	rpmLimit, hasRPM := resolveChannelRPMLimit(c, channelID, cfg.ChannelRPMLimit)
+
+	// 到这里才判断「是否完全没有维度」：所有维度来源（身份维度 + 上游凭据/账户池维度
+	// + 速率维度）都已确认，任何一个被配置了就应当施加约束。
+	if len(dims) == 0 && !hasRPM {
 		// 所有维度都未配置：不施加约束（过渡行为，见包注释）
 		return nil, true
 	}
@@ -211,8 +216,10 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
 	// 速率维度（RPM）：**在拿到并发租约之后**再计数。
 	// 顺序理由：并发不足时请求根本不会发出去，不该消耗速率额度；反过来则要对已拿到的
 	// 租约做补偿（下面就是）。
-	if cfg.ChannelRPMLimit > 0 {
-		if rpmLimit, ok := resolveChannelRPMLimit(c, channelID, cfg.ChannelRPMLimit); ok {
+	// 速率维度（RPM）：**在拿到并发租约之后**再计数——并发不足时请求根本不会发出去，
+	// 不该消耗速率额度；反过来则要对已拿到的租约做补偿（下面就是）。
+	if hasRPM {
+		{
 			windowKey := capacity.ChannelRPM(int64(channelID), capacity.MinuteWindow(time.Now()))
 			if rpmErr := ctrl.IncrementWindow(ctx, windowKey, rpmLimit, 1, capacity.WindowTTL(time.Minute)); rpmErr != nil {
 				// 速率超限：把刚拿到的并发租约**还回去**，避免"没发出去的请求"白占一个槽位
