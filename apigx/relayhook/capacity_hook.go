@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
+	"github.com/QuantumNous/new-api/apigx/channelpool"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
@@ -33,6 +34,10 @@ type Config struct {
 	ChannelLimit int64
 	TokenLimit   int64
 	UserLimit    int64
+	// UpstreamKeyLimit / UpstreamAccountLimit 是上游凭据与共享账户池的并发上限。
+	// 账户池这一维是关键：不能因为切换模型或 Key 就叠加容量（计划书 §9.2）。
+	UpstreamKeyLimit     int64
+	UpstreamAccountLimit int64
 }
 
 var (
@@ -46,10 +51,12 @@ var (
 
 func init() {
 	Configure(Config{
-		Enabled:      common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false),
-		ChannelLimit: int64(common.GetEnvOrDefault("APIGX_CHANNEL_CONCURRENCY_LIMIT", 0)),
-		TokenLimit:   int64(common.GetEnvOrDefault("APIGX_TOKEN_CONCURRENCY_LIMIT", 0)),
-		UserLimit:    int64(common.GetEnvOrDefault("APIGX_USER_CONCURRENCY_LIMIT", 0)),
+		Enabled:              common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false),
+		ChannelLimit:         int64(common.GetEnvOrDefault("APIGX_CHANNEL_CONCURRENCY_LIMIT", 0)),
+		TokenLimit:           int64(common.GetEnvOrDefault("APIGX_TOKEN_CONCURRENCY_LIMIT", 0)),
+		UserLimit:            int64(common.GetEnvOrDefault("APIGX_USER_CONCURRENCY_LIMIT", 0)),
+		UpstreamKeyLimit:     int64(common.GetEnvOrDefault("APIGX_UPSTREAM_KEY_CONCURRENCY_LIMIT", 0)),
+		UpstreamAccountLimit: int64(common.GetEnvOrDefault("APIGX_UPSTREAM_ACCOUNT_CONCURRENCY_LIMIT", 0)),
 	})
 }
 
@@ -142,6 +149,27 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
 		abortJSON(c, http.StatusForbidden, "capacity_disabled", "this resource is disabled for capacity control")
 		return nil, false
 	}
+
+	// 上游凭据与共享账户池维度（T1.7）：底座的运行期只给出 Key 索引，
+	// 这里翻译成我们的凭据身份（走映射缓存，不会反复解密全部凭据）。
+	//
+	// **必须放在「所有维度都未配置就提前返回」之前**：否则只配置了账户池上限
+	// （而不配渠道/令牌/用户上限）时，会在这里直接返回「不施加约束」，
+	// 新维度永远不生效——这是本轮实现时的真实缺陷，由端到端验证发现。
+	if cfg.UpstreamKeyLimit > 0 || cfg.UpstreamAccountLimit > 0 {
+		if common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
+			keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+			dims = append(dims, channelpool.BuildKeyCapacityDimensions(
+				channelpool.CurrentDB(), channelID, keyIndex,
+				channelpool.KeyCapacityLimits{
+					UpstreamKeyLimit:     cfg.UpstreamKeyLimit,
+					UpstreamAccountLimit: cfg.UpstreamAccountLimit,
+				})...)
+		}
+	}
+
+	// 到这里才判断「是否完全没有维度」：所有维度来源（身份维度 + 上游凭据/账户池维度）
+	// 都已拼接完毕，任何一个被配置了就应当施加约束。
 	if len(dims) == 0 {
 		// 所有维度都未配置：不施加约束（过渡行为，见包注释）
 		return nil, true

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/QuantumNous/new-api/apigx/capacity"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
@@ -649,4 +650,53 @@ func TestCachedMappingStillTranslatesCorrectly(t *testing.T) {
 	var b apigxmodel.UpstreamKey
 	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&b).Error)
 	assert.Positive(t, b.LastOKAt, "缓存路径下索引 1 仍应翻译到 stable-b")
+}
+
+// ---- 上游 Key / 账户池容量维度 ----
+
+func TestBuildKeyCapacityDimensions(t *testing.T) {
+	db := setupProjectionEnv(t)
+	ResetMappingCacheForTest()
+	t.Cleanup(ResetMappingCacheForTest)
+	const owner int64 = 9801
+	const baseChannelID int64 = 9595
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
+	}).Error)
+
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-cap-one-aaaaaa", "sk-cap-two-bbbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	// 把索引 0 的那把挂到一个共享账户池上（stable-a 是 id 较小者，投影在索引 0）
+	var keyA apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&keyA).Error)
+	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).Where("id = ?", keyA.ID).
+		Update("upstream_account_id", 4321).Error)
+
+	// 两个维度都配了上限 -> 应产出两条维度，且分别指向我们的 Key ID 与账户池 ID
+	dims := BuildKeyCapacityDimensions(db, int(baseChannelID), 0, KeyCapacityLimits{
+		UpstreamKeyLimit: 3, UpstreamAccountLimit: 2,
+	})
+	require.Len(t, dims, 2)
+	assert.Equal(t, capacity.UpstreamKeyConcurrency(keyA.ID), dims[0].Key)
+	assert.EqualValues(t, 3, dims[0].Limit)
+	assert.Equal(t, capacity.UpstreamAccountConcurrency(4321), dims[1].Key)
+	assert.EqualValues(t, 2, dims[1].Limit)
+
+	// 未配置上限维度时不产出任何维度（0 = 未配置，不是「不限」）
+	assert.Empty(t, BuildKeyCapacityDimensions(db, int(baseChannelID), 0, KeyCapacityLimits{}))
+	assert.Empty(t, BuildKeyCapacityDimensions(db, int(baseChannelID), 0, KeyCapacityLimits{UpstreamKeyLimit: 0, UpstreamAccountLimit: 0}))
+
+	// 只配 Key 维度：另一把没有账户池，因此只有一条维度
+	onlyKey := BuildKeyCapacityDimensions(db, int(baseChannelID), 1, KeyCapacityLimits{UpstreamKeyLimit: 1, UpstreamAccountLimit: 5})
+	require.Len(t, onlyKey, 1, "未归属账户池的凭据不应产生账户池维度")
+	assert.EqualValues(t, 1, onlyKey[0].Limit)
+
+	// 索引解析不到身份时**不产出维度**（池子刚变化过，不应把内部抖动放大成用户可见的错误）
+	assert.Empty(t, BuildKeyCapacityDimensions(db, int(baseChannelID), 9, KeyCapacityLimits{UpstreamKeyLimit: 1}))
+	// 非我们的渠道同样不产出
+	assert.Empty(t, BuildKeyCapacityDimensions(db, 999999, 0, KeyCapacityLimits{UpstreamKeyLimit: 1}))
 }
