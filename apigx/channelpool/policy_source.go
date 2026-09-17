@@ -132,3 +132,18 @@ func ShareChannelOwnerByBase(db *gorm.DB, baseChannelID int) (int64, bool) {
 	}
 	return shareChannel.OwnerUserID, true
 }
+
+// ShareChannelPublicInfoByBase 按底座渠道 ID 返回分享渠道的公开信息。
+//
+// 用于「用量记录」里展示**实际提供服务的分享来源**：只暴露对外可见的 public_id 与所有者，
+// 不暴露内部行 ID、上游地址或任何凭据相关字段。
+func ShareChannelPublicInfoByBase(db *gorm.DB, baseChannelID int) (publicID string, ownerUserID int64, ok bool) {
+	if db == nil || baseChannelID <= 0 {
+		return "", 0, false
+	}
+	var shareChannel apigxmodel.Channel
+	if err := db.Where("base_channel_id = ?", baseChannelID).First(&shareChannel).Error; err != nil {
+		return "", 0, false
+	}
+	return shareChannel.PublicID, shareChannel.OwnerUserID, true
+}
