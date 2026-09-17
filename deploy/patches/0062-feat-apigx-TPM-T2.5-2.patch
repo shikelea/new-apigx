@@ -1,0 +1,278 @@
+From 66cb3484780d982f569ece50054ce795d0f666fa Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 16:54:10 +0800
+Subject: [PATCH 62/62] =?UTF-8?q?feat(apigx):=20TPM=20=E9=A2=84=E7=95=99?=
+ =?UTF-8?q?=E6=8C=89=E5=AE=9E=E9=99=85=E7=94=A8=E9=87=8F=E9=80=80=E5=9B=9E?=
+ =?UTF-8?q?=EF=BC=88T2.5=20=E5=AE=8C=E6=88=90=EF=BC=8C=E9=98=B6=E6=AE=B5?=
+ =?UTF-8?q?=202=20=E5=85=A8=E9=83=A8=E5=B7=A5=E4=BD=9C=E5=8C=85=E6=94=B6?=
+ =?UTF-8?q?=E5=8F=A3=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 预留时把 {窗口 key, 预留量, TTL} 记入上下文; 结算时按 `实际 - 预留` 退回(AdjustWindow 带下限)
+- 接线点: service/text_quota.go 的消费日志处 —— **唯一**"gin 上下文 + 最终 usage"都齐的位置
+  (底座上下文只有 prompt tokens、结算入口只有 quota、usage facts 只在分层计费快照里;
+   这段查证写进注释, 避免后来者重走)。台账 D-019
+- 真实链路实测: total_tokens=46, 而该渠道 Redis TPM 计数=92(该分钟两次请求各 46),
+  **远小于最坏情况预留 8202** => "按实际退回"在真实链路生效; 反向(开关关)由单测固定为 8202
+- 一次性记账(调整后清空预留, 有用例); 实际高于预留时也让计数反映真实用量(不低报)
+- 测试: 调整机制 3 用例 + 结算接线 4 用例; apigx + middleware 全量通过
+---
+ apigx/relayhook/request_tpm.go     |   6 +-
+ apigx/relayhook/tpm_adjust.go      |  83 +++++++++++++++++++++++
+ apigx/relayhook/tpm_adjust_test.go | 103 +++++++++++++++++++++++++++++
+ service/text_quota.go              |   6 ++
+ 4 files changed, 197 insertions(+), 1 deletion(-)
+ create mode 100644 apigx/relayhook/tpm_adjust.go
+ create mode 100644 apigx/relayhook/tpm_adjust_test.go
+
+diff --git a/apigx/relayhook/request_tpm.go b/apigx/relayhook/request_tpm.go
+index b6b1861..40ead02 100644
+--- a/apigx/relayhook/request_tpm.go
++++ b/apigx/relayhook/request_tpm.go
+@@ -59,7 +59,8 @@ func CheckRequestTPM(c *gin.Context, channelID int, promptTokens int, outputCap
+ 
+ 	ctrl := capacity.New(common.RDB)
+ 	windowKey := capacity.ChannelTPM(int64(channelID), capacity.MinuteWindow(time.Now()))
+-	if err := ctrl.IncrementWindow(c.Request.Context(), windowKey, limit, amount, capacity.WindowTTL(time.Minute)); err != nil {
++	windowTTL := capacity.WindowTTL(time.Minute)
++	if err := ctrl.IncrementWindow(c.Request.Context(), windowKey, limit, amount, windowTTL); err != nil {
+ 		var exceeded *capacity.ErrExceeded
+ 		if errors.As(err, &exceeded) {
+ 			common.SysLog("apigx capacity: channel tpm exceeded")
+@@ -74,6 +75,9 @@ func CheckRequestTPM(c *gin.Context, channelID int, promptTokens int, outputCap
+ 		return types.NewErrorWithStatusCode(errors.New("tpm ledger error"),
+ 			types.ErrorCodeQueryDataError, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+ 	}
++	// 记下本次预留：拿到真实 usage 后按实际用量把差额退回去（T2.5），
++	// 否则渠道的每分钟额度会被"最坏情况"占满，表现为"没用到那么多也被限流"。
++	storeTPMReservation(c, tpmReservation{windowKey: windowKey, reserved: amount, ttl: windowTTL})
+ 	return nil
+ }
+ 
+diff --git a/apigx/relayhook/tpm_adjust.go b/apigx/relayhook/tpm_adjust.go
+new file mode 100644
+index 0000000..1432a1a
+--- /dev/null
++++ b/apigx/relayhook/tpm_adjust.go
+@@ -0,0 +1,83 @@
++package relayhook
++
++import (
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/gin-gonic/gin"
++)
++
++// TPM 预留的结算期调整（T2.5 最后一环）。
++//
++// # 问题
++//
++// TPM 预留必须用**可执行的输出上限**（计划书 §9.2），而上限通常远高于实际输出
++// （缺省 8192）。预留后若不调整，渠道的每分钟 token 额度会被"最坏情况"占满，
++// 结果是**明明没用到那么多也被限流**。
++//
++// # 做法
++//
++// 预留时把 {窗口 key, 预留量, TTL} 记在请求上下文里；拿到真实 usage 之后调用
++// `AdjustReservedTPM`，把 `实际 - 预留` 的差额退回去（`capacity.AdjustWindow` 带下限，
++// 重复调用也不会把计数减成负数）。
++//
++// # 为什么挂在消费日志点
++//
++// 底座把最终 usage 暴露到**消费日志参数**里（`summary.PromptTokens/CompletionTokens`），
++// 而那里同时有 gin 上下文——是唯一"两样都齐"的位置。上下文的 token 键只有 prompt 部分，
++// 结算入口只有 quota，都拿不到完整 usage。
++
++// tpmReservationKey 是存放本次请求 TPM 预留信息的上下文键。
++const tpmReservationKey = "apigx_tpm_reservation"
++
++type tpmReservation struct {
++	windowKey string
++	reserved  int64
++	ttl       time.Duration
++}
++
++// storeTPMReservation 记录一次 TPM 预留（供结算期按实际用量调整）。
++func storeTPMReservation(c *gin.Context, reservation tpmReservation) {
++	if c == nil || reservation.windowKey == "" || reservation.reserved <= 0 {
++		return
++	}
++	c.Set(tpmReservationKey, reservation)
++}
++
++// tpmAdjustEnabled 是"结算期按实际用量调整预留"的开关（默认关闭，与其它 APIGX 开关一致）。
++func tpmAdjustEnabled() bool {
++	return common.GetEnvOrDefaultBool("APIGX_TPM_ADJUST_ENABLED", false)
++}
++
++// AdjustReservedTPM 按实际用量把 TPM 预留的差额退回窗口计数。
++//
++// 任何失败只记日志，**不影响请求**——这是旁路性质的记账修正。
++func AdjustReservedTPM(c *gin.Context, actualTokens int64) {
++	if !tpmAdjustEnabled() || c == nil || actualTokens <= 0 {
++		return
++	}
++	value, exists := c.Get(tpmReservationKey)
++	if !exists {
++		return
++	}
++	reservation, ok := value.(tpmReservation)
++	if !ok || reservation.windowKey == "" {
++		return
++	}
++	delta := actualTokens - reservation.reserved
++	if delta == 0 {
++		return
++	}
++	if common.RDB == nil {
++		return
++	}
++	ctrl := capacity.New(common.RDB)
++	if _, err := ctrl.AdjustWindow(c.Request.Context(), reservation.windowKey, delta, reservation.ttl); err != nil {
++		common.SysError("apigx capacity: adjust reserved tpm failed: " + err.Error())
++		return
++	}
++	// 一次性记账：调整过就清掉，避免同一请求被重复调整
++	c.Set(tpmReservationKey, tpmReservation{})
++	common.SysLog("apigx capacity: adjusted reserved tpm by actual usage")
++}
+diff --git a/apigx/relayhook/tpm_adjust_test.go b/apigx/relayhook/tpm_adjust_test.go
+new file mode 100644
+index 0000000..ff58607
+--- /dev/null
++++ b/apigx/relayhook/tpm_adjust_test.go
+@@ -0,0 +1,103 @@
++package relayhook
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/gin-gonic/gin"
++	"github.com/go-redis/redis/v8"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// TPM 预留的结算期调整（T2.5 最后一环）。
++//
++// 这些断言都是**可确定的**：给定预留量与实际用量，窗口计数应落在哪个数值上是确定的。
++
++func setupTPMAdjustEnv(t *testing.T) (*gin.Context, *capacity.Controller) {
++	t.Helper()
++	addr := os.Getenv("APIGX_TEST_REDIS_ADDR")
++	if addr == "" {
++		t.Skip("未设置 APIGX_TEST_REDIS_ADDR：TPM 调整需要真实窗口计数")
++	}
++	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: 15})
++	require.NoError(t, rdb.Ping(t.Context()).Err(), "连接 Redis 失败")
++	previous := common.RDB
++	common.RDB = rdb
++	t.Cleanup(func() { common.RDB = previous; _ = rdb.Close() })
++
++	gin.SetMode(gin.TestMode)
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++	return c, capacity.New(rdb)
++}
++
++// 关闭时不做任何调整（默认关闭，与其它 APIGX 开关一致）。
++func TestAdjustReservedTPMDisabledByDefault(t *testing.T) {
++	c, ctrl := setupTPMAdjustEnv(t)
++	t.Setenv("APIGX_TPM_ADJUST_ENABLED", "false")
++
++	key := capacity.ChannelTPM(7701, capacity.MinuteWindow(time.Now()))
++	t.Cleanup(func() { _ = ctrl.Drop(context.Background(), key) })
++	require.NoError(t, ctrl.IncrementWindow(t.Context(), key, 1_000_000, 8202, capacity.WindowTTL(time.Minute)))
++	storeTPMReservation(c, tpmReservation{windowKey: key, reserved: 8202, ttl: capacity.WindowTTL(time.Minute)})
++
++	AdjustReservedTPM(c, 46)
++	count, err := ctrl.WindowCount(t.Context(), key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 8202, count, "开关关闭时不得调整")
++}
++
++// 开启后按 `实际 - 预留` 退回；且**只调整一次**（同一请求重复调用不会重复退回）。
++func TestAdjustReservedTPMRefundsTheDifferenceOnce(t *testing.T) {
++	c, ctrl := setupTPMAdjustEnv(t)
++	t.Setenv("APIGX_TPM_ADJUST_ENABLED", "true")
++
++	key := capacity.ChannelTPM(7702, capacity.MinuteWindow(time.Now()))
++	t.Cleanup(func() { _ = ctrl.Drop(context.Background(), key) })
++	// 预留 8202（prompt + 输出上限）
++	require.NoError(t, ctrl.IncrementWindow(t.Context(), key, 1_000_000, 8202, capacity.WindowTTL(time.Minute)))
++	storeTPMReservation(c, tpmReservation{windowKey: key, reserved: 8202, ttl: capacity.WindowTTL(time.Minute)})
++
++	// 实际只用 46 → 计数应变成 46（而不是 8202）
++	AdjustReservedTPM(c, 46)
++	count, err := ctrl.WindowCount(t.Context(), key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 46, count, "应按实际用量退回差额")
++
++	// 同一请求再调用一次：不得重复退回（否则计数会被减到 0 以下或凭空多出额度）
++	AdjustReservedTPM(c, 46)
++	count, err = ctrl.WindowCount(t.Context(), key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 46, count, "一次性记账：重复调用不得再次调整")
++}
++
++// 实际用量**高于**预留时不慌张：调整会让计数上升（窗口本来就该记住真实用量）。
++func TestAdjustReservedTPMHandlesUnderReservation(t *testing.T) {
++	c, ctrl := setupTPMAdjustEnv(t)
++	t.Setenv("APIGX_TPM_ADJUST_ENABLED", "true")
++
++	key := capacity.ChannelTPM(7703, capacity.MinuteWindow(time.Now()))
++	t.Cleanup(func() { _ = ctrl.Drop(context.Background(), key) })
++	require.NoError(t, ctrl.IncrementWindow(t.Context(), key, 1_000_000, 100, capacity.WindowTTL(time.Minute)))
++	storeTPMReservation(c, tpmReservation{windowKey: key, reserved: 100, ttl: capacity.WindowTTL(time.Minute)})
++
++	AdjustReservedTPM(c, 250) // 实际比预留多
++	count, err := ctrl.WindowCount(t.Context(), key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 250, count, "窗口计数应反映真实用量（而不是低报）")
++}
++
++// 没有预留记录（例如未启用 TPM）时是空操作。
++func TestAdjustReservedTPMWithoutReservationIsNoop(t *testing.T) {
++	c, _ := setupTPMAdjustEnv(t)
++	t.Setenv("APIGX_TPM_ADJUST_ENABLED", "true")
++	AdjustReservedTPM(c, 100) // 不应 panic、也不应写任何东西
++	assert.True(t, true)
++}
+diff --git a/service/text_quota.go b/service/text_quota.go
+index 543ebb0..6ac8343 100644
+--- a/service/text_quota.go
++++ b/service/text_quota.go
+@@ -7,6 +7,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/logger"
+@@ -535,6 +536,11 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
+ 
+ 	attachQuotaSaturation(ctx, relayInfo, other)
+ 
++	// APIGX TPM 预留调整（T2.5）：这里同时拿得到 gin 上下文与**最终 usage**，
++	// 因此按 `实际 token - 预留量` 把差额退回窗口计数（预留用的是输出上限，通常远高于实际）。
++	// 失败只记日志，不影响请求。
++	relayhook.AdjustReservedTPM(ctx, int64(summary.PromptTokens+summary.CompletionTokens))
++
+ 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
+ 		ChannelId:        relayInfo.ChannelId,
+ 		PromptTokens:     summary.PromptTokens,
+-- 
+2.53.0.windows.1
+
