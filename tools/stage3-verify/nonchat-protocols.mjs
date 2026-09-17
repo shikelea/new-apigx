@@ -194,6 +194,22 @@ async function main() {
   const badAudio = await call(`${BASE}/v1/audio/transcriptions`, { method: 'POST', auth, form: (() => { const f = new FormData(); f.append('model', AUDIO_MODEL); return f; })() });
   check('语音·缺少音频文件被拒', badAudio.status >= 400, `HTTP ${badAudio.status}`);
 
+  // ---- 语音合成（speech）：协议与计量 ----
+  const sBefore = await usageCount(AUDIO_MODEL);
+  const speech = await call(`${BASE}/v1/audio/speech`, {
+    method: 'POST', auth, body: { model: AUDIO_MODEL, input: 'hello world', voice: 'alloy', response_format: 'mp3' },
+  })
+  check('语音合成·返回音频（协议往返）', speech.status === 200 && speech.text.length > 0, `HTTP ${speech.status} 字节 ${speech.text.length}`)
+  const sAfter = await waitForUsageGrowth(AUDIO_MODEL, sBefore)
+  check('语音合成·计量落库', sAfter > sBefore, `${AUDIO_MODEL} 用量记录 ${sBefore} → ${sAfter}`)
+
+  // ---- 规格约束：上传大小上限 ----
+  const bigForm = new FormData()
+  bigForm.append('model', AUDIO_MODEL)
+  bigForm.append('file', new Blob([new Uint8Array(26 * 1024 * 1024)], { type: 'audio/mpeg' }), 'big.mp3')
+  const bigUpload = await call(`${BASE}/v1/audio/transcriptions`, { method: 'POST', auth, form: bigForm })
+  check('语音·上传超过大小上限（25 MiB）被拒', bigUpload.status >= 400 && bigUpload.status < 500, `HTTP ${bigUpload.status}`)
+
   // ---- 规格约束：计数类上限（计划书点名"输入量限制 / 文档数量限制"）----
   const tooManyInputs = Array.from({ length: 2049 }, (_v, i) => 'x' + i)
   const overEmbed = await call(`${BASE}/v1/embeddings`, {

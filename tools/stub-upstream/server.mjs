@@ -297,6 +297,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 语音合成：按 OpenAI 协议返回**二进制音频**（不是 JSON）。
+  if (url.pathname === '/v1/audio/speech') {
+    const payload = Buffer.alloc(2048, 0x55);
+    res.writeHead(200, {
+      'content-type': body.response_format === 'mp3' || !body.response_format ? 'audio/mpeg' : 'application/octet-stream',
+      'content-length': String(payload.length),
+    });
+    res.end(payload);
+    return;
+  }
+
   if (url.pathname === '/v1/audio/transcriptions') {
     sendJson(res, 200, { text: 'stub transcript', duration: 3.5 });
     return;

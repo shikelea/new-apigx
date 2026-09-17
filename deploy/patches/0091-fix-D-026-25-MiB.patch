@@ -1,0 +1,134 @@
+From 29276e9c378574e7cb3ed7f5ebe95b647a090370 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 22:49:38 +0800
+Subject: [PATCH 91/91] =?UTF-8?q?fix(D-026):=20=E8=AF=AD=E9=9F=B3=E5=90=88?=
+ =?UTF-8?q?=E6=88=90=E9=AA=8C=E8=AF=81=20+=20=E9=9F=B3=E9=A2=91=E4=B8=8A?=
+ =?UTF-8?q?=E4=BC=A0=E5=A4=A7=E5=B0=8F=E4=B8=8A=E9=99=90=2025=20MiB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+按计划书语音验收范围逐条核对:
+- **语音合成(speech)**: 替身新增 /v1/audio/speech(按协议返回二进制音频, 不是 JSON)
+  => 端到端 200 / 2048 字节 + **计量落库** ✅(此前完全没验过)
+- **上传大小**: 实测发现底座**没有任何上限**(超大文件先吃内存与磁盘)
+  => 补 MaxAudioFileSizeBytes = 25 MiB(校验就在既有"必须有 file"判定旁)
+  => 实测 超限 -> HTTP 400 ✅; 用例覆盖"超限被拒"与"恰好等于上限接受"
+- **上传时长**: **仍声明未验证** —— 时长需解码音频, 平台不做音频解码, 由上游判定(不假装验过)
+
+端到端: 非对话套件 16/16 全绿(新增合成/合成计量/上传上限三条)
+能力矩阵: 合成与上传大小移入 verified; not_verified 仅剩 上传时长/Gemini 原生路径/图片编辑/视频超时
+检查: go build ✅ / relay/helper ✅ / apigx/api ✅
+---
+ apigx/api/capabilities.go              |  5 ++--
+ relay/helper/max_tokens_bounds_test.go | 35 ++++++++++++++++++++++++++
+ relay/helper/valid_request.go          | 14 ++++++++++-
+ 3 files changed, 51 insertions(+), 3 deletions(-)
+
+diff --git a/apigx/api/capabilities.go b/apigx/api/capabilities.go
+index 52c6314..d4682b8 100644
+--- a/apigx/api/capabilities.go
++++ b/apigx/api/capabilities.go
+@@ -88,11 +88,12 @@ var capabilityMatrix = []capabilityEntry{
+ 		Evidence: "复用底座适配器；已验转写往返与计量；缺文件返回 4xx（台账 D-024）",
+ 		Verified: []string{
+ 			"转写协议往返与计量落库",
++			"语音合成（speech）返回音频与计量落库",
+ 			"缺少音频文件被拒（4xx，台账 D-024）",
++			"上传大小上限 25 MiB（超限 400，台账 D-026）",
+ 		},
+ 		NotVerified: []string{
+-			"语音合成（speech）",
+-			"上传大小/时长限制",
++			"上传音频的**时长**限制（由上游判定，平台不做音频解码）",
+ 		},
+ 	},
+ 	{
+diff --git a/relay/helper/max_tokens_bounds_test.go b/relay/helper/max_tokens_bounds_test.go
+index 51b8412..f90840c 100644
+--- a/relay/helper/max_tokens_bounds_test.go
++++ b/relay/helper/max_tokens_bounds_test.go
+@@ -2,6 +2,7 @@ package helper
+ 
+ import (
+ 	"bytes"
++	"mime/multipart"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"testing"
+@@ -155,3 +156,37 @@ func TestCountBounds(t *testing.T) {
+ 		require.NoError(t, err)
+ 	})
+ }
++
++// 音频上传大小上限：缺上限时一个超大文件会先吃掉内存与磁盘。
++func TestAudioUploadSizeBound(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	newMultipartContext := func(t *testing.T, size int) *gin.Context {
++		body := &bytes.Buffer{}
++		writer := multipart.NewWriter(body)
++		part, err := writer.CreateFormFile("file", "sample.mp3")
++		require.NoError(t, err)
++		_, err = part.Write(bytes.Repeat([]byte("a"), size))
++		require.NoError(t, err)
++		require.NoError(t, writer.WriteField("model", "whisper-1"))
++		require.NoError(t, writer.Close())
++
++		c, _ := gin.CreateTestContext(httptest.NewRecorder())
++		c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", body)
++		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
++		return c
++	}
++
++	t.Run("audio upload over the limit is rejected", func(t *testing.T) {
++		c := newMultipartContext(t, MaxAudioFileSizeBytes+1)
++		_, err := GetAndValidAudioRequest(c, relayconstant.RelayModeAudioTranscription)
++		require.Error(t, err)
++		require.Contains(t, err.Error(), "too large")
++	})
++
++	t.Run("audio upload at the limit is accepted", func(t *testing.T) {
++		c := newMultipartContext(t, MaxAudioFileSizeBytes)
++		_, err := GetAndValidAudioRequest(c, relayconstant.RelayModeAudioTranscription)
++		require.NoError(t, err)
++	})
++}
+diff --git a/relay/helper/valid_request.go b/relay/helper/valid_request.go
+index e3be622..6db548c 100644
+--- a/relay/helper/valid_request.go
++++ b/relay/helper/valid_request.go
+@@ -59,6 +59,9 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
+ 	return request, err
+ }
+ 
++// MaxAudioFileSizeBytes 是音频上传的大小上限（25 MiB）。
++const MaxAudioFileSizeBytes = 25 << 20
++
+ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, error) {
+ 	audioRequest := &dto.AudioRequest{}
+ 	err := common.UnmarshalBodyReusable(c, audioRequest)
+@@ -77,10 +80,19 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest,
+ 		// **缺少音频文件属客户端错误，必须在校验点拦下并给出 4xx**（阶段 3 实测发现）：
+ 		// 此前它一路走到适配器的打开文件处，报的是通用错误 ⇒ 最终 **500**，
+ 		// 调用方会误判成"平台故障"并重试 —— 而事实是它自己的请求不合法。
+-		if _, fileErr := c.FormFile("file"); fileErr != nil {
++		fileHeader, fileErr := c.FormFile("file")
++		if fileErr != nil {
+ 			return nil, types.NewError(fmt.Errorf("file is required"),
+ 				types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+ 		}
++		// 上传大小必须有界（计划书阶段 3：语音的"上传大小/时长限制"）。
++		// 没有上限时，一个超大文件会先把内存/磁盘吃掉；取 25 MiB 与主流转写实现一致。
++		// 时长由上游判定（我们不做音频解码），平台只对**大小**设界。
++		if fileHeader.Size > MaxAudioFileSizeBytes {
++			return nil, types.NewError(
++				fmt.Errorf("file is too large: limit is %d bytes", MaxAudioFileSizeBytes),
++				types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
++		}
+ 		if audioRequest.ResponseFormat == "" {
+ 			audioRequest.ResponseFormat = "json"
+ 		}
+-- 
+2.53.0.windows.1
+
