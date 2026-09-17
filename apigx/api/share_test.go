@@ -964,3 +964,48 @@ func TestPriceRuleEndpointsEnforceAcceptanceInvariants(t *testing.T) {
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":5000000}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// 能力矩阵：**支持范围必须可机读**，且"未取得真实凭据"的项不得标成 supported
+// （计划书：尚未支持的维度不能在界面宣称已生效）。
+func TestCapabilityMatrixIsHonest(t *testing.T) {
+	env := newTestEnv(t, false)
+	const owner int64 = 9001
+
+	rec, body := env.do(t, http.MethodGet, "/api/capabilities", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	matrix, _ := data["matrix"].([]any)
+	require.NotEmpty(t, matrix, "能力矩阵不能为空")
+
+	byCap := map[string]map[string]any{}
+	for _, item := range matrix {
+		entry, _ := item.(map[string]any)
+		name, _ := entry["capability"].(string)
+		require.NotEmpty(t, name)
+		require.Contains(t, []string{"supported", "declared", "unsupported"}, entry["status"],
+			"状态取值必须受控（三类），否则界面无法据它决定怎么显示")
+		require.NotEmpty(t, entry["evidence"], "%s 必须给出证据说明，否则界面只能靠猜", name)
+		byCap[name] = entry
+	}
+
+	// 六类必须齐全（缺一类就意味着界面会漏掉一个能力）
+	for _, name := range []string{"chat", "image", "embedding", "rerank", "audio", "video"} {
+		assert.Contains(t, byCap, name, "六类能力都要在矩阵里")
+	}
+
+	// **诚实性断言**：视频与其余三类未取得真实凭据 ⇒ 不得标成 supported
+	assert.Equal(t, "declared", byCap["video"]["status"], "视频用底座插件+替身验证，不得宣称真实上游已验证")
+	assert.Equal(t, "declared", byCap["embedding"]["status"])
+
+	// 明确不支持项必须在矩阵里出现（否则界面会显示成"可用"）
+	limits, _ := byCap["video"]["limitations"].([]any)
+	joined := ""
+	for _, l := range limits {
+		joined += l.(string) + " "
+	}
+	assert.Contains(t, joined, "不支持取消", "视频不支持取消必须写进矩阵，界面据此显示能力限制")
+
+	// 未决事项也要暴露（能力可用但策略未定，不能被说成"完全可用"）
+	pending, _ := data["pending_decisions"].([]any)
+	assert.GreaterOrEqual(t, len(pending), 2, "未知价格计费、结果代理等待决事项必须暴露")
+}

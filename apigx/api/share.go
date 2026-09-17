@@ -80,6 +80,10 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	r.PUT("/price-rules", h.setManualPriceRule)
 	r.POST("/channels/:id/price-sync", h.syncChannelPrice)
 
+	// 能力矩阵（T3.7/T3.8）：**支持范围的唯一事实来源**——界面/文档/验收脚本都从这里取，
+	// 避免各自发挥而宣称了没做到的能力（计划书：尚未支持的维度不能在界面宣称已生效）。
+	r.GET("/capabilities", h.listCapabilities)
+
 	// 可解释路由结果（T2.9）：只读，不写库、不投影
 	r.GET("/route-explain", h.explainRoute)
 	// 应用路由排名（T2.7 生效路径）：把名次写成底座渠道权重。**平台侧动作**——
