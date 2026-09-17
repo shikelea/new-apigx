@@ -27,7 +27,8 @@ import { LoadingState } from '@/components/loading-state'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TaskArtifactsCell } from '@/features/usage-logs/components/task-artifacts'
 
-import { getMyTasks } from './api'
+import { getMyTasks, getTaskRetention } from './api'
+import { retentionDeadlineUnix } from './lib/retention'
 import { isTaskTerminal, taskStatusLabelKey } from './lib/status'
 import type { UserTask } from './types'
 
@@ -42,7 +43,10 @@ export function TaskCenter() {
     queryFn: () => getMyTasks(1, PAGE_SIZE),
   })
 
+  const retentionQuery = useQuery({ queryKey: ['apigx-task-retention'], queryFn: getTaskRetention })
+
   const tasks = query.data?.data?.items ?? []
+  const retentionDays = retentionQuery.data?.data?.days ?? 0
 
   if (query.isPending) {
     return <LoadingState />
@@ -72,6 +76,17 @@ export function TaskCenter() {
       id: 'fail_reason',
       header: t('taskCenter.failReason'),
       cell: (row) => (isTaskTerminal(row.status) ? (row.fail_reason ?? '') : ''),
+    },
+    {
+      id: 'retention',
+      header: t('taskCenter.retention'),
+      cell: (row) => {
+        const deadline = retentionDeadlineUnix(row.finish_time, retentionDays)
+        if (deadline === null) {
+          return ''
+        }
+        return dayjs.unix(deadline).format('YYYY-MM-DD HH:mm:ss')
+      },
     },
     {
       id: 'artifacts',

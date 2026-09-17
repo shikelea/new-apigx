@@ -30,6 +30,7 @@ import (
 	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"os"
 )
 
 // Register 注册全部分享者接口。调用方需已挂好认证中间件（UserAuth）。
@@ -79,6 +80,11 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	r.GET("/price-rules", h.listPriceRules)
 	r.PUT("/price-rules", h.setManualPriceRule)
 	r.POST("/channels/:id/price-sync", h.syncChannelPrice)
+
+	// 任务产物的**保留期限**策略（计划书 §4：任务中心显示保留期限）。
+	// 这里是"策略"而不是逐任务字段：产物本身在上游（签名直链），我们记录的是**自己的保留承诺**，
+	// 因此做成可配置项，不引入任务表结构变更与迁移风险。
+	r.GET("/task-retention", h.getTaskRetention)
 
 	// 能力矩阵（T3.7/T3.8）：**支持范围的唯一事实来源**——界面/文档/验收脚本都从这里取，
 	// 避免各自发挥而宣称了没做到的能力（计划书：尚未支持的维度不能在界面宣称已生效）。
@@ -1641,4 +1647,32 @@ func applyBreakerToCandidates(candidates []routing.Candidate) {
 			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
 		}
 	}
+}
+
+// taskRetentionDefaultDays 是未配置时的默认保留天数。
+const taskRetentionDefaultDays = 7
+
+// getTaskRetention 返回任务产物的保留策略（天数）。
+//
+// **为什么是策略而不是逐任务字段**：产物在上游（签名直链），我们并不持有副本；
+// "保留期限"表达的是**本平台承诺的可查期限**。做成可配置项可以满足计划书 §4 的展示要求，
+// 又不必改动任务表结构（避免迁移与三库兼容风险）。上游直链自身可能更早失效，
+// 这属上游行为，界面只按本策略展示。
+func (h *handler) getTaskRetention(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid {
+		return
+	}
+	days := taskRetentionDefaultDays
+	source := "default"
+	if raw := strings.TrimSpace(os.Getenv("APIGX_TASK_RETENTION_DAYS")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			fail(c, http.StatusBadRequest, "invalid_config",
+				"APIGX_TASK_RETENTION_DAYS must be a non-negative integer")
+			return
+		}
+		days = parsed
+		source = "env"
+	}
+	ok(c, gin.H{"days": days, "source": source})
 }

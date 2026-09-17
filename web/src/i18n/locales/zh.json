@@ -6687,5 +6687,6 @@
   "taskCenter.status.queued": "排队中",
   "taskCenter.status.inProgress": "进行中",
   "taskCenter.status.success": "成功",
-  "taskCenter.status.failure": "失败"
+  "taskCenter.status.failure": "失败",
+  "taskCenter.retention": "保留至"
 }

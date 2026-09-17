@@ -6687,5 +6687,6 @@
   "taskCenter.status.queued": "Queued",
   "taskCenter.status.inProgress": "In progress",
   "taskCenter.status.success": "Succeeded",
-  "taskCenter.status.failure": "Failed"
+  "taskCenter.status.failure": "Failed",
+  "taskCenter.retention": "Retained until"
 }

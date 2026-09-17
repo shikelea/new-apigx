@@ -27,3 +27,8 @@ export async function getMyTasks(page = 1, pageSize = 50): Promise<UserTaskListR
   const res = await api.get('/api/task/self', { params: { p: page, page_size: pageSize } })
   return res.data
 }
+// 任务产物的保留策略（计划书 §4：任务中心显示保留期限）。
+export async function getTaskRetention(): Promise<{ success: boolean; data?: { days: number; source: string } }> {
+  const res = await api.get('/api/apigx/task-retention')
+  return res.data
+}

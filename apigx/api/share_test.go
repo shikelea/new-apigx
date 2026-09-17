@@ -1014,3 +1014,28 @@ func TestCapabilityMatrixIsHonest(t *testing.T) {
 	assert.Contains(t, joined, "不支持取消", "视频不支持取消必须写进矩阵，界面据此显示能力限制")
 
 }
+
+// 任务保留策略：默认值与非法配置的行为必须明确（计划书 §4 要求展示保留期限）。
+func TestTaskRetentionPolicy(t *testing.T) {
+	env := newTestEnv(t, false)
+	const owner int64 = 9101
+
+	t.Setenv("APIGX_TASK_RETENTION_DAYS", "")
+	rec, body := env.do(t, http.MethodGet, "/api/task-retention", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	assert.Equal(t, float64(taskRetentionDefaultDays), data["days"], "未配置时应给出默认值")
+	assert.Equal(t, "default", data["source"])
+
+	t.Setenv("APIGX_TASK_RETENTION_DAYS", "30")
+	rec, body = env.do(t, http.MethodGet, "/api/task-retention", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, float64(30), data["days"])
+	assert.Equal(t, "env", data["source"])
+
+	// 非法配置必须报错，而不是悄悄回退成默认值（否则运维会以为配置生效了）
+	t.Setenv("APIGX_TASK_RETENTION_DAYS", "abc")
+	rec, _ = env.do(t, http.MethodGet, "/api/task-retention", owner, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
