@@ -480,3 +480,63 @@ func TestSetChannelCapacityPolicy(t *testing.T) {
 		`{"concurrency_mode":4,"concurrency_value":1}`)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+// ---- 平台 Key 偏好接口（T1.10） ----
+
+func TestPlatformKeyPreferencesAPI(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, other int64 = 8301, 8302
+	const tokenID int64 = 4321
+
+	// 未配置偏好时读取：返回默认模式而不是错误
+	rec, body := env.do(t, http.MethodGet, "/api/platform-keys/4321/preferences", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	assert.Equal(t, false, data["configured"])
+	assert.Equal(t, float64(0), data["scope_mode"], "未配置 = 默认自动路由")
+
+	// 设置「允许来源 + 允许回退」
+	rec, body = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner,
+		`{"scope_mode":1,"allowed_owner_user_ids":[55,77],"allow_fallback":true,"allowed_model_ids":["m-b","m-a"]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, float64(1), data["scope_mode"])
+	assert.Equal(t, true, data["allow_fallback"])
+	owners, _ := data["allowed_owner_user_ids"].([]any)
+	assert.Len(t, owners, 2)
+	models, _ := data["allowed_model_ids"].([]any)
+	assert.Equal(t, []any{"m-a", "m-b"}, models, "允许模型应去重排序")
+
+	// 回读一致
+	rec, body = env.do(t, http.MethodGet, "/api/platform-keys/4321/preferences", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, true, data["configured"])
+
+	// 「允许来源」模式但列表为空必须被拒
+	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":1,"allowed_owner_user_ids":[]}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "空允许列表不得落库")
+
+	// 固定来源模式缺 pinned 必须被拒
+	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":2}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 未知模式被拒
+	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":99}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 归属隔离：他人读取只能看到「未配置」，且不能写入所有者之外的偏好
+	rec, body = env.do(t, http.MethodGet, "/api/platform-keys/4321/preferences", other, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, false, data["configured"], "他人的偏好对当前用户不可见")
+	require.NoError(t, nil)
+
+	// 越权写入：会写成 other 自己的偏好（各用户独立），不影响 owner 的记录
+	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", other, `{"scope_mode":0}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var count int64
+	require.NoError(t, env.db.Model(&apigxmodel.APIKey{}).Where("user_id = ?", owner).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "owner 的偏好记录不受他人操作影响")
+	_ = tokenID
+}

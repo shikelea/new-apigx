@@ -50,6 +50,12 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
 	}
 
+	platformKeys := r.Group("/platform-keys")
+	{
+		platformKeys.GET("/:tokenId/preferences", h.getPlatformKeyPreferences)
+		platformKeys.PUT("/:tokenId/preferences", h.setPlatformKeyPreferences)
+	}
+
 	keys := r.Group("/keys")
 	{
 		keys.PATCH("/:id/status", h.updateKeyStatus)
@@ -639,4 +645,101 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 	default:
 		failFromRepo(c, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 平台 Key 的 APIGX 偏好（T1.10）
+// ---------------------------------------------------------------------------
+
+type platformKeyPreferencesRequest struct {
+	ScopeMode           *int     `json:"scope_mode"`
+	PinnedOfferingID    *int64   `json:"pinned_offering_id"`
+	AllowedModelIDs     []string `json:"allowed_model_ids"`
+	AllowedOwnerUserIDs []int64  `json:"allowed_owner_user_ids"`
+	AllowFallback       *bool    `json:"allow_fallback"`
+}
+
+func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	tokenID, valid := paramID(c, "tokenId")
+	if !valid {
+		return
+	}
+	key, err := apigxmodel.GetAPIKeyByToken(h.db, owner, tokenID)
+	if errors.Is(err, apigxmodel.ErrNotFound) {
+		// 未配置偏好 = 按默认自动路由（不是错误）
+		ok(c, gin.H{"token_id": tokenID, "scope_mode": apigxmodel.ScopeModeDefault, "configured": false})
+		return
+	}
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{
+		"token_id":               key.TokenID,
+		"configured":             true,
+		"scope_mode":             key.ScopeMode,
+		"pinned_offering_id":     key.PinnedOfferingID,
+		"allowed_model_ids":      key.AllowedModels(),
+		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
+		"allow_fallback":         key.AllowFallback,
+	})
+}
+
+// setPlatformKeyPreferences 设置某平台 Key 的 APIGX 偏好。
+//
+// 凭据本身仍由底座的令牌体系持有（TD-07），这里只写偏好；校验在仓储层完成
+// （例如「允许来源」模式必须给出非空列表），避免写入看起来生效实际不生效的组合。
+func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	tokenID, valid := paramID(c, "tokenId")
+	if !valid {
+		return
+	}
+	var req platformKeyPreferencesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+
+	key, err := apigxmodel.UpsertAPIKeyPreferences(h.db, owner, tokenID, func(k *apigxmodel.APIKey) error {
+		if req.ScopeMode != nil {
+			k.ScopeMode = *req.ScopeMode
+		}
+		if req.PinnedOfferingID != nil {
+			k.PinnedOfferingID = *req.PinnedOfferingID
+		}
+		if req.AllowFallback != nil {
+			k.AllowFallback = *req.AllowFallback
+		}
+		if req.AllowedModelIDs != nil {
+			encoded, encErr := common.Marshal(req.AllowedModelIDs)
+			if encErr != nil {
+				return encErr
+			}
+			k.AllowedModelIDs = string(encoded)
+		}
+		if req.AllowedOwnerUserIDs != nil {
+			return k.SetAllowedOwnerIDs(req.AllowedOwnerUserIDs)
+		}
+		return nil
+	})
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{
+		"token_id":               key.TokenID,
+		"scope_mode":             key.ScopeMode,
+		"pinned_offering_id":     key.PinnedOfferingID,
+		"allowed_model_ids":      key.AllowedModels(),
+		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
+		"allow_fallback":         key.AllowFallback,
+	})
 }

@@ -337,3 +337,88 @@ func TestCapacityPolicyReadsRawFourState(t *testing.T) {
 	_, err = GetCapacityPolicy(db, 0)
 	assert.ErrorIs(t, err, ErrInvalidArgument)
 }
+
+// ---- 平台 Key 的 APIGX 偏好（T1.10） ----
+
+func TestAPIKeyPreferencesUpsertAndValidation(t *testing.T) {
+	db := newRepoDB(t)
+	const user, token int64 = 12001, 900
+
+	// 首次：默认模式
+	key, err := UpsertAPIKeyPreferences(db, user, token, nil)
+	require.NoError(t, err)
+	assert.Equal(t, ScopeModeDefault, key.ScopeMode)
+	assert.Empty(t, key.AllowedOwnerIDs(), "默认模式不限制来源")
+	allowed, fallback := key.AllowsOwner(12345)
+	assert.True(t, allowed, "默认模式允许任何来源")
+	assert.False(t, fallback)
+
+	// 允许来源模式：列表为空必须被拒（避免「配了模式却没配列表」的空转配置）
+	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = ScopeModeAllowedOwners
+		return nil
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidArgument)
+
+	// 写入允许来源（去重）+ 允许回退
+	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = ScopeModeAllowedOwners
+		k.AllowFallback = true
+		return k.SetAllowedOwnerIDs([]int64{77, 55, 77})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []int64{55, 77}, key.AllowedOwnerIDs(), "允许来源应去重排序")
+
+	// 回退语义：列表内允许；列表外不允许但**可回退**
+	if allowed, _ := key.AllowsOwner(77); !allowed {
+		assert.Fail(t, "列表内的来源应被允许")
+	}
+	allowed, fallback = key.AllowsOwner(99)
+	assert.False(t, allowed)
+	assert.True(t, fallback, "AllowFallback=true 时调用方应可让底座重选其它来源")
+
+	// 关闭回退后，列表外来源必须直接拒绝
+	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.AllowFallback = false
+		return nil
+	})
+	require.NoError(t, err)
+	allowed, fallback = key.AllowsOwner(99)
+	assert.False(t, allowed)
+	assert.False(t, fallback, "AllowFallback=false 时不得回退")
+
+	// 固定来源模式：必须给出 pinned_offering_id
+	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = ScopeModePinned
+		return nil
+	})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = ScopeModePinned
+		k.PinnedOfferingID = 4242
+		return nil
+	})
+	require.NoError(t, err)
+	assert.EqualValues(t, 4242, key.PinnedOfferingID)
+
+	// 未知模式必须被拒
+	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = 99
+		return nil
+	})
+	assert.ErrorIs(t, err, ErrInvalidArgument)
+
+	// 允许模型列表：去重排序 + 持久化后可读回
+	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = ScopeModeDefault
+		k.AllowedModelIDs = `["b","a","a"]`
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a", "b"}, key.AllowedModels())
+
+	// 归属隔离：另一个用户看不到该偏好
+	_, err = GetAPIKeyByToken(db, 12002, token)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
