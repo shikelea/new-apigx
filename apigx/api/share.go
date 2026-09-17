@@ -65,6 +65,12 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		offerings.DELETE("/:id", h.deleteOffering)
 	}
 
+	plaza := r.Group("/plaza")
+	{
+		plaza.GET("", h.listPlaza)
+		plaza.GET("/:publicId", h.getPlazaItem)
+	}
+
 	usage := r.Group("/usage")
 	{
 		usage.GET("", h.listUsage)
@@ -1105,4 +1111,71 @@ func (h *handler) fetchUpstreamModels(c *gin.Context) {
 		result["skipped"] = skipped
 	}
 	ok(c, result)
+}
+
+// ---------------------------------------------------------------------------
+// 广场与详情（T1.9）
+// ---------------------------------------------------------------------------
+
+// listPlaza 列出广场条目：**只含已发布且分组公开的供给**。
+//
+// 能力对外**只给平台当前真正具备的部分**（见 `PlatformSupportedCapabilities`），
+// 分享者声明但尚未具备的单独列在 `unverified_capabilities` 里如实展示——
+// 既不冒充可用，也不隐瞒（计划书「只启用已完成能力」）。
+func (h *handler) listPlaza(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid {
+		return
+	}
+	page, pageSize := 1, 20
+	if raw := c.Query("page"); raw != "" {
+		if parsed, convErr := strconv.Atoi(raw); convErr == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+	if raw := c.Query("page_size"); raw != "" {
+		if parsed, convErr := strconv.Atoi(raw); convErr == nil && parsed > 0 && parsed <= 100 {
+			pageSize = parsed
+		}
+	}
+	items, total, err := apigxmodel.ListPlazaItems(h.db, pageSize, (page-1)*pageSize)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	out := make([]gin.H, 0, len(items))
+	for _, item := range items {
+		out = append(out, plazaItemToJSON(item))
+	}
+	ok(c, gin.H{"items": out, "total": total, "page": page, "page_size": pageSize})
+}
+
+func (h *handler) getPlazaItem(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid {
+		return
+	}
+	publicID := c.Param("publicId")
+	item, err := apigxmodel.GetPlazaItem(h.db, publicID)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, plazaItemToJSON(*item))
+}
+
+// plazaItemToJSON 把广场条目转成对外 JSON。
+//
+// 只输出对外可见字段：**不含**渠道内部 ID、上游地址、凭据、成本价或任何内部标识。
+func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
+	out := gin.H{
+		"offering_public_id": item.OfferingPublicID,
+		"model":              item.UpstreamModelID,
+		"channel_public_id":  item.ChannelPublicID,
+		"owner_user_id":      item.OwnerUserID,
+		"capabilities":       item.Capabilities,
+		"updated_at":         item.UpdatedAt,
+	}
+	if len(item.UnverifiedCapabilities) > 0 {
+		out["unverified_capabilities"] = item.UnverifiedCapabilities
+	}
+	return out
 }

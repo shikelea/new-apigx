@@ -630,3 +630,79 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
 		`{"upstream_model_id":"gpt-x"}`)
 	assert.Equal(t, http.StatusOK, rec.Code, "软删除后应可重新发布")
 }
+
+// ---- 广场与详情（T1.9） ----
+
+func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8501
+
+	// 分组设为**公开**（可见性 2）；否则即便已发布也不该出现在广场
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "公开组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
+	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
+
+	// 草稿供给：不应出现在广场
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"m-plaza","capabilities":{"streaming":true,"vision":true,"tools":true}}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+	publicID := body["data"].(map[string]any)["public_id"].(string)
+
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, body["data"].(map[string]any)["items"], "草稿不得出现在广场")
+	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, owner, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "未发布供给的详情对广场不存在")
+
+	// 提交 + 发布后才可见
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	require.Len(t, items, 1)
+	item, _ := items[0].(map[string]any)
+	assert.Equal(t, "m-plaza", item["model"])
+	assert.NotEmpty(t, item["channel_public_id"], "广场必须给出对外可辨识的来源标识")
+
+	// **只启用已完成能力**：只声明了流式的供给，能力里就只有流式；
+	// vision/tools 属"声明了但平台尚不具备"，单独列出而不是混进 capabilities
+	// 能力字段是结构化布尔值（无 omitempty），因此断言的是**取值**而不是键是否存在：
+	// 平台具备的为 true，尚不具备的为 false——不冒充可用。
+	caps, _ := item["capabilities"].(map[string]any)
+	assert.Equal(t, true, caps["streaming"], "流式由底座中继链路直接支持，已具备")
+	assert.Equal(t, false, caps["vision"], "视觉尚未按供给验证，不得对外声称具备")
+	assert.Equal(t, false, caps["tools"], "工具调用尚未按供给验证")
+	unverified, _ := item["unverified_capabilities"].([]any)
+	assert.ElementsMatch(t, []any{"vision", "tools"}, unverified, "声明但未具备的能力应如实单列")
+
+	// 详情可见
+	rec, body = env.do(t, http.MethodGet, "/api/plaza/"+publicID, owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	detail, _ := body["data"].(map[string]any)
+	assert.Equal(t, "m-plaza", detail["model"])
+
+	// 私有分组：即便已发布也不出现在广场
+	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: 1}
+	require.NoError(t, apigxmodel.CreateShareGroup(env.db, privateGroup))
+	privateChannelID := env.createChannel(t, owner, privateGroup.ID, nextBaseChannelID())
+	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(privateChannelID, 10)+"/offerings", owner, `{"upstream_model_id":"m-private"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	privateOfferingID := int64(body["data"].(map[string]any)["id"].(float64))
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, privateOfferingID))
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, privateOfferingID))
+
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	items, _ = body["data"].(map[string]any)["items"].([]any)
+	assert.Len(t, items, 1, "私有分组的已发布供给不得出现在广场")
+
+	// 未登录不得访问广场
+	rec, _ = env.do(t, http.MethodGet, "/api/plaza", 0, "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
