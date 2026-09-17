@@ -18,6 +18,13 @@ type EmbeddingOptions struct {
 	NumCtx           int      `json:"num_ctx,omitempty"`
 }
 
+// MaxEmbeddingInputs 是单次请求允许的输入条数上限。
+//
+// 与 MaxImageN 同理：**用户可控的计数必须在校验器里设界**，否则一个超大输入数组
+// 会先把内存与上游配额吃掉（仓库的计费安全规则也要求这类字段从第一天起就有界）。
+// 取 2048 与主流实现一致。
+const MaxEmbeddingInputs = 2048
+
 type EmbeddingRequest struct {
 	Model            string   `json:"model"`
 	Input            any      `json:"input"`

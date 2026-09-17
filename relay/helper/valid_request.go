@@ -102,6 +102,12 @@ func GetAndValidateRerankRequest(c *gin.Context) (*dto.RerankRequest, error) {
 	if len(rerankRequest.Documents) == 0 {
 		return nil, types.NewError(fmt.Errorf("documents is empty"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
+	// 文档条数必须有界（计划书阶段 3：重排的"文档数量限制"）。
+	if len(rerankRequest.Documents) > dto.MaxRerankDocuments {
+		return nil, types.NewError(
+			fmt.Errorf("documents must contain at most %d items", dto.MaxRerankDocuments),
+			types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
 	return rerankRequest, nil
 }
 
@@ -115,6 +121,12 @@ func GetAndValidateEmbeddingRequest(c *gin.Context, relayMode int) (*dto.Embeddi
 
 	if embeddingRequest.Input == nil {
 		return nil, fmt.Errorf("input is empty")
+	}
+	// 输入条数必须有界（计划书阶段 3：向量的"输入量限制"）。
+	if count := embeddingInputCount(embeddingRequest.Input); count > dto.MaxEmbeddingInputs {
+		return nil, types.NewError(
+			fmt.Errorf("input must contain at most %d items", dto.MaxEmbeddingInputs),
+			types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 	if relayMode == relayconstant.RelayModeModerations && embeddingRequest.Model == "" {
 		embeddingRequest.Model = "omni-moderation-latest"
@@ -459,4 +471,26 @@ func validateImageSize(size string) error {
 		return fmt.Errorf("size must be between 1 and %d on each side, got %dx%d", maxImageSizeEdge, width, height)
 	}
 	return nil
+}
+
+// embeddingInputCount 返回 embeddings 请求的输入条数。
+//
+// 请求的 `input` 按协议可以是字符串、字符串数组，或 token 数组（含嵌套）。
+// **只对能确定的形态计数，认不出的形态返回 0**（不据此拒绝）—— 具体语义由上游判定，
+// 我们只负责挡住"数组大到明显不合理"这一类。
+func embeddingInputCount(input any) int {
+	switch value := input.(type) {
+	case string:
+		return 1
+	case []any:
+		return len(value)
+	case []string:
+		return len(value)
+	case []int:
+		return len(value)
+	case [][]int:
+		return len(value)
+	default:
+		return 0
+	}
 }

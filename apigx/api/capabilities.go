@@ -51,10 +51,10 @@ var capabilityMatrix = []capabilityEntry{
 			"尺寸语法与范围校验（台账 D-021）",
 			"结果访问需鉴权",
 			"计量（用量记录含配额）",
+			"数量参数 n 的上限 128（超限 400，实测 n=129）",
 		},
 		NotVerified: []string{
 			"图片编辑（未与真实上游联调）",
-			"数量参数 n 的上限（未验证）",
 		},
 		Limitations: []string{
 			"上游返回**签名直链**（有效期内持有者可直接访问）：若要求“结果仅授权者可见”，需我方代理或转存",
@@ -68,9 +68,7 @@ var capabilityMatrix = []capabilityEntry{
 			"批量 embeddings 协议往返",
 			"向量维度",
 			"usage 计量与落库",
-		},
-		NotVerified: []string{
-			"输入量上限（未验证）",
+			"输入条数上限 2048（超限 400，实测 2049 条）",
 		},
 	},
 	{
@@ -81,9 +79,7 @@ var capabilityMatrix = []capabilityEntry{
 			"查询/文档列表往返与排序结果",
 			"计量落库",
 			"空文档列表被拒",
-		},
-		NotVerified: []string{
-			"文档数量上限（未验证）",
+			"文档条数上限 1000（超限 400，实测 1001 条）",
 		},
 	},
 	{

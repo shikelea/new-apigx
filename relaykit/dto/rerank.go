@@ -8,6 +8,9 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
+// MaxRerankDocuments 是单次请求允许的文档条数上限（取 1000，与常见厂商限制一致）。
+const MaxRerankDocuments = 1000
+
 type RerankRequest struct {
 	Documents       []any  `json:"documents"`
 	Query           string `json:"query"`

@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -91,4 +93,65 @@ func TestSGLangMinTokensBounds(t *testing.T) {
 			require.NotNil(t, request.MinTokens)
 		})
 	}
+}
+
+// 计数类字段的上限：图片数量、向量输入条数、重排文档条数。
+//
+// 与 max_tokens 同理 —— 用户可控的计数参与上游配额与内存占用，
+// 必须在**校验阶段**被挡住，而不是等到上游或计费环节。
+func TestCountBounds(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newJSONContext := func(t *testing.T, body string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/relay", bytes.NewBufferString(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		return c
+	}
+
+	t.Run("embedding input count over the limit is rejected", func(t *testing.T) {
+		items := make([]string, dto.MaxEmbeddingInputs+1)
+		for i := range items {
+			items[i] = "x"
+		}
+		body, err := common.Marshal(map[string]any{"model": "m", "input": items})
+		require.NoError(t, err)
+		_, err = GetAndValidateEmbeddingRequest(newJSONContext(t, string(body)), relayconstant.RelayModeEmbeddings)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "at most")
+	})
+
+	t.Run("embedding input at the limit is accepted", func(t *testing.T) {
+		items := make([]string, dto.MaxEmbeddingInputs)
+		for i := range items {
+			items[i] = "x"
+		}
+		body, err := common.Marshal(map[string]any{"model": "m", "input": items})
+		require.NoError(t, err)
+		_, err = GetAndValidateEmbeddingRequest(newJSONContext(t, string(body)), relayconstant.RelayModeEmbeddings)
+		require.NoError(t, err)
+	})
+
+	t.Run("rerank documents over the limit is rejected", func(t *testing.T) {
+		docs := make([]string, dto.MaxRerankDocuments+1)
+		for i := range docs {
+			docs[i] = "d"
+		}
+		body, err := common.Marshal(map[string]any{"model": "m", "query": "q", "documents": docs})
+		require.NoError(t, err)
+		_, err = GetAndValidateRerankRequest(newJSONContext(t, string(body)))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "at most")
+	})
+
+	t.Run("rerank documents at the limit is accepted", func(t *testing.T) {
+		docs := make([]string, dto.MaxRerankDocuments)
+		for i := range docs {
+			docs[i] = "d"
+		}
+		body, err := common.Marshal(map[string]any{"model": "m", "query": "q", "documents": docs})
+		require.NoError(t, err)
+		_, err = GetAndValidateRerankRequest(newJSONContext(t, string(body)))
+		require.NoError(t, err)
+	})
 }
