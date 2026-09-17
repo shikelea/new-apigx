@@ -301,6 +301,16 @@ func applyFetchModelsHeaderOverrides(channel *model.Channel, key string, headers
 	return nil
 }
 
+// FetchChannelUpstreamModelIDsForAPIGX 导出「按渠道类型向对应上游拉取模型列表」的能力。
+//
+// 存在理由（APIGX 一键获取模型，T1.8）：真正干活的 `fetchChannelUpstreamModelIDs` 会按
+// 渠道类型分派到 40+ 家 provider 的适配器；APIGX 侧要复用这份能力就必须有一个**导出入口**，
+// 自己实现等于把这些适配器全部重写一遍（违反二开第一原则，CODE_STYLE 第 25 条）。
+// 台账见 docs/stage0/upstream-diff.md 的 D-017。
+func FetchChannelUpstreamModelIDsForAPIGX(channel *model.Channel) ([]string, error) {
+	return fetchChannelUpstreamModelIDs(channel)
+}
+
 func FetchUpstreamModels(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {

@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/controller"
 	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -52,6 +53,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
 		channels.POST("/:id/offerings", h.createOffering)
 		channels.GET("/:id/offerings", h.listOfferings)
+		channels.POST("/:id/fetch-models", h.fetchUpstreamModels)
 	}
 
 	offerings := r.Group("/offerings")
@@ -1045,4 +1047,62 @@ func isDuplicateError(err error) bool {
 	return strings.Contains(msg, "unique constraint failed") ||
 		strings.Contains(msg, "duplicate entry") ||
 		strings.Contains(msg, "duplicate key value")
+}
+
+type fetchModelsRequest struct {
+	// Import 为 true 时，把拉取到的模型**批量导入为草稿供给**（一键获取的落库动作）。
+	Import bool `json:"import"`
+}
+
+// fetchUpstreamModels 一键获取该渠道的上游模型列表（可选直接导入为草稿供给）。
+//
+// **复用底座的取模型能力**：按渠道类型分派到对应 provider 适配器（40+ 家）的实现已经在底座里，
+// 这里通过 `controller.FetchChannelUpstreamModelIDsForAPIGX`（3 行导出包装，台账 D-017）调用它，
+// 而不是自己重写一套。归属仍由服务端强制：先按 owner 取出分享渠道，再用它绑定的底座渠道去拉取。
+func (h *handler) fetchUpstreamModels(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req fetchModelsRequest
+	_ = c.ShouldBindJSON(&req) // 允许空 body（仅预览）
+
+	shareChannel, err := apigxmodel.GetChannel(h.db, owner, id)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if shareChannel.BaseChannelID <= 0 {
+		fail(c, http.StatusBadRequest, "invalid_channel", "share channel has no base channel")
+		return
+	}
+	var baseChannel basemodel.Channel
+	if err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
+		failFromRepo(c, err)
+		return
+	}
+
+	modelIDs, err := controller.FetchChannelUpstreamModelIDsForAPIGX(&baseChannel)
+	if err != nil {
+		// 上游取列表失败通常是凭据/网络问题：对外给明确原因，但不泄露上游原始报文
+		common.SysError("apigx api: fetch upstream models failed: " + err.Error())
+		fail(c, http.StatusBadGateway, "upstream_fetch_failed", "failed to fetch models from upstream")
+		return
+	}
+
+	result := gin.H{"models": modelIDs}
+	if req.Import {
+		created, skipped, importErr := apigxmodel.ImportModelOfferings(h.db, owner, shareChannel.ID, modelIDs)
+		if importErr != nil {
+			failFromRepo(c, importErr)
+			return
+		}
+		result["created"] = created
+		result["skipped"] = skipped
+	}
+	ok(c, result)
 }

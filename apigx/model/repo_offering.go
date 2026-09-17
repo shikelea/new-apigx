@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
@@ -193,4 +194,51 @@ func (o *ModelOffering) CapabilityOf() Capability {
 	}
 	_ = common.UnmarshalJsonStr(o.Capabilities, &caps)
 	return caps
+}
+
+// ImportModelOfferings 批量导入供给（一键获取上游模型列表后的落库动作）。
+//
+// 幂等：已存在（存活）的同名供给会被跳过而不是报错——上游模型列表反复拉取是常态，
+// 报错会让分享者必须先手工比对。返回新建数量与被跳过的模型名，便于界面如实回显。
+//
+// 新导入的供给仍然是**草稿**：导入不等于发布（发布要显式提交审核）。
+func ImportModelOfferings(db *gorm.DB, ownerUserID, channelID int64, upstreamModelIDs []string) (created int, skipped []string, err error) {
+	if len(upstreamModelIDs) == 0 {
+		return 0, nil, nil
+	}
+	if _, err := GetChannel(db, ownerUserID, channelID); err != nil {
+		return 0, nil, err
+	}
+
+	existing := make(map[string]struct{})
+	var alive []ModelOffering
+	if err := db.Where("channel_id = ?", channelID).Find(&alive).Error; err != nil {
+		return 0, nil, err
+	}
+	for i := range alive {
+		existing[alive[i].UpstreamModelID] = struct{}{}
+	}
+
+	seen := make(map[string]struct{}, len(upstreamModelIDs))
+	for _, modelID := range upstreamModelIDs {
+		trimmed := strings.TrimSpace(modelID)
+		if trimmed == "" {
+			continue
+		}
+		if _, dup := seen[trimmed]; dup {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		if _, exists := existing[trimmed]; exists {
+			skipped = append(skipped, trimmed)
+			continue
+		}
+		offering := &ModelOffering{ChannelID: channelID, UpstreamModelID: trimmed}
+		if err := CreateModelOffering(db, ownerUserID, offering); err != nil {
+			return created, skipped, err
+		}
+		existing[trimmed] = struct{}{}
+		created++
+	}
+	return created, skipped, nil
 }

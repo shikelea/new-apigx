@@ -509,3 +509,34 @@ func TestListModelOfferingsByChannelScopesByOwner(t *testing.T) {
 	// 驳回后可以修改并重新提交
 	require.NoError(t, SubmitModelOffering(db, ownerA, target.ID))
 }
+
+// ---- 一键获取后的批量导入（T1.8） ----
+
+func TestImportModelOfferingsIsIdempotentAndDraft(t *testing.T) {
+	db := newRepoDB(t)
+	const owner, other int64 = 13201, 13202
+	_, channel := seedGroupAndChannel(t, db, owner)
+
+	created, skipped, err := ImportModelOfferings(db, owner, channel.ID, []string{"m1", " m2 ", "m1", "", "m3"})
+	require.NoError(t, err)
+	assert.Equal(t, 3, created, "去空白、去批内重复、忽略空项")
+	assert.Empty(t, skipped)
+
+	// 再次导入同一批：全部跳过，不报错（上游模型列表反复拉取是常态）
+	created, skipped, err = ImportModelOfferings(db, owner, channel.ID, []string{"m1", "m2", "m4"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, created)
+	assert.ElementsMatch(t, []string{"m1", "m2"}, skipped)
+
+	// 导入的供给仍是草稿（导入 ≠ 发布）
+	list, err := ListModelOfferingsByChannel(db, owner, channel.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 4)
+	for i := range list {
+		assert.Equal(t, OfferingStatusDraft, list[i].Status, "导入的供给必须从草稿开始")
+	}
+
+	// 归属：用别人的渠道导入必须被拒
+	_, _, err = ImportModelOfferings(db, other, channel.ID, []string{"x"})
+	assert.ErrorIs(t, err, ErrNotFound)
+}
