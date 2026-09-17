@@ -141,3 +141,20 @@ func ChannelScope(shareChannelID int64) (scopeType int, scopeID int64) {
 func UpstreamKeyScope(upstreamKeyID int64) (scopeType int, scopeID int64) {
 	return apigxmodel.PriceScopeUpstreamKey, upstreamKeyID
 }
+
+// perRequestItems 构造「按次计价」分项（USD/次 → 微美元/次）。
+//
+// 与 token 价同样遵守"0 不等于免费"：价格为 0 时返回错误而不是生成 0 元分项。
+func perRequestItems(usdPerRequest float64) ([]apigxmodel.PriceRuleItem, error) {
+	if math.IsNaN(usdPerRequest) || math.IsInf(usdPerRequest, 0) || usdPerRequest <= 0 {
+		return nil, fmt.Errorf("%w: invalid per-request price %v", apigxmodel.ErrInvalidArgument, usdPerRequest)
+	}
+	micro := usdPerRequest * 1_000_000
+	if micro > float64(maxUnitPriceMicro) {
+		return nil, fmt.Errorf("%w: %v USD per request is implausible", ErrPriceOutOfRange, usdPerRequest)
+	}
+	return []apigxmodel.PriceRuleItem{{
+		Dimension: DimensionRequestCount, UnitScale: UnitScalePerRequest,
+		UnitPriceMicro: int64(math.Round(micro)), Currency: "USD",
+	}}, nil
+}

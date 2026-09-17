@@ -241,3 +241,38 @@ func seedOffering(t *testing.T, db *gorm.DB, ownerUserID, channelID int64, upstr
 	require.NoError(t, apigxmodel.CreateModelOffering(db, ownerUserID, offering))
 	return offering.ID
 }
+
+// 按次计价（底座 model_price）**不能被静默丢掉**：丢了等于把按次收费的模型当免费。
+func TestSyncChannelPricesHandlesPerRequestPricing(t *testing.T) {
+	db := newPriceTestDB(t)
+	const owner int64 = 7501
+	channel := seedShareChannel(t, db, owner, "F渠道")
+
+	report, err := SyncChannelPrices(db, owner, channel, []Reading{
+		{UpstreamModelID: "per-request-model", PerRequestUSD: 0.5,
+			Source: apigxmodel.PriceRuleSourceBuiltinPreset, SourceRef: "new-api/model_price/per-request-model"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, report.Applied)
+
+	rule, items, err := apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeChannel, channel, 0)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, DimensionRequestCount, items[0].Dimension, "按次价必须是「请求次数」维度")
+	assert.Equal(t, UnitScalePerRequest, items[0].UnitScale)
+	assert.EqualValues(t, 500_000, items[0].UnitPriceMicro, "0.5 USD/次 = 500000 微美元/次")
+	assert.Equal(t, apigxmodel.PriceModePerRequest, rule.PricingMode, "计价方式要如实记成「按次」")
+	assert.Equal(t, apigxmodel.PriceRuleSourceBuiltinPreset, rule.Source)
+}
+
+// 按次价离谱时同样拒绝写入。
+func TestPerRequestPriceRejectsImplausibleAndZero(t *testing.T) {
+	_, err := perRequestItems(0)
+	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument, "0 不是「免费」，是没配")
+
+	_, err = perRequestItems(-1)
+	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
+
+	_, err = perRequestItems(5_000_000)
+	assert.ErrorIs(t, err, ErrPriceOutOfRange)
+}

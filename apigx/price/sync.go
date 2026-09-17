@@ -31,6 +31,9 @@ type Reading struct {
 	OutputUSDPerMillion     float64
 	CacheReadUSDPerMillion  float64
 	CacheWriteUSDPerMillion float64
+	// PerRequestUSD 按次价（USD/次，对应底座的 `model_price`）。
+	// 与 token 价**互斥**：底座也是二选一表达。两者都给时以按次价为准（与底座一致）。
+	PerRequestUSD float64
 	// Source 价格来源（`PriceRuleSource*`）。
 	Source int
 	// SourceRef 来源标识（如 "models.dev/openai/gpt-4o"）。
@@ -84,9 +87,16 @@ func SyncChannelPrices(db *gorm.DB, ownerUserID, shareChannelID int64, readings 
 		if modelID == "" {
 			continue
 		}
-		items, mapErr := ItemsFromUSDPerMillion(
-			reading.InputUSDPerMillion, reading.OutputUSDPerMillion,
-			reading.CacheReadUSDPerMillion, reading.CacheWriteUSDPerMillion)
+		var items []apigxmodel.PriceRuleItem
+		var mapErr error
+		if reading.PerRequestUSD > 0 {
+			// 按次计价：**不能静默丢掉**（丢了就等于把"按次收费"的模型当成免费）
+			items, mapErr = perRequestItems(reading.PerRequestUSD)
+		} else {
+			items, mapErr = ItemsFromUSDPerMillion(
+				reading.InputUSDPerMillion, reading.OutputUSDPerMillion,
+				reading.CacheReadUSDPerMillion, reading.CacheWriteUSDPerMillion)
+		}
 		if mapErr != nil {
 			// 口径错误（如把"每 1K"当"每 1M"）：**不写任何版本**，只报告
 			report.Skipped = append(report.Skipped, modelID)
@@ -104,12 +114,16 @@ func SyncChannelPrices(db *gorm.DB, ownerUserID, shareChannelID int64, readings 
 		if currency == "" {
 			currency = "USD"
 		}
+		pricingMode := apigxmodel.PriceModePerDimension
+		if reading.PerRequestUSD > 0 {
+			pricingMode = apigxmodel.PriceModePerRequest
+		}
 		// 有对应供给、或调用方给了价格读数的模型，视为"模型已知"；
 		// 真正未知的模型（既无供给又无价格）根本不会出现在 readings 里。
 		result, ingestErr := apigxmodel.IngestSourcePrice(db, apigxmodel.SourcePriceIngest{
 			ScopeType: scopeType, ScopeID: scopeID,
 			Source: reading.Source, SourceRef: reading.SourceRef,
-			Currency: currency, PricingMode: apigxmodel.PriceModePerDimension,
+			Currency: currency, PricingMode: pricingMode,
 			Items: items, RawRecord: reading.RawRecord,
 			ModelKnown: true,
 			FxRateID:   reading.FxRateID, FxRateMicro: reading.FxRateMicro,
