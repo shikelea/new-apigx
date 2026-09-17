@@ -103,12 +103,10 @@ var capabilityMatrix = []capabilityEntry{
 		Verified: []string{
 			"提交与轮询到成功终态",
 			"失败终态如实反映",
+			"超时路径：长期未完成的任务被判定为失败并写明原因（实测 TASK_TIMEOUT_MINUTES=1，73 秒后置为 FAILURE，原因「任务超时（1分钟）」）",
 			"任务绑定正确用户与原渠道",
 			"跨用户访问被拒",
 			"结果内容访问（授权者取回）",
-		},
-		NotVerified: []string{
-			"超时路径（未构造真实超时）",
 		},
 		Limitations: []string{
 			"**不支持取消**：`/v1/videos/:id/cancel` 返回 404 —— 界面必须显示该能力限制，不得显示“可取消”",
