@@ -6531,5 +6531,13 @@
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
     "Zoom": "Zoom"
-  }
+  },
+  "plaza.title": "Model Plaza",
+  "plaza.description": "Models shared by providers, with sources and quality",
+  "plaza.empty": "No shared model yet",
+  "plaza.search.placeholder": "Search model",
+  "plaza.sources": "{{count}} source",
+  "plaza.sources_plural": "{{count}} sources",
+  "plaza.capabilities": "Capabilities",
+  "plaza.error": "Failed to load the plaza"
 }

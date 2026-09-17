@@ -6531,5 +6531,13 @@
     "Zhipu GLM": "智谱GLM",
     "Zhipu V4": "智谱 V4",
     "Zoom": "缩放"
-  }
+  },
+  "plaza.title": "模型广场",
+  "plaza.description": "分享者提供的模型，含来源与质量",
+  "plaza.empty": "还没有分享的模型",
+  "plaza.search.placeholder": "搜索模型",
+  "plaza.sources": "{{count}} 个来源",
+  "plaza.sources_plural": "{{count}} 个来源",
+  "plaza.capabilities": "能力",
+  "plaza.error": "广场加载失败"
 }
