@@ -1,0 +1,367 @@
+From a78eed6d057475a56aee2c57a5906609e824fa52 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:58:13 +0800
+Subject: [PATCH 49/49] =?UTF-8?q?feat(apigx):=20Key=20=E5=8A=A0=E6=9D=83?=
+ =?UTF-8?q?=EF=BC=88WRR=20=E5=B1=95=E5=BC=80=EF=BC=89=E4=B8=8E=E5=89=A9?=
+ =?UTF-8?q?=E4=BD=99=E5=AE=B9=E9=87=8F=E5=88=A4=E5=AE=9A=EF=BC=88T2.6=20?=
+ =?UTF-8?q?=E5=89=8D=E5=8D=8A=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 先查清底座可复用的部分: Channel.GetNextEnabledKey 的 MultiKeyStatusList(缺失即启用,
+  只有 Enabled 会被选用) 与 MultiKeyMode(轮询/随机都作用在一份列表上)
+- 加权: 底座无 per-Key 权重, 故按权重**展开**列表即可得到加权轮询/加权随机(无需改底座)
+  * 权重 0 视为 1(权重 0 不等于没机会, 与底座 +10 平滑同精神); 展开上限 16 防写错撑爆
+  * 展开后每个槽位仍映射回同一把 Key => 逐 Key 统计与失效隔离不受影响
+  * 测试实测 3:1 -> 4 槽位, MultiKeySize=4, 分布 3:1
+- 剩余容量: SaturatedKeyIndexes + MergeKeyStatusList
+  * 底座状态表同时承载它自己的禁用标记(如鉴权失败), 故合并**只回收我们自己写过的格子**,
+    用自己的标记值 StatusCapacitySaturated(刻意落在底座 ChannelStatus* 之外)
+  * 未配置上限不算已满
+- 测试 4/4; 待做: 饱和标记的运行时刷新接线 + 端到端(满载跳过/全满则渠道不可选)
+- apigx + middleware 全量通过
+---
+ apigx/channelpool/key_weight.go      | 132 +++++++++++++++++++++++++++
+ apigx/channelpool/projection.go      |  19 +++-
+ apigx/channelpool/projection_test.go | 131 ++++++++++++++++++++++++++
+ apigx/model/base.go                  |   8 ++
+ 4 files changed, 287 insertions(+), 3 deletions(-)
+ create mode 100644 apigx/channelpool/key_weight.go
+
+diff --git a/apigx/channelpool/key_weight.go b/apigx/channelpool/key_weight.go
+new file mode 100644
+index 0000000..82c59ce
+--- /dev/null
++++ b/apigx/channelpool/key_weight.go
+@@ -0,0 +1,132 @@
++package channelpool
++
++import (
++	"sort"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++)
++
++// Key 加权与剩余容量策略（T2.6）。
++//
++// # 复用底座的哪一部分
++//
++// 底座的 `Channel.GetNextEnabledKey`（`model/channel.go`）已经提供了两个我们需要的旋钮，
++// 因此**不重写选择器**：
++//   - `ChannelInfo.MultiKeyStatusList`：`getStatus(i)` **缺失即视为启用**，
++//     只有状态等于 `common.ChannelStatusEnabled` 的索引会被选用 ⇒ 把"已满/冷却中"的
++//     Key 标成非启用值，底座就会**自己跳过**它；
++//   - `MultiKeyMode`（轮询/随机）：它在一份**列表**上做轮询或均匀随机，
++//     因此把列表按权重展开（权重 3 的 Key 出现 3 次）即可得到**加权轮询/加权随机**，
++//     两种模式都自然成立，且不需要改底座。
++//
++// # 为什么用"展开"实现加权
++//
++// 底座没有 per-Key 权重字段。展开是唯一**无需改底座**、且对轮询与随机都等价有效的做法
++// （加权轮询的经典 WRR 形式）。代价是投影后的 key 列表会变长，因此设了展开上限，
++// 并把权重 0 视为 1 —— 与底座对渠道权重的 +10 平滑是同一个精神：
++// **权重 0 不等于"没有机会"**，否则一把没配权重的 Key 会永远选不到。
++
++// maxWeightedKeyExpansion 是单个 Key 的最大展开次数（防止权重写错把列表撑爆）。
++const maxWeightedKeyExpansion = 16
++
++// KeyWeight 是一把参与加权的上游 Key。
++type KeyWeight struct {
++	// Index 是该 Key 在**投影后底座 key 列表**中的索引。
++	Index int
++	// Weight 是分享者配置的权重；0 视为 1。
++	Weight int64
++}
++
++// BuildWeightedKeyIndexes 按权重把 Key 展开成一个索引序列（WRR）。
++//
++// 返回的序列用于投影到底座的多 Key 列表：轮询会按序列顺序取，随机会在序列上均匀取，
++// 两种情况下的选中概率都与权重成正比。
++func BuildWeightedKeyIndexes(keys []KeyWeight) []int {
++	if len(keys) == 0 {
++		return nil
++	}
++	// 按索引排序，保证结果确定（便于测试与复现）
++	ordered := make([]KeyWeight, len(keys))
++	copy(ordered, keys)
++	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Index < ordered[j].Index })
++
++	total := 0
++	expanded := make([]int, 0, len(ordered))
++	for _, key := range ordered {
++		times := key.Weight
++		if times <= 0 {
++			times = 1
++		}
++		if times > maxWeightedKeyExpansion {
++			times = maxWeightedKeyExpansion
++		}
++		for range times {
++			expanded = append(expanded, key.Index)
++		}
++		total += int(times)
++	}
++	return expanded
++}
++
++// KeyLoad 是一把 Key 的容量占用情况。
++type KeyLoad struct {
++	Index int
++	// InUse / Limit：Limit <= 0 表示未配置上限（不施加约束）。
++	InUse int64
++	Limit int64
++}
++
++// SaturatedKeyIndexes 返回已满（或超限）的 Key 索引。
++//
++// 这些索引应当被标记为"非启用"，让底座的 `GetNextEnabledKey` 跳过它们——
++// 当合格 Key 全部被跳过时，底座会明确返回"no enabled keys"，
++// 调用方据此把渠道视为不可选（计划书验收：「无合格 Key 时渠道不可选」）。
++func SaturatedKeyIndexes(keys []KeyLoad) []int {
++	saturated := make([]int, 0, len(keys))
++	for _, key := range keys {
++		if key.Limit <= 0 {
++			continue // 未配置上限 ≠ 已满
++		}
++		if key.InUse >= key.Limit {
++			saturated = append(saturated, key.Index)
++		}
++	}
++	sort.Ints(saturated)
++	return saturated
++}
++
++// MergeKeyStatusList 把"容量饱和"的索引并入底座的多 Key 状态表。
++//
++// # 为什么必须传入上一轮的标记
++//
++// 底座的状态表同时承载**它自己的**禁用标记（例如鉴权失败自动禁用）。
++// 若我们直接整表覆盖或整表清空，就会把底座自己的标记一并抹掉
++// （那等于把一把鉴权失败的 Key 重新放回池子）。
++//
++// 因此这里采用"只回收自己写过的格子"的做法：调用方把上一轮我们标记过的索引传进来，
++// 本次不再饱和的格子会被**删除**（恢复"缺失即启用"），底座自己的标记原样保留。
++func MergeKeyStatusList(current map[int]int, previousOurMarks []int, saturated []int, markValue int) map[int]int {
++	merged := make(map[int]int, len(current)+len(saturated))
++	for index, status := range current {
++		merged[index] = status
++	}
++	// 回收上一轮我们自己的标记（只在值仍等于我们的标记值时删除）
++	for _, index := range previousOurMarks {
++		if status, ok := merged[index]; ok && status == markValue {
++			delete(merged, index)
++		}
++	}
++	for _, index := range saturated {
++		merged[index] = markValue
++	}
++	if len(merged) == 0 {
++		return nil
++	}
++	return merged
++}
++
++// KeySaturationStatusValue 是我们为"容量饱和"写入底座状态表的值。
++//
++// 只要**不等于** `common.ChannelStatusEnabled`，底座就会跳过该 Key；
++// 用一个与底座自身禁用原因不同的值，是为了让 `MergeKeyStatusList` 能安全地只回收自己的标记。
++const KeySaturationStatusValue = apigxmodel.StatusCapacitySaturated
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index 78a20f9..b2a95b7 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -167,6 +167,15 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 	secrets := make([]string, 0, len(keys))
+ 	indexToStable := make(map[int]string, len(keys))
+ 	indexToKeyValue := make(map[int]string, len(keys))
++
++	// 先收集可解密的 Key（失败的跳过并记录），再按**权重展开**（T2.6）：
++	// 底座没有 per-Key 权重，而它的轮询/随机都作用在"一份列表"上，
++	// 因此把权重 3 的 Key 在列表里放 3 次即可得到加权轮询/加权随机。
++	//
++	// 展开后**每个重复槽位仍映射回同一把 Key**，所以密钥归属、逐 Key 统计、
++	// 失效隔离都不受影响（它们都靠索引映射回 StableKeyID）。
++	plaintexts := make([]string, 0, len(keys))
++	weights := make([]KeyWeight, 0, len(keys))
+ 	for i := range keys {
+ 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
+ 		if err != nil {
+@@ -175,9 +184,13 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 				keys[i].ID, keys[i].StableKeyID, err))
+ 			continue
+ 		}
+-		indexToStable[len(secrets)] = keys[i].StableKeyID
+-		indexToKeyValue[len(secrets)] = plain
+-		secrets = append(secrets, plain)
++		weights = append(weights, KeyWeight{Index: len(plaintexts), Weight: keys[i].Weight})
++		plaintexts = append(plaintexts, plain)
++	}
++	for _, slot := range BuildWeightedKeyIndexes(weights) {
++		indexToStable[len(secrets)] = keys[slot].StableKeyID
++		indexToKeyValue[len(secrets)] = plaintexts[slot]
++		secrets = append(secrets, plaintexts[slot])
+ 	}
+ 	if len(secrets) == 0 {
+ 		return nil, ErrNoUsableKey
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index 798a02d..0db31e4 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -813,3 +813,134 @@ func TestCompleteAttemptIsIdempotent(t *testing.T) {
+ 	// 非法状态被拒
+ 	assert.ErrorIs(t, apigxmodel.CompleteAttempt(db, uid, 99, 0), apigxmodel.ErrInvalidArgument)
+ }
++
++// ---- Key 加权与剩余容量（T2.6） ----
++
++// 加权轮询的经典形式：把 Key 按权重展开，底座的轮询/随机就会按比例选中。
++func TestBuildWeightedKeyIndexesProportionalToWeight(t *testing.T) {
++	expanded := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 3}, {Index: 1, Weight: 1}})
++	require.Len(t, expanded, 4)
++	assert.Equal(t, []int{0, 0, 0, 1}, expanded, "权重 3:1 应展开为 3 次与 1 次")
++
++	// 权重 0 视为 1：**不能等于"没有机会"**（否则没配权重的 Key 永远选不到）
++	zero := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 0}, {Index: 1, Weight: 2}})
++	require.Len(t, zero, 3)
++	assert.Contains(t, zero, 0, "权重 0 的 Key 仍应出现一次")
++	assert.Equal(t, 2, countIndex(zero, 1))
++
++	// 展开上限：权重写错（例如 10000）不得把列表撑爆
++	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}})
++	assert.Len(t, huge, 16, "单 Key 展开次数应有上限")
++
++	// 顺序确定：与传入顺序无关，按索引升序展开
++	reordered := BuildWeightedKeyIndexes([]KeyWeight{{Index: 1, Weight: 1}, {Index: 0, Weight: 3}})
++	assert.Equal(t, expanded, reordered, "展开结果必须与传入顺序无关（可复现）")
++
++	assert.Empty(t, BuildWeightedKeyIndexes(nil))
++}
++
++// 剩余容量：已满的 Key 要被标出来让底座跳过；未配置上限**不等于**已满。
++func TestSaturatedKeyIndexes(t *testing.T) {
++	saturated := SaturatedKeyIndexes([]KeyLoad{
++		{Index: 0, InUse: 2, Limit: 2},  // 已满
++		{Index: 1, InUse: 1, Limit: 2},  // 有余量
++		{Index: 2, InUse: 99, Limit: 0}, // 未配置上限：不得算作已满
++		{Index: 3, InUse: 5, Limit: 3},  // 超限
++	})
++	assert.Equal(t, []int{0, 3}, saturated)
++	assert.Empty(t, SaturatedKeyIndexes(nil))
++}
++
++// 状态表合并：只回收**我们自己**写的标记，底座自己的禁用原因必须原样保留。
++func TestMergeKeyStatusListKeepsBaseMarks(t *testing.T) {
++	const baseAutoDisabled = common.ChannelStatusAutoDisabled
++	current := map[int]int{
++		0: baseAutoDisabled,                   // 底座因鉴权失败自动禁用
++		1: apigxmodel.StatusCapacitySaturated, // 我们上一轮标的"容量满"
++	}
++
++	// 本轮：索引 1 已恢复余量，索引 2 变为已满
++	merged := MergeKeyStatusList(current, []int{1}, []int{2}, apigxmodel.StatusCapacitySaturated)
++
++	assert.Equal(t, baseAutoDisabled, merged[0], "底座自己的禁用原因不得被我们抹掉")
++	_, ourOldMarkStillThere := merged[1]
++	assert.False(t, ourOldMarkStillThere, "我们上一轮的标记在恢复后应被回收（缺失即启用）")
++	assert.Equal(t, apigxmodel.StatusCapacitySaturated, merged[2])
++
++	// 全部清空时返回 nil（底座把 nil 状态表视为"全部启用"）
++	assert.Nil(t, MergeKeyStatusList(map[int]int{1: apigxmodel.StatusCapacitySaturated}, []int{1}, nil,
++		apigxmodel.StatusCapacitySaturated))
++}
++
++func countIndex(indexes []int, target int) int {
++	count := 0
++	for _, index := range indexes {
++		if index == target {
++			count++
++		}
++	}
++	return count
++}
++
++// 接线：投影出的底座多 Key 列表必须是**按权重展开**的，且每个槽位仍映射回同一把 Key
++// （否则逐 Key 统计与失效隔离会被打乱）。
++func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
++	db := setupProjectionEnv(t)
++	ResetMappingCacheForTest()
++	t.Cleanup(ResetMappingCacheForTest)
++
++	const owner int64 = 9951
++	const baseChannelID int64 = 9897
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "加权组", PublicID: "wg1"}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	channel := &apigxmodel.Channel{
++		PublicID: "wc1", OwnerUserID: owner, ShareGroupID: group.ID,
++		Name: "加权渠道", BaseChannelID: baseChannelID, KeyPoolMode: apigxmodel.KeyPoolModePolling,
++	}
++	require.NoError(t, apigxmodel.CreateChannel(db, channel))
++
++	// 两把 Key：权重 3:1
++	for i, spec := range []struct {
++		stable string
++		secret string
++		weight int64
++	}{{"stable-a", "sk-aaa", 3}, {"stable-b", "sk-bbb", 1}} {
++		encrypted, err := secretbox.Encrypt(spec.secret)
++		require.NoError(t, err)
++		fingerprint, err := secretbox.Fingerprint(spec.secret)
++		require.NoError(t, err)
++		require.NoError(t, db.Create(&apigxmodel.UpstreamKey{
++			ChannelID: channel.ID, StableKeyID: spec.stable, Name: spec.stable,
++			SecretRef: encrypted, SecretFingerprint: fingerprint,
++			Status: apigxmodel.UpstreamKeyStatusEnabled, Weight: spec.weight,
++			CredentialVersion: 1, CreatedAt: common.GetTimestamp() + int64(i),
++		}).Error)
++	}
++
++	// 投影（含写库）：池模式已在建渠道时设为轮询
++	projection, err := ProjectKeyPool(db, channel.ID)
++	require.NoError(t, err)
++	require.NotNil(t, projection)
++	assert.Equal(t, 4, projection.KeyCount, "权重 3:1 应展开成 4 个槽位")
++
++	var base basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
++	assert.Equal(t, 4, len(strings.Split(base.Key, "\n")), "投影出的底座 key 列表应有 4 项")
++	assert.Equal(t, 4, base.ChannelInfo.MultiKeySize)
++
++	// 展开后每个槽位都映射回同一把 Key
++	countA, countB := 0, 0
++	for index := range 4 {
++		switch projection.IndexToStableKey[index] {
++		case "stable-a":
++			countA++
++		case "stable-b":
++			countB++
++		}
++	}
++	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
++	assert.Equal(t, 1, countB)
++}
+diff --git a/apigx/model/base.go b/apigx/model/base.go
+index 33cca76..0675293 100644
+--- a/apigx/model/base.go
++++ b/apigx/model/base.go
+@@ -50,6 +50,14 @@ package apigxmodel
+ // TablePrefix 是所有 APIGX 表的统一前缀，用于「新增文件集中、命名空间不相交」的约束。
+ const TablePrefix = "apigx_"
+ 
++// StatusCapacitySaturated 是 APIGX 写入**底座多 Key 状态表**的标记值，表示"该 Key 容量已满"。
++//
++// 取值刻意落在底座 `common.ChannelStatus*`（1/2/3…）之外：
++// 底座只要看到**非 Enabled** 就会跳过该 Key，而用一个属于自己的值，
++// 我们的清理逻辑就能只回收自己的标记、不误删底座自己的禁用原因
++// （例如鉴权失败自动禁用——那不该被我们顺手恢复）。
++const StatusCapacitySaturated = 90
++
+ // 四态限制：计划书 §9.2 要求「未配置 / 禁用 / 继承默认 / 明确不限」分别存储，
+ // 空字段不得被解释成无限容量（CODE_STYLE.md 第 11 条）。
+ //
+-- 
+2.53.0.windows.1
+
