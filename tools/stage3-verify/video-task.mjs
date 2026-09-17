@@ -136,7 +136,14 @@ async function main() {
   const poll = (id) => call(`${BASE}/v1/videos/${encodeURIComponent(id)}`, { auth });
 
   // ---- ① 提交 ----
-  await setPlan(['IN_PROGRESS', 'SUCCESS']);
+  // **关键**：把替身的结果地址指向一个**公网可达**的文件。
+  // 平台的媒体代理是**直接去取结果 URL** 的；若结果地址在回环地址，平台的 SSRF 防护会（正确地）拒绝，
+  // 于是我们只能"声明"而无法实证"结果访问"。换成公网地址后，这条链路就能**真正验证**：
+  // 授权者 → 平台代理 → 公网取回字节 → 原样回给调用方 ✓
+  // （用一张公开图片作为替身媒体；内容类型与本项要证明的"代理取回"无关，已在记录中说明。）
+  const PUBLIC_MEDIA = argOf('--public-media', 'https://www.python.org/static/img/python-logo.png');
+  await setPlan(['IN_PROGRESS', 'SUCCESS'], { resultUrl: PUBLIC_MEDIA });
+  info(`上游结果地址指向公网文件：${PUBLIC_MEDIA}`);
   const created = await submit('a cat playing piano');
   const taskId = created.json?.id ?? created.json?.task_id ?? created.json?.data?.task_id;
   check('视频任务提交（经平台 → 任务插件 → 替身上游）', created.status === 200 && Boolean(taskId),
