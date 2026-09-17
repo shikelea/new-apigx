@@ -505,3 +505,98 @@ func TestExplainNeverFallsBackToInternalIDs(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "51", "内部供给 ID 不得出现")
 }
+
+// ---- 熔断与错误归因（T2.8） ----
+
+// 归因红线：**平台自身的拒绝不得参与熔断**。
+// 准入拒绝（容量/来源）与用户取消都发生在我们这边或用户侧，与上游质量无关；
+// 拿它们熔断分享者的供给会误伤健康渠道。
+func TestBreakerIgnoresPlatformRejectionsAndCancellations(t *testing.T) {
+	cfg := DefaultBreakerConfig()
+	now := int64(1_700_000_000)
+
+	// 10 次尝试里：2 次成功、8 次**平台拒绝**（不是上游失败），外加大量用户取消
+	view := apigxmodel.QualityView{
+		SampleCount: 20, SuccessCount: 2,
+		PlatformRejects: 8, CancelledCount: 10,
+		UpstreamFailures: 0, TimeoutCount: 0,
+		ReliabilityLowerBoundPpm: 100_000, LatestUpstreamFailureTs: 0,
+	}
+	verdict := EvaluateBreaker(view, now, cfg)
+	assert.Equal(t, BreakerClosed, verdict.State, "平台拒绝与用户取消不得触发熔断")
+	assert.EqualValues(t, 2, verdict.Attempts, "合格尝试只算上游成功 + 上游失败 + 超时")
+	assert.Zero(t, verdict.FailureRatePpm)
+}
+
+// 上游持续失败 → 打开；冷却结束后 → 半开（放行试探，不永久封禁）。
+func TestBreakerOpensOnUpstreamFailuresAndRecoversAfterCooldown(t *testing.T) {
+	cfg := BreakerConfig{MinAttempts: 5, FailureRatePpm: 500_000, CooldownSeconds: 60}
+	now := int64(1_700_000_000)
+
+	view := apigxmodel.QualityView{
+		SampleCount: 10, SuccessCount: 2, UpstreamFailures: 7, TimeoutCount: 1,
+		LatestUpstreamFailureTs: now - 10, // 刚刚还在失败
+	}
+	verdict := EvaluateBreaker(view, now, cfg)
+	assert.Equal(t, BreakerOpen, verdict.State)
+	assert.EqualValues(t, 800_000, verdict.FailureRatePpm, "失败率 = 8/10")
+	assert.Contains(t, verdict.Reason, "failure_rate_high")
+
+	// 冷却已过 → 半开（给上游恢复的机会）
+	view.LatestUpstreamFailureTs = now - 120
+	verdict = EvaluateBreaker(view, now, cfg)
+	assert.Equal(t, BreakerHalfOpen, verdict.State, "冷却结束后必须放行试探，而不是永久封禁")
+	assert.Contains(t, verdict.Reason, "cooldown_elapsed")
+}
+
+// 样本不足不熔断：一两次失败不足以说明上游坏了（与"样本不足不给结论"同一原则）。
+func TestBreakerRequiresMinimumAttempts(t *testing.T) {
+	cfg := DefaultBreakerConfig()
+	view := apigxmodel.QualityView{
+		SampleCount: 2, SuccessCount: 0, UpstreamFailures: 2,
+		LatestUpstreamFailureTs: 1_700_000_000,
+	}
+	verdict := EvaluateBreaker(view, 1_700_000_000, cfg)
+	assert.Equal(t, BreakerClosed, verdict.State)
+	assert.Contains(t, verdict.Reason, "insufficient_attempts")
+}
+
+// 健康供给保持关闭（失败率低于阈值）。
+func TestBreakerStaysClosedForHealthySource(t *testing.T) {
+	cfg := DefaultBreakerConfig()
+	view := apigxmodel.QualityView{
+		SampleCount: 100, SuccessCount: 98, UpstreamFailures: 2,
+		LatestUpstreamFailureTs: 1_700_000_000,
+	}
+	verdict := EvaluateBreaker(view, 1_700_000_000, cfg)
+	assert.Equal(t, BreakerClosed, verdict.State)
+	assert.EqualValues(t, 20_000, verdict.FailureRatePpm)
+}
+
+// 熔断打开时该候选被摘出，且解释里给出**具体原因**（而不是笼统的"未授权"）。
+func TestBreakerOpenRemovesCandidateWithSpecificReason(t *testing.T) {
+	unhealthy := matureCandidate(61, 100_000, 200, 20)
+	unhealthy.Quality.SuccessCount = 2
+	unhealthy.Quality.UpstreamFailures = 18
+	unhealthy.Quality.LatestUpstreamFailureTs = 1_700_000_000
+	healthy := matureCandidate(62, 900_000, 300, 100)
+
+	public := map[int64]CandidatePublicInfo{
+		61: {OfferingPublicID: "off-61", ChannelPublicID: "ch-61"},
+		62: {OfferingPublicID: "off-62", ChannelPublicID: "ch-62"},
+	}
+	opts := DefaultOptions()
+	explanation, err := ExplainForStrategyWithBreaker(StrategyReliability, []Candidate{unhealthy, healthy}, public,
+		opts, DefaultBreakerConfig(), 1_700_000_000)
+	require.NoError(t, err)
+	require.NotNil(t, explanation.Selected)
+	assert.Equal(t, "off-62", explanation.Selected.OfferingPublicID, "熔断的供给不得被选中")
+
+	reasons := map[string]string{}
+	for _, item := range explanation.Candidates {
+		if item.ExcludedReason != "" {
+			reasons[item.OfferingPublicID] = item.ExcludedReason
+		}
+	}
+	assert.Equal(t, ExcludeBreakerOpen, reasons["off-61"], "解释必须说明是熔断，而不是笼统的未授权")
+}

@@ -23,6 +23,8 @@ type AssembleOptions struct {
 	WindowKind int
 	// Now 注入"当前时间"，便于测试；0 表示取当前。
 	Now int64
+	// Breaker 是熔断阈值（T2.8）；零值取 `DefaultBreakerConfig`。
+	Breaker BreakerConfig
 }
 
 // AssembleCandidates 为某模型装配候选集。
@@ -79,6 +81,14 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
 		view, viewErr := apigxmodel.ResolveQualityView(db, offering.ID, opts.WindowKind, opts.Now)
 		if viewErr == nil {
 			candidate.Quality = view
+		}
+
+		// 熔断（T2.8）：失败率过高且冷却未过 → **从候选中摘除**（原因写清，便于解释）；
+		// 冷却已过则为半开（放行试探），不永久封禁。
+		breaker := EvaluateBreaker(candidate.Quality, opts.Now, opts.Breaker)
+		if breaker.State == BreakerOpen {
+			candidate.Allowed = false
+			candidate.ExcludeReason = ExcludeBreakerOpen
 		}
 
 		// 容量：读渠道策略给出的上限与当前占用（未配置上限则不施加约束）

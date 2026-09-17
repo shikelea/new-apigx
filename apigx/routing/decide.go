@@ -68,6 +68,8 @@ const (
 	ExcludeNoMetric     = "no_metric"     // 该策略需要的指标缺失（不强行排名）
 	ExcludePriceUnknown = "price_unknown" // 价格未知：不参与需要成本的比较
 	ExcludeNotAllowed   = "not_allowed"   // 调用方判定为不在授权范围内
+	// ExcludeBreakerOpen 熔断打开：上游持续失败且冷却未过，**临时**摘出候选。
+	ExcludeBreakerOpen = "breaker_open"
 )
 
 // Candidate 是一个参与排序的候选供给。
@@ -96,6 +98,10 @@ type Candidate struct {
 	Priority int
 	// Allowed 由调用方先把授权/来源限制算完（硬限制先于评分）。
 	Allowed bool
+	// ExcludeReason 允许调用方给出**更具体**的排除原因（例如 BreakerOpen / 已下架）。
+	// 留空时 `Decide` 用 ExcludeNotAllowed。具体原因会出现在可解释结果里——
+	// 笼统的"未授权"无法回答用户"为什么我的来源没被用上"。
+	ExcludeReason string
 }
 
 // RemainingCapacity 返回剩余容量（未配置上限时返回 0，由调用方按"不限"处理）。
@@ -197,7 +203,11 @@ func Decide(strategy Strategy, candidates []Candidate, opts Options) (Decision, 
 	eligible := make([]Candidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		if !candidate.Allowed {
-			decision.Excluded = append(decision.Excluded, Exclusion{candidate.OfferingID, ExcludeNotAllowed})
+			reason := candidate.ExcludeReason
+			if reason == "" {
+				reason = ExcludeNotAllowed
+			}
+			decision.Excluded = append(decision.Excluded, Exclusion{candidate.OfferingID, reason})
 			continue
 		}
 		if candidate.Saturated() {

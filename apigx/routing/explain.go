@@ -173,3 +173,21 @@ func ExplainForStrategy(strategy Strategy, candidates []Candidate, public map[in
 	}
 	return Explain(ExplainInput{Decision: decision, Candidates: candidates, Public: public}), nil
 }
+
+// ExplainForStrategyWithBreaker 在决策前先按熔断结果摘除"打开"的候选，再给出解释。
+//
+// 摘除**不改写调用方的候选集**：这里按值建副本（`Candidate` 是值类型），
+// 因此调用方持有的切片不受影响——避免"看一眼解释就把候选状态改了"的隐蔽副作用。
+func ExplainForStrategyWithBreaker(strategy Strategy, candidates []Candidate,
+	public map[int64]CandidatePublicInfo, opts Options, breaker BreakerConfig, now int64) (Explanation, error) {
+	effective := make([]Candidate, len(candidates))
+	copy(effective, candidates)
+	for i := range effective {
+		verdict := EvaluateBreaker(effective[i].Quality, now, breaker)
+		if verdict.State == BreakerOpen {
+			effective[i].Allowed = false
+			effective[i].ExcludeReason = ExcludeBreakerOpen
+		}
+	}
+	return ExplainForStrategy(strategy, effective, public, opts)
+}

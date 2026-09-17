@@ -245,6 +245,12 @@ type QualityView struct {
 	LatencyMsP50 int64
 	// LatestBucketTs 是窗口内最新的桶时间（0 表示窗口内没有任何样本）。
 	LatestBucketTs int64
+	// LatestUpstreamFailureTs 是窗口内**最后一次上游失败/超时**所在桶的时间（0 表示没有）。
+	//
+	// 熔断（T2.8）需要它来算"冷却是否已过"：只关心**上游侧**的失败，
+	// 平台自身的拒绝（准入/配额）与用户取消不参与——它们不是上游的问题，
+	// 拿它们熔断分享者的供给会误伤。
+	LatestUpstreamFailureTs int64
 	// Insufficient 样本数不足以给出质量结论。
 	Insufficient bool
 	// Stale 窗口内数据已陈旧。
@@ -295,6 +301,9 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
 		view.PlatformRejects += bucket.PlatformRejectCount
 		if bucket.BucketTs > view.LatestBucketTs {
 			view.LatestBucketTs = bucket.BucketTs
+		}
+		if bucket.UpstreamFailureCount+bucket.TimeoutCount > 0 && bucket.BucketTs > view.LatestUpstreamFailureTs {
+			view.LatestUpstreamFailureTs = bucket.BucketTs
 		}
 		if bucket.LatencyMsP50 > 0 {
 			weight := bucket.NaturalRequestCount
