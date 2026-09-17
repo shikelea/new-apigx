@@ -1,0 +1,351 @@
+From 2e745fabd2c3fcdc88feef6acd13673d7b8d4a64 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 15:53:34 +0800
+Subject: [PATCH 58/58] =?UTF-8?q?feat(apigx):=20=E4=BB=B7=E6=A0=BC?=
+ =?UTF-8?q?=E6=8E=A5=E5=8F=A3=EF=BC=88=E4=BA=BA=E5=B7=A5=E8=A6=86=E7=9B=96?=
+ =?UTF-8?q?/=E5=8D=95=E6=B8=A0=E9=81=93=E5=90=8C=E6=AD=A5/=E8=AF=BB?=
+ =?UTF-8?q?=E5=8F=96=EF=BC=89+=20=E5=9B=9B=E6=9D=A1=E9=AA=8C=E6=94=B6?=
+ =?UTF-8?q?=E4=B8=8D=E5=8F=98=E9=87=8F=EF=BC=88T2.10=20=E4=BB=B7=E6=A0=BC?=
+ =?UTF-8?q?=E9=83=A8=E5=88=86=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增平台侧接口: PUT /price-rules(人工覆盖+锁定), GET /price-rules(生效+全部版本),
+  POST /channels/:id/price-sync(单渠道同步, 委托 price.SyncChannelPrices)
+- 接口用例一次覆盖四条验收不变量(真实接口, 非仅单测逻辑):
+  * 价格未知 != 零: 无快照时 price_known=false + reason=no_accepted_snapshot, 不给 0;
+    生效快照里不可用维度根本不出现在 dimensions 里
+  * 人工覆盖不被同步改写: applied=0 + notes=manual_override, 且**不产生新版本**
+  * 单渠道同步不污染他人: B 同步后 A 仍为未知, B 自己拿到价格
+  * 离谱价格(每1K当每1M) 400 被拒; 普通用户 403(价格是平台侧动作)
+- 读取接口同时给出"生效快照 + 全部版本": 只给生效价会让被挡下的可疑版本变成看不见的垃圾数据
+- apigx + middleware 全量通过
+---
+ apigx/api/share.go      | 192 ++++++++++++++++++++++++++++++++++++++++
+ apigx/api/share_test.go |  98 ++++++++++++++++++++
+ 2 files changed, 290 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 6c2c2b7..c2515f7 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/price"
+ 	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/apigx/routing"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+@@ -72,6 +73,12 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		plaza.GET("/:publicId", h.getPlazaItem)
+ 	}
+ 
++	// 价格快照（T2.1/T2.2）：人工覆盖与单渠道同步。**平台侧动作**——
++	// 价格决定计费，不能让分享者随意改写他人可见的价格。
++	r.GET("/price-rules", h.listPriceRules)
++	r.PUT("/price-rules", h.setManualPriceRule)
++	r.POST("/channels/:id/price-sync", h.syncChannelPrice)
++
+ 	// 可解释路由结果（T2.9）：只读，不写库、不投影
+ 	r.GET("/route-explain", h.explainRoute)
+ 	// 应用路由排名（T2.7 生效路径）：把名次写成底座渠道权重。**平台侧动作**——
+@@ -1377,3 +1384,188 @@ func (h *handler) applyRouteRanking(c *gin.Context) {
+ 		"skipped":     skipped,
+ 	})
+ }
++
++// ---------------------------------------------------------------------------
++// 价格快照：人工覆盖、单渠道同步、读取（T2.1 / T2.2）
++// ---------------------------------------------------------------------------
++
++// setManualPriceRule 建立**人工覆盖**的价格快照（可选锁定）。
++//
++// 人工覆盖的语义（计划书）：**优先且锁定**——同步不得改写它。锁定后由人工再改才能变更。
++func (h *handler) setManualPriceRule(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	var req struct {
++		ScopeType int    `json:"scope_type"`
++		ScopeID   int64  `json:"scope_id"`
++		Currency  string `json:"currency"`
++		// 单位统一用 **USD per 1M tokens**（与底座内置计价口径一致），0 表示该维度不单独计价。
++		InputUSDPerMillion  float64 `json:"input_usd_per_million"`
++		OutputUSDPerMillion float64 `json:"output_usd_per_million"`
++		Lock                bool    `json:"lock"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	if req.ScopeID <= 0 {
++		fail(c, http.StatusBadRequest, "invalid_body", "scope_id is required")
++		return
++	}
++	if req.ScopeType != apigxmodel.PriceScopeOffering && req.ScopeType != apigxmodel.PriceScopeChannel &&
++		req.ScopeType != apigxmodel.PriceScopeUpstreamKey {
++		fail(c, http.StatusBadRequest, "invalid_scope", "unsupported price scope type")
++		return
++	}
++	items, err := price.ItemsFromUSDPerMillion(req.InputUSDPerMillion, req.OutputUSDPerMillion, 0, 0)
++	if err != nil {
++		fail(c, http.StatusBadRequest, "invalid_price", err.Error())
++		return
++	}
++	if len(items) == 0 {
++		fail(c, http.StatusBadRequest, "invalid_price", "at least one dimension price is required")
++		return
++	}
++	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
++	if currency == "" {
++		currency = "USD"
++	}
++	rule := &apigxmodel.PriceRule{
++		ScopeType: req.ScopeType, ScopeID: req.ScopeID,
++		Source: apigxmodel.PriceRuleSourceManual, Currency: currency,
++		PricingMode:     apigxmodel.PriceModePerDimension,
++		ValidationState: apigxmodel.PriceValidationAccepted,
++	}
++	if err := apigxmodel.CreatePriceRuleSnapshot(h.db, rule, items); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if req.Lock {
++		if err := apigxmodel.SetPriceRuleLock(h.db, req.ScopeType, req.ScopeID, true); err != nil {
++			failFromRepo(c, err)
++			return
++		}
++	}
++	ok(c, gin.H{"id": rule.ID, "version": rule.Version, "locked": req.Lock, "source": "manual"})
++}
++
++// listPriceRules 读取某作用域的**生效快照**与全部版本（含待确认）。
++//
++// 刻意同时给出两者：只给"生效价"会让被挡下的可疑版本变成看不见的垃圾数据
++// （计划书要求"待确认"可见）。
++func (h *handler) listPriceRules(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid {
++		return
++	}
++	scopeType, err := strconv.Atoi(c.DefaultQuery("scope_type", "0"))
++	if err != nil {
++		fail(c, http.StatusBadRequest, "invalid_query", "invalid scope_type")
++		return
++	}
++	scopeID, err := strconv.ParseInt(c.DefaultQuery("scope_id", "0"), 10, 64)
++	if err != nil || scopeID <= 0 {
++		fail(c, http.StatusBadRequest, "invalid_query", "scope_id is required")
++		return
++	}
++
++	effective, items, effErr := apigxmodel.GetEffectivePriceRule(h.db, scopeType, scopeID, 0)
++	response := gin.H{"price_known": false}
++	if effErr == nil {
++		// **价格未知 ≠ 零**：这里逐维度给出"可用价格"，不可用的维度根本不出现
++		dimensions := make([]gin.H, 0, len(items))
++		for i := range items {
++			item := &items[i]
++			usdMicro, ok := apigxmodel.EffectiveUSDUnitPriceMicro(effective, item)
++			if !ok {
++				dimensions = append(dimensions, gin.H{"dimension": item.Dimension, "price_known": false})
++				continue
++			}
++			dimensions = append(dimensions, gin.H{
++				"dimension": item.Dimension, "unit_scale": item.UnitScale,
++				"usd_unit_price_micro": usdMicro, "price_known": true,
++			})
++		}
++		response["price_known"] = len(dimensions) > 0
++		response["effective"] = gin.H{
++			"version": effective.Version, "source": effective.Source, "currency": effective.Currency,
++			"manual_override": effective.ManualOverride, "locked": effective.Locked,
++			"dimensions": dimensions,
++		}
++	} else if !errors.Is(effErr, apigxmodel.ErrNoPriceRule) {
++		failFromRepo(c, effErr)
++		return
++	} else {
++		response["reason"] = "no_accepted_snapshot"
++	}
++
++	versions, err := apigxmodel.ListPriceRuleSnapshots(h.db, scopeType, scopeID, 20)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	history := make([]gin.H, 0, len(versions))
++	for i := range versions {
++		item := &versions[i]
++		history = append(history, gin.H{
++			"version": item.Version, "source": item.Source,
++			"validation_state": item.ValidationState, "validation_note": item.ValidationNote,
++			"manual_override": item.ManualOverride, "locked": item.Locked, "created_at": item.CreatedAt,
++		})
++	}
++	response["versions"] = history
++	ok(c, response)
++}
++
++// syncChannelPrice 按渠道摄入一批来源价格（单渠道同步）。
++//
++// **作用域隔离**由 `price.SyncChannelPrices` 保证：有供给落到供给作用域、否则落到渠道作用域，
++// 任何情况下都**不写全局**——这是"单渠道同步不污染全局或其他分享者"的实现层体现。
++func (h *handler) syncChannelPrice(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	channelID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req struct {
++		Source   int `json:"source"`
++		Readings []struct {
++			UpstreamModelID     string  `json:"upstream_model_id"`
++			InputUSDPerMillion  float64 `json:"input_usd_per_million"`
++			OutputUSDPerMillion float64 `json:"output_usd_per_million"`
++			SourceRef           string  `json:"source_ref"`
++			RawRecord           string  `json:"raw_record"`
++		} `json:"readings"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	if len(req.Readings) == 0 {
++		fail(c, http.StatusBadRequest, "invalid_body", "readings is required")
++		return
++	}
++	readings := make([]price.Reading, 0, len(req.Readings))
++	for _, item := range req.Readings {
++		readings = append(readings, price.Reading{
++			UpstreamModelID:     item.UpstreamModelID,
++			InputUSDPerMillion:  item.InputUSDPerMillion,
++			OutputUSDPerMillion: item.OutputUSDPerMillion,
++			Source:              req.Source,
++			SourceRef:           item.SourceRef,
++			RawRecord:           item.RawRecord,
++		})
++	}
++	report, err := price.SyncChannelPrices(h.db, owner, channelID, readings)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{
++		"applied": report.Applied, "pending": report.Pending,
++		"skipped": report.Skipped, "notes": report.Notes,
++	})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index bc37566..82a988e 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -866,3 +866,101 @@ func TestRouteApplyEndpoint(t *testing.T) {
+ 	rec, _ = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x","strategy":"bogus"}`)
+ 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+ }
++
++// ---- 价格：人工覆盖 / 单渠道同步 / 未知不为零（T2.1、T2.2 验收） ----
++
++func TestPriceRuleEndpointsEnforceAcceptanceInvariants(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 8901
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	groupID := env.createGroup(t, owner, "价格组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"price-x"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++
++	// ① **价格未知 ≠ 零**：没有任何快照时，接口如实说"未知"，而不是给 0
++	rec, body = env.do(t, http.MethodGet,
++		"/api/price-rules?scope_type=0&scope_id="+strconv.FormatInt(offeringID, 10), owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ := body["data"].(map[string]any)
++	assert.Equal(t, false, data["price_known"], "没有价格快照时必须标为未知")
++	assert.Equal(t, "no_accepted_snapshot", data["reason"])
++
++	// ② 普通用户不得设置价格（价格决定计费，属平台侧动作）
++	rec, _ = env.doWithRole(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":2}`,
++		common.RoleCommonUser)
++	assert.Equal(t, http.StatusForbidden, rec.Code)
++
++	// ③ 平台设置**人工覆盖**（并锁定）
++	rec, body = env.do(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":2,"output_usd_per_million":8,"lock":true}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	rec, body = env.do(t, http.MethodGet,
++		"/api/price-rules?scope_type=0&scope_id="+strconv.FormatInt(offeringID, 10), owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, true, data["price_known"])
++	effective, _ := data["effective"].(map[string]any)
++	assert.Equal(t, true, effective["manual_override"])
++	assert.Equal(t, true, effective["locked"])
++	dimensions, _ := effective["dimensions"].([]any)
++	require.Len(t, dimensions, 2, "输入与输出两个维度")
++	first, _ := dimensions[0].(map[string]any)
++	assert.EqualValues(t, 2_000_000, first["usd_unit_price_micro"], "2 USD/1M tokens = 2000000 微美元/1M")
++
++	// ④ **人工覆盖不被同步改写**：同一作用域发起同步 → 必须被跳过且不产生新版本
++	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/price-sync", owner,
++		`{"source":5,"readings":[{"upstream_model_id":"price-x","input_usd_per_million":1,"output_usd_per_million":1}]}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ = body["data"].(map[string]any)
++	assert.EqualValues(t, 0, data["applied"], "人工覆盖的价格不得被同步改写")
++	assert.Equal(t, "manual_override", data["notes"].(map[string]any)["price-x"])
++
++	rec, body = env.do(t, http.MethodGet,
++		"/api/price-rules?scope_type=0&scope_id="+strconv.FormatInt(offeringID, 10), owner, "")
++	data, _ = body["data"].(map[string]any)
++	effective, _ = data["effective"].(map[string]any)
++	assert.EqualValues(t, 1, effective["version"], "被挡下的同步不得产生新版本")
++	versions, _ := data["versions"].([]any)
++	require.Len(t, versions, 1, "版本历史里只有人工那一条")
++
++	// ⑤ 未锁定的作用域可以同步，且**单渠道同步不污染他人**
++	otherBase := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(otherBase), Name: "底座2", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	otherChannelID := env.createChannel(t, owner, groupID, otherBase)
++
++	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(otherChannelID, 10)+"/price-sync", owner,
++		`{"source":5,"readings":[{"upstream_model_id":"price-sync-x","input_usd_per_million":3}]}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ = body["data"].(map[string]any)
++	assert.EqualValues(t, 1, data["applied"], "没有人工覆盖时应正常落库（落到渠道作用域）")
++
++	// 另一个渠道（第一条渠道）**不受影响**
++	rec, body = env.do(t, http.MethodGet,
++		"/api/price-rules?scope_type=2&scope_id="+strconv.FormatInt(channelID, 10), owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, false, data["price_known"], "别的渠道不得因为这次同步而有价格")
++
++	// 而同步过的渠道确实拿到了价格
++	rec, body = env.do(t, http.MethodGet,
++		"/api/price-rules?scope_type=2&scope_id="+strconv.FormatInt(otherChannelID, 10), owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, true, data["price_known"])
++
++	// ⑥ 离谱价格被拒（把"每 1K"当"每 1M"这类口径错误不该进计费）
++	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":5000000}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++}
+-- 
+2.53.0.windows.1
+
