@@ -92,3 +92,27 @@ export function groupPlazaCards(cards: PlazaModelCard[]): PlazaGroupBucket[] {
   }
   return [...buckets.values()]
 }
+
+
+/**
+ * 「类型筛选」的可选项：从**当前数据**里归纳出现过的能力（计划书 §4 模型广场要求类型筛选）。
+ *
+ * 刻意不硬编码能力清单：平台声明了哪些能力就筛哪些，避免出现"筛选项点不出任何结果"。
+ */
+export function capabilityOptions(cards: PlazaModelCard[]): string[] {
+  const all = new Set<string>()
+  for (const card of cards) {
+    for (const capability of card.capabilities) {
+      all.add(capability)
+    }
+  }
+  return [...all].sort()
+}
+
+/** 按能力筛选卡片；空值表示不筛。 */
+export function filterPlazaCardsByCapability(cards: PlazaModelCard[], capability: string): PlazaModelCard[] {
+  if (capability === '') {
+    return cards
+  }
+  return cards.filter((card) => card.capabilities.includes(capability))
+}

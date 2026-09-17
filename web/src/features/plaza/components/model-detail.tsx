@@ -27,6 +27,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 
 import { getPlaza, getRouteExplain } from '../api'
 import { describeCandidateQuality, formatMicroUSD } from '../lib/format'
+import { InvocationCard } from './invocation-card'
 import type { RouteExplainCandidate } from '../types'
 
 /** 模型详情：来源表 + 价格与质量对比（数据来自广场与可解释路由结果）。 */
@@ -76,6 +77,8 @@ export function ModelDetail(props: { model: string }) {
           </div>
         </CardContent>
       </Card>
+
+      <InvocationCard model={props.model} />
 
       <Card>
         <CardHeader>

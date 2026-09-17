@@ -6695,5 +6695,10 @@
   "Describe what this share group provides": "介绍一下这个分享分组提供什么",
   "Share group": "分享分组",
   "Ungrouped": "未分组",
-  "Quality": "质量"
+  "Quality": "质量",
+  "Invocation": "调用配置",
+  "Base URL": "接口地址",
+  "Model": "模型",
+  "All types": "全部类型",
+  "Type": "类型"
 }

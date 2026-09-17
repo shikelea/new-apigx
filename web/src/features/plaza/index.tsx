@@ -26,26 +26,33 @@ import { ErrorState } from '@/components/error-state'
 import { SectionPageLayout } from '@/components/layout'
 import { LoadingState } from '@/components/loading-state'
 import { Badge } from '@/components/ui/badge'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 
 import { getPlaza } from './api'
-import { aggregatePlazaItems, filterPlazaCards, groupPlazaCards } from './lib/aggregate'
+import { aggregatePlazaItems, capabilityOptions, filterPlazaCards, filterPlazaCardsByCapability, groupPlazaCards } from './lib/aggregate'
 import { describePlazaQuality } from './lib/format'
 
 /** 模型广场：分享者提供的模型，按模型聚合展示可访问来源数与能力。 */
 export function Plaza() {
   const { t } = useTranslation()
   const [keyword, setKeyword] = useState('')
+  const [capability, setCapability] = useState('')
 
   const query = useQuery({
     queryKey: ['apigx-plaza'],
     queryFn: () => getPlaza({ page: 1, page_size: 100 }),
   })
 
-  const cards = useMemo(
+  const allCards = useMemo(
     () => filterPlazaCards(aggregatePlazaItems(query.data?.data?.items ?? []), keyword),
     [query.data, keyword]
+  )
+  const types = useMemo(() => capabilityOptions(allCards), [allCards])
+  const cards = useMemo(
+    () => filterPlazaCards(filterPlazaCardsByCapability(allCards, capability), keyword),
+    [allCards, capability, keyword]
   )
   const groups = useMemo(() => groupPlazaCards(cards), [cards])
 
@@ -68,6 +75,19 @@ export function Plaza() {
     <SectionPageLayout>
       <SectionPageLayout.Title>{t('plaza.title')}</SectionPageLayout.Title>
       <SectionPageLayout.Actions>
+        <Select value={capability === '' ? 'all' : capability} onValueChange={(next) => setCapability(next === 'all' ? '' : (next ?? ''))}>
+          <SelectTrigger className='w-44' aria-label={t('Type')}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value='all'>{t('All types')}</SelectItem>
+            {types.map((type) => (
+              <SelectItem key={type} value={type}>
+                {type}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Input
           value={keyword}
           onChange={(event) => setKeyword(event.target.value)}

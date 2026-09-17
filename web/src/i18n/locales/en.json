@@ -6695,5 +6695,10 @@
   "Describe what this share group provides": "Describe what this share group provides",
   "Share group": "Share group",
   "Ungrouped": "Ungrouped",
-  "Quality": "Quality"
+  "Quality": "Quality",
+  "Invocation": "Invocation",
+  "Base URL": "Base URL",
+  "Model": "Model",
+  "All types": "All types",
+  "Type": "Type"
 }
