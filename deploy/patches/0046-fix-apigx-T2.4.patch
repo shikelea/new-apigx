@@ -1,0 +1,88 @@
+From 4e6372c91d564b5bc6e74716d7af297a57bdd83b Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:38:47 +0800
+Subject: [PATCH 46/46] =?UTF-8?q?fix(apigx):=20T2.4=20=E8=B4=A8=E9=87=8F?=
+ =?UTF-8?q?=E9=87=87=E9=9B=86=E6=89=93=E9=80=9A=EF=BC=88=E4=B8=A4=E4=B8=AA?=
+ =?UTF-8?q?=E7=9C=9F=E7=BC=BA=E9=99=B7=EF=BC=9A=E6=8C=82=E9=94=99=E5=87=BD?=
+ =?UTF-8?q?=E6=95=B0=20+=20=E5=8E=86=E5=8F=B2=E5=9D=8F=E5=88=97=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+端到端已通过: 3 次成功请求 -> 桶 natural=3 success=3, latency_sum_ms=34, p50~14;
+ttft_sum_ms=0 是如实的(底座该场景 frt=-1000 未观测到首字, 代码只在确实观测时记录)
+
+缺陷1(挂错函数): PostConsumeQuota 是"没有计费会话时的旧回退路径", 正常请求走计费会话结算,
+  挂在死路径上的表现极具迷惑性: 不报错、不告警、什么都没有。
+  已改挂 BillingSession.Settle; 旧路径钩子保留(两路径互斥不重复计数)。
+  注意 defer 必须在 s.mu.Lock() 之前注册(defer 后注册先执行, 放锁后会持锁写库)
+缺陷2(历史坏列): apigx_quality_buckets.id 在 PG 里建成 character 类型且无默认值,
+  INSERT 报 23502; **SQLite 动态类型容忍了它**, 故单测全绿只有真实 PG 暴露。
+  AutoMigrate 不修复已存在列类型 -> 删除空表由迁移重建(现 bigint+nextval)即修复
+教训: 阶段 1 三库矩阵未断言"每张表 id 都是自增主键"; 待做: 补该断言(三库)并确认 MySQL 侧
+apigx + middleware 全量通过
+---
+ apigx/qualityhook/quality.go | 1 -
+ service/billing_session.go   | 9 +++++++++
+ service/quota.go             | 6 +++---
+ 3 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/apigx/qualityhook/quality.go b/apigx/qualityhook/quality.go
+index ad38895..e60bbbc 100644
+--- a/apigx/qualityhook/quality.go
++++ b/apigx/qualityhook/quality.go
+@@ -85,7 +85,6 @@ func RecordFromRelay(relayInfo *relaycommon.RelayInfo, apiErr *types.NewAPIError
+ 		return
+ 	}
+ 	if !found {
+-		// 该模型在这个渠道上没有供给（未发布/已下架）：不制造无主统计
+ 		return
+ 	}
+ 
+diff --git a/service/billing_session.go b/service/billing_session.go
+index ea27203..63f6500 100644
+--- a/service/billing_session.go
++++ b/service/billing_session.go
+@@ -7,6 +7,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 
++	"github.com/QuantumNous/new-api/apigx/qualityhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/logger"
+ 	"github.com/QuantumNous/new-api/model"
+@@ -41,6 +42,14 @@ type BillingSession struct {
+ // 资金来源和令牌额度分两步提交：若资金来源已提交但令牌调整失败，
+ // 会标记 fundingSettled 防止 Refund 对已提交的资金来源执行退款。
+ func (s *BillingSession) Settle(actualQuota int) error {
++	// APIGX 质量样本（T2.4）：**成功路径真正走的是这里**。
++	// 早期把钩子挂在 `PostConsumeQuota` 上，那是"没有计费会话时的旧回退路径"，
++	// 正常请求根本不经过它——端到端验证时表现为"桶表一行都没有、日志也没有任何提示"。
++	//
++	// defer 必须注册在 `s.mu.Lock()` **之前**：defer 是后注册先执行，
++	// 若放在加锁之后就会在**持锁期间写库**。
++	defer qualityhook.RecordFromRelay(s.relayInfo, nil)
++
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 	if s.settled {
+diff --git a/service/quota.go b/service/quota.go
+index 7a2688f..e4176db 100644
+--- a/service/quota.go
++++ b/service/quota.go
+@@ -422,9 +422,9 @@ type postConsumeQuotaResult struct {
+ }
+ 
+ func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) error {
+-	// APIGX 质量样本（T2.4）：**成功路径也必须记录**。
+-	// 只记失败会让成功率永远是 0% —— 那种"半个统计"比没有统计更误导。
+-	// 放在结算入口，保证"真的成功了"才计入成功（预扣/准入阶段不产生成功样本）。
++	// APIGX 质量样本（T2.4）：这里只覆盖「**没有计费会话时的旧回退路径**」。
++	// 正常请求的成功样本由 `BillingSession.Settle` 记录（那才是热路径）——
++	// 两处都挂是为了不遗漏回退路径，而不是重复计数（两条路径互斥）。
+ 	defer qualityhook.RecordFromRelay(relayInfo, nil)
+ 	_, err := postConsumeQuotaWithResult(relayInfo, quota, preConsumedQuota, sendEmail)
+ 	return err
+-- 
+2.53.0.windows.1
+
