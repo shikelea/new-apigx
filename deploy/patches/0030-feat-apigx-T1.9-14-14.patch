@@ -1,0 +1,400 @@
+From 1bd5b29bf29718c35b473de6d6809b024f2dc1e2 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:04:29 +0800
+Subject: [PATCH 30/30] =?UTF-8?q?feat(apigx):=20=E5=B9=BF=E5=9C=BA?=
+ =?UTF-8?q?=E4=B8=8E=E8=AF=A6=E6=83=85=EF=BC=88T1.9=20=E5=AE=8C=E6=88=90?=
+ =?UTF-8?q?=EF=BC=8C=E7=9C=9F=E5=AE=9E=E7=BD=91=E5=85=B3=E7=AB=AF=E5=88=B0?=
+ =?UTF-8?q?=E7=AB=AF=2014/14=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/model/repo_plaza.go: 只聚合「已发布 + 分组公开」的供给;
+  「受限可见」需要 Grant(阶段1未实现)故不放行, 宁可少展示
+- 只启用已完成能力: capabilities 只给平台真正具备的(当前仅流式, 底座中继直接支持),
+  声明但未具备的(vision/tools/reasoning)单列 unverified_capabilities 如实展示
+- api: GET /api/apigx/plaza 与 /api/apigx/plaza/:publicId; 对外不含内部渠道 ID/上游地址/凭据
+- 端到端: 未认证401 / 草稿不出现 / 未发布详情404 / 发布后出现 / 来源可辨识 /
+  能力取值正确 / 声明未具备者单列 / 泄露扫描4项
+- 修正一处断言写错(能力为结构化布尔, 应断言取值而非键是否存在)
+- apigx + middleware 全量通过
+---
+ apigx/api/share.go        |  73 +++++++++++++++
+ apigx/api/share_test.go   |  76 +++++++++++++++
+ apigx/model/repo_plaza.go | 192 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 341 insertions(+)
+ create mode 100644 apigx/model/repo_plaza.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index d0aab4c..af66553 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -65,6 +65,12 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		offerings.DELETE("/:id", h.deleteOffering)
+ 	}
+ 
++	plaza := r.Group("/plaza")
++	{
++		plaza.GET("", h.listPlaza)
++		plaza.GET("/:publicId", h.getPlazaItem)
++	}
++
+ 	usage := r.Group("/usage")
+ 	{
+ 		usage.GET("", h.listUsage)
+@@ -1106,3 +1112,70 @@ func (h *handler) fetchUpstreamModels(c *gin.Context) {
+ 	}
+ 	ok(c, result)
+ }
++
++// ---------------------------------------------------------------------------
++// 广场与详情（T1.9）
++// ---------------------------------------------------------------------------
++
++// listPlaza 列出广场条目：**只含已发布且分组公开的供给**。
++//
++// 能力对外**只给平台当前真正具备的部分**（见 `PlatformSupportedCapabilities`），
++// 分享者声明但尚未具备的单独列在 `unverified_capabilities` 里如实展示——
++// 既不冒充可用，也不隐瞒（计划书「只启用已完成能力」）。
++func (h *handler) listPlaza(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid {
++		return
++	}
++	page, pageSize := 1, 20
++	if raw := c.Query("page"); raw != "" {
++		if parsed, convErr := strconv.Atoi(raw); convErr == nil && parsed > 0 {
++			page = parsed
++		}
++	}
++	if raw := c.Query("page_size"); raw != "" {
++		if parsed, convErr := strconv.Atoi(raw); convErr == nil && parsed > 0 && parsed <= 100 {
++			pageSize = parsed
++		}
++	}
++	items, total, err := apigxmodel.ListPlazaItems(h.db, pageSize, (page-1)*pageSize)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	out := make([]gin.H, 0, len(items))
++	for _, item := range items {
++		out = append(out, plazaItemToJSON(item))
++	}
++	ok(c, gin.H{"items": out, "total": total, "page": page, "page_size": pageSize})
++}
++
++func (h *handler) getPlazaItem(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid {
++		return
++	}
++	publicID := c.Param("publicId")
++	item, err := apigxmodel.GetPlazaItem(h.db, publicID)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, plazaItemToJSON(*item))
++}
++
++// plazaItemToJSON 把广场条目转成对外 JSON。
++//
++// 只输出对外可见字段：**不含**渠道内部 ID、上游地址、凭据、成本价或任何内部标识。
++func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
++	out := gin.H{
++		"offering_public_id": item.OfferingPublicID,
++		"model":              item.UpstreamModelID,
++		"channel_public_id":  item.ChannelPublicID,
++		"owner_user_id":      item.OwnerUserID,
++		"capabilities":       item.Capabilities,
++		"updated_at":         item.UpdatedAt,
++	}
++	if len(item.UnverifiedCapabilities) > 0 {
++		out["unverified_capabilities"] = item.UnverifiedCapabilities
++	}
++	return out
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index c0d39f8..2375448 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -630,3 +630,79 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
+ 		`{"upstream_model_id":"gpt-x"}`)
+ 	assert.Equal(t, http.StatusOK, rec.Code, "软删除后应可重新发布")
+ }
++
++// ---- 广场与详情（T1.9） ----
++
++func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 8501
++
++	// 分组设为**公开**（可见性 2）；否则即便已发布也不该出现在广场
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "公开组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
++	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
++
++	// 草稿供给：不应出现在广场
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"m-plaza","capabilities":{"streaming":true,"vision":true,"tools":true}}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++	publicID := body["data"].(map[string]any)["public_id"].(string)
++
++	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	assert.Empty(t, body["data"].(map[string]any)["items"], "草稿不得出现在广场")
++	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, owner, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code, "未发布供给的详情对广场不存在")
++
++	// 提交 + 发布后才可见
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	items, _ := body["data"].(map[string]any)["items"].([]any)
++	require.Len(t, items, 1)
++	item, _ := items[0].(map[string]any)
++	assert.Equal(t, "m-plaza", item["model"])
++	assert.NotEmpty(t, item["channel_public_id"], "广场必须给出对外可辨识的来源标识")
++
++	// **只启用已完成能力**：只声明了流式的供给，能力里就只有流式；
++	// vision/tools 属"声明了但平台尚不具备"，单独列出而不是混进 capabilities
++	// 能力字段是结构化布尔值（无 omitempty），因此断言的是**取值**而不是键是否存在：
++	// 平台具备的为 true，尚不具备的为 false——不冒充可用。
++	caps, _ := item["capabilities"].(map[string]any)
++	assert.Equal(t, true, caps["streaming"], "流式由底座中继链路直接支持，已具备")
++	assert.Equal(t, false, caps["vision"], "视觉尚未按供给验证，不得对外声称具备")
++	assert.Equal(t, false, caps["tools"], "工具调用尚未按供给验证")
++	unverified, _ := item["unverified_capabilities"].([]any)
++	assert.ElementsMatch(t, []any{"vision", "tools"}, unverified, "声明但未具备的能力应如实单列")
++
++	// 详情可见
++	rec, body = env.do(t, http.MethodGet, "/api/plaza/"+publicID, owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	detail, _ := body["data"].(map[string]any)
++	assert.Equal(t, "m-plaza", detail["model"])
++
++	// 私有分组：即便已发布也不出现在广场
++	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: 1}
++	require.NoError(t, apigxmodel.CreateShareGroup(env.db, privateGroup))
++	privateChannelID := env.createChannel(t, owner, privateGroup.ID, nextBaseChannelID())
++	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(privateChannelID, 10)+"/offerings", owner, `{"upstream_model_id":"m-private"}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	privateOfferingID := int64(body["data"].(map[string]any)["id"].(float64))
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, privateOfferingID))
++	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, privateOfferingID))
++
++	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	items, _ = body["data"].(map[string]any)["items"].([]any)
++	assert.Len(t, items, 1, "私有分组的已发布供给不得出现在广场")
++
++	// 未登录不得访问广场
++	rec, _ = env.do(t, http.MethodGet, "/api/plaza", 0, "")
++	assert.Equal(t, http.StatusUnauthorized, rec.Code)
++}
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+new file mode 100644
+index 0000000..4ee5bc8
+--- /dev/null
++++ b/apigx/model/repo_plaza.go
+@@ -0,0 +1,192 @@
++package apigxmodel
++
++import (
++	"errors"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 广场（T1.9）：把**已发布且对外可见**的供给聚合出来。
++//
++// 两条硬性判据：
++//  1. 供给必须是 `已发布`（草稿/待审核/已驳回都不对外）；
++//  2. 所属分享分组的默认可见性必须是 `公开`（受限可见需要 Grant，阶段 1 尚未实现，
++//     因此**不放行**——宁可少展示，也不要把没有授权机制的东西暴露出去）。
++//
++// 另有一条产品约束来自计划书：**只启用已完成能力**。因此能力对外只输出平台当前
++// 真正具备的那部分（见 `PlatformSupportedCapabilities`），声明了但尚未具备的单独列出，
++// 不混进 capabilities 里冒充可用。
++
++// ShareGroupVisibility 取值（`apigx_share_groups.default_visibility`）。
++const (
++	ShareGroupVisibilityPrivate int = 0
++	ShareGroupVisibilityLimited int = 1
++	ShareGroupVisibilityPublic  int = 2
++)
++
++// PlazaItem 是广场列表/详情对外暴露的字段集合。
++//
++// 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
++// 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
++type PlazaItem struct {
++	OfferingPublicID string
++	UpstreamModelID  string
++	ChannelPublicID  string
++	OwnerUserID      int64
++	// Capabilities 是**平台当前真正具备**的能力（见 PlatformSupportedCapabilities）。
++	Capabilities Capability
++	// UnverifiedCapabilities 是分享者声明、但平台当前尚不具备的能力：如实列出而不是隐藏，
++	// 也不混进 Capabilities 冒充可用。
++	UnverifiedCapabilities []string
++	UpdatedAt              int64
++}
++
++// PlatformSupportedCapabilities 返回平台当前真正具备的能力。
++//
++// 只声明流式：它由底座的中继链路直接支持并已在阶段 0 验证（多格式流式请求均正常）。
++// 视觉/工具调用/推理这些**尚未按供给验证**，因此不计入对外能力——这正是
++// 「只启用已完成能力」的落地方式（计划书 §11 阶段 1）。
++func PlatformSupportedCapabilities() Capability {
++	return Capability{Streaming: true}
++}
++
++// capabilityFlagNames 把 Capability 的结构化字段映射为可枚举的名称（用于 Unverified 列表）。
++func capabilityFlagNames(caps Capability) []string {
++	names := make([]string, 0, 4)
++	if caps.Streaming {
++		names = append(names, "streaming")
++	}
++	if caps.Vision {
++		names = append(names, "vision")
++	}
++	if caps.Tools {
++		names = append(names, "tools")
++	}
++	if caps.Reasoning {
++		names = append(names, "reasoning")
++	}
++	return names
++}
++
++// projectCapabilities 把「声明的能力」投影为「平台具备的能力 + 未验证列表」。
++func projectCapabilities(declared Capability) (Capability, []string) {
++	supported := PlatformSupportedCapabilities()
++	effective := Capability{Streaming: declared.Streaming && supported.Streaming}
++
++	unverified := make([]string, 0, 4)
++	for _, name := range capabilityFlagNames(declared) {
++		switch name {
++		case "streaming":
++			// 已被支持，不列入未验证
++		case "vision", "tools", "reasoning":
++			unverified = append(unverified, name)
++		}
++	}
++	return effective, unverified
++}
++
++// ListPlazaItems 列出广场条目（已发布 + 分组公开），按更新时间倒序。
++func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) {
++	if db == nil {
++		return nil, 0, errors.New("apigxmodel: nil db")
++	}
++	if limit <= 0 || limit > 100 {
++		limit = 20
++	}
++	if offset < 0 {
++		offset = 0
++	}
++
++	// 表名取自各模型自带的 TableName()，与迁移保持一致（不硬编码字符串）
++	offeringTable := ModelOffering{}.TableName()
++	channelTable := Channel{}.TableName()
++	groupTable := ShareGroup{}.TableName()
++
++	query := db.Table(offeringTable+" AS o").
++		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL").
++		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL").
++		Where("o.deleted_at IS NULL AND o.status = ?", OfferingStatusPublished).
++		Where("g.default_visibility = ?", ShareGroupVisibilityPublic)
++
++	var total int64
++	if err := query.Count(&total).Error; err != nil {
++		return nil, 0, err
++	}
++
++	type row struct {
++		PublicID        string
++		UpstreamModelID string
++		ChannelPublicID string
++		OwnerUserID     int64
++		Capabilities    string
++		UpdatedAt       int64
++	}
++	var rows []row
++	err := query.Select("o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
++		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
++		"o.capabilities AS capabilities, o.updated_at AS updated_at").
++		Order("o.updated_at DESC, o.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error
++	if err != nil {
++		return nil, 0, err
++	}
++
++	items := make([]PlazaItem, 0, len(rows))
++	for _, r := range rows {
++		declared := Capability{}
++		if r.Capabilities != "" {
++			_ = common.UnmarshalJsonStr(r.Capabilities, &declared)
++		}
++		effective, unverified := projectCapabilities(declared)
++		items = append(items, PlazaItem{
++			OfferingPublicID:       r.PublicID,
++			UpstreamModelID:        r.UpstreamModelID,
++			ChannelPublicID:        r.ChannelPublicID,
++			OwnerUserID:            r.OwnerUserID,
++			Capabilities:           effective,
++			UnverifiedCapabilities: unverified,
++			UpdatedAt:              r.UpdatedAt,
++		})
++	}
++	return items, total, nil
++}
++
++// GetPlazaItem 按供给的对外 public_id 取详情（判据与列表一致：已发布 + 分组公开）。
++func GetPlazaItem(db *gorm.DB, offeringPublicID string) (*PlazaItem, error) {
++	if db == nil || offeringPublicID == "" {
++		return nil, errors.New("apigxmodel: offering public id is required")
++	}
++	var offering ModelOffering
++	if err := db.Where("public_id = ?", offeringPublicID).First(&offering).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil, ErrNotFound
++		}
++		return nil, err
++	}
++	if offering.Status != OfferingStatusPublished {
++		// 未发布的供给对广场**不存在**（与未找到同义，不泄露存在性）
++		return nil, ErrNotFound
++	}
++	var channel Channel
++	if err := db.Where("id = ?", offering.ChannelID).First(&channel).Error; err != nil {
++		return nil, ErrNotFound
++	}
++	var group ShareGroup
++	if err := db.Where("id = ?", channel.ShareGroupID).First(&group).Error; err != nil {
++		return nil, ErrNotFound
++	}
++	if group.DefaultVisibility != ShareGroupVisibilityPublic {
++		return nil, ErrNotFound
++	}
++
++	effective, unverified := projectCapabilities(offering.CapabilityOf())
++	return &PlazaItem{
++		OfferingPublicID:       offering.PublicID,
++		UpstreamModelID:        offering.UpstreamModelID,
++		ChannelPublicID:        channel.PublicID,
++		OwnerUserID:            channel.OwnerUserID,
++		Capabilities:           effective,
++		UnverifiedCapabilities: unverified,
++		UpdatedAt:              offering.UpdatedAt,
++	}, nil
++}
+-- 
+2.53.0.windows.1
+
