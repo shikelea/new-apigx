@@ -422,3 +422,90 @@ func TestAPIKeyPreferencesUpsertAndValidation(t *testing.T) {
 	_, err = GetAPIKeyByToken(db, 12002, token)
 	assert.ErrorIs(t, err, ErrNotFound)
 }
+
+// ---- 模型供给与发布流程（T1.8） ----
+
+func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
+	db := newRepoDB(t)
+	const owner, other int64 = 13001, 13002
+	_, channel := seedGroupAndChannel(t, db, owner)
+
+	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "gpt-x", CanonicalModelID: 0}
+	require.NoError(t, CreateModelOffering(db, owner, offering))
+	assert.Equal(t, OfferingStatusDraft, offering.Status, "新供给必须从草稿开始（不得自动对外可见）")
+	assert.NotEmpty(t, offering.PublicID)
+	assert.EqualValues(t, 1, offering.Revision)
+	assert.Equal(t, OfferingKeyHashFor(channel.ID, "gpt-x"), offering.OfferingKeyHash)
+
+	// 同一渠道同一模型不可重复
+	dup := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "gpt-x"}
+	require.Error(t, CreateModelOffering(db, owner, dup), "存活期间同一模型不得重复发布")
+
+	// 归属：他人读不到、也改不了
+	_, err := GetModelOffering(db, other, offering.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+	assert.ErrorIs(t, SubmitModelOffering(db, other, offering.ID), ErrNotFound)
+
+	// 状态机：草稿 → 待审核 → 已发布
+	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
+	got, err := GetModelOffering(db, owner, offering.ID)
+	require.NoError(t, err)
+	assert.Equal(t, OfferingStatusPending, got.Status)
+
+	// 待审核不能被重复提交
+	assert.ErrorIs(t, SubmitModelOffering(db, owner, offering.ID), ErrInvalidArgument)
+
+	require.NoError(t, PublishModelOffering(db, owner, offering.ID))
+	got, err = GetModelOffering(db, owner, offering.ID)
+	require.NoError(t, err)
+	assert.Equal(t, OfferingStatusPublished, got.Status)
+	assert.Positive(t, got.VerifiedAt, "发布时应记录核验时间")
+
+	// **已发布的供给不能被"提交"动作退回待审核**：那会让使用者看到模型突然消失
+	assert.ErrorIs(t, SubmitModelOffering(db, owner, offering.ID), ErrInvalidArgument)
+
+	// 能力声明的更新应递增修订号
+	require.NoError(t, UpdateModelOfferingCapabilities(db, owner, offering.ID, Capability{Streaming: true, Tools: true}))
+	got, err = GetModelOffering(db, owner, offering.ID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, got.Revision)
+	assert.True(t, got.CapabilityOf().Tools)
+	assert.False(t, got.CapabilityOf().Vision)
+
+	// 删除后同一模型可以重新发布（墓碑语义）
+	require.NoError(t, DeleteModelOffering(db, owner, offering.ID))
+	assert.ErrorIs(t, DeleteModelOffering(db, owner, offering.ID), ErrNotFound, "重复删除返回未找到")
+	again := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "gpt-x"}
+	require.NoError(t, CreateModelOffering(db, owner, again), "软删除后同一模型应可重新发布")
+	assert.Equal(t, OfferingStatusDraft, again.Status)
+}
+
+func TestListModelOfferingsByChannelScopesByOwner(t *testing.T) {
+	db := newRepoDB(t)
+	const ownerA, ownerB int64 = 13101, 13102
+	_, channelA := seedGroupAndChannel(t, db, ownerA)
+	_, channelB := seedGroupAndChannel(t, db, ownerB)
+
+	require.NoError(t, CreateModelOffering(db, ownerA, &ModelOffering{ChannelID: channelA.ID, UpstreamModelID: "m1"}))
+	require.NoError(t, CreateModelOffering(db, ownerA, &ModelOffering{ChannelID: channelA.ID, UpstreamModelID: "m2"}))
+
+	list, err := ListModelOfferingsByChannel(db, ownerA, channelA.ID)
+	require.NoError(t, err)
+	assert.Len(t, list, 2)
+
+	// 用别人的渠道 ID 查询被拒（归属经渠道传递）
+	_, err = ListModelOfferingsByChannel(db, ownerB, channelA.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = ListModelOfferingsByChannel(db, ownerA, channelB.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// 驳回流程
+	target := list[0]
+	require.NoError(t, SubmitModelOffering(db, ownerA, target.ID))
+	require.NoError(t, RejectModelOffering(db, ownerA, target.ID))
+	got, err := GetModelOffering(db, ownerA, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, OfferingStatusRejected, got.Status)
+	// 驳回后可以修改并重新提交
+	require.NoError(t, SubmitModelOffering(db, ownerA, target.ID))
+}

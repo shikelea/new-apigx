@@ -50,6 +50,17 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.GET("/:id/keys", h.listUpstreamKeys)
 		channels.POST("/:id/apply", h.applyChannelPool)
 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
+		channels.POST("/:id/offerings", h.createOffering)
+		channels.GET("/:id/offerings", h.listOfferings)
+	}
+
+	offerings := r.Group("/offerings")
+	{
+		offerings.PATCH("/:id/capabilities", h.updateOfferingCapabilities)
+		offerings.POST("/:id/submit", h.submitOffering)
+		offerings.POST("/:id/publish", h.publishOffering)
+		offerings.POST("/:id/reject", h.rejectOffering)
+		offerings.DELETE("/:id", h.deleteOffering)
 	}
 
 	usage := r.Group("/usage")
@@ -112,6 +123,10 @@ func failFromRepo(c *gin.Context, err error) {
 		fail(c, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, apigxmodel.ErrInvalidArgument):
 		fail(c, http.StatusBadRequest, "invalid_argument", err.Error())
+	case isDuplicateError(err):
+		// 唯一约束冲突（如「同一渠道同一模型重复发布」）应是对外可理解的 **409**，
+		// 而不是 500。三种方言的错误文本不同，因此按文本匹配（各驱动未提供统一的哨兵错误）。
+		fail(c, http.StatusConflict, "conflict", "resource already exists")
 	default:
 		common.SysError("apigx api: " + err.Error())
 		fail(c, http.StatusInternalServerError, "internal_error", "internal error")
@@ -840,4 +855,194 @@ func quotaToMicroUSD(quota int) int64 {
 		return 0
 	}
 	return int64(float64(quota) / common.QuotaPerUnit * 1_000_000)
+}
+
+// ---------------------------------------------------------------------------
+// 模型供给与发布流程（T1.8）
+// ---------------------------------------------------------------------------
+
+type createOfferingRequest struct {
+	UpstreamModelID  string                 `json:"upstream_model_id"`
+	CanonicalModelID *int64                 `json:"canonical_model_id"`
+	Capabilities     *apigxmodel.Capability `json:"capabilities"`
+}
+
+func (h *handler) createOffering(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	channelID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req createOfferingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	offering := &apigxmodel.ModelOffering{
+		ChannelID:       channelID,
+		UpstreamModelID: strings.TrimSpace(req.UpstreamModelID),
+	}
+	if req.CanonicalModelID != nil {
+		offering.CanonicalModelID = *req.CanonicalModelID
+	}
+	if req.Capabilities != nil {
+		encoded, encErr := common.Marshal(*req.Capabilities)
+		if encErr != nil {
+			fail(c, http.StatusBadRequest, "invalid_body", "invalid capabilities")
+			return
+		}
+		offering.Capabilities = string(encoded)
+	}
+	if err := apigxmodel.CreateModelOffering(h.db, owner, offering); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{
+		"id": offering.ID, "public_id": offering.PublicID,
+		"upstream_model_id": offering.UpstreamModelID, "status": offering.Status,
+	})
+}
+
+func (h *handler) listOfferings(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	channelID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	list, err := apigxmodel.ListModelOfferingsByChannel(h.db, owner, channelID)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	items := make([]gin.H, 0, len(list))
+	for i := range list {
+		item := &list[i]
+		items = append(items, gin.H{
+			"id": item.ID, "public_id": item.PublicID,
+			"upstream_model_id": item.UpstreamModelID,
+			"status":            item.Status, "revision": item.Revision,
+			"capabilities": item.CapabilityOf(), "price_rule_id": item.PriceRuleID,
+		})
+	}
+	ok(c, gin.H{"items": items})
+}
+
+type updateCapabilitiesRequest struct {
+	Capabilities *apigxmodel.Capability `json:"capabilities"`
+}
+
+func (h *handler) updateOfferingCapabilities(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req updateCapabilitiesRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Capabilities == nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "capabilities is required")
+		return
+	}
+	if err := apigxmodel.UpdateModelOfferingCapabilities(h.db, owner, id, *req.Capabilities); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id})
+}
+
+// submitOffering 分享者提交审核（草稿或已驳回 → 待审核）。
+func (h *handler) submitOffering(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	if err := apigxmodel.SubmitModelOffering(h.db, owner, id); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPending})
+}
+
+// requirePlatformReviewer 判定当前身份是否有权做审核动作（发布 / 驳回）。
+//
+// 审核**必须**由平台侧完成：如果分享者能自行发布，"待审核"就形同虚设
+// （计划书 §12 要求新公开资源先审核）。
+func requirePlatformReviewer(c *gin.Context) bool {
+	if c.GetInt("role") < common.RoleAdminUser {
+		fail(c, http.StatusForbidden, "review_required",
+			"this action requires platform review privileges")
+		return false
+	}
+	return true
+}
+
+func (h *handler) publishOffering(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	if err := apigxmodel.PublishModelOffering(h.db, owner, id); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
+}
+
+func (h *handler) rejectOffering(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	if err := apigxmodel.RejectModelOffering(h.db, owner, id); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusRejected})
+}
+
+func (h *handler) deleteOffering(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	if err := apigxmodel.DeleteModelOffering(h.db, owner, id); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"deleted": id})
+}
+
+// isDuplicateError 判定是否为唯一约束冲突（SQLite / MySQL / PostgreSQL 的文本各不相同）。
+func isDuplicateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint failed") ||
+		strings.Contains(msg, "duplicate entry") ||
+		strings.Contains(msg, "duplicate key value")
 }

@@ -80,6 +80,13 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
 	engine := gin.New()
 	api := engine.Group("/api")
 	api.Use(func(c *gin.Context) {
+		// 默认给管理员角色：审核类动作（发布/驳回）要求平台侧身份
+		c.Set("role", common.RoleAdminUser)
+		if raw := c.GetHeader("X-Test-Role"); raw != "" {
+			if role, convErr := strconv.Atoi(raw); convErr == nil {
+				c.Set("role", role)
+			}
+		}
 		if raw := c.GetHeader("X-Test-User"); raw != "" {
 			if id, convErr := strconv.Atoi(raw); convErr == nil {
 				c.Set("id", id)
@@ -91,6 +98,11 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
 }
 
 func (e *testEnv) do(t *testing.T, method, path string, userID int64, body string) (*httptest.ResponseRecorder, map[string]any) {
+	return e.doWithRole(t, method, path, userID, body, 0)
+}
+
+// doWithRole 允许指定角色（0 表示使用默认的管理员角色）。
+func (e *testEnv) doWithRole(t *testing.T, method, path string, userID int64, body string, role int) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
 	var reader *strings.Reader
 	if body == "" {
@@ -104,6 +116,9 @@ func (e *testEnv) do(t *testing.T, method, path string, userID int64, body strin
 	}
 	if userID > 0 {
 		req.Header.Set("X-Test-User", strconv.FormatInt(userID, 10))
+	}
+	if role > 0 {
+		req.Header.Set("X-Test-Role", strconv.Itoa(role))
 	}
 	rec := httptest.NewRecorder()
 	e.engine.ServeHTTP(rec, req)
@@ -539,4 +554,79 @@ func TestPlatformKeyPreferencesAPI(t *testing.T) {
 	require.NoError(t, env.db.Model(&apigxmodel.APIKey{}).Where("user_id = ?", owner).Count(&count).Error)
 	assert.EqualValues(t, 1, count, "owner 的偏好记录不受他人操作影响")
 	_ = tokenID
+}
+
+// ---- 模型供给与发布流程接口（T1.8） ----
+
+func TestOfferingLifecycleThroughAPI(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, other int64 = 8401, 8402
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "供给组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	// 手工添加：新供给是草稿，不对外可见
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"gpt-x","capabilities":{"streaming":true}}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	offeringID := int64(data["id"].(float64))
+	assert.Equal(t, float64(0), data["status"], "新供给必须是草稿")
+
+	// 重复添加同一模型 → 409（唯一约束应映射为冲突而不是 500）
+	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"gpt-x"}`)
+	assert.Equal(t, http.StatusConflict, rec.Code, "重复供给应返回 409")
+
+	// 列表
+	rec, body = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	require.Len(t, items, 1)
+
+	// 归属隔离：他人读不到、也不能提交
+	rec, _ = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", other, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", other, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// 提交审核：草稿 → 待审核
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// **非管理员不得发布**（否则「待审核」形同虚设）
+	rec, _ = env.doWithRole(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "普通用户不得自行发布")
+	assert.Contains(t, rec.Body.String(), "review_required")
+
+	// 管理员发布 → 已发布
+	rec, body = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, float64(2), data["status"])
+
+	// 能力更新递增修订号
+	rec, _ = env.do(t, http.MethodPatch, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/capabilities", owner,
+		`{"capabilities":{"streaming":true,"tools":true}}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec, body = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner, "")
+	items, _ = body["data"].(map[string]any)["items"].([]any)
+	first, _ := items[0].(map[string]any)
+	assert.Equal(t, float64(2), first["revision"])
+	caps, _ := first["capabilities"].(map[string]any)
+	assert.Equal(t, true, caps["tools"])
+
+	// 已发布不能被"提交"退回待审核
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", owner, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 删除后同一模型可重新发布
+	rec, _ = env.do(t, http.MethodDelete, "/api/offerings/"+strconv.FormatInt(offeringID, 10), owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"gpt-x"}`)
+	assert.Equal(t, http.StatusOK, rec.Code, "软删除后应可重新发布")
 }
