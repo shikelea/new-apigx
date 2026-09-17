@@ -1,0 +1,637 @@
+From 38abad1533d94020bb144cb364757a9f5e428ac7 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 07:25:43 +0800
+Subject: [PATCH 95/95] =?UTF-8?q?feat:=20UI=20=E9=80=82=E9=85=8D=EF=BC=88?=
+ =?UTF-8?q?=E5=88=86=E4=BA=AB=E8=AF=B4=E6=98=8E=E5=8F=AF=E7=BC=96=E8=BE=91?=
+ =?UTF-8?q?=20+=20=E5=B9=BF=E5=9C=BA=E6=8C=89=E5=88=86=E4=BA=AB=E5=88=86?=
+ =?UTF-8?q?=E7=BB=84=E7=BB=84=E7=BB=87=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户看 UI 后指出的两处"没适配":
+
+1) **分享说明没适配** => 后端本来就有 ShareGroup.Description 字段，但列表不返回、界面也无入口
+   - 分组列表返回 description（不可信文本，前端按纯文本渲染，不解析 HTML）
+   - 新增 PATCH /api/share-groups/:id（**此前只有创建，没有更新**）：改名 + 改简介
+     校验：名称去空白后 1..64（与模型列宽一致）；只动展示字段，不影响任何授权（结构体注释已写明）
+   - 新增仓储 UpdateShareGroup（按 owner 限定，0 行 => ErrNotFound）
+   - 前端: 我的分享新增「说明」列 + 「编辑」入口（复用项目 Dialog 写 GroupEditDialog）
+   - 用例: TestShareGroupNameAndDescription（改名/简介可读、空名与超长名被拒）
+
+2) **模型广场没有按我们的模式分组** => 广场条目里根本没有分组信息
+   - repo_plaza: PlazaItem 增加 GroupPublicID/GroupName（JOIN 已存在，只是没取这两列）
+   - 广场列表与详情都返回分组
+   - 前端: 新增 groupPlazaCards（按分组对外 ID 分区，无分组信息归「未分组」**不丢数据**），
+     广场页改为按分组分区渲染；新增 2 条聚合用例
+
+文案一律用仓库约定的**英文原文作键**（不再用带点键名）。
+检查: go build ✅ / apigx/api ✅（含新用例）/ typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅ / 前端用例 26/26 ✅
+实测: 分组列表含 description ✅ / 广场条目含 group_name ✅ / PATCH 分组 200 ✅
+---
+ apigx/api/share.go                            | 55 +++++++++++
+ apigx/api/share_test.go                       | 31 +++++++
+ apigx/model/repo_plaza.go                     |  8 ++
+ apigx/model/repo_share.go                     | 17 ++++
+ .../plaza/__tests__/aggregate.test.ts         | 26 +++++-
+ web/src/features/plaza/index.tsx              | 14 ++-
+ web/src/features/plaza/lib/aggregate.ts       | 28 ++++++
+ web/src/features/plaza/types.ts               |  3 +
+ web/src/features/share/api.ts                 | 11 ++-
+ .../share/components/group-edit-dialog.tsx    | 92 +++++++++++++++++++
+ web/src/features/share/index.tsx              | 33 ++++++-
+ web/src/features/share/types.ts               |  2 +
+ web/src/i18n/locales/en.json                  | 10 +-
+ web/src/i18n/locales/zh.json                  | 10 +-
+ 14 files changed, 330 insertions(+), 10 deletions(-)
+ create mode 100644 web/src/features/share/components/group-edit-dialog.tsx
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index b39bd85..c6bb800 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -41,6 +41,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	{
+ 		groups.POST("", h.createShareGroup)
+ 		groups.GET("", h.listShareGroups)
++		// 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）
++		groups.PATCH("/:id", h.updateShareGroup)
+ 		groups.GET("/:id", h.getShareGroup)
+ 		groups.DELETE("/:id", h.deleteShareGroup)
+ 		groups.GET("/:id/channels", h.listChannels)
+@@ -220,6 +222,8 @@ func (h *handler) listShareGroups(c *gin.Context) {
+ 	for _, g := range groups {
+ 		items = append(items, gin.H{
+ 			"id": g.ID, "public_id": g.PublicID, "name": g.Name,
++			// 简介（计划书 §4"分享名称、介绍"）：不可信内容，前端渲染时按纯文本处理
++			"description":        g.Description,
+ 			"default_visibility": g.DefaultVisibility, "publish_status": g.PublishStatus,
+ 			"updated_at": g.UpdatedAt,
+ 		})
+@@ -1300,6 +1304,8 @@ func (h *handler) getPlazaItem(c *gin.Context) {
+ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
+ 	out := gin.H{
+ 		"offering_public_id": item.OfferingPublicID,
++		"group_public_id":    item.GroupPublicID,
++		"group_name":         item.GroupName,
+ 		"model":              item.UpstreamModelID,
+ 		"channel_public_id":  item.ChannelPublicID,
+ 		"owner_user_id":      item.OwnerUserID,
+@@ -1702,3 +1708,52 @@ func (h *handler) listAllChannels(c *gin.Context) {
+ 	}
+ 	ok(c, gin.H{"items": items})
+ }
++
++// updateShareGroup 更新分组的展示名与简介。
++//
++// 只改展示字段（更名与改简介不影响授权，见 model.ShareGroup 的注释）；
++// 名称长度与模型列宽一致（64），简介为不可信文本 —— 前端按纯文本渲染，不做 HTML 解析。
++func (h *handler) updateShareGroup(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req struct {
++		Name        *string `json:"name"`
++		Description *string `json:"description"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	if req.Name == nil && req.Description == nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "name or description is required")
++		return
++	}
++	existing, err := apigxmodel.GetShareGroup(h.db, owner, id)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	name := existing.Name
++	if req.Name != nil {
++		name = strings.TrimSpace(*req.Name)
++	}
++	if name == "" || len([]rune(name)) > 64 {
++		fail(c, http.StatusBadRequest, "invalid_name", "name must be 1..64 characters")
++		return
++	}
++	description := existing.Description
++	if req.Description != nil {
++		description = *req.Description
++	}
++	if err := apigxmodel.UpdateShareGroup(h.db, owner, id, name, description); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "name": name, "description": description})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index e6376c6..c5c112f 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1039,3 +1039,34 @@ func TestTaskRetentionPolicy(t *testing.T) {
+ 	rec, _ = env.do(t, http.MethodGet, "/api/task-retention", owner, "")
+ 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+ }
++
++// 分组的展示名与简介：计划书 §4 要求"分享名称、介绍"，且说明必须能在列表里读到。
++func TestShareGroupNameAndDescription(t *testing.T) {
++	env := newTestEnv(t, false)
++	const owner int64 = 9201
++
++	rec, body := env.do(t, http.MethodPost, "/api/share-groups", owner, `{"name":"初始分组","default_visibility":2}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	groupID := int64(body["data"].(map[string]any)["id"].(float64))
++
++	// 改名 + 写简介
++	rec, _ = env.do(t, http.MethodPatch, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner,
++		`{"name":"改过的名字","description":"这是一段分享说明"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	// 列表里必须能读到（否则前端"分享说明"就无从显示）
++	rec, body = env.do(t, http.MethodGet, "/api/share-groups", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	items, _ := body["data"].(map[string]any)["items"].([]any)
++	require.NotEmpty(t, items)
++	first, _ := items[0].(map[string]any)
++	assert.Equal(t, "改过的名字", first["name"])
++	assert.Equal(t, "这是一段分享说明", first["description"], "简介必须在列表里返回")
++
++	// 非法名称必须被拒（空名 / 超长），而不是写进去
++	rec, _ = env.do(t, http.MethodPatch, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner, `{"name":"   "}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	rec, _ = env.do(t, http.MethodPatch, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner,
++		`{"name":"`+strings.Repeat("字", 65)+`"}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++}
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index 4ee5bc8..02251d2 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -30,6 +30,9 @@ const (
+ // 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
+ // 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
+ type PlazaItem struct {
++	// GroupPublicID/GroupName 用于广场按"分享分组"组织（我们的模式）。
++	GroupPublicID    string
++	GroupName        string
+ 	OfferingPublicID string
+ 	UpstreamModelID  string
+ 	ChannelPublicID  string
+@@ -115,6 +118,8 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 	}
+ 
+ 	type row struct {
++		GroupPublicID   string
++		GroupName       string
+ 		PublicID        string
+ 		UpstreamModelID string
+ 		ChannelPublicID string
+@@ -125,6 +130,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 	var rows []row
+ 	err := query.Select("o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
+ 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
++		"g.public_id AS group_public_id, g.name AS group_name, " +
+ 		"o.capabilities AS capabilities, o.updated_at AS updated_at").
+ 		Order("o.updated_at DESC, o.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error
+ 	if err != nil {
+@@ -142,6 +148,8 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 			OfferingPublicID:       r.PublicID,
+ 			UpstreamModelID:        r.UpstreamModelID,
+ 			ChannelPublicID:        r.ChannelPublicID,
++			GroupPublicID:          r.GroupPublicID,
++			GroupName:              r.GroupName,
+ 			OwnerUserID:            r.OwnerUserID,
+ 			Capabilities:           effective,
+ 			UnverifiedCapabilities: unverified,
+diff --git a/apigx/model/repo_share.go b/apigx/model/repo_share.go
+index a1c0859..351d92f 100644
+--- a/apigx/model/repo_share.go
++++ b/apigx/model/repo_share.go
+@@ -205,6 +205,23 @@ func ListChannelsByOwner(db *gorm.DB, ownerUserID int64, limit int) ([]Channel,
+ 	return channels, err
+ }
+ 
++// UpdateShareGroup 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
++//
++// 只动展示字段：更名与改简介**不影响任何授权**（Group 结构体注释已写明这一点），
++// 因此这里不做授权相关处理，只校验归属并写库。
++func UpdateShareGroup(db *gorm.DB, ownerUserID, id int64, name, description string) error {
++	res := db.Model(&ShareGroup{}).
++		Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", id, ownerUserID).
++		Updates(map[string]any{"name": name, "description": description, "updated_at": common.GetTimestamp()})
++	if res.Error != nil {
++		return res.Error
++	}
++	if res.RowsAffected == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
+ // DeleteChannel 软删除渠道（墓碑语义）。
+ func DeleteChannel(db *gorm.DB, ownerUserID, id int64) error {
+ 	return softDeleteByOwner(db, &Channel{}, ownerUserID, id)
+diff --git a/web/src/features/plaza/__tests__/aggregate.test.ts b/web/src/features/plaza/__tests__/aggregate.test.ts
+index 3031432..f002929 100644
+--- a/web/src/features/plaza/__tests__/aggregate.test.ts
++++ b/web/src/features/plaza/__tests__/aggregate.test.ts
+@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
+ */
+ import { describe, expect, it } from 'vitest'
+ 
+-import { aggregatePlazaItems, filterPlazaCards } from '../lib/aggregate'
++import { aggregatePlazaItems, filterPlazaCards, groupPlazaCards } from '../lib/aggregate'
+ import { makeItem } from './fixtures'
+ 
+ describe('广场聚合', () => {
+@@ -67,3 +67,27 @@ describe('广场搜索过滤', () => {
+     expect(filterPlazaCards(cards, 'gpt')).toEqual([])
+   })
+ })
++
++
++describe('广场按分享分组组织', () => {
++  it('按分组对外 ID 分区，并保留组名', () => {
++    const cards = aggregatePlazaItems([
++      makeItem({ model: 'm1', group_public_id: 'g1', group_name: '阿里云分享' }),
++      makeItem({ model: 'm2', group_public_id: 'g1', group_name: '阿里云分享' }),
++      makeItem({ model: 'm3', group_public_id: 'g2', group_name: '自建分享' }),
++    ])
++    const groups = groupPlazaCards(cards)
++
++    expect(groups.map((g) => g.name)).toEqual(['阿里云分享', '自建分享'])
++    expect(groups[0].cards.map((c) => c.model)).toEqual(['m1', 'm2'])
++    expect(groups[1].cards.map((c) => c.model)).toEqual(['m3'])
++  })
++
++  it('没有分组信息的条目归到「未分组」，不丢数据', () => {
++    const groups = groupPlazaCards(aggregatePlazaItems([makeItem({ model: 'm9' })]))
++
++    expect(groups).toHaveLength(1)
++    expect(groups[0].name).toBe('')
++    expect(groups[0].cards).toHaveLength(1)
++  })
++})
+diff --git a/web/src/features/plaza/index.tsx b/web/src/features/plaza/index.tsx
+index 201f0ed..5251d9b 100644
+--- a/web/src/features/plaza/index.tsx
++++ b/web/src/features/plaza/index.tsx
+@@ -30,7 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ import { Input } from '@/components/ui/input'
+ 
+ import { getPlaza } from './api'
+-import { aggregatePlazaItems, filterPlazaCards } from './lib/aggregate'
++import { aggregatePlazaItems, filterPlazaCards, groupPlazaCards } from './lib/aggregate'
+ 
+ /** 模型广场：分享者提供的模型，按模型聚合展示可访问来源数与能力。 */
+ export function Plaza() {
+@@ -46,6 +46,7 @@ export function Plaza() {
+     () => filterPlazaCards(aggregatePlazaItems(query.data?.data?.items ?? []), keyword),
+     [query.data, keyword]
+   )
++  const groups = useMemo(() => groupPlazaCards(cards), [cards])
+ 
+   if (query.isPending) {
+     return <LoadingState />
+@@ -79,8 +80,12 @@ export function Plaza() {
+         {cards.length === 0 ? (
+           <EmptyState title={t('plaza.empty')} />
+         ) : (
+-          <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
+-            {cards.map((card) => (
++          <div className='space-y-8'>
++            {groups.map((group) => (
++              <section key={group.key} className='space-y-3'>
++                <h2 className='text-sm font-medium'>{group.name === '' ? t('Ungrouped') : group.name}</h2>
++                <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
++                  {group.cards.map((card) => (
+               <Card key={card.model}>
+                 <CardHeader>
+                   <CardTitle className='break-all text-base'>
+@@ -104,6 +109,9 @@ export function Plaza() {
+                   ) : null}
+                 </CardContent>
+               </Card>
++                  ))}
++                </div>
++              </section>
+             ))}
+           </div>
+         )}
+diff --git a/web/src/features/plaza/lib/aggregate.ts b/web/src/features/plaza/lib/aggregate.ts
+index 9887f7c..8e3140b 100644
+--- a/web/src/features/plaza/lib/aggregate.ts
++++ b/web/src/features/plaza/lib/aggregate.ts
+@@ -64,3 +64,31 @@ export function filterPlazaCards(cards: PlazaModelCard[], keyword: string): Plaz
+   }
+   return cards.filter((card) => card.model.toLowerCase().includes(needle))
+ }
++
++
++/**
++ * 按**分享分组**把卡片分组（我们的模式：广场按"谁在分享"组织，而不是平铺一堆）。
++ *
++ * 没有分组信息的条目统一归到「未分组」，**不丢数据**；分组内的顺序沿用传入顺序，
++ * 保证同一份数据每次渲染的顺序一致。
++ */
++export interface PlazaGroupBucket {
++  key: string
++  name: string
++  cards: PlazaModelCard[]
++}
++
++export function groupPlazaCards(cards: PlazaModelCard[]): PlazaGroupBucket[] {
++  const buckets = new Map<string, PlazaGroupBucket>()
++  for (const card of cards) {
++    const key = card.offerings[0]?.group_public_id ?? ''
++    const name = card.offerings[0]?.group_name ?? ''
++    const existing = buckets.get(key)
++    if (existing) {
++      existing.cards.push(card)
++      continue
++    }
++    buckets.set(key, { key, name, cards: [card] })
++  }
++  return [...buckets.values()]
++}
+diff --git a/web/src/features/plaza/types.ts b/web/src/features/plaza/types.ts
+index a57913a..cca1f25 100644
+--- a/web/src/features/plaza/types.ts
++++ b/web/src/features/plaza/types.ts
+@@ -27,6 +27,9 @@ export interface PlazaOfferingItem {
+   offering_public_id: string
+   /** 对外标准模型 ID */
+   model: string
++  /** 分享分组对外 ID 与名称（广场按"分享分组"组织） */
++  group_public_id?: string
++  group_name?: string
+   /** 分享渠道对外 ID */
+   channel_public_id: string
+   /** 分享者用户 ID */
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 1330e8c..5a503c2 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -75,4 +75,13 @@ export async function setChannelCapacityPolicy(
+ export async function submitOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
+   const res = await api.post(`/api/apigx/offerings/${offeringId}/submit`)
+   return res.data
+-}
+\ No newline at end of file
++}
++
++// 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
++export async function updateShareGroup(
++  groupId: number,
++  input: { name: string; description: string }
++): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.patch(`/api/apigx/share-groups/${groupId}`, input)
++  return res.data
++}
+diff --git a/web/src/features/share/components/group-edit-dialog.tsx b/web/src/features/share/components/group-edit-dialog.tsx
+new file mode 100644
+index 0000000..a9169b7
+--- /dev/null
++++ b/web/src/features/share/components/group-edit-dialog.tsx
+@@ -0,0 +1,92 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useMutation } from '@tanstack/react-query'
++import { useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { Dialog } from '@/components/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import { Textarea } from '@/components/ui/textarea'
++
++import { updateShareGroup } from '../api'
++import type { ShareGroup } from '../types'
++
++/** 编辑分享分组的名称与简介（计划书 §4"分享名称、介绍"）。 */
++export function GroupEditDialog(props: {
++  group: ShareGroup | null
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  onSaved: () => void
++}) {
++  const { t } = useTranslation()
++  const [name, setName] = useState('')
++  const [description, setDescription] = useState('')
++
++  useEffect(() => {
++    setName(props.group?.name ?? '')
++    setDescription(props.group?.description ?? '')
++  }, [props.group])
++
++  const save = useMutation({
++    mutationFn: () => updateShareGroup(props.group?.id ?? 0, { name, description }),
++    onSuccess: () => {
++      props.onOpenChange(false)
++      props.onSaved()
++    },
++  })
++
++  const invalidName = name.trim() === '' || name.trim().length > 64
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('Edit share group')}
++      contentClassName='sm:max-w-lg'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button disabled={invalidName || save.isPending} onClick={() => save.mutate()}>
++            {t('Save')}
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-4'>
++        <div className='space-y-2'>
++          <Label>{t('Name')}</Label>
++          <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} />
++          {invalidName ? <p className='text-destructive text-xs'>{t('Name is required (1-64 characters)')}</p> : null}
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Description')}</Label>
++          <Textarea
++            value={description}
++            onChange={(event) => setDescription(event.target.value)}
++            rows={4}
++            placeholder={t('Describe what this share group provides')}
++          />
++        </div>
++      </div>
++    </Dialog>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index fa9df72..d5dca5e 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -15,7 +15,8 @@ You should have received a copy of the GNU Affero General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+-*/import { useQuery } from '@tanstack/react-query'
++*/import { useQuery, useQueryClient } from '@tanstack/react-query'
++import { useState } from 'react'
+ import { Link } from '@tanstack/react-router'
+ import { useTranslation } from 'react-i18next'
+ 
+@@ -24,15 +25,19 @@ import { EmptyState } from '@/components/empty-state'
+ import { ErrorState } from '@/components/error-state'
+ import { SectionPageLayout } from '@/components/layout'
+ import { LoadingState } from '@/components/loading-state'
++import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ 
+ import { getShareChannels, getShareGroups } from './api'
++import { GroupEditDialog } from './components/group-edit-dialog'
+ import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/labels'
+ import type { ShareChannel, ShareGroup } from './types'
+ 
+ /** 我的分享：分组与渠道。 */
+ export function MyShares() {
+   const { t } = useTranslation()
++  const queryClient = useQueryClient()
++  const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
+ 
+   const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
+   const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
+@@ -62,6 +67,21 @@ export function MyShares() {
+       cell: (row) => t(visibilityLabelKey(row.default_visibility)),
+     },
+     { id: 'public_id', header: t('share.group.publicId'), cell: (row) => row.public_id },
++    {
++      id: 'description',
++      header: t('Description'),
++      // 说明是不可信文本：这里按纯文本渲染（不打 HTML）
++      cell: (row) => <span className='text-muted-foreground line-clamp-2 text-xs'>{row.description}</span>,
++    },
++    {
++      id: 'actions',
++      header: '',
++      cell: (row) => (
++        <Button variant='outline' size='sm' onClick={() => setEditingGroup(row)}>
++          {t('Edit')}
++        </Button>
++      ),
++    },
+   ]
+ 
+   const channelColumns: StaticDataTableColumn<ShareChannel>[] = [
+@@ -118,6 +138,17 @@ export function MyShares() {
+             </CardContent>
+           </Card>
+         </div>
++        <GroupEditDialog
++          group={editingGroup}
++          open={editingGroup !== null}
++          onOpenChange={(next) => {
++            if (!next) setEditingGroup(null)
++          }}
++          onSaved={() => {
++            setEditingGroup(null)
++            void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
++          }}
++        />
+       </SectionPageLayout.Content>
+     </SectionPageLayout>
+   )
+diff --git a/web/src/features/share/types.ts b/web/src/features/share/types.ts
+index 36a6562..2e6bd50 100644
+--- a/web/src/features/share/types.ts
++++ b/web/src/features/share/types.ts
+@@ -23,6 +23,8 @@ export interface ShareGroup {
+   id: number
+   public_id: string
+   name: string
++  /** 简介（不可信文本，按纯文本渲染） */
++  description: string
+   /** 默认可见性（0=公开 / 1=邀请 / 2=指定用户 / 3=仅自己） */
+   default_visibility: number
+   /** 发布状态 */
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 8b4b699..15da1b8 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Related Projects",
+     "footer.defaultCopyright": "All rights reserved.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
++    "footer.newapi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "For private deployments, format: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.",
+@@ -6688,5 +6688,11 @@
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+   "taskCenter.status.failure": "Failed",
+-  "taskCenter.retention": "Retained until"
++  "taskCenter.retention": "Retained until",
++  "Description": "Description",
++  "Edit share group": "Edit share group",
++  "Name is required (1-64 characters)": "Name is required (1-64 characters)",
++  "Describe what this share group provides": "Describe what this share group provides",
++  "Share group": "Share group",
++  "Ungrouped": "Ungrouped"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index d27b4d8..49c4d7b 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相关项目",
+     "footer.defaultCopyright": "版权所有。",
+-    "footer.new\u0061pi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
++    "footer.newapi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "对于 2025 年 5 月 10 日之后添加的渠道，在部署时无需从模型名称中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "对于私有部署，格式为：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "出于安全考虑，现有访问令牌无法再次显示。仅在需要新令牌时重新生成。",
+@@ -6688,5 +6688,11 @@
+   "taskCenter.status.inProgress": "进行中",
+   "taskCenter.status.success": "成功",
+   "taskCenter.status.failure": "失败",
+-  "taskCenter.retention": "保留至"
++  "taskCenter.retention": "保留至",
++  "Description": "说明",
++  "Edit share group": "编辑分享分组",
++  "Name is required (1-64 characters)": "名称必填（1-64 个字符）",
++  "Describe what this share group provides": "介绍一下这个分享分组提供什么",
++  "Share group": "分享分组",
++  "Ungrouped": "未分组"
+ }
+-- 
+2.53.0.windows.1
+
