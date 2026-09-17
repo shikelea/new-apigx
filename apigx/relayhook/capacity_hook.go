@@ -39,6 +39,8 @@ type Config struct {
 	// 账户池这一维是关键：不能因为切换模型或 Key 就叠加容量（计划书 §9.2）。
 	UpstreamKeyLimit     int64
 	UpstreamAccountLimit int64
+	// ChannelRPMLimit 是渠道的每分钟请求数上限。与并发不同，速率计数在窗口内**不归还**。
+	ChannelRPMLimit int64
 }
 
 var (
@@ -58,6 +60,7 @@ func init() {
 		UserLimit:            int64(common.GetEnvOrDefault("APIGX_USER_CONCURRENCY_LIMIT", 0)),
 		UpstreamKeyLimit:     int64(common.GetEnvOrDefault("APIGX_UPSTREAM_KEY_CONCURRENCY_LIMIT", 0)),
 		UpstreamAccountLimit: int64(common.GetEnvOrDefault("APIGX_UPSTREAM_ACCOUNT_CONCURRENCY_LIMIT", 0)),
+		ChannelRPMLimit:      int64(common.GetEnvOrDefault("APIGX_CHANNEL_RPM_LIMIT", 0)),
 	})
 }
 
@@ -109,7 +112,7 @@ func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error
 	// 渠道维度：策略链 = 渠道自身的容量策略（apigx_capacity_policies） → 环境变量兜底。
 	// 策略存在数据库里，因此走 channelpool 的短 TTL 缓存；改上限最长一个 TTL 后生效。
 	if shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID); ok {
-		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit)
+		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit, cfg.ChannelRPMLimit)
 		res, err := capacity.Resolve(chain...)
 		if err != nil {
 			return nil, err
@@ -205,9 +208,46 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
 		return nil, false
 	}
 
+	// 速率维度（RPM）：**在拿到并发租约之后**再计数。
+	// 顺序理由：并发不足时请求根本不会发出去，不该消耗速率额度；反过来则要对已拿到的
+	// 租约做补偿（下面就是）。
+	if cfg.ChannelRPMLimit > 0 {
+		if rpmLimit, ok := resolveChannelRPMLimit(c, channelID, cfg.ChannelRPMLimit); ok {
+			windowKey := capacity.ChannelRPM(int64(channelID), capacity.MinuteWindow(time.Now()))
+			if rpmErr := ctrl.IncrementWindow(ctx, windowKey, rpmLimit, 1, capacity.WindowTTL(time.Minute)); rpmErr != nil {
+				// 速率超限：把刚拿到的并发租约**还回去**，避免"没发出去的请求"白占一个槽位
+				if releaseErr := ctrl.Release(ctx, id); releaseErr != nil {
+					common.SysLog("apigx capacity: release after rpm rejection failed: " + releaseErr.Error())
+				}
+				abortForError(c, rpmErr)
+				return nil, false
+			}
+		}
+	}
+
 	lease := &Lease{ctrl: ctrl, id: id, ttl: leaseTTL, stop: make(chan struct{})}
 	lease.startRenew()
 	return lease, true
+}
+
+// resolveChannelRPMLimit 解析渠道的 RPM 上限（策略链：渠道策略 → 环境变量兜底）。
+//
+// 返回 false 表示「未配置/明确不限」——两种情形都不施加约束（未配置是待补的过渡状态）。
+func resolveChannelRPMLimit(c *gin.Context, channelID int, envLimit int64) (int64, bool) {
+	shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID)
+	if !ok {
+		return envLimit, envLimit > 0
+	}
+	chain := channelpool.ChannelRPMChain(channelpool.CurrentDB(), shareChannelID, envLimit)
+	res, err := capacity.Resolve(chain...)
+	if err != nil {
+		common.SysError("apigx capacity: resolve rpm limit failed: " + err.Error())
+		return 0, false
+	}
+	if res.Decision == capacity.DecisionLimited {
+		return res.Value, true
+	}
+	return 0, false
 }
 
 // ID 返回租约标识（= 出站尝试的 AttemptUID，对账据此精确定位并释放容量）。

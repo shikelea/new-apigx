@@ -197,3 +197,62 @@ func TestReserveFailsClosedWithoutRedis(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrRedisUnavailable), "错误必须是 ErrRedisUnavailable 以便上层停止准入")
 }
+
+// ---- 窗口计数（RPM/TPM） ----
+
+// 窗口计数只增不减：**请求结束不归还**，否则 RPM 永远数不到 2、限速形同虚设。
+func TestIncrementWindowCountsUpToLimit(t *testing.T) {
+	c := newTestController(t)
+	ctx := context.Background()
+	key := ChannelRPM(4242, MinuteWindow(time.Now()))
+
+	require.NoError(t, c.IncrementWindow(ctx, key, 2, 1, WindowTTL(time.Minute)))
+	require.NoError(t, c.IncrementWindow(ctx, key, 2, 1, WindowTTL(time.Minute)))
+
+	// 第三次超限：必须返回 *ErrExceeded **且不写入**
+	err := c.IncrementWindow(ctx, key, 2, 1, WindowTTL(time.Minute))
+	var exceeded *ErrExceeded
+	require.ErrorAs(t, err, &exceeded)
+	assert.Contains(t, exceeded.Dimension, "rpm")
+
+	count, err := c.WindowCount(ctx, key)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, count, "超限的那次不得计入")
+}
+
+// 计数随窗口 TTL 自动过期：这是"窗口"语义的实现方式（不需要额外清理任务）。
+func TestWindowCountExpires(t *testing.T) {
+	c := newTestController(t)
+	ctx := context.Background()
+	key := ChannelRPM(4243, MinuteWindow(time.Now()))
+
+	require.NoError(t, c.IncrementWindow(ctx, key, 5, 1, 1*time.Second))
+	count, err := c.WindowCount(ctx, key)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, count)
+
+	time.Sleep(1200 * time.Millisecond)
+	count, err = c.WindowCount(ctx, key)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, count, "窗口结束后计数必须自动消失")
+}
+
+// 参数校验：非法入参不得静默通过（否则限速会被配置错值悄悄关掉）。
+func TestIncrementWindowRejectsInvalidInput(t *testing.T) {
+	c := newTestController(t)
+	ctx := context.Background()
+	key := ChannelRPM(4244, MinuteWindow(time.Now()))
+
+	require.Error(t, c.IncrementWindow(ctx, "", 1, 1, time.Minute))
+	require.Error(t, c.IncrementWindow(ctx, key, 1, 0, time.Minute), "累加量必须为正")
+	require.Error(t, c.IncrementWindow(ctx, key, -1, 1, time.Minute), "上限不得为负")
+	require.Error(t, c.IncrementWindow(ctx, key, 1, 1, 0), "TTL 必须为正")
+}
+
+// 不同窗口使用不同的 key，因此跨窗口互不影响（按分钟分桶）。
+func TestWindowKeysAreBucketedByMinute(t *testing.T) {
+	now := time.Now()
+	first := ChannelRPM(4245, MinuteWindow(now))
+	second := ChannelRPM(4245, MinuteWindow(now.Add(2*time.Minute)))
+	assert.NotEqual(t, first, second, "不同分钟必须落在不同的计数 key 上")
+}

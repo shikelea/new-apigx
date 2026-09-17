@@ -197,6 +197,8 @@ type Controller struct {
 	reserve *redis.Script
 	release *redis.Script
 	renew   *redis.Script
+	// window 是只增不减的窗口计数脚本（RPM/TPM 用），与租约模型分开
+	window *redis.Script
 }
 
 // New 用底座既有的 Redis 客户端（common.RDB）构造容量控制器。
@@ -210,6 +212,7 @@ func NewWithPrefix(rdb *redis.Client, prefix string) *Controller {
 		reserve: redis.NewScript(reserveScript),
 		release: redis.NewScript(releaseScript),
 		renew:   redis.NewScript(renewScript),
+		window:  redis.NewScript(windowScript),
 	}
 }
 
