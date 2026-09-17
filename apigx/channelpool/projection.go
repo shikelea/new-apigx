@@ -61,6 +61,36 @@ type Projection struct {
 // 只投影**当前可用**的 Key（启用 + 未到期 + 不在冷却）：分享者显式停用或已失效的凭据
 // 不应继续被发往上游。运行期故障（上游拒绝）仍由底座按索引隔离。
 func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+	built, err := buildPool(db, shareChannelID)
+	if err != nil {
+		return nil, err
+	}
+	if err := writePoolToBaseChannel(db, built); err != nil {
+		return nil, err
+	}
+	return built.Projection, nil
+}
+
+// BuildKeyPoolProjection **只读**地构建投影：读取池子、解密、算出索引映射，**不写任何东西**。
+//
+// 统计回填必须走这条路径。早期实现里统计直接调 `ProjectKeyPool`，等于**每次请求结束都重写
+// 底座渠道并清空它按下标的状态表**——既慢又错误（会把底座的 Key 健康状态与轮询游标抹掉）。
+func BuildKeyPoolProjection(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+	built, err := buildPool(db, shareChannelID)
+	if err != nil {
+		return nil, err
+	}
+	return built.Projection, nil
+}
+
+// builtPool 是一次构建的中间结果（含仅进程内可用的凭据明文）。
+type builtPool struct {
+	*Projection
+	shareChannel apigxmodel.Channel
+	secrets      []string
+}
+
+func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 	if db == nil {
 		return nil, errors.New("channelpool: nil db")
 	}
@@ -99,26 +129,32 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 		return nil, ErrNoUsableKey
 	}
 
+	return &builtPool{
+		Projection:   &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)},
+		shareChannel: shareChannel,
+		secrets:      secrets,
+	}, nil
+}
+
+// writePoolToBaseChannel 把池子写进底座渠道。**这是唯一会写底座的地方。**
+func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	var baseChannel basemodel.Channel
-	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
-		return nil, err
+	if err := db.Where("id = ?", built.shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
+		return err
 	}
 
 	// 索引即将改变，**必须清空按索引存放的状态**，否则旧状态会套到别的 Key 上。
-	baseChannel.Key = strings.Join(secrets, "\n")
+	baseChannel.Key = strings.Join(built.secrets, "\n")
 	baseChannel.ChannelInfo.IsMultiKey = true
-	baseChannel.ChannelInfo.MultiKeySize = len(secrets)
-	baseChannel.ChannelInfo.MultiKeyMode = baseMultiKeyMode(shareChannel.KeyPoolMode)
+	baseChannel.ChannelInfo.MultiKeySize = len(built.secrets)
+	baseChannel.ChannelInfo.MultiKeyMode = baseMultiKeyMode(built.shareChannel.KeyPoolMode)
 	baseChannel.ChannelInfo.MultiKeyStatusList = nil
 	baseChannel.ChannelInfo.MultiKeyDisabledReason = nil
 	baseChannel.ChannelInfo.MultiKeyDisabledTime = nil
 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
 
 	// 复用底座的更新路径：它会重算 MultiKeySize 并按当前 Key 列表裁剪越界的索引状态。
-	if err := baseChannel.Update(); err != nil {
-		return nil, err
-	}
-	return &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)}, nil
+	return baseChannel.Update()
 }
 
 // baseMultiKeyMode 把分享渠道的池策略映射为底座的选择方式。

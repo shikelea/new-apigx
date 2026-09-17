@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/channelpool"
 	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -199,6 +200,9 @@ func Distribute() func(c *gin.Context) {
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
+			// APIGX 逐 Key 成功统计（T1.5）：底座的运行期上下文仍带着本次使用的 Key 索引，
+			// 此处又天然只覆盖成功响应，因此复用这个位置而不是新增钩子点。默认关闭。
+			channelpool.RecordSuccessFromContext(c, channel.Id)
 		}
 	}
 }

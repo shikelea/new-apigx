@@ -465,3 +465,85 @@ func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
 	assert.Equal(t, 1, index, "底座必须跳过已失效的索引 0")
 	assert.Equal(t, "sk-low-aaaaaaaaa", key)
 }
+
+// 成功路径：关闭时空操作；开启后把 LastOKAt 记到**本次实际使用的那把**凭据上。
+func TestRecordSuccessFromContextWritesLastOKAt(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9401
+	const baseChannelID int64 = 8282
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-ok-one-aaaaaa", "sk-ok-two-bbbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	previous := dbProvider
+	SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
+
+	// 关闭时：一行都不该被写
+	SetKeyStatsEnabled(false)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
+	RecordSuccessFromContext(ctx, int(baseChannelID))
+	var before apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&before).Error)
+	assert.Zero(t, before.LastOKAt, "关闭时不得写入")
+
+	// 开启后：索引 0 的那把应被记上成功时间
+	SetKeyStatsEnabled(true)
+	RecordSuccessFromContext(ctx, int(baseChannelID))
+	var after apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&after).Error)
+	assert.Positive(t, after.LastOKAt, "成功时间必须记在本次使用的那把凭据上")
+
+	// 另一把不受影响
+	var other apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&other).Error)
+	assert.Zero(t, other.LastOKAt)
+
+	// 非多 Key 渠道：跳过
+	singleCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	RecordSuccessFromContext(singleCtx, int(baseChannelID))
+}
+
+// 统计回填**绝不能**改动底座渠道：早期实现复用 ProjectKeyPool，等于每次记录统计都重写
+// 底座渠道并清空它按下标的状态表与轮询游标——Key 健康状态会被一次次抹掉。
+func TestRecordKeyOutcomeDoesNotTouchBaseChannel(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9501
+	const baseChannelID int64 = 9292
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
+	}).Error)
+
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-stat-one-aaaaa", "sk-stat-two-bbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	// 人为制造「底座已有运行期状态」：索引 1 被底座禁用、轮询游标停在 1
+	require.NoError(t, db.Model(&basemodel.Channel{}).Where("id = ?", int(baseChannelID)).
+		Updates(map[string]any{
+			"channel_info": basemodel.ChannelInfo{
+				IsMultiKey:           true,
+				MultiKeySize:         2,
+				MultiKeyMode:         constant.MultiKeyModePolling,
+				MultiKeyPollingIndex: 1,
+				MultiKeyStatusList:   map[int]int{1: common.ChannelStatusAutoDisabled},
+			},
+		}).Error)
+
+	// 记统计（成功 + 失败各一次）
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{Success: true}))
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{ErrorCode: "500_boom"}))
+
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", int(baseChannelID)).First(&base).Error)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, base.ChannelInfo.MultiKeyStatusList[1],
+		"统计回填不得抹掉底座的 Key 健康状态")
+	assert.Equal(t, 1, base.ChannelInfo.MultiKeyPollingIndex, "统计回填不得重置轮询游标")
+	assert.Equal(t, 2, base.ChannelInfo.MultiKeySize)
+}

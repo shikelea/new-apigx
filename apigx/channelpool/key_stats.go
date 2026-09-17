@@ -86,3 +86,28 @@ func SetDBProvider(fn func() *gorm.DB) {
 }
 
 func defaultDB() *gorm.DB { return dbProvider() }
+
+// RecordSuccessFromContext 依据请求上下文，把一次**成功**调用记到对应的上游凭据上。
+//
+// 由底座的 `middleware.Distribute` 在 `c.Next()` 之后、响应状态 < 400 时调用
+// （见 docs/stage0/upstream-diff.md 的 D-015）——底座自己也在那一处记录渠道亲和性，
+// 因此上下文里的 Key 索引仍然有效，且天然只覆盖成功响应。
+//
+// 与失败路径同样的四条约束：默认关闭、只对多 Key 渠道生效、不记录任何凭据信息、失败不影响请求。
+func RecordSuccessFromContext(c *gin.Context, channelID int) {
+	if !keyStatsEnabled.Load() || c == nil || channelID <= 0 {
+		return
+	}
+	if !common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
+		return
+	}
+	keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+
+	db := defaultDB()
+	if db == nil {
+		return
+	}
+	if err := RecordKeyOutcome(db, channelID, keyIndex, KeyOutcome{Success: true}); err != nil {
+		common.SysError("channelpool: record key success failed: " + err.Error())
+	}
+}

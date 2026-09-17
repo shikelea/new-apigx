@@ -50,7 +50,9 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
 		return err
 	}
 
-	projection, err := ProjectKeyPool(db, shareChannel.ID)
+	// **只读**构建：统计回填绝不能写底座渠道（早期实现走 ProjectKeyPool，等于每次请求
+	// 结束都重写底座渠道并清空它按下标的状态表与轮询游标）。
+	projection, err := BuildKeyPoolProjection(db, shareChannel.ID)
 	if err != nil {
 		return err
 	}
