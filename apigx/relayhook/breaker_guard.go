@@ -43,6 +43,17 @@ func breakerEnabled() bool {
 
 const breakerCacheTTL = 30 * time.Second
 
+// breakerClosedCacheTTL 是"未打开"结论的缓存时长，故意很短：
+// 该结论随时可能被下一个请求推翻，缓存久了会让熔断在失败爆发期失明（实测过）。
+const breakerClosedCacheTTL = 3 * time.Second
+
+const (
+	// breakerRecentFailureSeconds 是"算作刚刚失败过"的时间窗。
+	breakerRecentFailureSeconds = 60
+	// breakerRecentFailureCacheTTL 是"刚失败过"的供给的判定缓存时长——刻意极短。
+	breakerRecentFailureCacheTTL = time.Second
+)
+
 // breakerCooldown 是"打开后至少保持不可用"的时长。
 //
 // # 为什么必须有冷却期（端到端回扫发现的抖动）
@@ -139,8 +150,28 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
 	verdict := routing.EvaluateBreaker(view, nowTs, routing.DefaultBreakerConfig())
 	open := verdict.State == routing.BreakerOpen
 
+	// **缓存分级（这是端到端回扫抓到的真问题）**：
+	//
+	// 早先"打开/未打开"都缓存 30 秒。但"未打开"是**随时可能被下一个请求推翻**的结论——
+	// 实测：第一次判定时样本还没攒够（`insufficient_attempts(0<5)`）→ 记为未打开并缓存 30 秒，
+	// 而失败爆发期与"改道后"阶段**恰好都落在这 30 秒里** ⇒ 熔断在它本该抓住的那一刻**完全失明**
+	// （表现为请求间歇性 500、坏上游样本持续增长）。
+	//
+	// 因此：**"打开"可以缓存较久**（它背后有冷却期兜底，不怕多拦一会儿），
+	// **"未打开"只缓存极短时间**，让失败一旦攒够就能立刻生效。
+	ttl := breakerCacheTTL
+	if !open {
+		ttl = breakerClosedCacheTTL
+		// **刚发生过上游失败的供给几乎立刻重新判定**：它可能正在跨越阈值。
+		// 否则"失败攒够的那一刻"与"缓存过期的那一刻"之间，熔断对整段爆发**失明**
+		// （端到端实测：去掉这条时，熔断打开后仍有 2/6 请求打到坏上游）。
+		// 健康供给不受影响，照旧走较长的缓存，避免每请求都查一次统计。
+		if view.LatestUpstreamFailureTs > 0 && nowTs-view.LatestUpstreamFailureTs < breakerRecentFailureSeconds {
+			ttl = breakerRecentFailureCacheTTL
+		}
+	}
 	breakerCacheMu.Lock()
-	breakerCache[offeringID] = cachedBreaker{open: open, expiresAt: now.Add(breakerCacheTTL)}
+	breakerCache[offeringID] = cachedBreaker{open: open, expiresAt: now.Add(ttl)}
 	breakerCacheMu.Unlock()
 	return open
 }
