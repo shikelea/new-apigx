@@ -1,0 +1,886 @@
+From ceed213fd9f608d991484cfe8d15522d77dee701 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:59:41 +0800
+Subject: [PATCH 84/84] =?UTF-8?q?feat(web):=20T3.9=E3=80=8C=E5=B9=B3?=
+ =?UTF-8?q?=E5=8F=B0=E7=AE=A1=E7=90=86=E3=80=8D=E9=A1=B5=EF=BC=88=E4=BB=B7?=
+ =?UTF-8?q?=E6=A0=BC=E8=A7=84=E5=88=99=20/=20=E4=BA=BA=E5=B7=A5=E8=A6=86?=
+ =?UTF-8?q?=E7=9B=96=20/=20=E8=B7=AF=E7=94=B1=E6=8E=92=E5=90=8D=E5=BA=94?=
+ =?UTF-8?q?=E7=94=A8=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- index.tsx: 价格规则(按作用域查询各维度单价; 未配置显示"未配置价格"而非 0) + 人工覆盖(输入/输出价)
+  + 路由排名应用(模型/策略/试算 dry-run 默认开)
+- lib/price.ts: 价格解析(**空串与非法一律无效, 绝不回退成 0** —— 0 是真实价格, 会让"价格缺失"像"免费")
+  + 可提交性(作用域 ID 为正且两个价格有效); +7 条用例
+- types.ts/api.ts: 作用域 0=供给/1=上游Key/2=渠道(沿用阶段2已核实三态); getPriceRules/setManualPrice/applyRouteRanking
+- 路由 /apigx-platform + 侧边栏「平台管理」
+- 自查: 删掉一行无用占位表达式(占位残留 lint 不覆盖, 靠自查)
+- 归属说明: 计划书的管理后台在底座 system-settings/*; 将来可移入该区(纯前端调整); price-sync 与供给审核 UI 下一步
+
+检查(全过): typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅ / 用例 25 文件 377 条全绿 ✅
+---
+ .../apigx-platform/__tests__/price.test.ts    |  60 ++++++
+ web/src/features/apigx-platform/api.ts        |  36 ++++
+ web/src/features/apigx-platform/index.tsx     | 189 ++++++++++++++++++
+ web/src/features/apigx-platform/lib/price.ts  |  57 ++++++
+ web/src/features/apigx-platform/types.ts      |  57 ++++++
+ web/src/hooks/use-sidebar-data.ts             |   6 +
+ web/src/i18n/locales/en.json                  |  26 ++-
+ web/src/i18n/locales/fr.json                  |  26 ++-
+ web/src/i18n/locales/ja.json                  |  26 ++-
+ web/src/i18n/locales/ru.json                  |  26 ++-
+ web/src/i18n/locales/vi.json                  |  26 ++-
+ web/src/i18n/locales/zh-TW.json               |  26 ++-
+ web/src/i18n/locales/zh.json                  |  26 ++-
+ web/src/routeTree.gen.ts                      |  22 ++
+ .../_authenticated/apigx-platform/index.tsx   |  24 +++
+ 15 files changed, 626 insertions(+), 7 deletions(-)
+ create mode 100644 web/src/features/apigx-platform/__tests__/price.test.ts
+ create mode 100644 web/src/features/apigx-platform/api.ts
+ create mode 100644 web/src/features/apigx-platform/index.tsx
+ create mode 100644 web/src/features/apigx-platform/lib/price.ts
+ create mode 100644 web/src/features/apigx-platform/types.ts
+ create mode 100644 web/src/routes/_authenticated/apigx-platform/index.tsx
+
+diff --git a/web/src/features/apigx-platform/__tests__/price.test.ts b/web/src/features/apigx-platform/__tests__/price.test.ts
+new file mode 100644
+index 0000000..f255bab
+--- /dev/null
++++ b/web/src/features/apigx-platform/__tests__/price.test.ts
+@@ -0,0 +1,60 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it } from 'vitest'
++
++import { canSubmitManualPrice, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from '../lib/price'
++
++describe('每百万 token 价格解析', () => {
++  it('合法数字被接受', () => {
++    expect(parseUsdPerMillion('2.5')).toBe(2.5)
++    expect(parseUsdPerMillion(' 0 ')).toBe(0)
++  })
++
++  it('空串与非法输入返回 null（绝不回退成 0）', () => {
++    expect(parseUsdPerMillion('')).toBeNull()
++    expect(parseUsdPerMillion('   ')).toBeNull()
++    expect(parseUsdPerMillion('abc')).toBeNull()
++    expect(parseUsdPerMillion('-1')).toBeNull()
++    expect(parseUsdPerMillion('NaN')).toBeNull()
++  })
++})
++
++describe('人工覆盖价格可提交性', () => {
++  const base = { scopeType: 0, scopeId: '12', inputPrice: '1', outputPrice: '2' }
++
++  it('作用域与两个价格都合法时可提交', () => {
++    expect(canSubmitManualPrice(base)).toBe(true)
++  })
++
++  it('作用域 ID 缺失或非正数时不可提交', () => {
++    expect(canSubmitManualPrice({ ...base, scopeId: '' })).toBe(false)
++    expect(canSubmitManualPrice({ ...base, scopeId: '0' })).toBe(false)
++    expect(canSubmitManualPrice({ ...base, scopeId: 'abc' })).toBe(false)
++  })
++
++  it('任一价格无效时不可提交', () => {
++    expect(canSubmitManualPrice({ ...base, inputPrice: '' })).toBe(false)
++    expect(canSubmitManualPrice({ ...base, outputPrice: 'x' })).toBe(false)
++  })
++})
++
++describe('价格作用域选项', () => {
++  it('与后端的三种作用域一一对应', () => {
++    expect(PRICE_SCOPE_OPTIONS.map((option) => option.value)).toEqual([0, 1, 2])
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/apigx-platform/api.ts b/web/src/features/apigx-platform/api.ts
+new file mode 100644
+index 0000000..29f850b
+--- /dev/null
++++ b/web/src/features/apigx-platform/api.ts
+@@ -0,0 +1,36 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { api } from '@/lib/api'
++
++import type { ApplyRouteRankingPayload, ManualPricePayload, PriceRuleResponse } from './types'
++
++// 平台侧数据访问：价格规则与路由排名应用。均为**平台侧动作**（后端 requirePlatformReviewer）。
++export async function getPriceRules(scopeType: number, scopeId: number): Promise<PriceRuleResponse> {
++  const res = await api.get('/api/apigx/price-rules', { params: { scope_type: scopeType, scope_id: scopeId } })
++  return res.data
++}
++
++export async function setManualPrice(payload: ManualPricePayload): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.put('/api/apigx/price-rules', payload)
++  return res.data
++}
++
++export async function applyRouteRanking(payload: ApplyRouteRankingPayload): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post('/api/apigx/route-apply', payload)
++  return res.data
++}
+\ No newline at end of file
+diff --git a/web/src/features/apigx-platform/index.tsx b/web/src/features/apigx-platform/index.tsx
+new file mode 100644
+index 0000000..8973828
+--- /dev/null
++++ b/web/src/features/apigx-platform/index.tsx
+@@ -0,0 +1,189 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useMutation, useQuery } from '@tanstack/react-query'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { SectionPageLayout } from '@/components/layout'
++import { Button } from '@/components/ui/button'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
++import { Switch } from '@/components/ui/switch'
++import { formatMicroUSD } from '@/features/plaza/lib/format'
++
++import { applyRouteRanking, getPriceRules, setManualPrice } from './api'
++import { canSubmitManualPrice, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
++import type { PriceDimension } from './types'
++
++/** 平台管理：价格规则（查询与人工覆盖）与路由排名应用。均为平台侧动作。 */
++export function ApigxPlatform() {
++  const { t } = useTranslation()
++
++  const [scopeType, setScopeType] = useState(String(PRICE_SCOPE_OPTIONS[0].value))
++  const [scopeId, setScopeId] = useState('')
++  const [inputPrice, setInputPrice] = useState('')
++  const [outputPrice, setOutputPrice] = useState('')
++
++  const [model, setModel] = useState('')
++  const [strategy, setStrategy] = useState('auto')
++  const [dryRun, setDryRun] = useState(true)
++
++  const parsedScopeId = Number.parseInt(scopeId.trim(), 10)
++  const canQuery = Number.isFinite(parsedScopeId) && parsedScopeId > 0
++
++  const priceQuery = useQuery({
++    queryKey: ['apigx-price-rules', scopeType, parsedScopeId],
++    queryFn: () => getPriceRules(Number(scopeType), parsedScopeId),
++    enabled: canQuery,
++  })
++
++  const savePriceMutation = useMutation({
++    mutationFn: () =>
++      setManualPrice({
++        scope_type: Number(scopeType),
++        scope_id: parsedScopeId,
++        input_usd_per_million: parseUsdPerMillion(inputPrice) ?? 0,
++        output_usd_per_million: parseUsdPerMillion(outputPrice) ?? 0,
++      }),
++    onSuccess: () => {
++      void priceQuery.refetch()
++    },
++  })
++
++  const applyRankingMutation = useMutation({
++    mutationFn: () => applyRouteRanking({ model, strategy, dry_run: dryRun }),
++  })
++
++  const dimensions = priceQuery.data?.data?.dimensions ?? []
++  const priceColumns: StaticDataTableColumn<PriceDimension>[] = [
++    { id: 'dimension', header: t('apigxPlatform.dimension'), cell: (row) => row.dimension },
++    {
++      id: 'unit_price',
++      header: t('apigxPlatform.unitPrice'),
++      cell: (row) => (row.price_known ? formatMicroUSD(row.usd_unit_price_micro) : t('apigxPlatform.priceUnknown')),
++    },
++  ]
++
++  return (
++    <SectionPageLayout>
++      <SectionPageLayout.Title>{t('apigxPlatform.title')}</SectionPageLayout.Title>
++      <SectionPageLayout.Content>
++        <div className='space-y-6'>
++          <Card>
++            <CardHeader>
++              <CardTitle>{t('apigxPlatform.priceRules')}</CardTitle>
++            </CardHeader>
++            <CardContent className='space-y-4'>
++              <div className='grid gap-3 sm:grid-cols-3'>
++                <div className='space-y-1'>
++                  <Label>{t('apigxPlatform.scope')}</Label>
++                  <Select value={scopeType} onValueChange={(next) => setScopeType(next ?? '0')}>
++                    <SelectTrigger>
++                      <SelectValue />
++                    </SelectTrigger>
++                    <SelectContent>
++                      {PRICE_SCOPE_OPTIONS.map((option) => (
++                        <SelectItem key={option.value} value={String(option.value)}>
++                          {t(option.labelKey)}
++                        </SelectItem>
++                      ))}
++                    </SelectContent>
++                  </Select>
++                </div>
++                <div className='space-y-1'>
++                  <Label>{t('apigxPlatform.scopeId')}</Label>
++                  <Input value={scopeId} onChange={(event) => setScopeId(event.target.value)} inputMode='numeric' />
++                </div>
++              </div>
++
++              {canQuery && dimensions.length > 0 ? (
++                <StaticDataTable columns={priceColumns} data={dimensions} getRowKey={(row) => row.dimension} />
++              ) : null}
++              {canQuery && !priceQuery.isFetching && dimensions.length === 0 ? (
++                <EmptyState title={t('apigxPlatform.noPrice')} />
++              ) : null}
++
++              <div className='grid gap-3 sm:grid-cols-2'>
++                <div className='space-y-1'>
++                  <Label>{t('apigxPlatform.inputPrice')}</Label>
++                  <Input value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} inputMode='decimal' />
++                </div>
++                <div className='space-y-1'>
++                  <Label>{t('apigxPlatform.outputPrice')}</Label>
++                  <Input
++                    value={outputPrice}
++                    onChange={(event) => setOutputPrice(event.target.value)}
++                    inputMode='decimal'
++                  />
++                </div>
++              </div>
++              <Button
++                disabled={!canSubmitManualPrice({ scopeType: Number(scopeType), scopeId, inputPrice, outputPrice }) || savePriceMutation.isPending}
++                onClick={() => savePriceMutation.mutate()}
++              >
++                {t('apigxPlatform.savePrice')}
++              </Button>
++            </CardContent>
++          </Card>
++
++          <Card>
++            <CardHeader>
++              <CardTitle>{t('apigxPlatform.applyRanking')}</CardTitle>
++            </CardHeader>
++            <CardContent className='space-y-4'>
++              <div className='grid gap-3 sm:grid-cols-2'>
++                <div className='space-y-1'>
++                  <Label>{t('apigxPlatform.model')}</Label>
++                  <Input value={model} onChange={(event) => setModel(event.target.value)} />
++                </div>
++                <div className='space-y-1'>
++                  <Label>{t('apigxPlatform.strategy')}</Label>
++                  <Select value={strategy} onValueChange={(next) => setStrategy(next ?? 'auto')}>
++                    <SelectTrigger>
++                      <SelectValue />
++                    </SelectTrigger>
++                    <SelectContent>
++                      <SelectItem value='auto'>{t('apigxPlatform.strategy.auto')}</SelectItem>
++                      <SelectItem value='latency'>{t('apigxPlatform.strategy.latency')}</SelectItem>
++                      <SelectItem value='throughput'>{t('apigxPlatform.strategy.throughput')}</SelectItem>
++                      <SelectItem value='reliability'>{t('apigxPlatform.strategy.reliability')}</SelectItem>
++                    </SelectContent>
++                  </Select>
++                </div>
++              </div>
++              <div className='flex items-center gap-3'>
++                <Switch checked={dryRun} onCheckedChange={setDryRun} id='apigx-route-dry-run' />
++                <Label htmlFor='apigx-route-dry-run'>{t('apigxPlatform.dryRun')}</Label>
++              </div>
++              <Button
++                disabled={model.trim() === '' || applyRankingMutation.isPending}
++                onClick={() => applyRankingMutation.mutate()}
++              >
++                {t('apigxPlatform.apply')}
++              </Button>
++            </CardContent>
++          </Card>
++        </div>
++      </SectionPageLayout.Content>
++    </SectionPageLayout>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/features/apigx-platform/lib/price.ts b/web/src/features/apigx-platform/lib/price.ts
+new file mode 100644
+index 0000000..af4f04a
+--- /dev/null
++++ b/web/src/features/apigx-platform/lib/price.ts
+@@ -0,0 +1,57 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { PRICE_SCOPE_CHANNEL, PRICE_SCOPE_OFFERING, PRICE_SCOPE_UPSTREAM_KEY } from '../types'
++
++/** 价格作用域选项（与后端一致：0=供给 / 1=上游 Key / 2=渠道）。 */
++export const PRICE_SCOPE_OPTIONS: { value: number; labelKey: string }[] = [
++  { value: PRICE_SCOPE_OFFERING, labelKey: 'apigxPlatform.priceScope.offering' },
++  { value: PRICE_SCOPE_UPSTREAM_KEY, labelKey: 'apigxPlatform.priceScope.upstreamKey' },
++  { value: PRICE_SCOPE_CHANNEL, labelKey: 'apigxPlatform.priceScope.channel' },
++]
++
++/**
++ * 解析用户填写的「每百万 token 美元价」。
++ *
++ * 与"未知价格"的既有取向一致：**空串或非法输入一律视为无效（返回 null）**，
++ * 绝不回退成 0 —— 0 是一个真实价格，会让"价格缺失"看起来像"免费"（阶段 3 讨论过这一点）。
++ */
++export function parseUsdPerMillion(text: string): number | null {
++  const trimmed = text.trim()
++  if (trimmed === '') {
++    return null
++  }
++  const value = Number(trimmed)
++  if (!Number.isFinite(value) || value < 0) {
++    return null
++  }
++  return value
++}
++
++/** 人工覆盖价格是否可提交：作用域合法 + 输入与输出都是有效价格。 */
++export function canSubmitManualPrice(form: {
++  scopeType: number
++  scopeId: string
++  inputPrice: string
++  outputPrice: string
++}): boolean {
++  const scopeId = Number.parseInt(form.scopeId.trim(), 10)
++  if (!Number.isFinite(scopeId) || scopeId <= 0) {
++    return false
++  }
++  return parseUsdPerMillion(form.inputPrice) !== null && parseUsdPerMillion(form.outputPrice) !== null
++}
+\ No newline at end of file
+diff --git a/web/src/features/apigx-platform/types.ts b/web/src/features/apigx-platform/types.ts
+new file mode 100644
+index 0000000..bd96d11
+--- /dev/null
++++ b/web/src/features/apigx-platform/types.ts
+@@ -0,0 +1,57 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++// 平台侧（管理后台）相关类型。
++//
++// 价格作用域沿用阶段 2 已核实的三态：0=供给 / 1=上游 Key / 2=渠道。
++
++export const PRICE_SCOPE_OFFERING = 0
++export const PRICE_SCOPE_UPSTREAM_KEY = 1
++export const PRICE_SCOPE_CHANNEL = 2
++
++/** 一个计价维度（后端按维度返回，未配置时 `price_known=false`）。 */
++export interface PriceDimension {
++  dimension: string
++  unit_scale: number
++  usd_unit_price_micro: number
++  price_known: boolean
++}
++
++export interface PriceRuleResponse {
++  success: boolean
++  data?: {
++    price_known: boolean
++    dimensions: PriceDimension[] | null
++  }
++}
++
++/** 人工覆盖价格（平台侧动作）。 */
++export interface ManualPricePayload {
++  scope_type: number
++  scope_id: number
++  input_usd_per_million: number
++  output_usd_per_million: number
++  lock?: boolean
++}
++
++/** 应用路由排名（平台侧动作；支持 dry-run）。 */
++export interface ApplyRouteRankingPayload {
++  model: string
++  strategy?: string
++  dry_run?: boolean
++}
+\ No newline at end of file
+diff --git a/web/src/hooks/use-sidebar-data.ts b/web/src/hooks/use-sidebar-data.ts
+index 8b69ab1..24c5a14 100644
+--- a/web/src/hooks/use-sidebar-data.ts
++++ b/web/src/hooks/use-sidebar-data.ts
+@@ -25,6 +25,7 @@ import {
+   FlaskConical,
+   Store,
+   Coins,
++  Settings2,
+   Share2,
+   Key,
+   LayoutDashboard,
+@@ -80,6 +81,11 @@ export function useSidebarData(): SidebarData {
+             url: '/usage',
+             icon: Coins,
+           },
++          {
++            title: t('apigxPlatform.nav'),
++            url: '/apigx-platform',
++            icon: Settings2,
++          },
+           {
+             title: t('Chat'),
+             icon: MessageSquare,
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 439d164..b00d98d 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6641,5 +6641,29 @@
+   "apigxKey.scope.allowedModels": "Allowed models",
+   "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
+   "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
+-  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources",
++  "apigxPlatform.nav": "Platform admin",
++  "apigxPlatform.title": "Platform admin",
++  "apigxPlatform.priceRules": "Price rules",
++  "apigxPlatform.scope": "Scope",
++  "apigxPlatform.scopeId": "Scope ID",
++  "apigxPlatform.priceScope.offering": "Offering",
++  "apigxPlatform.priceScope.upstreamKey": "Upstream key",
++  "apigxPlatform.priceScope.channel": "Channel",
++  "apigxPlatform.dimension": "Dimension",
++  "apigxPlatform.unitPrice": "Unit price (USD)",
++  "apigxPlatform.priceUnknown": "Price not configured",
++  "apigxPlatform.noPrice": "No price configured for this scope",
++  "apigxPlatform.inputPrice": "Input price (USD / million tokens)",
++  "apigxPlatform.outputPrice": "Output price (USD / million tokens)",
++  "apigxPlatform.savePrice": "Save price",
++  "apigxPlatform.applyRanking": "Apply routing ranking",
++  "apigxPlatform.model": "Model",
++  "apigxPlatform.strategy": "Strategy",
++  "apigxPlatform.strategy.auto": "Auto",
++  "apigxPlatform.strategy.latency": "Latency",
++  "apigxPlatform.strategy.throughput": "Throughput",
++  "apigxPlatform.strategy.reliability": "Reliability",
++  "apigxPlatform.dryRun": "Dry run (do not write)",
++  "apigxPlatform.apply": "Apply"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 532fac1..4f4be4a 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6641,5 +6641,29 @@
+   "apigxKey.scope.allowedModels": "Allowed models",
+   "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
+   "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
+-  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources",
++  "apigxPlatform.nav": "Platform admin",
++  "apigxPlatform.title": "Platform admin",
++  "apigxPlatform.priceRules": "Price rules",
++  "apigxPlatform.scope": "Scope",
++  "apigxPlatform.scopeId": "Scope ID",
++  "apigxPlatform.priceScope.offering": "Offering",
++  "apigxPlatform.priceScope.upstreamKey": "Upstream key",
++  "apigxPlatform.priceScope.channel": "Channel",
++  "apigxPlatform.dimension": "Dimension",
++  "apigxPlatform.unitPrice": "Unit price (USD)",
++  "apigxPlatform.priceUnknown": "Price not configured",
++  "apigxPlatform.noPrice": "No price configured for this scope",
++  "apigxPlatform.inputPrice": "Input price (USD / million tokens)",
++  "apigxPlatform.outputPrice": "Output price (USD / million tokens)",
++  "apigxPlatform.savePrice": "Save price",
++  "apigxPlatform.applyRanking": "Apply routing ranking",
++  "apigxPlatform.model": "Model",
++  "apigxPlatform.strategy": "Strategy",
++  "apigxPlatform.strategy.auto": "Auto",
++  "apigxPlatform.strategy.latency": "Latency",
++  "apigxPlatform.strategy.throughput": "Throughput",
++  "apigxPlatform.strategy.reliability": "Reliability",
++  "apigxPlatform.dryRun": "Dry run (do not write)",
++  "apigxPlatform.apply": "Apply"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 17395bb..539da66 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6641,5 +6641,29 @@
+   "apigxKey.scope.allowedModels": "Allowed models",
+   "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
+   "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
+-  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources",
++  "apigxPlatform.nav": "Platform admin",
++  "apigxPlatform.title": "Platform admin",
++  "apigxPlatform.priceRules": "Price rules",
++  "apigxPlatform.scope": "Scope",
++  "apigxPlatform.scopeId": "Scope ID",
++  "apigxPlatform.priceScope.offering": "Offering",
++  "apigxPlatform.priceScope.upstreamKey": "Upstream key",
++  "apigxPlatform.priceScope.channel": "Channel",
++  "apigxPlatform.dimension": "Dimension",
++  "apigxPlatform.unitPrice": "Unit price (USD)",
++  "apigxPlatform.priceUnknown": "Price not configured",
++  "apigxPlatform.noPrice": "No price configured for this scope",
++  "apigxPlatform.inputPrice": "Input price (USD / million tokens)",
++  "apigxPlatform.outputPrice": "Output price (USD / million tokens)",
++  "apigxPlatform.savePrice": "Save price",
++  "apigxPlatform.applyRanking": "Apply routing ranking",
++  "apigxPlatform.model": "Model",
++  "apigxPlatform.strategy": "Strategy",
++  "apigxPlatform.strategy.auto": "Auto",
++  "apigxPlatform.strategy.latency": "Latency",
++  "apigxPlatform.strategy.throughput": "Throughput",
++  "apigxPlatform.strategy.reliability": "Reliability",
++  "apigxPlatform.dryRun": "Dry run (do not write)",
++  "apigxPlatform.apply": "Apply"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 21973fe..171f274 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6641,5 +6641,29 @@
+   "apigxKey.scope.allowedModels": "Allowed models",
+   "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
+   "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
+-  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources",
++  "apigxPlatform.nav": "Platform admin",
++  "apigxPlatform.title": "Platform admin",
++  "apigxPlatform.priceRules": "Price rules",
++  "apigxPlatform.scope": "Scope",
++  "apigxPlatform.scopeId": "Scope ID",
++  "apigxPlatform.priceScope.offering": "Offering",
++  "apigxPlatform.priceScope.upstreamKey": "Upstream key",
++  "apigxPlatform.priceScope.channel": "Channel",
++  "apigxPlatform.dimension": "Dimension",
++  "apigxPlatform.unitPrice": "Unit price (USD)",
++  "apigxPlatform.priceUnknown": "Price not configured",
++  "apigxPlatform.noPrice": "No price configured for this scope",
++  "apigxPlatform.inputPrice": "Input price (USD / million tokens)",
++  "apigxPlatform.outputPrice": "Output price (USD / million tokens)",
++  "apigxPlatform.savePrice": "Save price",
++  "apigxPlatform.applyRanking": "Apply routing ranking",
++  "apigxPlatform.model": "Model",
++  "apigxPlatform.strategy": "Strategy",
++  "apigxPlatform.strategy.auto": "Auto",
++  "apigxPlatform.strategy.latency": "Latency",
++  "apigxPlatform.strategy.throughput": "Throughput",
++  "apigxPlatform.strategy.reliability": "Reliability",
++  "apigxPlatform.dryRun": "Dry run (do not write)",
++  "apigxPlatform.apply": "Apply"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index d87eaa5..5f7ea20 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6641,5 +6641,29 @@
+   "apigxKey.scope.allowedModels": "Allowed models",
+   "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
+   "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
+-  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources",
++  "apigxPlatform.nav": "Platform admin",
++  "apigxPlatform.title": "Platform admin",
++  "apigxPlatform.priceRules": "Price rules",
++  "apigxPlatform.scope": "Scope",
++  "apigxPlatform.scopeId": "Scope ID",
++  "apigxPlatform.priceScope.offering": "Offering",
++  "apigxPlatform.priceScope.upstreamKey": "Upstream key",
++  "apigxPlatform.priceScope.channel": "Channel",
++  "apigxPlatform.dimension": "Dimension",
++  "apigxPlatform.unitPrice": "Unit price (USD)",
++  "apigxPlatform.priceUnknown": "Price not configured",
++  "apigxPlatform.noPrice": "No price configured for this scope",
++  "apigxPlatform.inputPrice": "Input price (USD / million tokens)",
++  "apigxPlatform.outputPrice": "Output price (USD / million tokens)",
++  "apigxPlatform.savePrice": "Save price",
++  "apigxPlatform.applyRanking": "Apply routing ranking",
++  "apigxPlatform.model": "Model",
++  "apigxPlatform.strategy": "Strategy",
++  "apigxPlatform.strategy.auto": "Auto",
++  "apigxPlatform.strategy.latency": "Latency",
++  "apigxPlatform.strategy.throughput": "Throughput",
++  "apigxPlatform.strategy.reliability": "Reliability",
++  "apigxPlatform.dryRun": "Dry run (do not write)",
++  "apigxPlatform.apply": "Apply"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 0b596e2..f3d2bda 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6641,5 +6641,29 @@
+   "apigxKey.scope.allowedModels": "Allowed models",
+   "apigxKey.scope.allowedOwners": "Allowed providers (user IDs)",
+   "apigxKey.scope.listPlaceholder": "Comma or space separated; empty = no restriction",
+-  "apigxKey.scope.allowFallback": "Allow fallback to other sources"
++  "apigxKey.scope.allowFallback": "Allow fallback to other sources",
++  "apigxPlatform.nav": "Platform admin",
++  "apigxPlatform.title": "Platform admin",
++  "apigxPlatform.priceRules": "Price rules",
++  "apigxPlatform.scope": "Scope",
++  "apigxPlatform.scopeId": "Scope ID",
++  "apigxPlatform.priceScope.offering": "Offering",
++  "apigxPlatform.priceScope.upstreamKey": "Upstream key",
++  "apigxPlatform.priceScope.channel": "Channel",
++  "apigxPlatform.dimension": "Dimension",
++  "apigxPlatform.unitPrice": "Unit price (USD)",
++  "apigxPlatform.priceUnknown": "Price not configured",
++  "apigxPlatform.noPrice": "No price configured for this scope",
++  "apigxPlatform.inputPrice": "Input price (USD / million tokens)",
++  "apigxPlatform.outputPrice": "Output price (USD / million tokens)",
++  "apigxPlatform.savePrice": "Save price",
++  "apigxPlatform.applyRanking": "Apply routing ranking",
++  "apigxPlatform.model": "Model",
++  "apigxPlatform.strategy": "Strategy",
++  "apigxPlatform.strategy.auto": "Auto",
++  "apigxPlatform.strategy.latency": "Latency",
++  "apigxPlatform.strategy.throughput": "Throughput",
++  "apigxPlatform.strategy.reliability": "Reliability",
++  "apigxPlatform.dryRun": "Dry run (do not write)",
++  "apigxPlatform.apply": "Apply"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 07e3c61..3d8be37 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6641,5 +6641,29 @@
+   "apigxKey.scope.allowedModels": "允许的模型",
+   "apigxKey.scope.allowedOwners": "允许的分享者（用户 ID）",
+   "apigxKey.scope.listPlaceholder": "逗号或空格分隔；留空 = 不限制",
+-  "apigxKey.scope.allowFallback": "允许回退到其他来源"
++  "apigxKey.scope.allowFallback": "允许回退到其他来源",
++  "apigxPlatform.nav": "平台管理",
++  "apigxPlatform.title": "平台管理",
++  "apigxPlatform.priceRules": "价格规则",
++  "apigxPlatform.scope": "作用域",
++  "apigxPlatform.scopeId": "作用域 ID",
++  "apigxPlatform.priceScope.offering": "供给",
++  "apigxPlatform.priceScope.upstreamKey": "上游 Key",
++  "apigxPlatform.priceScope.channel": "渠道",
++  "apigxPlatform.dimension": "计价维度",
++  "apigxPlatform.unitPrice": "单价（USD）",
++  "apigxPlatform.priceUnknown": "未配置价格",
++  "apigxPlatform.noPrice": "该作用域尚未配置价格",
++  "apigxPlatform.inputPrice": "输入价（USD / 百万 token）",
++  "apigxPlatform.outputPrice": "输出价（USD / 百万 token）",
++  "apigxPlatform.savePrice": "保存价格",
++  "apigxPlatform.applyRanking": "应用路由排名",
++  "apigxPlatform.model": "模型",
++  "apigxPlatform.strategy": "策略",
++  "apigxPlatform.strategy.auto": "自动",
++  "apigxPlatform.strategy.latency": "低延迟",
++  "apigxPlatform.strategy.throughput": "高吞吐",
++  "apigxPlatform.strategy.reliability": "高可靠",
++  "apigxPlatform.dryRun": "试算（不写库）",
++  "apigxPlatform.apply": "应用"
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index 3d9a4bf..d9f73c1 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -34,6 +34,7 @@ import { Route as PricingIndexRouteImport } from './routes/pricing/index'
+ import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
+ import { Route as SetupIndexRouteImport } from './routes/setup/index'
+ import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
++import { Route as AuthenticatedApigxPlatformIndexRouteImport } from './routes/_authenticated/apigx-platform/index'
+ import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
+ import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
+ import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
+@@ -200,6 +201,12 @@ const authUserResetRoute = authUserResetRouteImport.update({
+   path: '/user/reset',
+   getParentRoute: () => authRouteRoute,
+ } as any)
++const AuthenticatedApigxPlatformIndexRoute =
++  AuthenticatedApigxPlatformIndexRouteImport.update({
++    id: '/apigx-platform/',
++    path: '/apigx-platform/',
++    getParentRoute: () => AuthenticatedRouteRoute,
++  } as any)
+ const AuthenticatedChannelsIndexRoute =
+   AuthenticatedChannelsIndexRouteImport.update({
+     id: '/channels/',
+@@ -471,6 +478,7 @@ export interface FileRoutesByFullPath {
+   '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
++  '/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
+   '/channels/': typeof AuthenticatedChannelsIndexRoute
+   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
+   '/keys/': typeof AuthenticatedKeysIndexRoute
+@@ -536,6 +544,7 @@ export interface FileRoutesByTo {
+   '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
++  '/apigx-platform': typeof AuthenticatedApigxPlatformIndexRoute
+   '/channels': typeof AuthenticatedChannelsIndexRoute
+   '/dashboard': typeof AuthenticatedDashboardIndexRoute
+   '/keys': typeof AuthenticatedKeysIndexRoute
+@@ -605,6 +614,7 @@ export interface FileRoutesById {
+   '/_authenticated/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
++  '/_authenticated/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
+   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
+   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
+   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
+@@ -673,6 +683,7 @@ export interface FileRouteTypes {
+     | '/share/$channelId'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
++    | '/apigx-platform/'
+     | '/channels/'
+     | '/dashboard/'
+     | '/keys/'
+@@ -738,6 +749,7 @@ export interface FileRouteTypes {
+     | '/share/$channelId'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
++    | '/apigx-platform'
+     | '/channels'
+     | '/dashboard'
+     | '/keys'
+@@ -806,6 +818,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/share/$channelId'
+     | '/_authenticated/usage-logs/$section'
+     | '/_authenticated/usage-logs/audit'
++    | '/_authenticated/apigx-platform/'
+     | '/_authenticated/channels/'
+     | '/_authenticated/dashboard/'
+     | '/_authenticated/keys/'
+@@ -1037,6 +1050,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof authUserResetRouteImport
+       parentRoute: typeof authRouteRoute
+     }
++    '/_authenticated/apigx-platform/': {
++      id: '/_authenticated/apigx-platform/'
++      path: '/apigx-platform'
++      fullPath: '/apigx-platform/'
++      preLoaderRoute: typeof AuthenticatedApigxPlatformIndexRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/channels/': {
+       id: '/_authenticated/channels/'
+       path: '/channels'
+@@ -1421,6 +1441,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedShareChannelIdRoute: typeof AuthenticatedShareChannelIdRoute
+   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
+   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
++  AuthenticatedApigxPlatformIndexRoute: typeof AuthenticatedApigxPlatformIndexRoute
+   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
+   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
+   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
+@@ -1452,6 +1473,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedShareChannelIdRoute: AuthenticatedShareChannelIdRoute,
+   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
+   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
++  AuthenticatedApigxPlatformIndexRoute: AuthenticatedApigxPlatformIndexRoute,
+   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
+   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
+   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,
+diff --git a/web/src/routes/_authenticated/apigx-platform/index.tsx b/web/src/routes/_authenticated/apigx-platform/index.tsx
+new file mode 100644
+index 0000000..31c8e73
+--- /dev/null
++++ b/web/src/routes/_authenticated/apigx-platform/index.tsx
+@@ -0,0 +1,24 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { createFileRoute } from '@tanstack/react-router'
++
++import { ApigxPlatform } from '@/features/apigx-platform'
++
++export const Route = createFileRoute('/_authenticated/apigx-platform/')({
++  component: ApigxPlatform,
++})
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+
