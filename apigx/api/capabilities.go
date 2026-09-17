@@ -65,6 +65,7 @@ var capabilityMatrix = []capabilityEntry{
 		Status:   "supported",
 		Evidence: "复用底座适配器；已验协议往返、usage 计量与规格拒绝",
 		Verified: []string{
+			"**真实厂商端到端**（aiping.cn，模型 Qwen3-Embedding-0.6B：平台返回 200、2 条向量、维度 1024）",
 			"批量 embeddings 协议往返",
 			"向量维度",
 			"usage 计量与落库",
@@ -76,6 +77,7 @@ var capabilityMatrix = []capabilityEntry{
 		Status:   "supported",
 		Evidence: "复用底座适配器；已验查询/文档往返、计量与空文档拒绝",
 		Verified: []string{
+			"**真实厂商端到端**（aiping.cn，模型 Qwen3-Reranker-0.6B：平台返回 200、3 条排序结果）",
 			"查询/文档列表往返与排序结果",
 			"计量落库",
 			"空文档列表被拒",
