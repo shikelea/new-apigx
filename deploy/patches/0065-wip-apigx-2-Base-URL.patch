@@ -1,0 +1,103 @@
+From 12ff97772197ecb8e759dd729ac9d20484a102e3 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 18:06:28 +0800
+Subject: [PATCH 65/65] =?UTF-8?q?wip(apigx):=20=E9=98=B6=E6=AE=B5=202=20?=
+ =?UTF-8?q?=E5=9B=9E=E6=89=AB=E2=80=94=E2=80=94=E4=BF=AE=E5=A4=8D=20Base?=
+ =?UTF-8?q?=20URL/=E8=84=9A=E6=9C=AC=E5=81=87=E9=98=B3=E6=80=A7=EF=BC=9B?=
+ =?UTF-8?q?=E7=86=94=E6=96=AD=E6=94=B9=E9=81=93=E5=9B=9E=E5=BD=92**?=
+ =?UTF-8?q?=E6=9C=AA=E8=A7=A3=E5=86=B3**=EF=BC=88=E5=A6=82=E5=AE=9E?=
+ =?UTF-8?q?=E8=AE=B0=E5=BD=95=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+本轮完成:
+  - 真实上游端到端 7/7（tokenrhythm.studio / glm-5.3-flash, 密钥只从环境变量读取）
+  - 修复 Base URL 归一化(用户填 .../v1 会被底座再拼一层 => 404; 新增 NormalizeUpstreamBaseURL + 9 用例)
+  - 修复验收脚本假阳性(用量断言只取最近一条, 会命中历史记录)
+  - 澄清 channel-policy-limit 的 3/4 是**环境开关冲突**(网关设了 env 上限, 而脚本要验证"未配置不施加约束"), 单独跑 4/4
+  - 熔断**冷却期**(breakerCooldown=60s): 修"流量挪走后失败过期 => 立刻恢复 => 再失败"的抖动
+
+❗未解决回归(本轮止步, 已缩范围):
+  熔断的"改道"在**请求路径上不再触发** —— 网关日志里**从未出现** "offering is open, retry with another channel",
+  而同一时刻 route-explain 用同一套判定报出 breaker_open => **判定对、执行没发生**
+  - 钩子都在(distributor L760/L763/L768), 不是被摘掉
+  - 可疑: CheckBreakerAllows 的某个**静默早退**(fail-open); 或与第 54 轮对 distributor 的改动时序吻合
+  - 下一步: 给早退分支加可观测, 先确定它走到哪一步、FindOfferingByUpstreamModel 是否命中
+  - 撤掉写不通的冷却单测(fixture 对 channel_info map 回读不一致), 按"宁可无断言也不要假阳性"处理
+
+=> 阶段 2 暂不能算"验收无误"
+---
+ apigx/relayhook/breaker_guard.go      | 33 +++++++++++++++++++++++++++
+ apigx/relayhook/breaker_guard_test.go |  7 ++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+index e34d0d2..e73a534 100644
+--- a/apigx/relayhook/breaker_guard.go
++++ b/apigx/relayhook/breaker_guard.go
+@@ -43,6 +43,27 @@ func breakerEnabled() bool {
+ 
+ const breakerCacheTTL = 30 * time.Second
+ 
++// breakerCooldown 是"打开后至少保持不可用"的时长。
++//
++// # 为什么必须有冷却期（端到端回扫发现的抖动）
++//
++// 一旦熔断打开、我们把流量挪到别的渠道，这条坏渠道就**不再产生新失败**了——
++// 于是分钟窗口里的失败**过期**，下一次判定变成"未打开"，我们就把它**恢复**；
++// 流量再次打到它上面、再次失败、再次打开……表现为**请求间歇性失败**且坏渠道的样本数还在增长。
++//
++// 因此：打开后**必须**先冷却，冷却期内忽略"看起来已经好了"的判定；
++// 冷却结束后的第一次经过才允许恢复（这也就是计划书里的"冷却后再半开探测"）。
++var breakerCooldown = 60 * time.Second
++
++// breakerOpenedAt 记录各渠道**本次**被我们打开的时刻（进程内即可：
++// 重启后 Map 为空，等价于"冷却已过"，于是会按判定恢复，不会把渠道永久锁死）。
++var breakerOpenedAt sync.Map // baseChannelID -> time.Time
++
++// ResetBreakerCooldownForTest 清空冷却记录（测试用）。
++func ResetBreakerCooldownForTest() {
++	breakerOpenedAt.Range(func(key, _ any) bool { breakerOpenedAt.Delete(key); return true })
++}
++
+ type cachedBreaker struct {
+ 	open      bool
+ 	expiresAt time.Time
+@@ -186,6 +207,18 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 		common.SysError("apigx breaker: update channel marks failed: " + err.Error())
+ 		return
+ 	}
++	if open {
++		if _, loaded := breakerOpenedAt.Load(channelID); !loaded {
++			breakerOpenedAt.Store(channelID, time.Now())
++		}
++	} else if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
++		// 冷却未过：**保持不可用**，不因为"窗口里没有新失败"就恢复（那会造成抖动）
++		if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
++			return
++		}
++		breakerOpenedAt.Delete(channelID)
++	}
++
+ 	// **真正让底座不选中它**（修法①）：标记只让"选中后立刻失败"，不足以改道；
+ 	// 权重又因为底座的 +10 平滑而无法表达"接近零"（两者都被实测否掉）。
+ 	// 因此这里调用底座**自己的**渠道状态入口——它会同步更新能力索引，
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+index ad20a6f..211f980 100644
+--- a/apigx/relayhook/breaker_guard_test.go
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -247,3 +247,10 @@ func TestSyncBreakerMarksSkipsNonMultiKeyChannel(t *testing.T) {
+ 	assert.False(t, channel.ChannelInfo.IsMultiKey)
+ 	assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList)
+ }
++
++// 📌 冷却期（`breakerCooldown`）**由端到端验收覆盖**，不在这里写单测。
++// 原因如实记录：本包的两个 fixture 对 `channel_info` 里 map 字段的**回读**行为不一致——
++// 同一个动作在既有用例里能读回标记、在新用例里读不回（本文件上方已记录过该 fixture 限制）。
++// 与其把断言改成"读不回也算过"（那就是假阳性），不如把这条策略交给
++// `tools/stage2-verify/breaker-routing.mjs`：它用真实请求验证"熔断后坏上游不再收到新样本"，
++// 而这正是冷却期要保护的**用户可见行为**。
+-- 
+2.53.0.windows.1
+

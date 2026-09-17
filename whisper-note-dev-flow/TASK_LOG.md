@@ -588,3 +588,23 @@
 
 - 真实上游返回非标准字段（`reasoning_content`、`provider_s...`）时，平台**如实透传**，未被裁剪。
 - 真实上游 404 时，平台把该次失败**归因为上游失败并按规则记账**（质量样本数 +1），符合 T2.8 的归因红线。
+### ❗ 回扫发现的**未解决回归**（本轮止步于此，如实记录）
+
+**熔断的"改道"在请求路径上不再触发**（阶段 2 收口时曾端到端 9/9）。
+
+- **证据（网关日志）**：整轮 E2E 里**没有任何一行** `apigx breaker: offering is open, retry with another channel` ✗，
+  而**同一时刻** `route-explain` 用同一套判定报出 `candidates[].excluded_reason = breaker_open` ✓。
+  也就是说：**判定算得对，执行没发生**。
+- **不是钩子被摘掉**：`middleware/distributor.go` 里三个 APIGX 钩子都在（L760 `AcquireForAttempt`、L763 `CheckSourceAllowed`、L768 `CheckBreakerAllows`）✓。
+- **可疑点（按可能性排序，已缩小范围）**：
+  1. `CheckBreakerAllows` 的某个**静默早退**：`breakerEnabled()` / `CurrentDB()` / `ShareChannelIDByBase` / `FindOfferingByUpstreamModel` ——
+     其中任何一个返回"否"都会**静默放行**（fail-open）。而 `route-explain` 走的是**另一条装配路径**（直接查已发布供给 ✓），两者对"供给存在性"的判断可能不一致。
+  2. 判定缓存（30 秒）与 E2E 时序的交互。
+  3. 第 54 轮我改过 `middleware/distributor.go`（加请求级策略过滤器）——时间点与"从 9/9 变 7/9"吻合，**必须优先排除**。
+- **下一步（下一轮第一件事）**：给 `CheckBreakerAllows` 的每个早退分支加**可观测**（临时日志或直接与 `route-explain` 的装配结果对齐），
+  先确定它在真实请求里走到了哪一步、`FindOfferingByUpstreamModel` 是否命中——**用证据定位，不猜**。
+- 📌 本轮已经做的一处相关修复（**仍然正确且必要**）：熔断**冷却期**（`breakerCooldown = 60s`）——
+  修的是"我们把流量挪走后坏渠道不再产生新失败 → 窗口失败过期 → 立刻恢复 → 再失败"的**抖动**。
+  它不会解决上面这条"执行没发生"，但两条都要修。原打算配的单元测试因 fixture 对 `channel_info` map 字段**回读行为不一致**而写不通，
+  已按"**宁可没有断言，也不要假阳性断言**"的原则撤掉，并在测试文件里写明原因（该行为由端到端脚本覆盖）。
+- ⚠️ 因此**阶段 2 当前不能算"验收无误"**：真实 API 端到端 7/7 ✓、价格/容量/Key 加权等条目仍绿 ✓，但**熔断改道这条回归未修复**。
