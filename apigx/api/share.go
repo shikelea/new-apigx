@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
@@ -734,6 +735,9 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
+	// 偏好已变更：让准入侧立刻看到新限制（否则最长一个缓存 TTL 才生效，
+	// 「刚收紧来源却仍被放行」是不能接受的）
+	relayhook.InvalidatePreferenceCache(tokenID)
 	ok(c, gin.H{
 		"token_id":               key.TokenID,
 		"scope_mode":             key.ScopeMode,

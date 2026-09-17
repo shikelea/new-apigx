@@ -117,3 +117,18 @@ func ShareChannelIDByBase(db *gorm.DB, baseChannelID int) (int64, bool) {
 	}
 	return shareChannel.ID, true
 }
+
+// ShareChannelOwnerByBase 按底座渠道 ID 返回其分享渠道的**所有者**。
+//
+// 用于「允许来源」判定：平台 Key 可以限定只使用指定分享者提供的渠道。
+// 返回 false 表示该渠道不是我们的分享渠道（例如管理员自建的普通渠道）。
+func ShareChannelOwnerByBase(db *gorm.DB, baseChannelID int) (int64, bool) {
+	if db == nil || baseChannelID <= 0 {
+		return 0, false
+	}
+	var shareChannel apigxmodel.Channel
+	if err := db.Where("base_channel_id = ?", baseChannelID).First(&shareChannel).Error; err != nil {
+		return 0, false
+	}
+	return shareChannel.OwnerUserID, true
+}
