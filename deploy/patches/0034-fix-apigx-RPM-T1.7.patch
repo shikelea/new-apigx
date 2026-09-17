@@ -1,0 +1,168 @@
+From 7f13b3f1439f5c0afe5f9618f7c78ef6d8122219 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:30:46 +0800
+Subject: [PATCH 34/34] =?UTF-8?q?fix(apigx):=20=E5=87=86=E5=85=A5=E9=92=A9?=
+ =?UTF-8?q?=E5=AD=90=E4=BD=8D=E7=BD=AE=E4=BF=AE=E5=A4=8D=20+=20RPM=20?=
+ =?UTF-8?q?=E7=AB=AF=E5=88=B0=E7=AB=AF=E9=80=9A=E8=BF=87=EF=BC=88T1.7?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+线上级缺陷(端到端发现): 转发请求 500 'unsupported protocol scheme'
+根因两层: (1) Channel.BaseURL 是指针, GetBaseURL() 在 nil 时返回空串;
+(2) 准入/容量钩子插在 SetupContextForSelectedChannel 中间(在设置 BaseURL/ChannelKey 之前),
+钩子提前 return error(如来源被拒但可回退时不 abort)会让函数提前返回 -> BaseURL/Key 未写入;
+而 Distribute 忽略返回值, 请求照旧发出 -> 上游 URL 为空 -> 500。
+修法: 两个钩子整体移到该函数末尾(BaseURL/Key 之后)。对照: 此前失败的用量脚本恢复 12/12。
+
+RPM 另修两处门控缺陷: 只看环境变量导致只配策略时整段跳过;
+空维度提前返回排在 RPM 解析之前导致只配 RPM 时形同虚设。
+容量策略接口支持 rpm_mode/rpm_limit(四态校验), 限额可按渠道配置。
+
+端到端: 串行 3 次 -> 200,200,429(带 Retry-After) => 速率计数在窗口内不归还
+脚本修正: 复原时清空全部限制(上轮残留 allowed_model_ids 是本轮排查的触发器)
+apigx + middleware 全量通过
+---
+ apigx/api/share.go               | 19 ++++++++++++++++++-
+ apigx/relayhook/capacity_hook.go | 17 ++++++++++++-----
+ middleware/distributor.go        | 28 ++++++++++++++++------------
+ 3 files changed, 46 insertions(+), 18 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index af66553..e3fd966 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -580,9 +580,11 @@ func (h *handler) applyChannelPool(c *gin.Context) {
+ // ---------------------------------------------------------------------------
+ 
+ type capacityPolicyRequest struct {
+-	// ConcurrencyMode 遵循四态：0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值。
++	// 各维度都遵循四态：0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值。
+ 	ConcurrencyMode  *int   `json:"concurrency_mode"`
+ 	ConcurrencyValue *int64 `json:"concurrency_value"`
++	RPMMode          *int   `json:"rpm_mode"`
++	RPMLimit         *int64 `json:"rpm_limit"`
+ }
+ 
+ // setChannelCapacityPolicy 为分享渠道设置容量策略（当前支持"并发"维度）。
+@@ -623,6 +625,18 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
+ 		return
+ 	}
++	rpmValue := int64(0)
++	if req.RPMLimit != nil {
++		rpmValue = *req.RPMLimit
++	}
++	rpmMode := capacity.LimitModeUnset
++	if req.RPMMode != nil {
++		rpmMode = *req.RPMMode
++	}
++	if err := (capacity.Policy{Mode: rpmMode, Value: rpmValue}).Validate(); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
++		return
++	}
+ 
+ 	// 无论新建还是更新，都必须把策略**挂到渠道上**（`apigx_channels.capacity_policy_id`）。
+ 	// 只写策略行不建立这层引用的话，读取侧按渠道的 FK 找不到策略——上限静默不生效。
+@@ -650,6 +664,8 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 		}
+ 		existing.MaxConcurrencyMode = policy.Mode
+ 		existing.MaxConcurrency = policy.Value
++		existing.RpmMode = rpmMode
++		existing.RpmLimit = rpmValue
+ 		if linkErr := linkPolicy(existing.ID); linkErr != nil {
+ 			failFromRepo(c, linkErr)
+ 			return
+@@ -660,6 +676,7 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 			OwnerUserID: owner, ScopeType: apigxmodel.CapacityScopeChannel, ScopeID: shareChannel.ID,
+ 			PolicyVersion:      1,
+ 			MaxConcurrencyMode: policy.Mode, MaxConcurrency: policy.Value,
++			RpmMode: rpmMode, RpmLimit: rpmValue,
+ 		}
+ 		now := common.GetTimestamp()
+ 		created.CreatedAt, created.UpdatedAt = now, now
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index d16a60e..c7fe52b 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -189,9 +189,14 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
+ 		}
+ 	}
+ 
+-	// 到这里才判断「是否完全没有维度」：所有维度来源（身份维度 + 上游凭据/账户池维度）
+-	// 都已拼接完毕，任何一个被配置了就应当施加约束。
+-	if len(dims) == 0 {
++	// RPM 与并发维度**分开处理**（速率计数不归还），因此必须在这里先解析它，
++	// 否则"只配了 RPM、没配任何并发维度"时会在下面的空维度判断处直接返回，
++	// 速率限制形同虚设——这是端到端验证抓到的第二个同类缺陷。
++	rpmLimit, hasRPM := resolveChannelRPMLimit(c, channelID, cfg.ChannelRPMLimit)
++
++	// 到这里才判断「是否完全没有维度」：所有维度来源（身份维度 + 上游凭据/账户池维度
++	// + 速率维度）都已确认，任何一个被配置了就应当施加约束。
++	if len(dims) == 0 && !hasRPM {
+ 		// 所有维度都未配置：不施加约束（过渡行为，见包注释）
+ 		return nil, true
+ 	}
+@@ -211,8 +216,10 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
+ 	// 速率维度（RPM）：**在拿到并发租约之后**再计数。
+ 	// 顺序理由：并发不足时请求根本不会发出去，不该消耗速率额度；反过来则要对已拿到的
+ 	// 租约做补偿（下面就是）。
+-	if cfg.ChannelRPMLimit > 0 {
+-		if rpmLimit, ok := resolveChannelRPMLimit(c, channelID, cfg.ChannelRPMLimit); ok {
++	// 速率维度（RPM）：**在拿到并发租约之后**再计数——并发不足时请求根本不会发出去，
++	// 不该消耗速率额度；反过来则要对已拿到的租约做补偿（下面就是）。
++	if hasRPM {
++		{
+ 			windowKey := capacity.ChannelRPM(int64(channelID), capacity.MinuteWindow(time.Now()))
+ 			if rpmErr := ctrl.IncrementWindow(ctx, windowKey, rpmLimit, 1, capacity.WindowTTL(time.Minute)); rpmErr != nil {
+ 				// 速率超限：把刚拿到的并发租约**还回去**，避免"没发出去的请求"白占一个槽位
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index d13d101..854d4db 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -713,18 +713,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
+ 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
+ 	}
+-	// APIGX 共享容量控制（T1.7）：**每次尝试**都按当次选中的渠道与凭据预留容量。
+-	// 放在这个函数里而不是 Distributor 里，是因为底座的失败重试会**重新选择渠道**并再次
+-	// 经过这里——只有在这里预留，才能保证「本次真正使用的渠道与凭据」都被容量约束到，
+-	// 也才能借用底座既有的重选机制（无需自己写一套候选循环）。
+-	if !relayhook.AcquireForAttempt(c, channel.Id) {
+-		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+-	}
+-	// APIGX 平台 Key 的「允许来源」准入（T1.10）：不可回退时直接拒绝；可回退时返回可重试错误，
+-	// 由底座的重试机制重新选择渠道（复用底座重选，不自己写候选循环）。
+-	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
+-		return sourceErr
+-	}
++
+ 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
+ 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+ 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, channel.GetBaseURL())
+@@ -750,6 +739,21 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 	case constant.ChannelTypeCoze:
+ 		c.Set("bot_id", channel.Other)
+ 	}
++	// APIGX 的准入与容量预留放在**函数末尾**，必须在渠道 Key 与 BaseURL 都已写入上下文之后：
++	// 这些检查可能**提前返回**（例如来源被拒但允许回退时返回可重试错误），
++	// 若放在中间就会留下"半成品上下文"——BaseURL/ChannelKey 未设置，
++	// 而 `Distribute` 调用本函数时**忽略返回值**，请求照旧发出去，
++	// 结果上游 URL 为空、报 `unsupported protocol scheme` 的 500。
++	// 放在末尾可保证：无论这里返回成功还是错误，上下文都是完整可用的。
++	//
++	// 位置说明：本函数是**每次尝试（含每次重试）**都会经过的点，因此容量预留
++	// 天然"按当次选中的渠道与凭据"进行，也借用了底座既有的重选机制。
++	if !relayhook.AcquireForAttempt(c, channel.Id) {
++		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
++	}
++	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
++		return sourceErr
++	}
+ 	return nil
+ }
+ 
+-- 
+2.53.0.windows.1
+

@@ -137,7 +137,9 @@ async function main() {
   check('固定来源不可用时拒绝', pinnedBad.status !== 200, `HTTP ${pinnedBad.status}`);
 
   // 复原
-  await setPrefs({ scope_mode: 0, allow_fallback: true });
+  // 复原时要**清空全部限制**：只改 scope_mode 会留下 allowed_model_ids，
+  // 那会让后续所有其它模型的请求都被拒（本轮排查就踩到了这个残留）
+  await setPrefs({ scope_mode: 0, allow_fallback: true, allowed_model_ids: [], allowed_owner_user_ids: [] });
   const restored = await chat();
   check('复原默认后恢复可用', restored.status === 200, `HTTP ${restored.status}`);
 

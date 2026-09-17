@@ -81,6 +81,16 @@ async function main() {
   });
   await call(`${BASE}/api/apigx/channels/${shareChannelId}/apply`, { method: 'POST', auth: root });
 
+  // 用**渠道策略**设置速率上限（而不是进程级环境变量）：
+  // 并发维度明确设为「不限」，这样唯一能拦住请求的就只有速率维度，断言才有意义。
+  // 同时这也顺带验证了「限额按渠道配置」这条路径——进程级开关无法表达"每个渠道不同上限"。
+  const policyRes = await call(`${BASE}/api/apigx/channels/${shareChannelId}/capacity-policy`, {
+    method: 'PUT', auth: root,
+    body: { concurrency_mode: 3, rpm_mode: 4, rpm_limit: EXPECT_LIMIT },
+  });
+  if (policyRes.status !== 200) throw new Error(`设置渠道策略失败：${policyRes.status} ${policyRes.text.slice(0, 140)}`);
+  info(`已设置渠道策略：并发=明确不限，RPM=${EXPECT_LIMIT}`);
+
   const tokens = await call(`${BASE}/api/token/`, { auth: root });
   const items0 = tokens.json?.data?.items ?? [];
   const vt = (Array.isArray(items0) ? items0 : []).find((t) => t?.name === 'apigx-stage0-verify') ?? (Array.isArray(items0) ? items0 : [])[0];
@@ -103,9 +113,10 @@ async function main() {
   info('模型已可路由（注意：上面探测请求也会计入 RPM 窗口）');
 
   // 等待窗口翻页，保证计数从干净的一分钟开始
+  // 策略带 30s 缓存，且窗口按分钟分桶：两者都要等，否则读到的是旧策略或旧窗口
   const nowSecond = new Date().getUTCSeconds();
-  const waitMs = ((60 - nowSecond) % 60) * 1000 + 1500;
-  info(`等待窗口翻页 ${Math.round(waitMs / 1000)}s，使计数从新的一分钟开始...`);
+  const waitMs = ((60 - nowSecond) % 60) * 1000 + 32000;
+  info(`等待窗口翻页 + 策略缓存过期 ${Math.round(waitMs / 1000)}s ...`);
   await new Promise((r) => setTimeout(r, waitMs));
 
   // 串行发 limit+1 次：并发维度不可能拦截，能拦住的只可能是速率维度
