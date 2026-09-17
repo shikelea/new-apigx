@@ -1,0 +1,104 @@
+From 40d77333489f0c324af2b090a7417578f5df5e25 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:58:24 +0800
+Subject: [PATCH 37/37] =?UTF-8?q?feat(apigx):=20TPM=20=E5=AE=8C=E6=88=90?=
+ =?UTF-8?q?=EF=BC=88=E7=AB=AF=E5=88=B0=E7=AB=AF=204/4=EF=BC=89=EF=BC=8CT1.?=
+ =?UTF-8?q?7=20=E6=94=B6=E5=8F=A3=EF=BC=8C=E9=98=B6=E6=AE=B5=201=20?=
+ =?UTF-8?q?=E5=85=A8=E9=83=A8=E5=AE=9E=E7=8E=B0=E5=B9=B6=E9=AA=8C=E8=AF=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+根因(上一轮的"放行仍429"): 容量策略接口**更新分支**的 Updates(map) 漏了
+rpm/tpm 四个列(只改内存对象没落库) -> 改 RPM/TPM 静默不生效。
+证据: 策略行 ver=3(更新了3次) 但 tpm=4/100(停在创建时的值)。
+迷惑点: 创建分支是对的, RPM 脚本每次用新渠道故从未暴露。
+修法: 四个维度列全部放入更新映射 + 新增专门测更新路径的回归测试。
+
+TPM 实现: apigx/relayhook/request_tpm.go 挂在 relay.PrepareRequestBilling
+(输出上限与 prompt 计数齐备且尚未发送; 位于 FreeModel 短路之前, 免费模型同样受约束),
+预留量 = prompt + 输出上限; 台账 D-018。
+端到端 4/4: tpm_limit=100 -> 429 + Retry-After; tpm_mode=3 -> 200; tpm_limit=1e6 -> 200;
+Redis 计数 8202 = prompt 10 + 8192 => 取自可执行的输出上限。
+
+脚本健壮性: 单次运行 >100s 会话令牌会中途过期 -> 按年龄主动重登 + 401 自动重登重试。
+apigx + middleware 全量通过。
+---
+ apigx/api/share.go      | 14 +++++++++++---
+ apigx/api/share_test.go | 37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 48 insertions(+), 3 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index a2c1a8b..e7d3e53 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -673,10 +673,18 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 	case err == nil:
+ 		updateErr := h.db.Model(&apigxmodel.CapacityPolicy{}).Where("id = ?", existing.ID).
+ 			Updates(map[string]any{
+-				"max_concurrency_mode": policy.Mode,
++				"max_concurrency_mode": concurrencyMode,
+ 				"max_concurrency":      policy.Value,
+-				"policy_version":       existing.PolicyVersion + 1,
+-				"updated_at":           common.GetTimestamp(),
++				// **每个维度都必须出现在更新映射里**：早期只写了并发与版本号，
++				// 导致"改 RPM/TPM"静默不生效（内存对象改了、库里没改）。
++				// 表现极具迷惑性：新建策略（走创建分支）时一切正常，
++				// 只有更新已有策略时才失效——由 TPM 端到端验证发现。
++				"rpm_mode":       rpmMode,
++				"rpm_limit":      rpmValue,
++				"tpm_mode":       tpmMode,
++				"tpm_limit":      tpmValue,
++				"policy_version": existing.PolicyVersion + 1,
++				"updated_at":     common.GetTimestamp(),
+ 			}).Error
+ 		if updateErr != nil {
+ 			failFromRepo(c, updateErr)
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 2375448..6fcc3e5 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -706,3 +706,40 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 	rec, _ = env.do(t, http.MethodGet, "/api/plaza", 0, "")
+ 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+ }
++
++// **回归测试**：更新已有策略时，**每个维度都必须落库**。
++//
++// 早期实现的更新分支只写了并发与版本号，导致"改 RPM/TPM 静默不生效"：
++// 内存对象改了、库里没改。表现很迷惑——新建策略（走创建分支）时一切正常，
++// 只有更新已有策略才失效，因此必须专门测更新路径。
++func TestCapacityPolicyUpdatePersistsAllDimensions(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 8601
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	groupID := env.createGroup(t, owner, "策略更新组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	// 首次：创建（三个维度都给值）
++	rec, body := env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
++		`{"concurrency_mode":4,"concurrency_value":5,"rpm_mode":4,"rpm_limit":60,"tpm_mode":4,"tpm_limit":9000}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	policyID := int64(body["data"].(map[string]any)["id"].(float64))
++
++	// 再次：**更新**为完全不同的值（含"明确不限"）
++	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
++		`{"concurrency_mode":3,"rpm_mode":4,"rpm_limit":7,"tpm_mode":4,"tpm_limit":12345}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	var stored apigxmodel.CapacityPolicy
++	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
++	assert.EqualValues(t, 3, stored.MaxConcurrencyMode, "并发维度应更新为「明确不限」")
++	// 下面两条是本回归测试的核心：更新分支漏列会让它们保持旧值
++	assert.EqualValues(t, 7, stored.RpmLimit, "RPM 上限必须随更新落库")
++	assert.EqualValues(t, 4, stored.RpmMode)
++	assert.EqualValues(t, 12345, stored.TpmLimit, "TPM 上限必须随更新落库")
++	assert.EqualValues(t, 4, stored.TpmMode)
++	assert.EqualValues(t, 2, stored.PolicyVersion, "版本号应递增")
++}
+-- 
+2.53.0.windows.1
+

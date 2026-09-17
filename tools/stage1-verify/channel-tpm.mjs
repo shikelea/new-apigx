@@ -38,15 +38,20 @@ const SESSION_FILE = path.join(STATE_DIR, 'sessions.json');
 const sessions = (() => { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch { return {}; } })();
 function saveSessions() { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions, null, 2)); }
 
+// 会话令牌有有效期：复用缓存时**主动检查年龄**，避免跑一半突然 AUTH_TOKEN_EXPIRED
+// （本脚本单次要跑 100 秒以上，中途过期会让后半段全部失败）。
+const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+
 async function login(user, password) {
   const cached = sessions[user];
-  if (cached?.token) {
+  const fresh = cached?.token && cached?.loginAt && (Date.now() - cached.loginAt) < SESSION_MAX_AGE_MS;
+  if (fresh) {
     const probe = await call(`${BASE}/api/user/self`, { auth: 'Bearer ' + cached.token });
     if (probe.status === 200) return 'Bearer ' + cached.token;
   }
   const r = await call(`${BASE}/api/user/login`, { method: 'POST', body: { username: user, password } });
   if (!r.json?.data?.access_token) throw new Error(`${user} 登录失败：HTTP ${r.status}`);
-  sessions[user] = { token: r.json.data.access_token };
+  sessions[user] = { token: r.json.data.access_token, loginAt: Date.now() };
   saveSessions();
   return 'Bearer ' + r.json.data.access_token;
 }
@@ -92,8 +97,16 @@ async function main() {
     method: 'POST', auth: 'Bearer ' + platformKey,
     body: { model: MODEL, messages: [{ role: 'user', content: 'tpm probe' }] },
   });
+  let auth = root;
   const setPolicy = async (body) => {
-    const res = await call(`${BASE}/api/apigx/channels/${shareChannelId}/capacity-policy`, { method: 'PUT', auth: root, body });
+    let res = await call(`${BASE}/api/apigx/channels/${shareChannelId}/capacity-policy`, { method: 'PUT', auth, body });
+    if (res.status === 401) {
+      // 会话过期：清掉缓存重新登录后重试一次
+      delete sessions['apigxroot'];
+      saveSessions();
+      auth = await login('apigxroot', 'ApigxDev#2026');
+      res = await call(`${BASE}/api/apigx/channels/${shareChannelId}/capacity-policy`, { method: 'PUT', auth, body });
+    }
     if (res.status !== 200) throw new Error(`设置策略失败：${res.status} ${res.text.slice(0, 140)}`);
     return res.json.data;
   };
