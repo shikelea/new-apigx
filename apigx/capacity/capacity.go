@@ -213,6 +213,11 @@ type Controller struct {
 	renew   *redis.Script
 	// window 是只增不减的窗口计数脚本（RPM/TPM 用），与租约模型分开
 	window *redis.Script
+	// adjust 是"带下限的调整"脚本（把最坏情况预留按实际用量退回，T2.5）。
+	// **必须与 window 分开**：go-redis 的 Script.Run 执行的是**它自己绑定的脚本**，
+	// 复用同一个句柄会让"调整"实际执行成"自增"（早期实现正是如此：
+	// 调整调用的返回值恒为 0、计数纹丝不动）。
+	adjust *redis.Script
 }
 
 // New 用底座既有的 Redis 客户端（common.RDB）构造容量控制器。
@@ -227,6 +232,7 @@ func NewWithPrefix(rdb *redis.Client, prefix string) *Controller {
 		release: redis.NewScript(releaseScript),
 		renew:   redis.NewScript(renewScript),
 		window:  redis.NewScript(windowScript),
+		adjust:  redis.NewScript(adjustScript),
 	}
 }
 

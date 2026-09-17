@@ -256,3 +256,64 @@ func TestWindowKeysAreBucketedByMinute(t *testing.T) {
 	second := ChannelRPM(4245, MinuteWindow(now.Add(2*time.Minute)))
 	assert.NotEqual(t, first, second, "不同分钟必须落在不同的计数 key 上")
 }
+
+// ---- 窗口调整（T2.5：把最坏情况预留按实际用量退回） ----
+
+// 调整必须**带下限**：重复调整不能把计数减成负数而"凭空多出额度"。
+func TestAdjustWindowFloorsAtZero(t *testing.T) {
+	c := newTestController(t)
+	ctx := context.Background()
+	key := ChannelTPM(5251, MinuteWindow(time.Now()))
+
+	// 预留 8202（prompt + 输出上限）
+	require.NoError(t, c.IncrementWindow(ctx, key, 1_000_000, 8202, WindowTTL(time.Minute)))
+	// 实际只用 46 → 退回 8156
+	remaining, err := c.AdjustWindow(ctx, key, 46-8202, WindowTTL(time.Minute))
+	require.NoError(t, err)
+	assert.EqualValues(t, 46, remaining, "退回后应等于实际用量")
+
+	// **重复调整**（例如重试路径又回填一次）：不得变成负数
+	remaining, err = c.AdjustWindow(ctx, key, 46-8202, WindowTTL(time.Minute))
+	require.NoError(t, err)
+	assert.Zero(t, remaining, "重复调整只能到 0，不能变负数")
+
+	// 计数为 0 时 key 被删除（等同于"没占用"）
+	count, err := c.WindowCount(ctx, key)
+	require.NoError(t, err)
+	assert.Zero(t, count)
+}
+
+// 调整到 0 之后仍然可以继续累计（窗口没被破坏）。
+func TestAdjustWindowKeepsWindowUsable(t *testing.T) {
+	c := newTestController(t)
+	ctx := context.Background()
+	key := ChannelTPM(5252, MinuteWindow(time.Now()))
+
+	require.NoError(t, c.IncrementWindow(ctx, key, 1000, 500, WindowTTL(time.Minute)))
+	_, err := c.AdjustWindow(ctx, key, -500, WindowTTL(time.Minute))
+	require.NoError(t, err)
+
+	// 退回后仍能正常累加
+	require.NoError(t, c.IncrementWindow(ctx, key, 1000, 300, WindowTTL(time.Minute)))
+	count, err := c.WindowCount(ctx, key)
+	require.NoError(t, err)
+	assert.EqualValues(t, 300, count)
+}
+
+// delta 为 0 时是只读查询（不写库）。
+func TestAdjustWindowZeroDeltaIsReadOnly(t *testing.T) {
+	c := newTestController(t)
+	ctx := context.Background()
+	key := ChannelTPM(5253, MinuteWindow(time.Now()))
+
+	require.NoError(t, c.IncrementWindow(ctx, key, 1000, 7, WindowTTL(time.Minute)))
+	count, err := c.AdjustWindow(ctx, key, 0, WindowTTL(time.Minute))
+	require.NoError(t, err)
+	assert.EqualValues(t, 7, count)
+
+	// 参数校验
+	_, err = c.AdjustWindow(ctx, "", -1, time.Minute)
+	assert.Error(t, err)
+	_, err = c.AdjustWindow(ctx, key, -1, 0)
+	assert.Error(t, err)
+}

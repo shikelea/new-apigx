@@ -83,3 +83,65 @@ func WindowTTL(window time.Duration) time.Duration {
 func (c *Controller) WindowCount(ctx context.Context, key string) (int64, error) {
 	return c.Usage(ctx, key)
 }
+
+// adjustScript 原子地"带下限地调整"计数：结果**不会低于 0**。
+//
+// KEYS[1] = 窗口计数 key
+// ARGV[1] = 调整量（可为负），ARGV[2] = TTL（秒）
+// 返回调整后的值。
+const adjustScript = `
+local key = KEYS[1]
+local delta = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local current = tonumber(redis.call('GET', key) or '0')
+local next = current + delta
+if next < 0 then
+  next = 0
+end
+if next == 0 then
+  redis.call('DEL', key)
+  return 0
+end
+redis.call('SET', key, next)
+redis.call('EXPIRE', key, ttl)
+return next
+`
+
+// AdjustWindow 把窗口计数按 delta 调整（**可为负**），结果不会低于 0。
+//
+// # 用途：把"最坏情况预留"按实际用量退回去（T2.5）
+//
+// TPM 预留必须用**可执行的输出上限**（计划书 §9.2），但上限通常远高于实际输出。
+// 若预留后不调整，渠道的每分钟 token 额度会被"最坏情况"长期占满，
+// 结果是**明明没用到那么多也被限流**。
+//
+// 因此在拿到真实 usage 之后调用本函数把差额退回去：
+//
+//	AdjustWindow(ctx, key, actualTokens-reservedTokens, ttl)
+//
+// 下限 0 保证：即使发生重复调整（例如重试路径回填两次），
+// 计数也不会变成负数而"凭空多出额度"。
+func (c *Controller) AdjustWindow(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	if err := c.available(); err != nil {
+		return 0, err
+	}
+	if key == "" {
+		return 0, errors.New("capacity: window key is required")
+	}
+	if ttl <= 0 {
+		return 0, fmt.Errorf("capacity: window ttl must be positive (got %s)", ttl)
+	}
+	if delta == 0 {
+		count, err := c.Usage(ctx, key)
+		return count, err
+	}
+	res, err := c.adjust.Run(ctx, c.rdb, []string{c.counterKey(key)},
+		delta, int64(ttl/time.Second)).Result()
+	if err != nil {
+		return 0, err
+	}
+	if count, ok := res.(int64); ok {
+		return count, nil
+	}
+	return 0, nil
+}
