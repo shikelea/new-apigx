@@ -1,0 +1,195 @@
+From 4fafb0aa886e7a0d2629ed437ee7dd6db250ec8e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 15:07:41 +0800
+Subject: [PATCH 51/51] =?UTF-8?q?feat(apigx):=20TPM=20=E9=A2=84=E7=95=99?=
+ =?UTF-8?q?=E8=B0=83=E6=95=B4=E6=9C=BA=E5=88=B6=20capacity.AdjustWindow?=
+ =?UTF-8?q?=EF=BC=88T2.5=20=E5=89=8D=E5=8D=8A=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+问题: 阶段 1 的 TPM 按最坏情况(prompt+输出上限,缺省 8192)预留, 而实际输出通常远低于上限;
+不调整则渠道每分钟额度被"最坏情况"长期占满 => 明明没用到那么多也被限流。
+
+- capacity.AdjustWindow: 在窗口计数上做**可为负**的调整(actual-reserved)
+  * 下限 0: 重复调整不会减成负数而"凭空多出额度"; 归零则删 key(等同未占用)
+  * delta=0 为只读查询不写库
+  * 测试 3/3(真实 Redis): 退回=实际用量/重复调整只到 0/归零后仍可累加/参数校验
+- ❗踩到静默失效: go-redis 的 Script.Run 执行它**自己绑定**的脚本, 复用 window 句柄会让
+  "调整"实际执行成"自增"(返回恒 0、计数不变且不报错)。已单独绑定并注释说明
+- 待做(位置已定位): 结算期接线。底座有 ContextKeyPromptTokens 但**无 completion tokens 键**,
+  故须挂在能拿到完整 usage 处 —— service/log_info_generate.go 组装消费日志参数处;
+  预留量+窗口 key 在预留时存上下文, 结算按 actual-reserved 调整, 失败只记日志
+- apigx + middleware 全量通过
+---
+ apigx/capacity/capacity.go      |  6 ++++
+ apigx/capacity/capacity_test.go | 61 ++++++++++++++++++++++++++++++++
+ apigx/capacity/window.go        | 62 +++++++++++++++++++++++++++++++++
+ 3 files changed, 129 insertions(+)
+
+diff --git a/apigx/capacity/capacity.go b/apigx/capacity/capacity.go
+index a9a1f22..d87071e 100644
+--- a/apigx/capacity/capacity.go
++++ b/apigx/capacity/capacity.go
+@@ -213,6 +213,11 @@ type Controller struct {
+ 	renew   *redis.Script
+ 	// window 是只增不减的窗口计数脚本（RPM/TPM 用），与租约模型分开
+ 	window *redis.Script
++	// adjust 是"带下限的调整"脚本（把最坏情况预留按实际用量退回，T2.5）。
++	// **必须与 window 分开**：go-redis 的 Script.Run 执行的是**它自己绑定的脚本**，
++	// 复用同一个句柄会让"调整"实际执行成"自增"（早期实现正是如此：
++	// 调整调用的返回值恒为 0、计数纹丝不动）。
++	adjust *redis.Script
+ }
+ 
+ // New 用底座既有的 Redis 客户端（common.RDB）构造容量控制器。
+@@ -227,6 +232,7 @@ func NewWithPrefix(rdb *redis.Client, prefix string) *Controller {
+ 		release: redis.NewScript(releaseScript),
+ 		renew:   redis.NewScript(renewScript),
+ 		window:  redis.NewScript(windowScript),
++		adjust:  redis.NewScript(adjustScript),
+ 	}
+ }
+ 
+diff --git a/apigx/capacity/capacity_test.go b/apigx/capacity/capacity_test.go
+index a171e32..b738cb0 100644
+--- a/apigx/capacity/capacity_test.go
++++ b/apigx/capacity/capacity_test.go
+@@ -256,3 +256,64 @@ func TestWindowKeysAreBucketedByMinute(t *testing.T) {
+ 	second := ChannelRPM(4245, MinuteWindow(now.Add(2*time.Minute)))
+ 	assert.NotEqual(t, first, second, "不同分钟必须落在不同的计数 key 上")
+ }
++
++// ---- 窗口调整（T2.5：把最坏情况预留按实际用量退回） ----
++
++// 调整必须**带下限**：重复调整不能把计数减成负数而"凭空多出额度"。
++func TestAdjustWindowFloorsAtZero(t *testing.T) {
++	c := newTestController(t)
++	ctx := context.Background()
++	key := ChannelTPM(5251, MinuteWindow(time.Now()))
++
++	// 预留 8202（prompt + 输出上限）
++	require.NoError(t, c.IncrementWindow(ctx, key, 1_000_000, 8202, WindowTTL(time.Minute)))
++	// 实际只用 46 → 退回 8156
++	remaining, err := c.AdjustWindow(ctx, key, 46-8202, WindowTTL(time.Minute))
++	require.NoError(t, err)
++	assert.EqualValues(t, 46, remaining, "退回后应等于实际用量")
++
++	// **重复调整**（例如重试路径又回填一次）：不得变成负数
++	remaining, err = c.AdjustWindow(ctx, key, 46-8202, WindowTTL(time.Minute))
++	require.NoError(t, err)
++	assert.Zero(t, remaining, "重复调整只能到 0，不能变负数")
++
++	// 计数为 0 时 key 被删除（等同于"没占用"）
++	count, err := c.WindowCount(ctx, key)
++	require.NoError(t, err)
++	assert.Zero(t, count)
++}
++
++// 调整到 0 之后仍然可以继续累计（窗口没被破坏）。
++func TestAdjustWindowKeepsWindowUsable(t *testing.T) {
++	c := newTestController(t)
++	ctx := context.Background()
++	key := ChannelTPM(5252, MinuteWindow(time.Now()))
++
++	require.NoError(t, c.IncrementWindow(ctx, key, 1000, 500, WindowTTL(time.Minute)))
++	_, err := c.AdjustWindow(ctx, key, -500, WindowTTL(time.Minute))
++	require.NoError(t, err)
++
++	// 退回后仍能正常累加
++	require.NoError(t, c.IncrementWindow(ctx, key, 1000, 300, WindowTTL(time.Minute)))
++	count, err := c.WindowCount(ctx, key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 300, count)
++}
++
++// delta 为 0 时是只读查询（不写库）。
++func TestAdjustWindowZeroDeltaIsReadOnly(t *testing.T) {
++	c := newTestController(t)
++	ctx := context.Background()
++	key := ChannelTPM(5253, MinuteWindow(time.Now()))
++
++	require.NoError(t, c.IncrementWindow(ctx, key, 1000, 7, WindowTTL(time.Minute)))
++	count, err := c.AdjustWindow(ctx, key, 0, WindowTTL(time.Minute))
++	require.NoError(t, err)
++	assert.EqualValues(t, 7, count)
++
++	// 参数校验
++	_, err = c.AdjustWindow(ctx, "", -1, time.Minute)
++	assert.Error(t, err)
++	_, err = c.AdjustWindow(ctx, key, -1, 0)
++	assert.Error(t, err)
++}
+diff --git a/apigx/capacity/window.go b/apigx/capacity/window.go
+index c2a755c..cb56773 100644
+--- a/apigx/capacity/window.go
++++ b/apigx/capacity/window.go
+@@ -83,3 +83,65 @@ func WindowTTL(window time.Duration) time.Duration {
+ func (c *Controller) WindowCount(ctx context.Context, key string) (int64, error) {
+ 	return c.Usage(ctx, key)
+ }
++
++// adjustScript 原子地"带下限地调整"计数：结果**不会低于 0**。
++//
++// KEYS[1] = 窗口计数 key
++// ARGV[1] = 调整量（可为负），ARGV[2] = TTL（秒）
++// 返回调整后的值。
++const adjustScript = `
++local key = KEYS[1]
++local delta = tonumber(ARGV[1])
++local ttl = tonumber(ARGV[2])
++local current = tonumber(redis.call('GET', key) or '0')
++local next = current + delta
++if next < 0 then
++  next = 0
++end
++if next == 0 then
++  redis.call('DEL', key)
++  return 0
++end
++redis.call('SET', key, next)
++redis.call('EXPIRE', key, ttl)
++return next
++`
++
++// AdjustWindow 把窗口计数按 delta 调整（**可为负**），结果不会低于 0。
++//
++// # 用途：把"最坏情况预留"按实际用量退回去（T2.5）
++//
++// TPM 预留必须用**可执行的输出上限**（计划书 §9.2），但上限通常远高于实际输出。
++// 若预留后不调整，渠道的每分钟 token 额度会被"最坏情况"长期占满，
++// 结果是**明明没用到那么多也被限流**。
++//
++// 因此在拿到真实 usage 之后调用本函数把差额退回去：
++//
++//	AdjustWindow(ctx, key, actualTokens-reservedTokens, ttl)
++//
++// 下限 0 保证：即使发生重复调整（例如重试路径回填两次），
++// 计数也不会变成负数而"凭空多出额度"。
++func (c *Controller) AdjustWindow(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
++	if err := c.available(); err != nil {
++		return 0, err
++	}
++	if key == "" {
++		return 0, errors.New("capacity: window key is required")
++	}
++	if ttl <= 0 {
++		return 0, fmt.Errorf("capacity: window ttl must be positive (got %s)", ttl)
++	}
++	if delta == 0 {
++		count, err := c.Usage(ctx, key)
++		return count, err
++	}
++	res, err := c.adjust.Run(ctx, c.rdb, []string{c.counterKey(key)},
++		delta, int64(ttl/time.Second)).Result()
++	if err != nil {
++		return 0, err
++	}
++	if count, ok := res.(int64); ok {
++		return count, nil
++	}
++	return 0, nil
++}
+-- 
+2.53.0.windows.1
+
