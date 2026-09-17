@@ -1,0 +1,239 @@
+From 994db92815ec6a35286ed9f9f40c646c1991068a Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 22:46:20 +0800
+Subject: [PATCH 90/90] =?UTF-8?q?fix(D-025):=20=E8=AE=A1=E6=95=B0=E7=B1=BB?=
+ =?UTF-8?q?=E8=A7=84=E6=A0=BC=E7=BA=A6=E6=9D=9F=E8=A1=A5=E4=B8=8A=E9=99=90?=
+ =?UTF-8?q?=EF=BC=88=E5=90=91=E9=87=8F=E8=BE=93=E5=85=A5=E6=9D=A1=E6=95=B0?=
+ =?UTF-8?q?=202048=20/=20=E9=87=8D=E6=8E=92=E6=96=87=E6=A1=A3=E6=95=B0=201?=
+ =?UTF-8?q?000=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+按计划书阶段3点名的"输入量限制""文档数量限制"逐条核对 => 实测发现两个校验器**只判空、没有上限**:
+  一个超大输入数组会先吃掉内存与上游配额(仓库自身规则要求: 用户可控计数必须在校验器设界)
+- relaykit/dto/{embedding,rerank}.go: 新增 MaxEmbeddingInputs=2048 / MaxRerankDocuments=1000
+  (与既有 MaxImageN=128 同风格); relaykit 已按规则用 GOWORK=off 独立构建 ✅
+- relay/helper/valid_request.go: 两个校验器强制上限(只加拒绝路径, 未超限行为不变)
+  向量 input 是 any(字符串/数组/嵌套) => 只对可确定形态计数, 认不出的形态不据此拒绝
+- 边界用例: 扩展既有 max_tokens_bounds_test.go(上限测试的既有范例)
+  覆盖超限被拒 + 恰好等于上限被接受(向量/重排各两条)
+- 端到端: 向量 2049 条 -> 400 ✅ / 重排 1001 条 -> 400 ✅ / 图片 n=129 -> 400 ✅(底座 MaxImageN 本就有, 此前未实测)
+- 回归: go build ✅ / 全量 Go 套件 12 包全绿 ✅ / 非对话套件 13/13 ✅ / 图片套件 4/5(唯一失败是上游签名直链匿名可访问性, 属上游行为不稳定, 脚本对两种结果都算通过)
+- 能力矩阵: 上述三项移入 verified; 仍留 not_verified 的是 Gemini 原生路径/图片编辑/语音合成/上传大小时长/视频超时
+---
+ apigx/api/capabilities.go              | 10 ++--
+ relay/helper/max_tokens_bounds_test.go | 63 ++++++++++++++++++++++++++
+ relay/helper/valid_request.go          | 34 ++++++++++++++
+ relaykit/dto/embedding.go              |  7 +++
+ relaykit/dto/rerank.go                 |  3 ++
+ 5 files changed, 110 insertions(+), 7 deletions(-)
+
+diff --git a/apigx/api/capabilities.go b/apigx/api/capabilities.go
+index 9c34a0a..52c6314 100644
+--- a/apigx/api/capabilities.go
++++ b/apigx/api/capabilities.go
+@@ -51,10 +51,10 @@ var capabilityMatrix = []capabilityEntry{
+ 			"尺寸语法与范围校验（台账 D-021）",
+ 			"结果访问需鉴权",
+ 			"计量（用量记录含配额）",
++			"数量参数 n 的上限 128（超限 400，实测 n=129）",
+ 		},
+ 		NotVerified: []string{
+ 			"图片编辑（未与真实上游联调）",
+-			"数量参数 n 的上限（未验证）",
+ 		},
+ 		Limitations: []string{
+ 			"上游返回**签名直链**（有效期内持有者可直接访问）：若要求“结果仅授权者可见”，需我方代理或转存",
+@@ -68,9 +68,7 @@ var capabilityMatrix = []capabilityEntry{
+ 			"批量 embeddings 协议往返",
+ 			"向量维度",
+ 			"usage 计量与落库",
+-		},
+-		NotVerified: []string{
+-			"输入量上限（未验证）",
++			"输入条数上限 2048（超限 400，实测 2049 条）",
+ 		},
+ 	},
+ 	{
+@@ -81,9 +79,7 @@ var capabilityMatrix = []capabilityEntry{
+ 			"查询/文档列表往返与排序结果",
+ 			"计量落库",
+ 			"空文档列表被拒",
+-		},
+-		NotVerified: []string{
+-			"文档数量上限（未验证）",
++			"文档条数上限 1000（超限 400，实测 1001 条）",
+ 		},
+ 	},
+ 	{
+diff --git a/relay/helper/max_tokens_bounds_test.go b/relay/helper/max_tokens_bounds_test.go
+index 9e526d0..51b8412 100644
+--- a/relay/helper/max_tokens_bounds_test.go
++++ b/relay/helper/max_tokens_bounds_test.go
+@@ -6,7 +6,9 @@ import (
+ 	"net/http/httptest"
+ 	"testing"
+ 
++	"github.com/QuantumNous/new-api/common"
+ 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
++	"github.com/QuantumNous/new-api/relaykit/dto"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/stretchr/testify/require"
+ )
+@@ -92,3 +94,64 @@ func TestSGLangMinTokensBounds(t *testing.T) {
+ 		})
+ 	}
+ }
++
++// 计数类字段的上限：图片数量、向量输入条数、重排文档条数。
++//
++// 与 max_tokens 同理 —— 用户可控的计数参与上游配额与内存占用，
++// 必须在**校验阶段**被挡住，而不是等到上游或计费环节。
++func TestCountBounds(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++
++	newJSONContext := func(t *testing.T, body string) *gin.Context {
++		c, _ := gin.CreateTestContext(httptest.NewRecorder())
++		c.Request = httptest.NewRequest(http.MethodPost, "/relay", bytes.NewBufferString(body))
++		c.Request.Header.Set("Content-Type", "application/json")
++		return c
++	}
++
++	t.Run("embedding input count over the limit is rejected", func(t *testing.T) {
++		items := make([]string, dto.MaxEmbeddingInputs+1)
++		for i := range items {
++			items[i] = "x"
++		}
++		body, err := common.Marshal(map[string]any{"model": "m", "input": items})
++		require.NoError(t, err)
++		_, err = GetAndValidateEmbeddingRequest(newJSONContext(t, string(body)), relayconstant.RelayModeEmbeddings)
++		require.Error(t, err)
++		require.Contains(t, err.Error(), "at most")
++	})
++
++	t.Run("embedding input at the limit is accepted", func(t *testing.T) {
++		items := make([]string, dto.MaxEmbeddingInputs)
++		for i := range items {
++			items[i] = "x"
++		}
++		body, err := common.Marshal(map[string]any{"model": "m", "input": items})
++		require.NoError(t, err)
++		_, err = GetAndValidateEmbeddingRequest(newJSONContext(t, string(body)), relayconstant.RelayModeEmbeddings)
++		require.NoError(t, err)
++	})
++
++	t.Run("rerank documents over the limit is rejected", func(t *testing.T) {
++		docs := make([]string, dto.MaxRerankDocuments+1)
++		for i := range docs {
++			docs[i] = "d"
++		}
++		body, err := common.Marshal(map[string]any{"model": "m", "query": "q", "documents": docs})
++		require.NoError(t, err)
++		_, err = GetAndValidateRerankRequest(newJSONContext(t, string(body)))
++		require.Error(t, err)
++		require.Contains(t, err.Error(), "at most")
++	})
++
++	t.Run("rerank documents at the limit is accepted", func(t *testing.T) {
++		docs := make([]string, dto.MaxRerankDocuments)
++		for i := range docs {
++			docs[i] = "d"
++		}
++		body, err := common.Marshal(map[string]any{"model": "m", "query": "q", "documents": docs})
++		require.NoError(t, err)
++		_, err = GetAndValidateRerankRequest(newJSONContext(t, string(body)))
++		require.NoError(t, err)
++	})
++}
+diff --git a/relay/helper/valid_request.go b/relay/helper/valid_request.go
+index 84dc984..e3be622 100644
+--- a/relay/helper/valid_request.go
++++ b/relay/helper/valid_request.go
+@@ -102,6 +102,12 @@ func GetAndValidateRerankRequest(c *gin.Context) (*dto.RerankRequest, error) {
+ 	if len(rerankRequest.Documents) == 0 {
+ 		return nil, types.NewError(fmt.Errorf("documents is empty"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+ 	}
++	// 文档条数必须有界（计划书阶段 3：重排的"文档数量限制"）。
++	if len(rerankRequest.Documents) > dto.MaxRerankDocuments {
++		return nil, types.NewError(
++			fmt.Errorf("documents must contain at most %d items", dto.MaxRerankDocuments),
++			types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
++	}
+ 	return rerankRequest, nil
+ }
+ 
+@@ -116,6 +122,12 @@ func GetAndValidateEmbeddingRequest(c *gin.Context, relayMode int) (*dto.Embeddi
+ 	if embeddingRequest.Input == nil {
+ 		return nil, fmt.Errorf("input is empty")
+ 	}
++	// 输入条数必须有界（计划书阶段 3：向量的"输入量限制"）。
++	if count := embeddingInputCount(embeddingRequest.Input); count > dto.MaxEmbeddingInputs {
++		return nil, types.NewError(
++			fmt.Errorf("input must contain at most %d items", dto.MaxEmbeddingInputs),
++			types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
++	}
+ 	if relayMode == relayconstant.RelayModeModerations && embeddingRequest.Model == "" {
+ 		embeddingRequest.Model = "omni-moderation-latest"
+ 	}
+@@ -460,3 +472,25 @@ func validateImageSize(size string) error {
+ 	}
+ 	return nil
+ }
++
++// embeddingInputCount 返回 embeddings 请求的输入条数。
++//
++// 请求的 `input` 按协议可以是字符串、字符串数组，或 token 数组（含嵌套）。
++// **只对能确定的形态计数，认不出的形态返回 0**（不据此拒绝）—— 具体语义由上游判定，
++// 我们只负责挡住"数组大到明显不合理"这一类。
++func embeddingInputCount(input any) int {
++	switch value := input.(type) {
++	case string:
++		return 1
++	case []any:
++		return len(value)
++	case []string:
++		return len(value)
++	case []int:
++		return len(value)
++	case [][]int:
++		return len(value)
++	default:
++		return 0
++	}
++}
+diff --git a/relaykit/dto/embedding.go b/relaykit/dto/embedding.go
+index 65a6b54..ac04c37 100644
+--- a/relaykit/dto/embedding.go
++++ b/relaykit/dto/embedding.go
+@@ -18,6 +18,13 @@ type EmbeddingOptions struct {
+ 	NumCtx           int      `json:"num_ctx,omitempty"`
+ }
+ 
++// MaxEmbeddingInputs 是单次请求允许的输入条数上限。
++//
++// 与 MaxImageN 同理：**用户可控的计数必须在校验器里设界**，否则一个超大输入数组
++// 会先把内存与上游配额吃掉（仓库的计费安全规则也要求这类字段从第一天起就有界）。
++// 取 2048 与主流实现一致。
++const MaxEmbeddingInputs = 2048
++
+ type EmbeddingRequest struct {
+ 	Model            string   `json:"model"`
+ 	Input            any      `json:"input"`
+diff --git a/relaykit/dto/rerank.go b/relaykit/dto/rerank.go
+index a7315ef..f745a5a 100644
+--- a/relaykit/dto/rerank.go
++++ b/relaykit/dto/rerank.go
+@@ -8,6 +8,9 @@ import (
+ 	"github.com/QuantumNous/new-api/relaykit/types"
+ )
+ 
++// MaxRerankDocuments 是单次请求允许的文档条数上限（取 1000，与常见厂商限制一致）。
++const MaxRerankDocuments = 1000
++
+ type RerankRequest struct {
+ 	Documents       []any  `json:"documents"`
+ 	Query           string `json:"query"`
+-- 
+2.53.0.windows.1
+

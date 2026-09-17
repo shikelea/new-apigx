@@ -169,6 +169,9 @@ async function main() {
   // **规格约束（已加固，台账 D-021）**：尺寸的语法与范围在底座同一校验点把关
   // （`GetAndValidOpenAIImageRequest`，数量 n 也在那里），因此非法尺寸应当在**到达上游之前**被拒。
   const illegal = await gen({ prompt: 'x', n: 1, size: '999999x999999' });
+  const overN = await gen({ prompt: 'a cat', size: '1024x1024', n: 129 });
+  check('图片·数量 n 超过上限（128）被拒', overN.status >= 400 && overN.status < 500, `HTTP ${overN.status}`);
+
   check('非法尺寸在到达上游前被拒（不是默默出图）', illegal.status === 400, `HTTP ${illegal.status}`);
   const badSyntax = await gen({ prompt: 'x', n: 1, size: 'not-a-size' });
   check('尺寸语法错误被拒', badSyntax.status === 400, `HTTP ${badSyntax.status}`);

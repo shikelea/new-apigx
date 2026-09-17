@@ -194,6 +194,19 @@ async function main() {
   const badAudio = await call(`${BASE}/v1/audio/transcriptions`, { method: 'POST', auth, form: (() => { const f = new FormData(); f.append('model', AUDIO_MODEL); return f; })() });
   check('语音·缺少音频文件被拒', badAudio.status >= 400, `HTTP ${badAudio.status}`);
 
+  // ---- 规格约束：计数类上限（计划书点名"输入量限制 / 文档数量限制"）----
+  const tooManyInputs = Array.from({ length: 2049 }, (_v, i) => 'x' + i)
+  const overEmbed = await call(`${BASE}/v1/embeddings`, {
+    method: 'POST', auth, body: { model: EMBED_MODEL, input: tooManyInputs },
+  })
+  check('向量·输入条数超过上限被拒', overEmbed.status >= 400 && overEmbed.status < 500, `HTTP ${overEmbed.status}（2049 条）`)
+
+  const tooManyDocs = Array.from({ length: 1001 }, (_v, i) => 'd' + i)
+  const overRerank = await call(`${BASE}/v1/rerank`, {
+    method: 'POST', auth, body: { model: RERANK_MODEL, query: 'q', documents: tooManyDocs },
+  })
+  check('重排·文档数超过上限被拒', overRerank.status >= 400 && overRerank.status < 500, `HTTP ${overRerank.status}（1001 条）`)
+
   // 被拒不计量
   const eBefore2 = await usageCount(EMBED_MODEL);
   await call(`${BASE}/v1/embeddings`, { method: 'POST', auth, body: { model: EMBED_MODEL } });
