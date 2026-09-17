@@ -78,7 +78,16 @@ func CreateModelOffering(db *gorm.DB, ownerUserID int64, offering *ModelOffering
 	offering.Revision = 1
 	offering.AliveFlag = AliveFlagAlive
 	touchTimestamps(true, &offering.CreatedAt, &offering.UpdatedAt)
-	return db.Create(offering).Error
+	if err := db.Create(offering).Error; err != nil {
+		return err
+	}
+	// 顺手把上游模型名登记为**候选**别名（幂等；候选不会当结论用，见 repo_catalog.go）。
+	// 放在仓储层是为了让所有调用方（含"一键导入"的批量路径）都覆盖到；
+	// 失败**不影响供给创建**（目录是辅助能力，不该挡住主流程），因此只记录不返回错误。
+	if err := RecordAliasCandidate(db, AliasScopePlatform, 0, 0, offering.UpstreamModelID); err != nil {
+		common.SysError("apigx: record alias candidate failed: " + err.Error())
+	}
+	return nil
 }
 
 // GetModelOffering 按所有者读取供给。
