@@ -1095,11 +1095,45 @@ func (h *handler) publishOffering(c *gin.Context) {
 	if !valid {
 		return
 	}
+	// **强制要求设置价格**（与底座一致：底座在价格未配置时直接判定"模型暂时无法使用"）。
+	// 分享者在发布供给前必须已有**被接受的价格**（供给作用域或渠道作用域皆可），
+	// 否则这份供给不该出现在广场里、也不该被计费型调用选中。
+	if !h.offeringHasAcceptedPrice(id) {
+		fail(c, http.StatusBadRequest, "price_not_configured",
+			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
+		return
+	}
 	if err := apigxmodel.PublishModelOffering(h.db, owner, id); err != nil {
 		failFromRepo(c, err)
 		return
 	}
 	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
+}
+
+// offeringHasAcceptedPrice 判断该供给是否已有**被接受**的价格（供给作用域或它所属渠道作用域）。
+//
+// 与底座"价格未配置即不可用"的语义对齐；这里只做**存在性**判断，不参与具体计价。
+func (h *handler) offeringHasAcceptedPrice(offeringID int64) bool {
+	var offering apigxmodel.ModelOffering
+	if err := h.db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
+		return false
+	}
+	scopes := []struct {
+		scopeType int
+		scopeID   int64
+	}{
+		{apigxmodel.PriceScopeOffering, offeringID},
+		{apigxmodel.PriceScopeChannel, offering.ChannelID},
+	}
+	for _, scope := range scopes {
+		if scope.scopeID <= 0 {
+			continue
+		}
+		if _, _, err := apigxmodel.GetEffectivePriceRule(h.db, scope.scopeType, scope.scopeID, 0); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *handler) rejectOffering(c *gin.Context) {
