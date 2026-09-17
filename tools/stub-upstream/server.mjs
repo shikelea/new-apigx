@@ -36,6 +36,7 @@ const getArg = (name, fallback) => {
 };
 const PORT = Number(getArg('--port', process.env.STUB_PORT || 8100));
 const HOST = getArg('--host', process.env.STUB_HOST || '127.0.0.1');
+const STUB_BASE = 'http://127.0.0.1:' + (process.env.PORT || 8100);
 const MAX_RECORDS = 1000;
 
 const state = {
@@ -52,6 +53,11 @@ const state = {
   },
   // 取证记录
   requests: [],
+  tasks: {},
+  taskSeq: 0,
+  taskPlan: ['IN_PROGRESS', 'SUCCESS'],
+  taskFailReason: '',
+  taskResultUrl: '',
   keyCounts: {},       // 上游 Key 指纹 -> 次数
   startedAt: new Date().toISOString(),
 };
@@ -110,16 +116,18 @@ function sendJson(res, status, obj) {
 // 注意：请求体已在主处理器里读过一次（Node 的流只能消费一次），
 // 因此这里必须接收已经读好的 bodyText，不能再次 readBody，否则请求会永远挂住。
 async function handleControl(req, res, url, bodyText) {
-  if (url.pathname === '/_control/state' && req.method === 'GET') {
-    sendJson(res, 200, {
-      ok: true,
-      startedAt: state.startedAt,
-      profile: state.profile,
-      requestCount: state.requests.length,
-      keyCounts: state.keyCounts,
-    });
+  // ---- 视频任务模拟（照 Kling 的形状：底座 kling 插件按此解析）----
+  // 控制面：/_control/task 设置后续状态序列，例如 {"states":["IN_PROGRESS","SUCCESS"]}
+  if (url.pathname === '/_control/task' && req.method === 'POST') {
+    let patch = {};
+    try { patch = JSON.parse(bodyText || '{}'); } catch { sendJson(res, 400, { ok: false, error: 'invalid json' }); return true; }
+    if (Array.isArray(patch.states)) state.taskPlan = patch.states.slice();
+    if (typeof patch.failReason === 'string') state.taskFailReason = patch.failReason;
+    if (typeof patch.resultUrl === 'string') state.taskResultUrl = patch.resultUrl;
+    sendJson(res, 200, { ok: true, taskPlan: state.taskPlan });
     return true;
   }
+
   if (url.pathname === '/_control/profile' && req.method === 'POST') {
     let patch = {};
     try { patch = JSON.parse(bodyText || '{}'); } catch { sendJson(res, 400, { ok: false, error: 'invalid json' }); return true; }
@@ -295,6 +303,54 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 异步任务（视频等）最小形态，阶段 3 再补细节
+  // 同时接受带与不带 `/kling` 前缀（kling 插件在"中继型"密钥下会加 `/kling` 前缀，
+  // 实测它就是这样出站的）。两种都收，避免因密钥形态不同而"看起来没接上"。
+  const videoSubmit = (url.pathname === '/v1/videos/text2video' || url.pathname === '/kling/v1/videos/text2video') && req.method === 'POST';
+  const videoQuery = /^(?:\/kling)?\/v1\/videos\/(text2video|image2video)\/([^/]+)$/.exec(url.pathname);
+  if (videoSubmit || videoQuery) {
+    // 不调用 recordRequest：它的签名与入参由主入口持有，这里只需模拟任务生命周期即可
+    if (state.profile.status) { res.writeHead(state.profile.status, { 'content-type': 'application/json' }); res.end(JSON.stringify({ code: 1, message: 'injected status' })); return true; }
+    if (videoSubmit) {
+      const taskId = 'task_stub_' + (state.taskSeq = (state.taskSeq || 0) + 1);
+      state.tasks[taskId] = { id: taskId, step: 0, createdAt: Date.now() };
+      state.lastTaskId = taskId;
+      sendJson(res, 200, { code: 0, message: 'SUCCEED', data: { task_id: taskId, task_status: 'submitted', created_at: Date.now() } });
+      return true;
+    }
+    const taskId = decodeURIComponent(videoQuery[2]);
+    const task = state.tasks[taskId];
+    if (!task) { sendJson(res, 404, { code: 1, message: 'task not found' }); return true; }
+    const plan = state.taskPlan && state.taskPlan.length ? state.taskPlan : ['IN_PROGRESS', 'SUCCESS'];
+    const status = plan[Math.min(task.step, plan.length - 1)];
+    task.step += 1;
+    if (status === 'SUCCESS') {
+      sendJson(res, 200, {
+        code: 0, message: 'SUCCEED',
+        data: {
+          task_id: taskId, task_status: 'SUCCESS', task_status_msg: '',
+          task_result: { videos: [{ id: taskId + '_v', url: state.taskResultUrl || (STUB_BASE + '/media/' + taskId + '.mp4'), duration: '5' }] },
+        },
+      });
+      return true;
+    }
+    if (status === 'FAILURE') {
+      sendJson(res, 200, { code: 0, message: 'SUCCEED', data: { task_id: taskId, task_status: 'FAILURE', task_status_msg: state.taskFailReason || 'stub injected failure' } });
+      return;
+    }
+    sendJson(res, 200, { code: 0, message: 'SUCCEED', data: { task_id: taskId, task_status: status, task_status_msg: '' } });
+    return;
+  }
+  if (url.pathname === '/_control/state' && req.method === 'GET') {
+    sendJson(res, 200, {
+      ok: true,
+      startedAt: state.startedAt,
+      profile: state.profile,
+      requestCount: state.requests.length,
+      keyCounts: state.keyCounts,
+    });
+    return true;
+  }
+
   if (url.pathname === '/v1/video/generations') {
     sendJson(res, 200, { id: 'task-stub-' + crypto.randomUUID().slice(0, 8), task_id: 'task-stub', status: 'queued' });
     return;
