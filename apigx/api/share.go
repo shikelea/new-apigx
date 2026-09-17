@@ -1271,6 +1271,9 @@ func (h *handler) explainRoute(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
+	// **解释必须反映真实状态**：正在熔断的供给要显示为被摘出（原因 breaker_open），
+	// 否则用户看到"它在候选里"而实际请求根本不会用它——那是最难排查的一类不一致。
+	applyBreakerToCandidates(candidates)
 	explanation, err := routing.ExplainForStrategy(strategy, candidates, public, routing.DefaultOptions())
 	if err != nil {
 		fail(c, http.StatusBadRequest, "invalid_strategy", err.Error())
@@ -1348,14 +1351,8 @@ func (h *handler) applyRouteRanking(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
-	// 先按熔断摘除不可用候选，再决策（与解释接口同一套判定，避免两处口径不一致）
-	now := common.GetTimestamp()
-	for i := range candidates {
-		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
-			candidates[i].Allowed = false
-			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
-		}
-	}
+	// 按熔断摘除不可用候选，再决策（与解释接口共用同一函数，避免两处口径不一致）
+	applyBreakerToCandidates(candidates)
 	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())
 	if err != nil {
 		fail(c, http.StatusBadRequest, "invalid_strategy", err.Error())
@@ -1568,4 +1565,18 @@ func (h *handler) syncChannelPrice(c *gin.Context) {
 		"applied": report.Applied, "pending": report.Pending,
 		"skipped": report.Skipped, "notes": report.Notes,
 	})
+}
+
+// applyBreakerToCandidates 按熔断结果把"打开"的候选置为不可用（含具体原因）。
+//
+// 抽成共用函数的原因：`route-explain` 与 `route-apply` 必须用**同一套口径**，
+// 否则会出现"解释里它在候选里、实际请求却不会用它"的最难排查类不一致。
+func applyBreakerToCandidates(candidates []routing.Candidate) {
+	now := common.GetTimestamp()
+	for i := range candidates {
+		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
+			candidates[i].Allowed = false
+			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
+		}
+	}
 }

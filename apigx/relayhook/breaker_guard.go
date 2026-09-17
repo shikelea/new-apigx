@@ -175,13 +175,66 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 		next = channelpool.MergeKeyStatusList(indices, ours, nil, apigxmodel.StatusBreakerOpen)
 	}
 	channel.ChannelInfo.MultiKeyStatusList = next
+
+	// **刻意不动权重**：曾经的方案是"把熔断渠道的权重压到接近零"，但实测与底座语义相冲突——
+	// 底座对权重有 **+10 平滑**，权重 1 与 1 之间的分配是 11:11（≈50%），
+	// 也就是说**权重根本无法表达"接近零"**（要让它接近零，同层其他渠道的权重都得远大于 10，
+	// 而我们无权假设/改动别人的权重）。更危险的是"恢复"时无从判断原值是不是平台设置的。
+	// 因此这条被证据否掉，改走"让渠道在底座眼里不可选"（见下面的状态处理）。
 	if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
 		Update("channel_info", channel.ChannelInfo).Error; err != nil {
 		common.SysError("apigx breaker: update channel marks failed: " + err.Error())
 		return
 	}
+	// **真正让底座不选中它**（修法①）：标记只让"选中后立刻失败"，不足以改道；
+	// 权重又因为底座的 +10 平滑而无法表达"接近零"（两者都被实测否掉）。
+	// 因此这里调用底座**自己的**渠道状态入口——它会同步更新能力索引，
+	// 于是该渠道在同模型下**根本不出现在候选里**，重试自然落到别的渠道。
+	// ⚠️ 不能直接用 `basemodel.UpdateChannelStatus`：我们的分享渠道是**多 Key 渠道**，
+	// 而它对多 Key 渠道会走 `handlerMultiKeyUpdate`——传入空 key 时找不到对应索引，
+	// **不会禁用整条渠道**（实测：调用后排除了个寂寞，坏上游照样被选中）。
+	// 因此直接做两件等价的事：置渠道状态 + 关掉它的**能力索引**（后者才是选择逻辑真正看的）。
+	if open {
+		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+			Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
+			common.SysError("apigx breaker: disable channel status failed: " + err.Error())
+		}
+		if err := basemodel.UpdateAbilityStatus(channelID, false); err != nil {
+			common.SysError("apigx breaker: disable ability failed: " + err.Error())
+		}
+	} else {
+		// 恢复：**只还原我们自己禁用的**（判据 = 我们的多 Key 标记仍在 + 渠道处于自动禁用），
+		// 避免把底座因鉴权失败等原因禁用的渠道顺手恢复。
+		var now basemodel.Channel
+		if err := db.Where("id = ?", channelID).First(&now).Error; err == nil {
+			if now.Status == common.ChannelStatusAutoDisabled && hasOurBreakerMark(now.ChannelInfo.MultiKeyStatusList) {
+				if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+					Update("status", common.ChannelStatusEnabled).Error; err != nil {
+					common.SysError("apigx breaker: restore channel status failed: " + err.Error())
+				}
+				if err := basemodel.UpdateAbilityStatus(channelID, true); err != nil {
+					common.SysError("apigx breaker: restore ability failed: " + err.Error())
+				}
+			}
+		}
+	}
+
 	// 必须刷新底座缓存：只改库不会被选择逻辑看到（阶段 1 已经踩过同一个坑）
 	if refreshed, err := basemodel.GetChannelById(channelID, true); err == nil && refreshed != nil {
 		basemodel.CacheUpdateChannel(refreshed)
 	}
+	// 权重写在渠道行上，但选择逻辑读的是能力索引里的权重 → 必须重建（与投影同一处理）
+	if basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+}
+
+// hasOurBreakerMark 判断状态表里是否还有我们写的熔断标记。
+func hasOurBreakerMark(statusList map[int]int) bool {
+	for _, status := range statusList {
+		if status == apigxmodel.StatusBreakerOpen {
+			return true
+		}
+	}
+	return false
 }
