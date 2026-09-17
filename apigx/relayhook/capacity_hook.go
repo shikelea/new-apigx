@@ -41,6 +41,9 @@ type Config struct {
 	UpstreamAccountLimit int64
 	// ChannelRPMLimit 是渠道的每分钟请求数上限。与并发不同，速率计数在窗口内**不归还**。
 	ChannelRPMLimit int64
+	// ChannelTPMLimit 是渠道的每分钟 token 数上限（需要"可执行的输出上限"，因此校验点
+	// 在请求解析之后，见 relayhook.CheckRequestTPM）。
+	ChannelTPMLimit int64
 }
 
 var (
@@ -61,6 +64,7 @@ func init() {
 		UpstreamKeyLimit:     int64(common.GetEnvOrDefault("APIGX_UPSTREAM_KEY_CONCURRENCY_LIMIT", 0)),
 		UpstreamAccountLimit: int64(common.GetEnvOrDefault("APIGX_UPSTREAM_ACCOUNT_CONCURRENCY_LIMIT", 0)),
 		ChannelRPMLimit:      int64(common.GetEnvOrDefault("APIGX_CHANNEL_RPM_LIMIT", 0)),
+		ChannelTPMLimit:      int64(common.GetEnvOrDefault("APIGX_CHANNEL_TPM_LIMIT", 0)),
 	})
 }
 
@@ -112,7 +116,7 @@ func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error
 	// 渠道维度：策略链 = 渠道自身的容量策略（apigx_capacity_policies） → 环境变量兜底。
 	// 策略存在数据库里，因此走 channelpool 的短 TTL 缓存；改上限最长一个 TTL 后生效。
 	if shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID); ok {
-		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit, cfg.ChannelRPMLimit)
+		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit, cfg.ChannelRPMLimit, cfg.ChannelTPMLimit)
 		res, err := capacity.Resolve(chain...)
 		if err != nil {
 			return nil, err
@@ -245,7 +249,9 @@ func resolveChannelRPMLimit(c *gin.Context, channelID int, envLimit int64) (int6
 	if !ok {
 		return envLimit, envLimit > 0
 	}
-	chain := channelpool.ChannelRPMChain(channelpool.CurrentDB(), shareChannelID, envLimit)
+	// 这里只解析 RPM：TPM 的环境值传 0（TPM 有自己的解析入口 CheckRequestTPM，
+	// 且它与本函数共用同一份策略缓存，重建时也会把 TPM 链一起建好）。
+	chain := channelpool.ChannelRPMChain(channelpool.CurrentDB(), shareChannelID, envLimit, 0)
 	res, err := capacity.Resolve(chain...)
 	if err != nil {
 		common.SysError("apigx capacity: resolve rpm limit failed: " + err.Error())

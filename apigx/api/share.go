@@ -585,6 +585,8 @@ type capacityPolicyRequest struct {
 	ConcurrencyValue *int64 `json:"concurrency_value"`
 	RPMMode          *int   `json:"rpm_mode"`
 	RPMLimit         *int64 `json:"rpm_limit"`
+	TPMMode          *int   `json:"tpm_mode"`
+	TPMLimit         *int64 `json:"tpm_limit"`
 }
 
 // setChannelCapacityPolicy 为分享渠道设置容量策略（当前支持"并发"维度）。
@@ -611,16 +613,22 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
-	if req.ConcurrencyMode == nil {
-		fail(c, http.StatusBadRequest, "missing_mode", "concurrency_mode is required")
+	// 至少要提供一个维度：否则这个请求什么也没配（但**不要求**必须是并发维度——
+	// 早期强制要求 concurrency_mode，会让"只配 RPM/TPM"变成不可能，属设计缺陷）。
+	if req.ConcurrencyMode == nil && req.RPMMode == nil && req.TPMMode == nil {
+		fail(c, http.StatusBadRequest, "missing_mode", "at least one dimension mode is required")
 		return
 	}
+	// 未提供的维度按「未配置」处理，并逐个用四态解析器校验「模式 + 值」的组合
 	value := int64(0)
 	if req.ConcurrencyValue != nil {
 		value = *req.ConcurrencyValue
 	}
-	// 先用四态解析器校验「模式 + 值」的组合，非法组合不允许落库
-	policy := capacity.Policy{Mode: *req.ConcurrencyMode, Value: value}
+	concurrencyMode := capacity.LimitModeUnset
+	if req.ConcurrencyMode != nil {
+		concurrencyMode = *req.ConcurrencyMode
+	}
+	policy := capacity.Policy{Mode: concurrencyMode, Value: value}
 	if err := policy.Validate(); err != nil {
 		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
 		return
@@ -634,6 +642,18 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 		rpmMode = *req.RPMMode
 	}
 	if err := (capacity.Policy{Mode: rpmMode, Value: rpmValue}).Validate(); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
+		return
+	}
+	tpmValue := int64(0)
+	if req.TPMLimit != nil {
+		tpmValue = *req.TPMLimit
+	}
+	tpmMode := capacity.LimitModeUnset
+	if req.TPMMode != nil {
+		tpmMode = *req.TPMMode
+	}
+	if err := (capacity.Policy{Mode: tpmMode, Value: tpmValue}).Validate(); err != nil {
 		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
 		return
 	}
@@ -662,10 +682,12 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 			failFromRepo(c, updateErr)
 			return
 		}
-		existing.MaxConcurrencyMode = policy.Mode
+		existing.MaxConcurrencyMode = concurrencyMode
 		existing.MaxConcurrency = policy.Value
 		existing.RpmMode = rpmMode
 		existing.RpmLimit = rpmValue
+		existing.TpmMode = tpmMode
+		existing.TpmLimit = tpmValue
 		if linkErr := linkPolicy(existing.ID); linkErr != nil {
 			failFromRepo(c, linkErr)
 			return
@@ -675,8 +697,9 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 		created := &apigxmodel.CapacityPolicy{
 			OwnerUserID: owner, ScopeType: apigxmodel.CapacityScopeChannel, ScopeID: shareChannel.ID,
 			PolicyVersion:      1,
-			MaxConcurrencyMode: policy.Mode, MaxConcurrency: policy.Value,
+			MaxConcurrencyMode: concurrencyMode, MaxConcurrency: policy.Value,
 			RpmMode: rpmMode, RpmLimit: rpmValue,
+			TpmMode: tpmMode, TpmLimit: tpmValue,
 		}
 		now := common.GetTimestamp()
 		created.CreatedAt, created.UpdatedAt = now, now

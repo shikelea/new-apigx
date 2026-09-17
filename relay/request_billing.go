@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -58,6 +60,20 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
 	}
+	// APIGX TPM 维度（T1.7）：用「prompt tokens + 输出上限」做窗口预留。
+	// 挂在这里的原因见 apigx/relayhook/request_tpm.go：**输出上限只在请求解析后才有**，
+	// 而这里正好同时具备上限、prompt 计数，且尚未发送请求。
+	// 位置刻意放在 FreeModel 短路**之前**：免费模型也必须受 TPM 约束，
+	// 不得靠短路绕过计量（计划书明确点名的陷阱）。
+	if tpmErr := relayhook.CheckRequestTPM(
+		c,
+		common.GetContextKeyInt(c, constant.ContextKeyChannelId),
+		tokens,
+		meta.MaxTokens,
+	); tpmErr != nil {
+		return tpmErr
+	}
+
 	if priceData.FreeModel {
 		logger.LogInfo(c, fmt.Sprintf("模型 %s 免费，跳过预扣费", info.OriginModelName))
 		return nil

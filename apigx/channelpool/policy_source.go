@@ -22,9 +22,10 @@ import (
 const policyCacheTTL = 30 * time.Second
 
 type cachedPolicies struct {
-	// concurrency / rpm 是两个维度的策略链（最具体在最前）。
+	// concurrency / rpm / tpm 是三个维度的策略链（最具体在最前）。
 	concurrency []capacity.Policy
 	rpm         []capacity.Policy
+	tpm         []capacity.Policy
 	expiresAt   time.Time
 }
 
@@ -73,7 +74,7 @@ func loadChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int
 }
 
 // ChannelConcurrencyChain 返回渠道并发维度的策略链（带缓存）。
-func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64, envRPMLimit int64) []capacity.Policy {
+func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64, envRPMLimit int64, envTPMLimit int64) []capacity.Policy {
 	now := time.Now()
 	policyCacheMu.RLock()
 	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
@@ -86,13 +87,13 @@ func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64, 
 	rpmChain := loadChannelRPMChain(db, shareChannelID, envRPMLimit)
 
 	policyCacheMu.Lock()
-	policyCache[shareChannelID] = cachedPolicies{concurrency: chain, rpm: rpmChain, expiresAt: now.Add(policyCacheTTL)}
+	policyCache[shareChannelID] = cachedPolicies{concurrency: chain, rpm: rpmChain, tpm: loadChannelTPMChain(db, shareChannelID, envTPMLimit), expiresAt: now.Add(policyCacheTTL)}
 	policyCacheMu.Unlock()
 	return chain
 }
 
 // ChannelRPMChain 返回渠道 RPM 维度的策略链（与并发共用同一份缓存，不额外查库）。
-func ChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
+func ChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64, envTPMLimit int64) []capacity.Policy {
 	now := time.Now()
 	policyCacheMu.RLock()
 	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
@@ -102,7 +103,7 @@ func ChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capaci
 	policyCacheMu.RUnlock()
 
 	// 缓存未命中：整体重建（并发链与 RPM 链一起），避免两次查库
-	_ = ChannelConcurrencyChain(db, shareChannelID, 0, envLimit)
+	_ = ChannelConcurrencyChain(db, shareChannelID, 0, envLimit, envTPMLimit)
 	policyCacheMu.RLock()
 	defer policyCacheMu.RUnlock()
 	if cached, ok := policyCache[shareChannelID]; ok {
@@ -200,4 +201,42 @@ func ShareChannelIDByOffering(db *gorm.DB, offeringID int64) (int64, bool) {
 		return 0, false
 	}
 	return offering.ChannelID, true
+}
+
+// ChannelTPMChain 返回渠道 TPM（每分钟 token 数）维度的策略链（与并发/RPM 共用一份缓存）。
+func ChannelTPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
+	now := time.Now()
+	policyCacheMu.RLock()
+	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
+		policyCacheMu.RUnlock()
+		return cached.tpm
+	}
+	policyCacheMu.RUnlock()
+	_ = ChannelConcurrencyChain(db, shareChannelID, 0, 0, envLimit)
+	policyCacheMu.RLock()
+	defer policyCacheMu.RUnlock()
+	if cached, ok := policyCache[shareChannelID]; ok {
+		return cached.tpm
+	}
+	return loadChannelTPMChain(db, shareChannelID, envLimit)
+}
+
+// loadChannelTPMChain 组装 TPM 维度的策略链：渠道策略 → 环境变量兜底。
+func loadChannelTPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
+	chain := make([]capacity.Policy, 0, 2)
+	if db != nil {
+		var shareChannel apigxmodel.Channel
+		if err := db.Where("id = ?", shareChannelID).First(&shareChannel).Error; err == nil && shareChannel.CapacityPolicyID > 0 {
+			if policy, err := apigxmodel.GetCapacityPolicy(db, shareChannel.CapacityPolicyID); err == nil {
+				mode, value := policy.TPM()
+				chain = append(chain, policyFromRaw(mode, value))
+			}
+		}
+	}
+	if envLimit > 0 {
+		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeValue, Value: envLimit})
+	} else {
+		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeUnset})
+	}
+	return chain
 }
