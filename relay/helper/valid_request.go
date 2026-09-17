@@ -74,6 +74,13 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 		if audioRequest.Model == "" {
 			return nil, errors.New("model is required")
 		}
+		// **缺少音频文件属客户端错误，必须在校验点拦下并给出 4xx**（阶段 3 实测发现）：
+		// 此前它一路走到适配器的打开文件处，报的是通用错误 ⇒ 最终 **500**，
+		// 调用方会误判成"平台故障"并重试 —— 而事实是它自己的请求不合法。
+		if _, fileErr := c.FormFile("file"); fileErr != nil {
+			return nil, types.NewError(fmt.Errorf("file is required"),
+				types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
 		if audioRequest.ResponseFormat == "" {
 			audioRequest.ResponseFormat = "json"
 		}
