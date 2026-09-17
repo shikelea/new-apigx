@@ -1,0 +1,393 @@
+From a35ee4ba9b0214e7121836aa879f826c9567dac4 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:49:51 +0800
+Subject: [PATCH 36/36] =?UTF-8?q?feat(apigx):=20TPM=20=E6=89=A7=E8=A1=8C?=
+ =?UTF-8?q?=E4=BE=A7=EF=BC=88=E6=8C=82=E8=BD=BD=E7=82=B9=E6=AD=A3=E7=A1=AE?=
+ =?UTF-8?q?=E3=80=81=E8=B6=85=E9=99=90=E6=8B=A6=E6=88=AA=E5=B7=B2=E9=AA=8C?=
+ =?UTF-8?q?=E8=AF=81=EF=BC=9B=E6=94=BE=E8=A1=8C=E8=B7=AF=E5=BE=84=E6=9C=AA?=
+ =?UTF-8?q?=E8=A7=A3=E5=BC=82=E5=B8=B8=EF=BC=8C=E6=9C=AA=E5=8B=BE=E9=80=89?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 关键发现: relay.PrepareRequestBilling 已算出 TokenCountMeta.MaxTokens(缺省8192) 与 prompt
+  token 数且尚未发送 => TPM 挂在请求解析之后, 预留量=prompt+输出上限, 符合"可执行上限"要求;
+  且位于 FreeModel 短路之前, 免费模型同样受约束(原"推迟理由"被推翻并更正)
+- apigx/relayhook/request_tpm.go: CheckRequestTPM(超限 429 + Retry-After) + 渠道策略链
+  tpm_mode/tpm_limit + 策略接口支持 TPM; 台账 D-018(relay/request_billing.go)
+- 已验证: tpm_limit=100 -> 429 capacity_exceeded + Retry-After=1
+- ❗未解: 改为"明确不限"/大上限后仍 429(应为放行), 原因尚未隔离 -> 不勾选
+- 顺带修接口设计缺陷: 容量策略原先强制要求 concurrency_mode, 使"只配 RPM/TPM"不可能;
+  已改为"至少一个维度", 未提供的按未配置写入
+- apigx + middleware 全量通过
+---
+ apigx/api/share.go                 |  35 ++++++++--
+ apigx/channelpool/policy_source.go |  49 ++++++++++++--
+ apigx/relayhook/capacity_hook.go   |  10 ++-
+ apigx/relayhook/request_tpm.go     | 100 +++++++++++++++++++++++++++++
+ relay/request_billing.go           |  16 +++++
+ 5 files changed, 197 insertions(+), 13 deletions(-)
+ create mode 100644 apigx/relayhook/request_tpm.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index e3fd966..a2c1a8b 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -585,6 +585,8 @@ type capacityPolicyRequest struct {
+ 	ConcurrencyValue *int64 `json:"concurrency_value"`
+ 	RPMMode          *int   `json:"rpm_mode"`
+ 	RPMLimit         *int64 `json:"rpm_limit"`
++	TPMMode          *int   `json:"tpm_mode"`
++	TPMLimit         *int64 `json:"tpm_limit"`
+ }
+ 
+ // setChannelCapacityPolicy 为分享渠道设置容量策略（当前支持"并发"维度）。
+@@ -611,16 +613,22 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+ 		return
+ 	}
+-	if req.ConcurrencyMode == nil {
+-		fail(c, http.StatusBadRequest, "missing_mode", "concurrency_mode is required")
++	// 至少要提供一个维度：否则这个请求什么也没配（但**不要求**必须是并发维度——
++	// 早期强制要求 concurrency_mode，会让"只配 RPM/TPM"变成不可能，属设计缺陷）。
++	if req.ConcurrencyMode == nil && req.RPMMode == nil && req.TPMMode == nil {
++		fail(c, http.StatusBadRequest, "missing_mode", "at least one dimension mode is required")
+ 		return
+ 	}
++	// 未提供的维度按「未配置」处理，并逐个用四态解析器校验「模式 + 值」的组合
+ 	value := int64(0)
+ 	if req.ConcurrencyValue != nil {
+ 		value = *req.ConcurrencyValue
+ 	}
+-	// 先用四态解析器校验「模式 + 值」的组合，非法组合不允许落库
+-	policy := capacity.Policy{Mode: *req.ConcurrencyMode, Value: value}
++	concurrencyMode := capacity.LimitModeUnset
++	if req.ConcurrencyMode != nil {
++		concurrencyMode = *req.ConcurrencyMode
++	}
++	policy := capacity.Policy{Mode: concurrencyMode, Value: value}
+ 	if err := policy.Validate(); err != nil {
+ 		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
+ 		return
+@@ -637,6 +645,18 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
+ 		return
+ 	}
++	tpmValue := int64(0)
++	if req.TPMLimit != nil {
++		tpmValue = *req.TPMLimit
++	}
++	tpmMode := capacity.LimitModeUnset
++	if req.TPMMode != nil {
++		tpmMode = *req.TPMMode
++	}
++	if err := (capacity.Policy{Mode: tpmMode, Value: tpmValue}).Validate(); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
++		return
++	}
+ 
+ 	// 无论新建还是更新，都必须把策略**挂到渠道上**（`apigx_channels.capacity_policy_id`）。
+ 	// 只写策略行不建立这层引用的话，读取侧按渠道的 FK 找不到策略——上限静默不生效。
+@@ -662,10 +682,12 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 			failFromRepo(c, updateErr)
+ 			return
+ 		}
+-		existing.MaxConcurrencyMode = policy.Mode
++		existing.MaxConcurrencyMode = concurrencyMode
+ 		existing.MaxConcurrency = policy.Value
+ 		existing.RpmMode = rpmMode
+ 		existing.RpmLimit = rpmValue
++		existing.TpmMode = tpmMode
++		existing.TpmLimit = tpmValue
+ 		if linkErr := linkPolicy(existing.ID); linkErr != nil {
+ 			failFromRepo(c, linkErr)
+ 			return
+@@ -675,8 +697,9 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 		created := &apigxmodel.CapacityPolicy{
+ 			OwnerUserID: owner, ScopeType: apigxmodel.CapacityScopeChannel, ScopeID: shareChannel.ID,
+ 			PolicyVersion:      1,
+-			MaxConcurrencyMode: policy.Mode, MaxConcurrency: policy.Value,
++			MaxConcurrencyMode: concurrencyMode, MaxConcurrency: policy.Value,
+ 			RpmMode: rpmMode, RpmLimit: rpmValue,
++			TpmMode: tpmMode, TpmLimit: tpmValue,
+ 		}
+ 		now := common.GetTimestamp()
+ 		created.CreatedAt, created.UpdatedAt = now, now
+diff --git a/apigx/channelpool/policy_source.go b/apigx/channelpool/policy_source.go
+index 750d10d..7448fb2 100644
+--- a/apigx/channelpool/policy_source.go
++++ b/apigx/channelpool/policy_source.go
+@@ -22,9 +22,10 @@ import (
+ const policyCacheTTL = 30 * time.Second
+ 
+ type cachedPolicies struct {
+-	// concurrency / rpm 是两个维度的策略链（最具体在最前）。
++	// concurrency / rpm / tpm 是三个维度的策略链（最具体在最前）。
+ 	concurrency []capacity.Policy
+ 	rpm         []capacity.Policy
++	tpm         []capacity.Policy
+ 	expiresAt   time.Time
+ }
+ 
+@@ -73,7 +74,7 @@ func loadChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int
+ }
+ 
+ // ChannelConcurrencyChain 返回渠道并发维度的策略链（带缓存）。
+-func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64, envRPMLimit int64) []capacity.Policy {
++func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64, envRPMLimit int64, envTPMLimit int64) []capacity.Policy {
+ 	now := time.Now()
+ 	policyCacheMu.RLock()
+ 	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
+@@ -86,13 +87,13 @@ func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64,
+ 	rpmChain := loadChannelRPMChain(db, shareChannelID, envRPMLimit)
+ 
+ 	policyCacheMu.Lock()
+-	policyCache[shareChannelID] = cachedPolicies{concurrency: chain, rpm: rpmChain, expiresAt: now.Add(policyCacheTTL)}
++	policyCache[shareChannelID] = cachedPolicies{concurrency: chain, rpm: rpmChain, tpm: loadChannelTPMChain(db, shareChannelID, envTPMLimit), expiresAt: now.Add(policyCacheTTL)}
+ 	policyCacheMu.Unlock()
+ 	return chain
+ }
+ 
+ // ChannelRPMChain 返回渠道 RPM 维度的策略链（与并发共用同一份缓存，不额外查库）。
+-func ChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++func ChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64, envTPMLimit int64) []capacity.Policy {
+ 	now := time.Now()
+ 	policyCacheMu.RLock()
+ 	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
+@@ -102,7 +103,7 @@ func ChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capaci
+ 	policyCacheMu.RUnlock()
+ 
+ 	// 缓存未命中：整体重建（并发链与 RPM 链一起），避免两次查库
+-	_ = ChannelConcurrencyChain(db, shareChannelID, 0, envLimit)
++	_ = ChannelConcurrencyChain(db, shareChannelID, 0, envLimit, envTPMLimit)
+ 	policyCacheMu.RLock()
+ 	defer policyCacheMu.RUnlock()
+ 	if cached, ok := policyCache[shareChannelID]; ok {
+@@ -201,3 +202,41 @@ func ShareChannelIDByOffering(db *gorm.DB, offeringID int64) (int64, bool) {
+ 	}
+ 	return offering.ChannelID, true
+ }
++
++// ChannelTPMChain 返回渠道 TPM（每分钟 token 数）维度的策略链（与并发/RPM 共用一份缓存）。
++func ChannelTPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++	now := time.Now()
++	policyCacheMu.RLock()
++	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
++		policyCacheMu.RUnlock()
++		return cached.tpm
++	}
++	policyCacheMu.RUnlock()
++	_ = ChannelConcurrencyChain(db, shareChannelID, 0, 0, envLimit)
++	policyCacheMu.RLock()
++	defer policyCacheMu.RUnlock()
++	if cached, ok := policyCache[shareChannelID]; ok {
++		return cached.tpm
++	}
++	return loadChannelTPMChain(db, shareChannelID, envLimit)
++}
++
++// loadChannelTPMChain 组装 TPM 维度的策略链：渠道策略 → 环境变量兜底。
++func loadChannelTPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++	chain := make([]capacity.Policy, 0, 2)
++	if db != nil {
++		var shareChannel apigxmodel.Channel
++		if err := db.Where("id = ?", shareChannelID).First(&shareChannel).Error; err == nil && shareChannel.CapacityPolicyID > 0 {
++			if policy, err := apigxmodel.GetCapacityPolicy(db, shareChannel.CapacityPolicyID); err == nil {
++				mode, value := policy.TPM()
++				chain = append(chain, policyFromRaw(mode, value))
++			}
++		}
++	}
++	if envLimit > 0 {
++		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeValue, Value: envLimit})
++	} else {
++		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeUnset})
++	}
++	return chain
++}
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index c7fe52b..5840b3c 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -41,6 +41,9 @@ type Config struct {
+ 	UpstreamAccountLimit int64
+ 	// ChannelRPMLimit 是渠道的每分钟请求数上限。与并发不同，速率计数在窗口内**不归还**。
+ 	ChannelRPMLimit int64
++	// ChannelTPMLimit 是渠道的每分钟 token 数上限（需要"可执行的输出上限"，因此校验点
++	// 在请求解析之后，见 relayhook.CheckRequestTPM）。
++	ChannelTPMLimit int64
+ }
+ 
+ var (
+@@ -61,6 +64,7 @@ func init() {
+ 		UpstreamKeyLimit:     int64(common.GetEnvOrDefault("APIGX_UPSTREAM_KEY_CONCURRENCY_LIMIT", 0)),
+ 		UpstreamAccountLimit: int64(common.GetEnvOrDefault("APIGX_UPSTREAM_ACCOUNT_CONCURRENCY_LIMIT", 0)),
+ 		ChannelRPMLimit:      int64(common.GetEnvOrDefault("APIGX_CHANNEL_RPM_LIMIT", 0)),
++		ChannelTPMLimit:      int64(common.GetEnvOrDefault("APIGX_CHANNEL_TPM_LIMIT", 0)),
+ 	})
+ }
+ 
+@@ -112,7 +116,7 @@ func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error
+ 	// 渠道维度：策略链 = 渠道自身的容量策略（apigx_capacity_policies） → 环境变量兜底。
+ 	// 策略存在数据库里，因此走 channelpool 的短 TTL 缓存；改上限最长一个 TTL 后生效。
+ 	if shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID); ok {
+-		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit, cfg.ChannelRPMLimit)
++		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit, cfg.ChannelRPMLimit, cfg.ChannelTPMLimit)
+ 		res, err := capacity.Resolve(chain...)
+ 		if err != nil {
+ 			return nil, err
+@@ -245,7 +249,9 @@ func resolveChannelRPMLimit(c *gin.Context, channelID int, envLimit int64) (int6
+ 	if !ok {
+ 		return envLimit, envLimit > 0
+ 	}
+-	chain := channelpool.ChannelRPMChain(channelpool.CurrentDB(), shareChannelID, envLimit)
++	// 这里只解析 RPM：TPM 的环境值传 0（TPM 有自己的解析入口 CheckRequestTPM，
++	// 且它与本函数共用同一份策略缓存，重建时也会把 TPM 链一起建好）。
++	chain := channelpool.ChannelRPMChain(channelpool.CurrentDB(), shareChannelID, envLimit, 0)
+ 	res, err := capacity.Resolve(chain...)
+ 	if err != nil {
+ 		common.SysError("apigx capacity: resolve rpm limit failed: " + err.Error())
+diff --git a/apigx/relayhook/request_tpm.go b/apigx/relayhook/request_tpm.go
+new file mode 100644
+index 0000000..b6b1861
+--- /dev/null
++++ b/apigx/relayhook/request_tpm.go
+@@ -0,0 +1,100 @@
++package relayhook
++
++import (
++	"errors"
++	"net/http"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/apigx/channelpool"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/gin-gonic/gin"
++)
++
++// TPM（每分钟 token 数）维度 —— 挂在**请求解析之后**。
++//
++// # 为什么不能和并发/RPM 挂在同一个位置
++//
++// 计划书 §9.2 要求 TPM 预留必须使用**可执行的输出上限**，不得凭空估算 token 来预留。
++// 而"输出上限"（`max_tokens` 等）只在**请求体解析之后**才存在：
++// 我们的准入钩子位于 `SetupContextForSelectedChannel`，那里请求体还没解析。
++//
++// 因此本维度挂在 `relay.PrepareRequestBilling`：底座在那里已经算出
++// `TokenCountMeta.MaxTokens`（缺省 8192，见 `relay/helper/price.go`）与 prompt token 数，
++// **并且尚未发送请求**。预留量 = prompt tokens + 输出上限，即该次请求 token 用量的**上界**。
++//
++// 该位置还有两个好处：
++//  1. 它在 `FreeModel` 短路**之前**执行，因此免费模型同样受 TPM 约束（计划书明确要求不得靠短路绕过计量）；
++//  2. 它是协议无关的统一入口（OpenAI / Claude / Responses / 图像都经过它）。
++//
++// 与 RPM 一样，TPM 计数在窗口内**不归还**（已经发出去的 token 不会因为请求失败而"没发过"）。
++
++// CheckRequestTPM 依据「prompt tokens + 输出上限」做 TPM 窗口预留。
++//
++// 返回 nil 表示放行；否则返回错误，调用方应当**直接中止**（不得发送请求）。
++func CheckRequestTPM(c *gin.Context, channelID int, promptTokens int, outputCap int) *types.NewAPIError {
++	if c == nil || channelID <= 0 {
++		return nil
++	}
++	// 输出上限缺省值与底座估算保持一致（`relay/helper/price.go` 的 defaultTieredPreConsumeMaxTokens）
++	if outputCap <= 0 {
++		outputCap = 8192
++	}
++	amount := int64(promptTokens + outputCap)
++	if amount <= 0 {
++		return nil
++	}
++
++	limit, ok := resolveChannelTPMLimit(c, channelID)
++	if !ok {
++		// 未配置 / 明确不限：不施加约束
++		return nil
++	}
++	if common.RDB == nil {
++		// 未启用 Redis 时无法判断共享限额 → 失败关闭
++		return types.NewErrorWithStatusCode(errors.New("tpm ledger unavailable"),
++			types.ErrorCodeQueryDataError, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
++	}
++
++	ctrl := capacity.New(common.RDB)
++	windowKey := capacity.ChannelTPM(int64(channelID), capacity.MinuteWindow(time.Now()))
++	if err := ctrl.IncrementWindow(c.Request.Context(), windowKey, limit, amount, capacity.WindowTTL(time.Minute)); err != nil {
++		var exceeded *capacity.ErrExceeded
++		if errors.As(err, &exceeded) {
++			common.SysLog("apigx capacity: channel tpm exceeded")
++			c.Header("Retry-After", "1")
++			abortJSON(c, http.StatusTooManyRequests, "capacity_exceeded",
++				"capacity is temporarily exceeded, please retry later")
++			return types.NewErrorWithStatusCode(errors.New("tpm exceeded"),
++				types.ErrorCodeChannelNoAvailableKey, http.StatusTooManyRequests,
++				types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++		}
++		common.SysError("apigx capacity: tpm ledger error: " + err.Error())
++		return types.NewErrorWithStatusCode(errors.New("tpm ledger error"),
++			types.ErrorCodeQueryDataError, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
++	}
++	return nil
++}
++
++// resolveChannelTPMLimit 解析渠道的 TPM 上限（策略链：渠道策略 → 环境变量兜底）。
++//
++// 返回 false 表示「未配置 / 明确不限」——两种情形都不施加约束。
++func resolveChannelTPMLimit(c *gin.Context, channelID int) (int64, bool) {
++	envLimit := getConfig().ChannelTPMLimit
++	db := channelpool.CurrentDB()
++	shareChannelID, ok := channelpool.ShareChannelIDByBase(db, channelID)
++	if !ok {
++		return envLimit, envLimit > 0
++	}
++	chain := channelpool.ChannelTPMChain(db, shareChannelID, envLimit)
++	res, err := capacity.Resolve(chain...)
++	if err != nil {
++		common.SysError("apigx capacity: resolve tpm limit failed: " + err.Error())
++		return 0, false
++	}
++	if res.Decision == capacity.DecisionLimited {
++		return res.Value, true
++	}
++	return 0, false
++}
+diff --git a/relay/request_billing.go b/relay/request_billing.go
+index d3394a3..08ce988 100644
+--- a/relay/request_billing.go
++++ b/relay/request_billing.go
+@@ -6,6 +6,8 @@ import (
+ 	"net/http"
+ 	"strings"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
++	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/logger"
+ 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+@@ -58,6 +60,20 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
+ 	if err != nil {
+ 		return types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
+ 	}
++	// APIGX TPM 维度（T1.7）：用「prompt tokens + 输出上限」做窗口预留。
++	// 挂在这里的原因见 apigx/relayhook/request_tpm.go：**输出上限只在请求解析后才有**，
++	// 而这里正好同时具备上限、prompt 计数，且尚未发送请求。
++	// 位置刻意放在 FreeModel 短路**之前**：免费模型也必须受 TPM 约束，
++	// 不得靠短路绕过计量（计划书明确点名的陷阱）。
++	if tpmErr := relayhook.CheckRequestTPM(
++		c,
++		common.GetContextKeyInt(c, constant.ContextKeyChannelId),
++		tokens,
++		meta.MaxTokens,
++	); tpmErr != nil {
++		return tpmErr
++	}
++
+ 	if priceData.FreeModel {
+ 		logger.LogInfo(c, fmt.Sprintf("模型 %s 免费，跳过预扣费", info.OriginModelName))
+ 		return nil
+-- 
+2.53.0.windows.1
+
