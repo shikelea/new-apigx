@@ -317,3 +317,108 @@ func TestIngestNonUSDPriceUsesSavedFxRate(t *testing.T) {
 	_, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
 	assert.False(t, usable, "缺汇率时 USD 价格必须显式未知，而不是 0")
 }
+
+// ---- 汇率快照（T2.3） ----
+
+// 汇率快照只追加且封版上一条：历史价格不会因为汇率更新而改变。
+func TestFxRateSnapshotSealsPreviousVersion(t *testing.T) {
+	db := newRepoDB(t)
+
+	first := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, EffectiveFrom: 1000,
+		SourceLabel: "admin", ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+	require.NoError(t, CreateFxRateSnapshot(db, first))
+
+	// 取到第一条
+	rate, err := GetEffectiveFxRate(db, "CNY", 1500)
+	require.NoError(t, err)
+	assert.EqualValues(t, 7_200_000, rate.RateMicro)
+
+	// 追加第二条（汇率变动）：第一条应被封版
+	second := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_400_000, EffectiveFrom: 2000,
+		SourceLabel: "admin", ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+	require.NoError(t, CreateFxRateSnapshot(db, second))
+
+	// 历史时刻仍取到**当时**的汇率（历史不被改写）
+	rate, err = GetEffectiveFxRate(db, "CNY", 1500)
+	require.NoError(t, err)
+	assert.EqualValues(t, 7_200_000, rate.RateMicro, "历史时刻必须取到当时生效的汇率")
+	assert.EqualValues(t, first.ID, rate.ID)
+
+	// 当前时刻取到新汇率
+	rate, err = GetEffectiveFxRate(db, "CNY", 2500)
+	require.NoError(t, err)
+	assert.EqualValues(t, 7_400_000, rate.RateMicro)
+
+	// 同一币种任何时刻**只有一条**生效，避免"用哪条"变成未定义
+	var active int64
+	require.NoError(t, db.Model(&FxRate{}).Where("quote_currency = ? AND effective_to = 0", "CNY").Count(&active).Error)
+	assert.EqualValues(t, 1, active)
+}
+
+// 没有汇率时必须报"未知"，**绝不退回 1:1**——否则 7.2 CNY 会被当成 7.2 USD。
+func TestFxRateMissingIsNotOneToOne(t *testing.T) {
+	db := newRepoDB(t)
+
+	_, err := GetEffectiveFxRate(db, "JPY", 0)
+	assert.ErrorIs(t, err, ErrNoFxRate)
+
+	// 换算接口对 nil/非法汇率一律返回 ok=false，而不是拿 1:1 硬算
+	usd, ok := QuoteToUSDMicro(nil, 1_000_000)
+	assert.False(t, ok)
+	assert.Zero(t, usd)
+
+	usd, ok = QuoteToUSDMicro(&FxRate{RateMicro: 0}, 1_000_000)
+	assert.False(t, ok)
+
+	// 方向不对也拒绝（防止"乘还是除"的口径分歧被悄悄绕过）
+	usd, ok = QuoteToUSDMicro(&FxRate{RateMicro: 7_200_000, ConversionDirection: 99}, 7_200_000)
+	assert.False(t, ok)
+}
+
+// 换算方向与数值：USD = quote / rate；反向 quote = USD × rate。
+func TestFxRateConversionDirection(t *testing.T) {
+	rate := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+
+	// 7200000 微人民币 ÷ 7.2 = 1000000 微美元（即 1 USD）
+	usd, ok := QuoteToUSDMicro(rate, 7_200_000)
+	require.True(t, ok)
+	assert.EqualValues(t, 1_000_000, usd)
+
+	// 反向：1 USD → 7.2 CNY
+	quote, ok := USDToQuoteMicro(rate, 1_000_000)
+	require.True(t, ok)
+	assert.EqualValues(t, 7_200_000, quote)
+
+	// 往返一致（取整误差为 0）
+	back, ok := QuoteToUSDMicro(rate, quote)
+	require.True(t, ok)
+	assert.EqualValues(t, 1_000_000, back)
+}
+
+// 非法汇率输入被拒（含"给 USD 配汇率"这种会让 1 USD = ? USD 出现两种答案的情况）。
+func TestCreateFxRateRejectsInvalidInput(t *testing.T) {
+	db := newRepoDB(t)
+	base := func() *FxRate {
+		return &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+	}
+
+	bad := base()
+	bad.QuoteCurrency = "CN"
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+
+	bad = base()
+	bad.QuoteCurrency = "USD"
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument, "USD 对自己不需要汇率")
+
+	bad = base()
+	bad.RateMicro = 0
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+
+	bad = base()
+	bad.BaseCurrency = "EUR"
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+
+	bad = base()
+	bad.ConversionDirection = 1
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+}

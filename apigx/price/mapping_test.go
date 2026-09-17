@@ -276,3 +276,63 @@ func TestPerRequestPriceRejectsImplausibleAndZero(t *testing.T) {
 	_, err = perRequestItems(5_000_000)
 	assert.ErrorIs(t, err, ErrPriceOutOfRange)
 }
+
+// ---- 多单位估算（T2.3） ----
+
+// 同族单位可换算：token 的 1K/1M、时间的 秒/分钟。
+func TestConvertUnitPriceMicroWithinFamily(t *testing.T) {
+	// 0.002 USD /1K tokens = 2 USD /1M tokens
+	perMillion, err := ConvertUnitPriceMicro(2000, UnitScalePerThousandTokens, UnitScalePerMillionTokens)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2_000_000, perMillion)
+
+	// 反向
+	perThousand, err := ConvertUnitPriceMicro(2_000_000, UnitScalePerMillionTokens, UnitScalePerThousandTokens)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2000, perThousand)
+
+	// 0.01 USD /秒 = 0.6 USD /分钟
+	perMinute, err := ConvertUnitPriceMicro(10_000, UnitScalePerSecond, UnitScalePerMinute)
+	require.NoError(t, err)
+	assert.EqualValues(t, 600_000, perMinute)
+
+	// 同单位原样返回
+	same, err := ConvertUnitPriceMicro(1234, UnitScalePerRequest, UnitScalePerRequest)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1234, same)
+}
+
+// 跨族不可换算：必须报错，**不能猜一个系数**（猜错就是不会报错的错价）。
+func TestConvertUnitPriceMicroRejectsCrossFamily(t *testing.T) {
+	_, err := ConvertUnitPriceMicro(1000, UnitScalePerImage, UnitScalePerMillionTokens)
+	assert.ErrorIs(t, err, ErrUnitNotConvertible)
+
+	_, err = ConvertUnitPriceMicro(1000, UnitScalePerRequest, UnitScalePerSecond)
+	assert.ErrorIs(t, err, ErrUnitNotConvertible)
+
+	// 未知单位
+	_, err = ConvertUnitPriceMicro(1000, 99, UnitScalePerMillionTokens)
+	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
+
+	// 负价
+	_, err = ConvertUnitPriceMicro(-1, UnitScalePerSecond, UnitScalePerMinute)
+	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
+}
+
+// 归一化到基准单位后可直接比较：不同来源用不同单位报价时能放在一起比。
+func TestNormalizeToCanonicalUnit(t *testing.T) {
+	// 0.002 USD/1K → 基准（/1M）
+	normalized, err := NormalizeToCanonicalUnit(2000, UnitScalePerThousandTokens)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2_000_000, normalized)
+
+	// 已经是基准单位：不变
+	normalized, err = NormalizeToCanonicalUnit(2_000_000, UnitScalePerMillionTokens)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2_000_000, normalized)
+
+	// 时间族基准是 /秒
+	normalized, err = NormalizeToCanonicalUnit(600_000, UnitScalePerMinute)
+	require.NoError(t, err)
+	assert.EqualValues(t, 10_000, normalized)
+}
