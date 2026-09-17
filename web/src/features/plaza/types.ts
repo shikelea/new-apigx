@@ -38,6 +38,12 @@ export interface PlazaOfferingItem {
   capabilities?: string[]
   /** 尚未验证的能力（后端仅在存在时返回） */
   unverified_capabilities?: string[]
+  /** 质量摘要（最近 6 小时窗口）：样本不足时 insufficient 为 true，界面必须显示"样本不足" */
+  sample_count?: number
+  reliability_lower_bound_ppm?: number
+  latency_ms_p50?: number
+  insufficient?: boolean
+  stale?: boolean
   /** 更新时间（UTC epoch 秒） */
   updated_at: number
 }

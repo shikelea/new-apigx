@@ -45,3 +45,25 @@ export function describeCandidateQuality(candidate: RouteExplainCandidate): stri
   }
   return formatPpm(candidate.reliability_lower_bound_ppm, candidate.sample_count)
 }
+
+/**
+ * 广场卡片上的**质量摘要**文案（计划书 §4：模型广场显示质量摘要）。
+ *
+ * 与路由候选用的是**同一套判定语义**（样本不足 / 陈旧 → 明确标注，否则显示 Wilson 下界），
+ * 避免同一个供给在广场说"98%"、在路由解释里说"样本不足"这种自相矛盾。
+ */
+export function describePlazaQuality(item: {
+  sample_count?: number
+  reliability_lower_bound_ppm?: number
+  insufficient?: boolean
+  stale?: boolean
+}): string {
+  const samples = item.sample_count ?? 0
+  if (item.insufficient === true || samples <= 0) {
+    return 'insufficient'
+  }
+  if (item.stale === true) {
+    return 'stale'
+  }
+  return formatPpm(item.reliability_lower_bound_ppm ?? 0, samples)
+}

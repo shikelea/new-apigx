@@ -6694,5 +6694,6 @@
   "Name is required (1-64 characters)": "Name is required (1-64 characters)",
   "Describe what this share group provides": "Describe what this share group provides",
   "Share group": "Share group",
-  "Ungrouped": "Ungrouped"
+  "Ungrouped": "Ungrouped",
+  "Quality": "Quality"
 }

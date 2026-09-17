@@ -31,6 +31,7 @@ import { Input } from '@/components/ui/input'
 
 import { getPlaza } from './api'
 import { aggregatePlazaItems, filterPlazaCards, groupPlazaCards } from './lib/aggregate'
+import { describePlazaQuality } from './lib/format'
 
 /** 模型广场：分享者提供的模型，按模型聚合展示可访问来源数与能力。 */
 export function Plaza() {
@@ -98,6 +99,12 @@ export function Plaza() {
                   <div className='text-muted-foreground text-sm'>
                     {t('plaza.sources', { count: card.offerings.length })}
                   </div>
+                  {/* 质量摘要：取该模型**最好的一条来源**作为卡片上的代表值（样本不足/陈旧会如实显示） */}
+                  {card.offerings.length > 0 ? (
+                    <div className='text-muted-foreground text-xs'>
+                      {t('Quality')}: {describePlazaQuality(card.offerings[0])}
+                    </div>
+                  ) : null}
                   {card.capabilities.length > 0 ? (
                     <div className='flex flex-wrap gap-2'>
                       {card.capabilities.map((capability) => (

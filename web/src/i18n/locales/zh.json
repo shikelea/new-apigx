@@ -6694,5 +6694,6 @@
   "Name is required (1-64 characters)": "名称必填（1-64 个字符）",
   "Describe what this share group provides": "介绍一下这个分享分组提供什么",
   "Share group": "分享分组",
-  "Ungrouped": "未分组"
+  "Ungrouped": "未分组",
+  "Quality": "质量"
 }

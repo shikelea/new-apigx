@@ -30,6 +30,12 @@ const (
 // 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
 // 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
 type PlazaItem struct {
+	// 质量摘要（最近 6 小时窗口）：样本不足时 Insufficient 为 true，界面必须显示"样本不足"而不是编一个数字。
+	SampleCount              int64
+	ReliabilityLowerBoundPpm int64
+	LatencyMsP50             int64
+	Insufficient             bool
+	Stale                    bool
 	// GroupPublicID/GroupName 用于广场按"分享分组"组织（我们的模式）。
 	GroupPublicID    string
 	GroupName        string
@@ -118,6 +124,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 	}
 
 	type row struct {
+		ID              int64
 		GroupPublicID   string
 		GroupName       string
 		PublicID        string
@@ -128,7 +135,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 		UpdatedAt       int64
 	}
 	var rows []row
-	err := query.Select("o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
+	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
 		"g.public_id AS group_public_id, g.name AS group_name, " +
 		"o.capabilities AS capabilities, o.updated_at AS updated_at").
@@ -144,16 +151,26 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 			_ = common.UnmarshalJsonStr(r.Capabilities, &declared)
 		}
 		effective, unverified := projectCapabilities(declared)
+		// 质量摘要：与路由/解释用的是同一个窗口与同一种口径（Wilson 下界），避免两处结论不一致
+		quality, qErr := ResolveQualityView(db, r.ID, QualityWindowSixHour, common.GetTimestamp())
+		if qErr != nil {
+			quality = QualityView{Insufficient: true}
+		}
 		items = append(items, PlazaItem{
-			OfferingPublicID:       r.PublicID,
-			UpstreamModelID:        r.UpstreamModelID,
-			ChannelPublicID:        r.ChannelPublicID,
-			GroupPublicID:          r.GroupPublicID,
-			GroupName:              r.GroupName,
-			OwnerUserID:            r.OwnerUserID,
-			Capabilities:           effective,
-			UnverifiedCapabilities: unverified,
-			UpdatedAt:              r.UpdatedAt,
+			OfferingPublicID:         r.PublicID,
+			SampleCount:              quality.SampleCount,
+			ReliabilityLowerBoundPpm: quality.ReliabilityLowerBoundPpm,
+			LatencyMsP50:             quality.LatencyMsP50,
+			Insufficient:             quality.Insufficient,
+			Stale:                    quality.Stale,
+			UpstreamModelID:          r.UpstreamModelID,
+			ChannelPublicID:          r.ChannelPublicID,
+			GroupPublicID:            r.GroupPublicID,
+			GroupName:                r.GroupName,
+			OwnerUserID:              r.OwnerUserID,
+			Capabilities:             effective,
+			UnverifiedCapabilities:   unverified,
+			UpdatedAt:                r.UpdatedAt,
 		})
 	}
 	return items, total, nil

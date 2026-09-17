@@ -1303,14 +1303,19 @@ func (h *handler) getPlazaItem(c *gin.Context) {
 // 只输出对外可见字段：**不含**渠道内部 ID、上游地址、凭据、成本价或任何内部标识。
 func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 	out := gin.H{
-		"offering_public_id": item.OfferingPublicID,
-		"group_public_id":    item.GroupPublicID,
-		"group_name":         item.GroupName,
-		"model":              item.UpstreamModelID,
-		"channel_public_id":  item.ChannelPublicID,
-		"owner_user_id":      item.OwnerUserID,
-		"capabilities":       item.Capabilities,
-		"updated_at":         item.UpdatedAt,
+		"offering_public_id":          item.OfferingPublicID,
+		"sample_count":                item.SampleCount,
+		"reliability_lower_bound_ppm": item.ReliabilityLowerBoundPpm,
+		"latency_ms_p50":              item.LatencyMsP50,
+		"insufficient":                item.Insufficient,
+		"stale":                       item.Stale,
+		"group_public_id":             item.GroupPublicID,
+		"group_name":                  item.GroupName,
+		"model":                       item.UpstreamModelID,
+		"channel_public_id":           item.ChannelPublicID,
+		"owner_user_id":               item.OwnerUserID,
+		"capabilities":                item.Capabilities,
+		"updated_at":                  item.UpdatedAt,
 	}
 	if len(item.UnverifiedCapabilities) > 0 {
 		out["unverified_capabilities"] = item.UnverifiedCapabilities

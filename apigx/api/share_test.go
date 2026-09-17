@@ -1070,3 +1070,39 @@ func TestShareGroupNameAndDescription(t *testing.T) {
 		`{"name":"`+strings.Repeat("字", 65)+`"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// 广场必须带**质量摘要**（计划书 §4），且**样本不足时要如实标注**而不是编一个数字。
+func TestPlazaCarriesQualitySummary(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 9301
+
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "质量组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
+	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座质量", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
+
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"quality-model"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+
+	// 先配价再发布（与产品规则一致：未配置价格不得发布）
+	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	require.NotEmpty(t, items, "已发布且分组公开的供给应当出现在广场")
+	first, _ := items[0].(map[string]any)
+
+	// 关键字段必须在（没有样本时也要在，只是 insufficient=true）
+	require.Contains(t, first, "reliability_lower_bound_ppm")
+	require.Contains(t, first, "sample_count")
+	assert.Equal(t, true, first["insufficient"], "没有样本时必须标为样本不足，而不是给出一个看起来可信的数字")
+	assert.Equal(t, float64(0), first["reliability_lower_bound_ppm"])
+}

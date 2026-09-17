@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */import { describe, expect, it } from 'vitest'
 
-import { describeCandidateQuality, formatMicroUSD, formatPpm } from '../lib/format'
+import { describeCandidateQuality, describePlazaQuality, formatMicroUSD, formatPpm } from '../lib/format'
 import type { RouteExplainCandidate } from '../types'
 
 function candidate(overrides: Partial<RouteExplainCandidate> = {}): RouteExplainCandidate {
@@ -67,5 +67,19 @@ describe('候选质量描述', () => {
 
   it('正常时给出可靠性下界百分数', () => {
     expect(describeCandidateQuality(candidate())).toBe('98.00%')
+  })
+})
+
+describe('广场卡片的质量摘要', () => {
+  it('没有样本时显示"样本不足"，而不是编一个百分比', () => {
+    expect(describePlazaQuality({ sample_count: 0, insufficient: true })).toBe('insufficient')
+  })
+
+  it('数据陈旧时显示 stale', () => {
+    expect(describePlazaQuality({ sample_count: 100, insufficient: false, stale: true })).toBe('stale')
+  })
+
+  it('正常时显示可靠性下界百分比（与路由候选同一口径）', () => {
+    expect(describePlazaQuality({ sample_count: 100, insufficient: false, reliability_lower_bound_ppm: 980000 })).toBe('98.00%')
   })
 })
