@@ -1,11 +1,18 @@
 package routing
 
 import (
+	"fmt"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/common"
+	basemodel "github.com/QuantumNous/new-api/model"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // 造一个"成熟"候选（样本充足，避免被判为冷启动）。
@@ -218,4 +225,178 @@ func TestTiedCandidatesShareRankDeterministically(t *testing.T) {
 	require.Len(t, decision.Ranked, 2)
 	assert.Equal(t, decision.Ranked[0].Rank, decision.Ranked[1].Rank, "同分应共享 Rank")
 	assert.EqualValues(t, 1, decision.Ranked[0].Candidate.OfferingID, "同分时按供给 ID 升序，保证确定性")
+}
+
+// ---- 投影到底座渠道（T2.7 收尾） ----
+
+// 默认只投影 weight，**不动 priority**：priority 是全局语义，擅自抬高会压过
+// 同模型下平台或他人配置的优先级（计划书：分享者优先级不能抢占跨分享者质量排序）。
+func TestApplyRankingProjectsWeightNotPriority(t *testing.T) {
+	env := newRoutingTestEnv(t)
+	first := env.seedChannelWithOffering(t, 1, "gpt-x")
+	second := env.seedChannelWithOffering(t, 1, "gpt-x")
+
+	decision, err := Decide(StrategyReliability, []Candidate{
+		matureCandidate(first.OfferingID, 990_000, 200, 100),
+		matureCandidate(second.OfferingID, 300_000, 200, 100),
+	}, DefaultOptions())
+	require.NoError(t, err)
+	// 让候选能映射到我们的分享渠道与底座渠道
+	decision.Ranked[0].Candidate.ShareChannelID = first.ShareChannelID
+	decision.Ranked[1].Candidate.ShareChannelID = second.ShareChannelID
+
+	// 底座渠道上先放一个"平台配置的优先级"，投影必须原样保留
+	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", first.BaseChannelID).
+		Update("priority", int64(5000)).Error)
+
+	result, err := ApplyRankingToBaseChannels(env.db, decision, "default", DefaultApplyOptions())
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Updated)
+
+	var winnerChannel, loserChannel basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", first.BaseChannelID).First(&winnerChannel).Error)
+	require.NoError(t, env.db.Where("id = ?", second.BaseChannelID).First(&loserChannel).Error)
+
+	assert.Greater(t, winnerChannel.GetWeight(), loserChannel.GetWeight(),
+		"评分高的候选应得到更大权重（底座在同优先级内按权重分散流量）")
+	assert.Less(t, winnerChannel.GetWeight(), 101)
+	assert.GreaterOrEqual(t, loserChannel.GetWeight(), 1, "权重下限为 1，不能让候选完全没有机会")
+	assert.EqualValues(t, 5000, *winnerChannel.Priority, "默认投影不得改动 priority")
+}
+
+// 显式开启分层时才改 priority，且排名越靠前优先级越高（底座取 priority 最大的一层）。
+func TestApplyRankingProjectsPriorityWhenExplicitlyAllowed(t *testing.T) {
+	env := newRoutingTestEnv(t)
+	first := env.seedChannelWithOffering(t, 1, "gpt-y")
+	second := env.seedChannelWithOffering(t, 1, "gpt-y")
+
+	decision, err := Decide(StrategyReliability, []Candidate{
+		matureCandidate(first.OfferingID, 990_000, 200, 100),
+		matureCandidate(second.OfferingID, 300_000, 200, 100),
+	}, DefaultOptions())
+	require.NoError(t, err)
+	decision.Ranked[0].Candidate.ShareChannelID = first.ShareChannelID
+	decision.Ranked[1].Candidate.ShareChannelID = second.ShareChannelID
+
+	opts := DefaultApplyOptions()
+	opts.AllowPriorityProjection = true
+	opts.PriorityBase = 1000
+	_, err = ApplyRankingToBaseChannels(env.db, decision, "default", opts)
+	require.NoError(t, err)
+
+	var winnerChannel, loserChannel basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", first.BaseChannelID).First(&winnerChannel).Error)
+	require.NoError(t, env.db.Where("id = ?", second.BaseChannelID).First(&loserChannel).Error)
+	assert.Greater(t, *winnerChannel.Priority, *loserChannel.Priority,
+		"排名靠前者应得到更高优先级（底座按 priority 降序取）")
+}
+
+// 投影只动决策里出现的渠道：别的渠道（例如他人的或平台自建的）不得被修改。
+func TestApplyRankingTouchesOnlyDecidedChannels(t *testing.T) {
+	env := newRoutingTestEnv(t)
+	mine := env.seedChannelWithOffering(t, 1, "gpt-z")
+	others := env.seedChannelWithOffering(t, 2, "gpt-z") // 另一位分享者
+
+	require.NoError(t, env.db.Model(&basemodel.Channel{}).
+		Where("id = ?", others.BaseChannelID).Updates(map[string]any{"weight": uint(77), "priority": int64(42)}).Error)
+
+	decision, err := Decide(StrategyReliability, []Candidate{
+		matureCandidate(mine.OfferingID, 900_000, 200, 100),
+	}, DefaultOptions())
+	require.NoError(t, err)
+	decision.Ranked[0].Candidate.ShareChannelID = mine.ShareChannelID
+
+	_, err = ApplyRankingToBaseChannels(env.db, decision, "default", DefaultApplyOptions())
+	require.NoError(t, err)
+
+	var otherChannel basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", others.BaseChannelID).First(&otherChannel).Error)
+	assert.EqualValues(t, 77, otherChannel.GetWeight(), "他人的渠道权重不得被改写")
+	assert.EqualValues(t, 42, *otherChannel.Priority)
+}
+
+// 同分候选得到**相同权重**（让底座在组内按权重分散，而不是硬选一个）。
+func TestApplyRankingGivesTiedCandidatesEqualWeight(t *testing.T) {
+	env := newRoutingTestEnv(t)
+	first := env.seedChannelWithOffering(t, 1, "gpt-tie")
+	second := env.seedChannelWithOffering(t, 1, "gpt-tie")
+
+	decision, err := Decide(StrategyReliability, []Candidate{
+		matureCandidate(first.OfferingID, 900_000, 200, 100),
+		matureCandidate(second.OfferingID, 900_000, 200, 100),
+	}, DefaultOptions())
+	require.NoError(t, err)
+	for i := range decision.Ranked {
+		if decision.Ranked[i].Candidate.OfferingID == first.OfferingID {
+			decision.Ranked[i].Candidate.ShareChannelID = first.ShareChannelID
+		} else {
+			decision.Ranked[i].Candidate.ShareChannelID = second.ShareChannelID
+		}
+	}
+
+	_, err = ApplyRankingToBaseChannels(env.db, decision, "default", DefaultApplyOptions())
+	require.NoError(t, err)
+
+	var channelA, channelB basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", first.BaseChannelID).First(&channelA).Error)
+	require.NoError(t, env.db.Where("id = ?", second.BaseChannelID).First(&channelB).Error)
+	assert.Equal(t, channelA.GetWeight(), channelB.GetWeight(), "同分应同权重")
+}
+
+// ---- fixture（投影测试需要真实库 + 我们的分享渠道） ----
+
+type routingTestEnv struct {
+	db  *gorm.DB
+	seq atomic.Int64
+}
+
+func newRoutingTestEnv(t *testing.T) *routingTestEnv {
+	t.Helper()
+	dsn := filepath.Join(t.TempDir(), "apigx_routing_test.db")
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	require.NoError(t, apigxmodel.Migrate(db))
+	// 底座自己的表（channels / abilities）不由 APIGX 迁移创建，
+	// 但投影要写 base channel 的 weight/priority，因此这里按需建出来。
+	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
+	// 底座的缓存刷新函数走的是**底座的全局 DB**：这里接上，让刷新路径也被覆盖
+	previousBaseDB := basemodel.DB
+	basemodel.DB = db
+	t.Cleanup(func() { basemodel.DB = previousBaseDB })
+	return &routingTestEnv{db: db}
+}
+
+type seededChannel struct {
+	ShareChannelID int64
+	BaseChannelID  int64
+	OfferingID     int64
+}
+
+// seedChannelWithOffering 建一个"底座渠道 + 我们的分享渠道 + 一条供给"，
+// 让投影能沿着 sharing → base 的映射落到底座渠道上。
+func (e *routingTestEnv) seedChannelWithOffering(t *testing.T, ownerUserID int64, modelName string) seededChannel {
+	t.Helper()
+	seq := e.seq.Add(1)
+	baseChannelID := 900000 + seq
+	priority := int64(0)
+	weight := uint(0)
+	require.NoError(t, e.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: fmt.Sprintf("base-%d", seq), Key: "sk-x",
+		Status: common.ChannelStatusEnabled, Priority: &priority, Weight: &weight,
+	}).Error)
+
+	group := &apigxmodel.ShareGroup{OwnerUserID: ownerUserID, Name: fmt.Sprintf("g-%d", seq), PublicID: fmt.Sprintf("g%d", seq)}
+	require.NoError(t, apigxmodel.CreateShareGroup(e.db, group))
+	channel := &apigxmodel.Channel{
+		PublicID: fmt.Sprintf("c%d", seq), OwnerUserID: ownerUserID, ShareGroupID: group.ID,
+		Name: fmt.Sprintf("share-%d", seq), BaseChannelID: baseChannelID,
+	}
+	require.NoError(t, apigxmodel.CreateChannel(e.db, channel))
+	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: modelName}
+	require.NoError(t, apigxmodel.CreateModelOffering(e.db, ownerUserID, offering))
+
+	return seededChannel{ShareChannelID: channel.ID, BaseChannelID: baseChannelID, OfferingID: offering.ID}
 }
