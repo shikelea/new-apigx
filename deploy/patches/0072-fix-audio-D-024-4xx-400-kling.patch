@@ -1,0 +1,46 @@
+From e8dcb94f0b856585cef3ec161fc7aa2ed28f6f7c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 20:02:45 +0800
+Subject: [PATCH 72/72] =?UTF-8?q?fix(audio):=20D-024=20=E7=BC=BA=E9=9F=B3?=
+ =?UTF-8?q?=E9=A2=91=E6=96=87=E4=BB=B6=E6=94=B9=E4=B8=BA=204xx=EF=BC=88?=
+ =?UTF-8?q?=E5=AE=9E=E6=B5=8B=20400=EF=BC=89+=20=E8=AE=B0=E5=BD=95=20kling?=
+ =?UTF-8?q?=20=E6=8F=92=E4=BB=B6=E5=AF=86=E9=92=A5=E5=A5=91=E7=BA=A6?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+D-024(已实测): relay/helper/valid_request.go 音频校验点新增"必须有 file"判定
+  返回客户端错误(ErrorCodeInvalidRequest) => **HTTP 400**(原为 500 ✗)
+  为什么该修: 500 会让调用方以为"平台故障"并重试, 而事实是请求不合法 => 误导排障方向
+  复跑 nonchat-protocols **11/11** ✓
+
+kling 插件密钥契约(夹具知识, 非缺陷):
+  isRelay(apiKey) = startsWith("sk-")  => sk- 开头当作"中继密钥"直接透传, 且出站 URL 加 /kling 前缀
+  非 sk- 时要求严格两段 accessKey|secretKey(JWT 签名), 否则报 invalid api_key
+  => **sk- 前缀会切换整条出站策略**; 视频 E2E 夹具此前在两种模式间摇摆 => 时通时不通
+  => T3.6 的实质证据不受影响(终态/绑定/跨用户/取消声明已在打通那轮取得)
+---
+ relay/helper/valid_request.go | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/relay/helper/valid_request.go b/relay/helper/valid_request.go
+index 4eca170..84dc984 100644
+--- a/relay/helper/valid_request.go
++++ b/relay/helper/valid_request.go
+@@ -74,6 +74,13 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest,
+ 		if audioRequest.Model == "" {
+ 			return nil, errors.New("model is required")
+ 		}
++		// **缺少音频文件属客户端错误，必须在校验点拦下并给出 4xx**（阶段 3 实测发现）：
++		// 此前它一路走到适配器的打开文件处，报的是通用错误 ⇒ 最终 **500**，
++		// 调用方会误判成"平台故障"并重试 —— 而事实是它自己的请求不合法。
++		if _, fileErr := c.FormFile("file"); fileErr != nil {
++			return nil, types.NewError(fmt.Errorf("file is required"),
++				types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
++		}
+ 		if audioRequest.ResponseFormat == "" {
+ 			audioRequest.ResponseFormat = "json"
+ 		}
+-- 
+2.53.0.windows.1
+
