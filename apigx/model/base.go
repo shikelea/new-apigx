@@ -58,6 +58,12 @@ const TablePrefix = "apigx_"
 // （例如鉴权失败自动禁用——那不该被我们顺手恢复）。
 const StatusCapacitySaturated = 90
 
+// StatusBreakerOpen 是 APIGX 写入底座多 Key 状态表的标记值，表示"该渠道因上游持续失败被熔断"。
+//
+// 与 `StatusCapacitySaturated` **分开取值**：两者是不同的原因、由不同的逻辑回收，
+// 共用一个值会导致"容量恢复"把"熔断标记"顺手清掉（反之亦然）。
+const StatusBreakerOpen = 91
+
 // 四态限制：计划书 §9.2 要求「未配置 / 禁用 / 继承默认 / 明确不限」分别存储，
 // 空字段不得被解释成无限容量（CODE_STYLE.md 第 11 条）。
 //

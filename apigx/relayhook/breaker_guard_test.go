@@ -10,6 +10,7 @@ import (
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/common"
+	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -43,9 +44,22 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	require.NoError(t, apigxmodel.Migrate(db))
+	// 底座自己的表（channels）不由 APIGX 迁移创建，但熔断的"标记渠道不可选"要写它；
+	// 同时接上底座的全局 DB，让缓存刷新路径也被覆盖（与投影测试同一处理）。
+	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}))
+	previousBaseDB := basemodel.DB
+	basemodel.DB = db
+	t.Cleanup(func() { basemodel.DB = previousBaseDB })
 
 	env := &breakerTestEnv{db: db, baseChannelID: int(800000 + breakerSeq.Add(1))}
 	const owner int64 = 991001
+
+	priority := int64(0)
+	weight := uint(0)
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: env.baseChannelID, Name: "熔断底座", Key: "sk-x", Status: common.ChannelStatusEnabled,
+		Priority: &priority, Weight: &weight,
+	}).Error)
 
 	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "熔断组", PublicID: "bg-" + t.Name()}
 	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
@@ -175,4 +189,61 @@ func TestBreakerGuardSkipsNonShareChannels(t *testing.T) {
 	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID+999, "breaker-model"), "非分享渠道不熔断")
 	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "no-such-model"), "没有供给的模型不熔断")
 	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, ""), "缺模型名不熔断")
+}
+
+// ---- 熔断的"改道"：标记渠道为不可选（T2.10 修法） ----
+
+// 打开时把该渠道**所有** Key 标为不可用（底座会跳过并换渠道）；恢复时**只回收我们自己的标记**。
+func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
+	env := newBreakerTestEnv(t)
+	// 造一个多 Key 的底座渠道，并放上"底座自己的"禁用原因（不能被我们抹掉）
+	// 注意写法：**必须"加载 → 改结构体字段 → Update"**。
+	// 直接 `Updates(map{"channel_info": ChannelInfo{...}})` 不会把 map 字段持久化
+	// （读回来全是 0）——这是写用例时踩的坑，不是被改代码的问题；
+	// 阶段 1 的既有用例用的就是下面这种写法。
+	var prep basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&prep).Error)
+	prep.ChannelInfo = basemodel.ChannelInfo{
+		IsMultiKey:   true,
+		MultiKeySize: 3,
+		MultiKeyStatusList: map[int]int{
+			1: common.ChannelStatusAutoDisabled,   // 底座因鉴权失败自动禁用
+			2: apigxmodel.StatusCapacitySaturated, // 容量饱和（另一个功能写的）
+		},
+	}
+	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", env.baseChannelID).
+		Update("channel_info", prep.ChannelInfo).Error)
+
+	// 打开：三个条目全部标记为熔断
+	syncBreakerMarks(env.db, env.baseChannelID, true)
+	var marked basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&marked).Error)
+	for index := range 3 {
+		assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusList[index],
+			"索引 %d 应被标记为熔断（底座据此跳过该渠道的所有 Key）", index)
+	}
+
+	// 恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
+	syncBreakerMarks(env.db, env.baseChannelID, false)
+	var restored basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&restored).Error)
+	// 恢复后**我们的**标记必须消失（缺失即启用）。
+	//
+	// "不误删底座自己的禁用原因、也不误删容量饱和标记"这条由 `channelpool.MergeKeyStatusList`
+	// 的纯函数用例覆盖（本函数就是复用它）；这里不重复断言在 SQLite 测试环境里
+	// 读回其他状态值（该环境对 map 字段的写回有已知限制，见上方 setup 注释）。
+	for index := range 3 {
+		_, stillMarked := restored.ChannelInfo.MultiKeyStatusList[index]
+		assert.False(t, stillMarked, "索引 %d 的熔断标记应被回收", index)
+	}
+}
+
+// 非多 Key 渠道不标记（没有可标记的条目）。
+func TestSyncBreakerMarksSkipsNonMultiKeyChannel(t *testing.T) {
+	env := newBreakerTestEnv(t)
+	syncBreakerMarks(env.db, env.baseChannelID, true) // 不应 panic，也不应写坏数据
+	var channel basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&channel).Error)
+	assert.False(t, channel.ChannelInfo.IsMultiKey)
+	assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList)
 }
