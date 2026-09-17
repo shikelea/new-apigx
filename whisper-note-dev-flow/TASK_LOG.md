@@ -1215,3 +1215,21 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **📌 过程中的一次自查**：我第一次插入代码用的锚点带 `\r\n`，而文件是 **LF** ⇒ 插入**静默未生效** ✗（typecheck 立刻报出"导入了却没用到" ✓ —— 这正是类型检查的价值 ✓）。已改为**按行插入**（与行尾无关 ✓）并复跑通过 ✓。
 
 **下一步（T3.9 续）**：按 §4 做「我的用量」（按请求与模型查看消耗、成本与**路由结果**）、「我的 API Key」（允许模型 / 来源限制 / 路由策略）、「任务中心」、「管理后台」（含价格同步与供给审核 ✓）。
+### T3.9 前端：「我的用量」页（按模型汇总 + 最近请求含**路由结果**）
+
+按 §4「我的用量：按请求和模型查看个人消耗、估算成本及**路由结果**」实现 ✓：
+
+| 文件 | 作用 |
+|---|---|
+| `src/features/usage/index.tsx` | 两张表：**按模型汇总**（模型 / 请求数 / Token / 成本）与**最近请求**（时间 / 模型 / Token / 成本 / **来源** / 请求 ID）✓；复用 `SectionPageLayout`、`StaticDataTable`、状态组件、`Card` ✓ |
+| `src/features/usage/lib/aggregate.ts` | **纯逻辑**：按模型汇总（成本直接累加后端给的 `cost_micro_usd`，**不在前端重新定价** ✓）；来源描述（分享渠道显示渠道对外 ID / 平台自有显示 `platform` / **无来源信息时不编造** ✓） |
+| `src/features/usage/types.ts` / `api.ts` | 字段与后端 `listUsage` **逐一对照**（含 `source` = 路由结果 ✓、`cost_micro_usd` ✓） |
+| `src/routes/_authenticated/usage/index.tsx` | 路由 `/usage` ✓（与底座的 `/usage-logs` 不冲突 ✓） |
+| `src/hooks/use-sidebar-data.ts` | 侧边栏加「我的用量」✓ |
+| `__tests__/aggregate.test.ts` | 6 条用例（汇总累加、按成本降序、空列表不伪造 0 行、来源三种情形 ✓） |
+
+**按规范的检查（全过）**：`typecheck` ✅（**新增路由后必须先 build 重新生成路由树**，否则报 `FileRoutesByPath` ✓ —— 这次又验证了一遍 ✓）；`oxlint` ✅ **0 错 0 警**；`build` ✅；用例 ✅ —— 而且这次的测试命令意外匹配到更广范围，实际跑成了一次**整个前端套件回归**：**23 个文件 / 365 条用例全绿** ✓（说明本轮改动未影响其它 feature ✓）。
+
+**📌 又一自查（lint 抓到真问题）**：`const entries = query.data?.data?.items ?? []` 每次渲染都是**新数组** ⇒ 下游 `useMemo([entries])` **每渲染都重算**（缓存形同虚设 ✗）。已改为 `useMemo(..., [query.data])` 让 `entries` 稳定 ✓ —— 这条是 `react-hooks/exhaustive-deps` 报出来的，属于真实的性能缺陷，不是风格问题 ✓。
+
+**下一步（T3.9 续）**：「我的 API Key」（允许模型 / 来源限制 / **路由策略** ✓）、「任务中心」、「管理后台」（含价格同步与供给审核 ✓）。

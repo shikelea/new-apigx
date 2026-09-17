@@ -1,0 +1,730 @@
+From ed4916e712646279dbfb38ce662ef31cdce6ace9 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:40:48 +0800
+Subject: [PATCH 81/81] =?UTF-8?q?feat(web):=20T3.9=E3=80=8C=E6=88=91?=
+ =?UTF-8?q?=E7=9A=84=E7=94=A8=E9=87=8F=E3=80=8D=E9=A1=B5=EF=BC=88=E6=8C=89?=
+ =?UTF-8?q?=E6=A8=A1=E5=9E=8B=E6=B1=87=E6=80=BB=20+=20=E6=9C=80=E8=BF=91?=
+ =?UTF-8?q?=E8=AF=B7=E6=B1=82=E5=90=AB=E8=B7=AF=E7=94=B1=E7=BB=93=E6=9E=9C?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- index.tsx: 按模型汇总表(模型/请求数/Token/成本) + 最近请求表(时间/模型/Token/成本/**来源**/请求ID)
+- lib/aggregate.ts: 按模型汇总(成本直接累加后端 cost_micro_usd, **不在前端重新定价**)
+  + 来源描述(分享渠道显示渠道对外ID / 平台自有显示 platform / 无来源信息时不编造); +6 条用例
+- types.ts/api.ts: 字段与后端 listUsage 逐一对照(含 source=路由结果)
+- routes/_authenticated/usage/index.tsx: /usage(与底座 /usage-logs 不冲突); 侧边栏加「我的用量」
+- 自查(lint 抓真问题): entries 每次渲染都是新数组 => 下游 useMemo 缓存形同虚设; 已改为依赖 query.data
+
+检查(全过): typecheck ✅(新增路由需先 build 生成路由树) / oxlint 0 错 0 警 ✅ / build ✅
+  / 测试意外跑到更广范围 => **整个前端套件回归 23 文件 365 用例全绿** ✅
+下一步: 我的 API Key -> 任务中心 -> 管理后台
+---
+ .../usage/__tests__/aggregate.test.ts         |  78 +++++++++++++
+ web/src/features/usage/api.ts                 |  26 +++++
+ web/src/features/usage/index.tsx              | 108 ++++++++++++++++++
+ web/src/features/usage/lib/aggregate.ts       |  61 ++++++++++
+ web/src/features/usage/types.ts               |  62 ++++++++++
+ web/src/hooks/use-sidebar-data.ts             |   6 +
+ web/src/i18n/locales/en.json                  |  13 ++-
+ web/src/i18n/locales/fr.json                  |  13 ++-
+ web/src/i18n/locales/ja.json                  |  13 ++-
+ web/src/i18n/locales/ru.json                  |  13 ++-
+ web/src/i18n/locales/vi.json                  |  13 ++-
+ web/src/i18n/locales/zh-TW.json               |  13 ++-
+ web/src/i18n/locales/zh.json                  |  13 ++-
+ web/src/routeTree.gen.ts                      |  21 ++++
+ web/src/routes/_authenticated/usage/index.tsx |  24 ++++
+ 15 files changed, 470 insertions(+), 7 deletions(-)
+ create mode 100644 web/src/features/usage/__tests__/aggregate.test.ts
+ create mode 100644 web/src/features/usage/api.ts
+ create mode 100644 web/src/features/usage/index.tsx
+ create mode 100644 web/src/features/usage/lib/aggregate.ts
+ create mode 100644 web/src/features/usage/types.ts
+ create mode 100644 web/src/routes/_authenticated/usage/index.tsx
+
+diff --git a/web/src/features/usage/__tests__/aggregate.test.ts b/web/src/features/usage/__tests__/aggregate.test.ts
+new file mode 100644
+index 0000000..c72f6b4
+--- /dev/null
++++ b/web/src/features/usage/__tests__/aggregate.test.ts
+@@ -0,0 +1,78 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it } from 'vitest'
++
++import { aggregateUsageByModel, describeUsageSource } from '../lib/aggregate'
++import type { UsageEntry } from '../types'
++
++function entry(overrides: Partial<UsageEntry> = {}): UsageEntry {
++  return {
++    created_at: 1789640000,
++    model: 'glm-5.3-flash',
++    prompt_tokens: 10,
++    completion_tokens: 5,
++    total_tokens: 15,
++    quota: 100,
++    cost_micro_usd: 200,
++    elapsed_seconds: 1,
++    is_stream: false,
++    request_id: 'req_1',
++    ...overrides,
++  }
++}
++
++describe('用量按模型汇总', () => {
++  it('同一模型的多次请求合并，请求数与成本累加', () => {
++    const rows = aggregateUsageByModel([
++      entry({ total_tokens: 15, cost_micro_usd: 200 }),
++      entry({ total_tokens: 5, cost_micro_usd: 100 }),
++    ])
++
++    expect(rows).toHaveLength(1)
++    expect(rows[0].requests).toBe(2)
++    expect(rows[0].total_tokens).toBe(20)
++    expect(rows[0].cost_micro_usd).toBe(300)
++  })
++
++  it('按成本从高到低排序（先看花钱多的）', () => {
++    const rows = aggregateUsageByModel([
++      entry({ model: 'cheap', cost_micro_usd: 1 }),
++      entry({ model: 'pricey', cost_micro_usd: 1000 }),
++    ])
++
++    expect(rows.map((row) => row.model)).toEqual(['pricey', 'cheap'])
++  })
++
++  it('没有记录时返回空列表（不伪造 0 行）', () => {
++    expect(aggregateUsageByModel([])).toEqual([])
++  })
++})
++
++describe('用量来源描述', () => {
++  it('分享来源显示渠道对外 ID', () => {
++    expect(describeUsageSource(entry({ source: { kind: 'share', channel_public_id: 'ch_9' } }))).toBe('ch_9')
++  })
++
++  it('平台自有显示 platform', () => {
++    expect(describeUsageSource(entry({ source: { kind: 'platform' } }))).toBe('platform')
++  })
++
++  it('没有来源信息时不编造（返回空串）', () => {
++    expect(describeUsageSource(entry())).toBe('')
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/usage/api.ts b/web/src/features/usage/api.ts
+new file mode 100644
+index 0000000..002e233
+--- /dev/null
++++ b/web/src/features/usage/api.ts
+@@ -0,0 +1,26 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { api } from '@/lib/api'
++
++import type { GetUsageParams, UsageListResponse } from './types'
++
++// 我的用量数据访问层：只做请求与类型，错误交给 Query 失败回调（规范 3.9）。
++export async function getUsage(params: GetUsageParams = {}): Promise<UsageListResponse> {
++  const res = await api.get('/api/apigx/usage', { params })
++  return res.data
++}
+\ No newline at end of file
+diff --git a/web/src/features/usage/index.tsx b/web/src/features/usage/index.tsx
+new file mode 100644
+index 0000000..6550a16
+--- /dev/null
++++ b/web/src/features/usage/index.tsx
+@@ -0,0 +1,108 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useQuery } from '@tanstack/react-query'
++import dayjs from 'dayjs'
++import { useMemo } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { ErrorState } from '@/components/error-state'
++import { SectionPageLayout } from '@/components/layout'
++import { LoadingState } from '@/components/loading-state'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { formatMicroUSD } from '@/features/plaza/lib/format'
++
++import { getUsage } from './api'
++import { aggregateUsageByModel, describeUsageSource, type UsageByModel } from './lib/aggregate'
++import type { UsageEntry } from './types'
++
++const PAGE_SIZE = 50
++
++/** 我的用量：按模型汇总 + 最近请求（含路由结果）。 */
++export function MyUsage() {
++  const { t } = useTranslation()
++
++  const query = useQuery({
++    queryKey: ['apigx-usage', PAGE_SIZE],
++    queryFn: () => getUsage({ page: 1, page_size: PAGE_SIZE }),
++  })
++
++  const entries = useMemo(() => query.data?.data?.items ?? [], [query.data])
++  const byModel = useMemo(() => aggregateUsageByModel(entries), [entries])
++
++  if (query.isPending) {
++    return <LoadingState />
++  }
++  if (query.isError) {
++    return (
++      <ErrorState
++        onRetry={() => {
++          void query.refetch()
++        }}
++      />
++    )
++  }
++
++  const modelColumns: StaticDataTableColumn<UsageByModel>[] = [
++    { id: 'model', header: t('usage.model'), cell: (row) => row.model },
++    { id: 'requests', header: t('usage.requests'), cell: (row) => String(row.requests) },
++    { id: 'tokens', header: t('usage.tokens'), cell: (row) => String(row.total_tokens) },
++    { id: 'cost', header: t('usage.cost'), cell: (row) => formatMicroUSD(row.cost_micro_usd) },
++  ]
++
++  const requestColumns: StaticDataTableColumn<UsageEntry>[] = [
++    { id: 'time', header: t('usage.time'), cell: (row) => dayjs.unix(row.created_at).format('YYYY-MM-DD HH:mm:ss') },
++    { id: 'model', header: t('usage.model'), cell: (row) => row.model },
++    { id: 'tokens', header: t('usage.tokens'), cell: (row) => String(row.total_tokens) },
++    { id: 'cost', header: t('usage.cost'), cell: (row) => formatMicroUSD(row.cost_micro_usd) },
++    { id: 'source', header: t('usage.source'), cell: (row) => describeUsageSource(row) },
++    { id: 'request_id', header: t('usage.requestId'), cell: (row) => row.request_id },
++  ]
++
++  return (
++    <SectionPageLayout>
++      <SectionPageLayout.Title>{t('usage.title')}</SectionPageLayout.Title>
++      <SectionPageLayout.Content>
++        {entries.length === 0 ? (
++          <EmptyState title={t('usage.empty')} />
++        ) : (
++          <div className='space-y-6'>
++            <Card>
++              <CardHeader>
++                <CardTitle>{t('usage.byModel')}</CardTitle>
++              </CardHeader>
++              <CardContent>
++                <StaticDataTable columns={modelColumns} data={byModel} getRowKey={(row) => row.model} />
++              </CardContent>
++            </Card>
++
++            <Card>
++              <CardHeader>
++                <CardTitle>{t('usage.recentRequests')}</CardTitle>
++              </CardHeader>
++              <CardContent>
++                <StaticDataTable columns={requestColumns} data={entries} getRowKey={(row) => row.request_id} />
++              </CardContent>
++            </Card>
++          </div>
++        )}
++      </SectionPageLayout.Content>
++    </SectionPageLayout>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/features/usage/lib/aggregate.ts b/web/src/features/usage/lib/aggregate.ts
+new file mode 100644
+index 0000000..82536db
+--- /dev/null
++++ b/web/src/features/usage/lib/aggregate.ts
+@@ -0,0 +1,61 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import type { UsageEntry } from '../types'
++
++/** 按模型汇总后的一行。 */
++export interface UsageByModel {
++  model: string
++  requests: number
++  total_tokens: number
++  cost_micro_usd: number
++}
++
++/**
++ * 按模型汇总用量。
++ *
++ * 计划书要求「按请求**和模型**查看个人消耗及估算成本」，因此两份视图必须来自**同一份数据**：
++ * 这里只做分组求和，不做任何补齐 —— 没有用量的模型不会凭空出现一行 0 ✓。
++ * 成本直接累加后端给出的 `cost_micro_usd`（不在前端重新定价 ✓）。
++ */
++export function aggregateUsageByModel(entries: UsageEntry[]): UsageByModel[] {
++  const byModel = new Map<string, UsageByModel>()
++  for (const entry of entries) {
++    const existing = byModel.get(entry.model)
++    if (existing) {
++      existing.requests += 1
++      existing.total_tokens += entry.total_tokens
++      existing.cost_micro_usd += entry.cost_micro_usd
++      continue
++    }
++    byModel.set(entry.model, {
++      model: entry.model,
++      requests: 1,
++      total_tokens: entry.total_tokens,
++      cost_micro_usd: entry.cost_micro_usd,
++    })
++  }
++  return [...byModel.values()].sort((a, b) => b.cost_micro_usd - a.cost_micro_usd)
++}
++
++/** 一条记录的路由结果描述：分享渠道（含对外 ID）或平台自有。 */
++export function describeUsageSource(entry: UsageEntry): string {
++  if (entry.source?.kind === 'share') {
++    return entry.source.channel_public_id ?? ''
++  }
++  return entry.source?.kind ?? ''
++}
+\ No newline at end of file
+diff --git a/web/src/features/usage/types.ts b/web/src/features/usage/types.ts
+new file mode 100644
+index 0000000..7acb1c9
+--- /dev/null
++++ b/web/src/features/usage/types.ts
+@@ -0,0 +1,62 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++// 「我的用量」的对外数据结构（字段与后端 `GET /api/apigx/usage` 一致）。
++
++/** 本次请求的来源：分享渠道或平台自有。 */
++export interface UsageSource {
++  kind: 'share' | 'platform'
++  channel_public_id?: string
++  owner_user_id?: number
++}
++
++/** 一条用量记录（一次请求）。 */
++export interface UsageEntry {
++  created_at: number
++  model: string
++  prompt_tokens: number
++  completion_tokens: number
++  total_tokens: number
++  /** 底座额度（参考价） */
++  quota: number
++  /** 换算后的成本（微美元） */
++  cost_micro_usd: number
++  elapsed_seconds: number
++  is_stream: boolean
++  request_id: string
++  /** **路由结果**：这次实际用了哪条来源 */
++  source?: UsageSource
++}
++
++export interface UsageListResponse {
++  success: boolean
++  data?: {
++    items: UsageEntry[]
++    total: number
++    page: number
++    page_size: number
++  }
++}
++
++export interface GetUsageParams {
++  page?: number
++  page_size?: number
++  model?: string
++  start?: number
++  end?: number
++}
+\ No newline at end of file
+diff --git a/web/src/hooks/use-sidebar-data.ts b/web/src/hooks/use-sidebar-data.ts
+index fd3b3ee..8b69ab1 100644
+--- a/web/src/hooks/use-sidebar-data.ts
++++ b/web/src/hooks/use-sidebar-data.ts
+@@ -24,6 +24,7 @@ import {
+   FileText,
+   FlaskConical,
+   Store,
++  Coins,
+   Share2,
+   Key,
+   LayoutDashboard,
+@@ -74,6 +75,11 @@ export function useSidebarData(): SidebarData {
+             url: '/share',
+             icon: Share2,
+           },
++          {
++            title: t('usage.title'),
++            url: '/usage',
++            icon: Coins,
++          },
+           {
+             title: t('Chat'),
+             icon: MessageSquare,
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 55a901d..92992e6 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6616,5 +6616,16 @@
+   "share.limitMode.inherit": "Inherit",
+   "share.limitMode.unlimited": "Unlimited",
+   "share.limitMode.value": "Explicit limit",
+-  "share.offering.submit": "Submit for review"
++  "share.offering.submit": "Submit for review",
++  "usage.title": "My Usage",
++  "usage.byModel": "Usage by model",
++  "usage.recentRequests": "Recent requests",
++  "usage.empty": "No usage record yet",
++  "usage.model": "Model",
++  "usage.requests": "Requests",
++  "usage.tokens": "Tokens",
++  "usage.cost": "Cost (USD)",
++  "usage.time": "Time",
++  "usage.source": "Source",
++  "usage.requestId": "Request ID"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 152b7fb..fbc1d11 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6616,5 +6616,16 @@
+   "share.limitMode.inherit": "Inherit",
+   "share.limitMode.unlimited": "Unlimited",
+   "share.limitMode.value": "Explicit limit",
+-  "share.offering.submit": "Submit for review"
++  "share.offering.submit": "Submit for review",
++  "usage.title": "My Usage",
++  "usage.byModel": "Usage by model",
++  "usage.recentRequests": "Recent requests",
++  "usage.empty": "No usage record yet",
++  "usage.model": "Model",
++  "usage.requests": "Requests",
++  "usage.tokens": "Tokens",
++  "usage.cost": "Cost (USD)",
++  "usage.time": "Time",
++  "usage.source": "Source",
++  "usage.requestId": "Request ID"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 0126edb..be7d579 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6616,5 +6616,16 @@
+   "share.limitMode.inherit": "Inherit",
+   "share.limitMode.unlimited": "Unlimited",
+   "share.limitMode.value": "Explicit limit",
+-  "share.offering.submit": "Submit for review"
++  "share.offering.submit": "Submit for review",
++  "usage.title": "My Usage",
++  "usage.byModel": "Usage by model",
++  "usage.recentRequests": "Recent requests",
++  "usage.empty": "No usage record yet",
++  "usage.model": "Model",
++  "usage.requests": "Requests",
++  "usage.tokens": "Tokens",
++  "usage.cost": "Cost (USD)",
++  "usage.time": "Time",
++  "usage.source": "Source",
++  "usage.requestId": "Request ID"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 035267c..5d59227 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6616,5 +6616,16 @@
+   "share.limitMode.inherit": "Inherit",
+   "share.limitMode.unlimited": "Unlimited",
+   "share.limitMode.value": "Explicit limit",
+-  "share.offering.submit": "Submit for review"
++  "share.offering.submit": "Submit for review",
++  "usage.title": "My Usage",
++  "usage.byModel": "Usage by model",
++  "usage.recentRequests": "Recent requests",
++  "usage.empty": "No usage record yet",
++  "usage.model": "Model",
++  "usage.requests": "Requests",
++  "usage.tokens": "Tokens",
++  "usage.cost": "Cost (USD)",
++  "usage.time": "Time",
++  "usage.source": "Source",
++  "usage.requestId": "Request ID"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 211e88f..d98819e 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6616,5 +6616,16 @@
+   "share.limitMode.inherit": "Inherit",
+   "share.limitMode.unlimited": "Unlimited",
+   "share.limitMode.value": "Explicit limit",
+-  "share.offering.submit": "Submit for review"
++  "share.offering.submit": "Submit for review",
++  "usage.title": "My Usage",
++  "usage.byModel": "Usage by model",
++  "usage.recentRequests": "Recent requests",
++  "usage.empty": "No usage record yet",
++  "usage.model": "Model",
++  "usage.requests": "Requests",
++  "usage.tokens": "Tokens",
++  "usage.cost": "Cost (USD)",
++  "usage.time": "Time",
++  "usage.source": "Source",
++  "usage.requestId": "Request ID"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 6100f7c..5940162 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6616,5 +6616,16 @@
+   "share.limitMode.inherit": "Inherit",
+   "share.limitMode.unlimited": "Unlimited",
+   "share.limitMode.value": "Explicit limit",
+-  "share.offering.submit": "Submit for review"
++  "share.offering.submit": "Submit for review",
++  "usage.title": "My Usage",
++  "usage.byModel": "Usage by model",
++  "usage.recentRequests": "Recent requests",
++  "usage.empty": "No usage record yet",
++  "usage.model": "Model",
++  "usage.requests": "Requests",
++  "usage.tokens": "Tokens",
++  "usage.cost": "Cost (USD)",
++  "usage.time": "Time",
++  "usage.source": "Source",
++  "usage.requestId": "Request ID"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index bccb1b5..08c10f0 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6616,5 +6616,16 @@
+   "share.limitMode.inherit": "继承",
+   "share.limitMode.unlimited": "明确不限",
+   "share.limitMode.value": "明确值",
+-  "share.offering.submit": "提交审核"
++  "share.offering.submit": "提交审核",
++  "usage.title": "我的用量",
++  "usage.byModel": "按模型汇总",
++  "usage.recentRequests": "最近请求",
++  "usage.empty": "还没有用量记录",
++  "usage.model": "模型",
++  "usage.requests": "请求数",
++  "usage.tokens": "Token 数",
++  "usage.cost": "成本（USD）",
++  "usage.time": "时间",
++  "usage.source": "来源",
++  "usage.requestId": "请求 ID"
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index d180f66..3d9a4bf 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -57,6 +57,7 @@ import { Route as AuthenticatedTaskPluginsIndexRouteImport } from './routes/_aut
+ import { Route as AuthenticatedUsageLogsIndexRouteImport } from './routes/_authenticated/usage-logs/index'
+ import { Route as AuthenticatedUsageLogsSectionRouteImport } from './routes/_authenticated/usage-logs/$section'
+ import { Route as AuthenticatedUsageLogsAuditRouteImport } from './routes/_authenticated/usage-logs/audit'
++import { Route as AuthenticatedUsageIndexRouteImport } from './routes/_authenticated/usage/index'
+ import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
+ import { Route as AuthenticatedWalletIndexRouteImport } from './routes/_authenticated/wallet/index'
+ import { Route as PricingModelIdIndexRouteImport } from './routes/pricing/$modelId/index'
+@@ -332,6 +333,11 @@ const AuthenticatedUsageLogsAuditRoute =
+     path: '/usage-logs/audit',
+     getParentRoute: () => AuthenticatedRouteRoute,
+   } as any)
++const AuthenticatedUsageIndexRoute = AuthenticatedUsageIndexRouteImport.update({
++  id: '/usage/',
++  path: '/usage/',
++  getParentRoute: () => AuthenticatedRouteRoute,
++} as any)
+ const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
+   id: '/users/',
+   path: '/users/',
+@@ -480,6 +486,7 @@ export interface FileRoutesByFullPath {
+   '/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
+   '/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
+   '/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
++  '/usage/': typeof AuthenticatedUsageIndexRoute
+   '/users/': typeof AuthenticatedUsersIndexRoute
+   '/wallet/': typeof AuthenticatedWalletIndexRoute
+   '/pricing/$modelId/': typeof PricingModelIdIndexRoute
+@@ -544,6 +551,7 @@ export interface FileRoutesByTo {
+   '/system-settings': typeof AuthenticatedSystemSettingsIndexRoute
+   '/task-plugins': typeof AuthenticatedTaskPluginsIndexRoute
+   '/usage-logs': typeof AuthenticatedUsageLogsIndexRoute
++  '/usage': typeof AuthenticatedUsageIndexRoute
+   '/users': typeof AuthenticatedUsersIndexRoute
+   '/wallet': typeof AuthenticatedWalletIndexRoute
+   '/pricing/$modelId': typeof PricingModelIdIndexRoute
+@@ -612,6 +620,7 @@ export interface FileRoutesById {
+   '/_authenticated/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
+   '/_authenticated/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
+   '/_authenticated/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
++  '/_authenticated/usage/': typeof AuthenticatedUsageIndexRoute
+   '/_authenticated/users/': typeof AuthenticatedUsersIndexRoute
+   '/_authenticated/wallet/': typeof AuthenticatedWalletIndexRoute
+   '/pricing/$modelId/': typeof PricingModelIdIndexRoute
+@@ -679,6 +688,7 @@ export interface FileRouteTypes {
+     | '/system-settings/'
+     | '/task-plugins/'
+     | '/usage-logs/'
++    | '/usage/'
+     | '/users/'
+     | '/wallet/'
+     | '/pricing/$modelId/'
+@@ -743,6 +753,7 @@ export interface FileRouteTypes {
+     | '/system-settings'
+     | '/task-plugins'
+     | '/usage-logs'
++    | '/usage'
+     | '/users'
+     | '/wallet'
+     | '/pricing/$modelId'
+@@ -810,6 +821,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/system-settings/'
+     | '/_authenticated/task-plugins/'
+     | '/_authenticated/usage-logs/'
++    | '/_authenticated/usage/'
+     | '/_authenticated/users/'
+     | '/_authenticated/wallet/'
+     | '/pricing/$modelId/'
+@@ -1186,6 +1198,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedUsageLogsAuditRouteImport
+       parentRoute: typeof AuthenticatedRouteRoute
+     }
++    '/_authenticated/usage/': {
++      id: '/_authenticated/usage/'
++      path: '/usage'
++      fullPath: '/usage/'
++      preLoaderRoute: typeof AuthenticatedUsageIndexRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/users/': {
+       id: '/_authenticated/users/'
+       path: '/users'
+@@ -1416,6 +1435,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedSystemInfoIndexRoute: typeof AuthenticatedSystemInfoIndexRoute
+   AuthenticatedTaskPluginsIndexRoute: typeof AuthenticatedTaskPluginsIndexRoute
+   AuthenticatedUsageLogsIndexRoute: typeof AuthenticatedUsageLogsIndexRoute
++  AuthenticatedUsageIndexRoute: typeof AuthenticatedUsageIndexRoute
+   AuthenticatedUsersIndexRoute: typeof AuthenticatedUsersIndexRoute
+   AuthenticatedWalletIndexRoute: typeof AuthenticatedWalletIndexRoute
+ }
+@@ -1447,6 +1467,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedSystemInfoIndexRoute: AuthenticatedSystemInfoIndexRoute,
+   AuthenticatedTaskPluginsIndexRoute: AuthenticatedTaskPluginsIndexRoute,
+   AuthenticatedUsageLogsIndexRoute: AuthenticatedUsageLogsIndexRoute,
++  AuthenticatedUsageIndexRoute: AuthenticatedUsageIndexRoute,
+   AuthenticatedUsersIndexRoute: AuthenticatedUsersIndexRoute,
+   AuthenticatedWalletIndexRoute: AuthenticatedWalletIndexRoute,
+ }
+diff --git a/web/src/routes/_authenticated/usage/index.tsx b/web/src/routes/_authenticated/usage/index.tsx
+new file mode 100644
+index 0000000..3b76e94
+--- /dev/null
++++ b/web/src/routes/_authenticated/usage/index.tsx
+@@ -0,0 +1,24 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { createFileRoute } from '@tanstack/react-router'
++
++import { MyUsage } from '@/features/usage'
++
++export const Route = createFileRoute('/_authenticated/usage/')({
++  component: MyUsage,
++})
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+
