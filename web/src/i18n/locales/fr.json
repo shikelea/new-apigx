@@ -6665,5 +6665,10 @@
   "apigxPlatform.strategy.throughput": "Throughput",
   "apigxPlatform.strategy.reliability": "Reliability",
   "apigxPlatform.dryRun": "Dry run (do not write)",
-  "apigxPlatform.apply": "Apply"
+  "apigxPlatform.apply": "Apply",
+  "apigxPlatform.review": "Offering review",
+  "apigxPlatform.channelId": "Channel ID",
+  "apigxPlatform.noOffering": "No offering in this channel",
+  "apigxPlatform.publish": "Publish",
+  "apigxPlatform.reject": "Reject"
 }

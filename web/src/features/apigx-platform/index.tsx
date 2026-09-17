@@ -29,9 +29,11 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { formatMicroUSD } from '@/features/plaza/lib/format'
+import { getChannelOfferings } from '@/features/share/api'
+import type { Offering } from '@/features/share/types'
 
-import { applyRouteRanking, getPriceRules, setManualPrice } from './api'
-import { canSubmitManualPrice, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
+import { applyRouteRanking, getPriceRules, publishOffering, rejectOffering, setManualPrice } from './api'
+import { canSubmitManualPrice, isOfferingReviewable, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
 import type { PriceDimension } from './types'
 
 /** 平台管理：价格规则（查询与人工覆盖）与路由排名应用。均为平台侧动作。 */
@@ -46,6 +48,24 @@ export function ApigxPlatform() {
   const [model, setModel] = useState('')
   const [strategy, setStrategy] = useState('auto')
   const [dryRun, setDryRun] = useState(true)
+
+  const [reviewChannelId, setReviewChannelId] = useState('')
+  const reviewChannel = Number.parseInt(reviewChannelId.trim(), 10)
+  const canReview = Number.isFinite(reviewChannel) && reviewChannel > 0
+
+  const offeringsQuery = useQuery({
+    queryKey: ['apigx-review-offerings', reviewChannel],
+    queryFn: () => getChannelOfferings(reviewChannel),
+    enabled: canReview,
+  })
+
+  const reviewMutation = useMutation({
+    mutationFn: (input: { id: number; publish: boolean }) =>
+      input.publish ? publishOffering(input.id) : rejectOffering(input.id),
+    onSuccess: () => {
+      void offeringsQuery.refetch()
+    },
+  })
 
   const parsedScopeId = Number.parseInt(scopeId.trim(), 10)
   const canQuery = Number.isFinite(parsedScopeId) && parsedScopeId > 0
@@ -72,6 +92,35 @@ export function ApigxPlatform() {
   const applyRankingMutation = useMutation({
     mutationFn: () => applyRouteRanking({ model, strategy, dry_run: dryRun }),
   })
+
+  const offerings = offeringsQuery.data?.data?.items ?? []
+  const reviewColumns: StaticDataTableColumn<Offering>[] = [
+    { id: 'model', header: t('apigxPlatform.model'), cell: (row) => row.upstream_model_id },
+    {
+      id: 'actions',
+      header: '',
+      cell: (row) => (
+        <div className='flex gap-2'>
+          <Button
+            size='sm'
+            variant='outline'
+            disabled={!isOfferingReviewable(row.status) || reviewMutation.isPending}
+            onClick={() => reviewMutation.mutate({ id: row.id, publish: true })}
+          >
+            {t('apigxPlatform.publish')}
+          </Button>
+          <Button
+            size='sm'
+            variant='outline'
+            disabled={!isOfferingReviewable(row.status) || reviewMutation.isPending}
+            onClick={() => reviewMutation.mutate({ id: row.id, publish: false })}
+          >
+            {t('apigxPlatform.reject')}
+          </Button>
+        </div>
+      ),
+    },
+  ]
 
   const dimensions = priceQuery.data?.data?.dimensions ?? []
   const priceColumns: StaticDataTableColumn<PriceDimension>[] = [
@@ -180,6 +229,27 @@ export function ApigxPlatform() {
               >
                 {t('apigxPlatform.apply')}
               </Button>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t('apigxPlatform.review')}</CardTitle>
+            </CardHeader>
+            <CardContent className='space-y-4'>
+              <div className='space-y-1 sm:max-w-xs'>
+                <Label>{t('apigxPlatform.channelId')}</Label>
+                <Input
+                  value={reviewChannelId}
+                  onChange={(event) => setReviewChannelId(event.target.value)}
+                  inputMode='numeric'
+                />
+              </div>
+              {canReview && offerings.length === 0 && !offeringsQuery.isFetching ? (
+                <EmptyState title={t('apigxPlatform.noOffering')} />
+              ) : null}
+              {offerings.length > 0 ? (
+                <StaticDataTable columns={reviewColumns} data={offerings} getRowKey={(row) => row.id} />
+              ) : null}
             </CardContent>
           </Card>
         </div>

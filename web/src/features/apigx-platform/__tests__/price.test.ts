@@ -17,7 +17,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */import { describe, expect, it } from 'vitest'
 
-import { canSubmitManualPrice, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from '../lib/price'
+import {
+  canSubmitManualPrice,
+  isOfferingReviewable,
+  OFFERING_STATUS_DRAFT,
+  OFFERING_STATUS_PUBLISHED,
+  OFFERING_STATUS_REJECTED,
+  OFFERING_STATUS_SUBMITTED,
+  parseUsdPerMillion,
+  PRICE_SCOPE_OPTIONS,
+} from '../lib/price'
 
 describe('每百万 token 价格解析', () => {
   it('合法数字被接受', () => {
@@ -56,5 +65,17 @@ describe('人工覆盖价格可提交性', () => {
 describe('价格作用域选项', () => {
   it('与后端的三种作用域一一对应', () => {
     expect(PRICE_SCOPE_OPTIONS.map((option) => option.value)).toEqual([0, 1, 2])
+  })
+})
+describe('供给审核规则', () => {
+  it('只有"已提交"的供给可被审核', () => {
+    expect(isOfferingReviewable(OFFERING_STATUS_SUBMITTED)).toBe(true)
+    expect(isOfferingReviewable(OFFERING_STATUS_DRAFT)).toBe(false)
+    expect(isOfferingReviewable(OFFERING_STATUS_PUBLISHED)).toBe(false)
+    expect(isOfferingReviewable(OFFERING_STATUS_REJECTED)).toBe(false)
+  })
+
+  it('未知状态一律不可审核（不猜）', () => {
+    expect(isOfferingReviewable(9)).toBe(false)
   })
 })

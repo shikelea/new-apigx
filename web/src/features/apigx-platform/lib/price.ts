@@ -55,3 +55,17 @@ export function canSubmitManualPrice(form: {
   }
   return parseUsdPerMillion(form.inputPrice) !== null && parseUsdPerMillion(form.outputPrice) !== null
 }
+/**
+ * 供给是否处于"可审核"状态。
+ *
+ * 只有**已提交**的供给能被发布或驳回：对草稿直接发布会让分享者跳过提交这一步，
+ * 对已发布/已驳回的再审核会覆盖既有结论 —— 因此这里把规则固化下来（与后端状态机一致）。
+ */
+export const OFFERING_STATUS_DRAFT = 0
+export const OFFERING_STATUS_SUBMITTED = 1
+export const OFFERING_STATUS_PUBLISHED = 2
+export const OFFERING_STATUS_REJECTED = 3
+
+export function isOfferingReviewable(status: number): boolean {
+  return status === OFFERING_STATUS_SUBMITTED
+}

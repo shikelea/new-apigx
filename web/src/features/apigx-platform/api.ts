@@ -34,3 +34,14 @@ export async function applyRouteRanking(payload: ApplyRouteRankingPayload): Prom
   const res = await api.post('/api/apigx/route-apply', payload)
   return res.data
 }
+// 供给审核（平台侧动作：发布 / 驳回）。
+// 与分享者的 `submit` 分开：这两个动作在**平台侧**页面出现，接口也要求审核者身份。
+export async function publishOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/offerings/${offeringId}/publish`)
+  return res.data
+}
+
+export async function rejectOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/offerings/${offeringId}/reject`)
+  return res.data
+}

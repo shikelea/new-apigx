@@ -6665,5 +6665,10 @@
   "apigxPlatform.strategy.throughput": "高吞吐",
   "apigxPlatform.strategy.reliability": "高可靠",
   "apigxPlatform.dryRun": "试算（不写库）",
-  "apigxPlatform.apply": "应用"
+  "apigxPlatform.apply": "应用",
+  "apigxPlatform.review": "供给审核",
+  "apigxPlatform.channelId": "渠道 ID",
+  "apigxPlatform.noOffering": "该渠道暂无供给",
+  "apigxPlatform.publish": "发布",
+  "apigxPlatform.reject": "驳回"
 }
