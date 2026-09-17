@@ -1,0 +1,523 @@
+From 147f5c65a18549dc627eaadfe043614414d6e0f7 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:11:25 +0800
+Subject: [PATCH 40/40] =?UTF-8?q?feat(apigx):=20=E4=BB=B7=E6=A0=BC?=
+ =?UTF-8?q?=E5=8F=A3=E5=BE=84=E6=98=A0=E5=B0=84=EF=BC=88T2.2=20=E5=89=8D?=
+ =?UTF-8?q?=E5=8D=8A=EF=BC=89+=20=E4=BD=9C=E7=94=A8=E5=9F=9F=E6=9E=9A?=
+ =?UTF-8?q?=E4=B8=BE=E7=BA=A0=E6=AD=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/price/mapping.go: 与底座对齐的口径, 不另立一套
+  * 内置表达式即 USD/1M tokens -> UnitPriceMicro = USD/1M × 1e6, UnitScale=/1M tokens
+  * 旧倍率: USD/1M = 倍率 × 1e6 / **运行时 QuotaPerUnit**(写死 ×2 会在 QuotaPerUnit 变更时静默算错)
+  * 0 表示"不单独计价"(不生成分项, 避免表现为免费); 负数/NaN 是数据错误必须拒绝(测试逼出的修正)
+  * 离谱价格写入前拒绝(ErrPriceOutOfRange), 不让口径错误进计费
+- ⚠️ 修掉一处会酿成静默错误的陷阱: PriceRule.ScopeType 是**自己的枚举**(0=供给/1=上游Key/2=渠道),
+  与容量 CapacityScope*(0=平台/1=渠道) 不同; 借用会把"渠道价"写成"Key价"。
+  已各自定义 PriceScope* 并加回归断言
+- 测试: apigx/price 4/4; apigx/model 价格用例改用常量后仍全过
+- apigx + middleware 全量通过
+---
+ apigx/model/repo_price.go      |  14 ++++
+ apigx/model/repo_price_test.go |  66 +++++++--------
+ apigx/price/mapping.go         | 143 +++++++++++++++++++++++++++++++++
+ apigx/price/mapping_test.go    |  87 ++++++++++++++++++++
+ 4 files changed, 277 insertions(+), 33 deletions(-)
+ create mode 100644 apigx/price/mapping.go
+ create mode 100644 apigx/price/mapping_test.go
+
+diff --git a/apigx/model/repo_price.go b/apigx/model/repo_price.go
+index 3b737a5..1b8e886 100644
+--- a/apigx/model/repo_price.go
++++ b/apigx/model/repo_price.go
+@@ -63,6 +63,20 @@ const (
+ 	UsdStateNotNeeded int = 2 // 原币种即 USD
+ )
+ 
++// 价格快照的作用域类型（`apigx_price_rules.scope_type`）。
++//
++// ⚠️ 这套取值与**容量策略**的作用域（`CapacityScope*`）**不是同一套**：
++// 价格是 0=供给 / 1=上游 Key / 2=渠道，容量是 0=平台 / 1=渠道 / …。
++// 两者混用会把"渠道价格"写成"上游 Key 价格"这类静默错误，因此各自定义、不要互相借用。
++const (
++	// PriceScopeOffering 供给（`apigx_model_offerings.id`）。
++	PriceScopeOffering int = 0
++	// PriceScopeUpstreamKey 上游 Key（`apigx_upstream_keys.id`）。
++	PriceScopeUpstreamKey int = 1
++	// PriceScopeChannel 分享渠道（`apigx_channels.id`）。
++	PriceScopeChannel int = 2
++)
++
+ // ErrNoPriceRule 表示该作用域**没有**可用的价格快照。
+ //
+ // 调用方必须把它当成「价格未知」处理，**不得**退化成"价格为零"
+diff --git a/apigx/model/repo_price_test.go b/apigx/model/repo_price_test.go
+index 9837535..344b6ec 100644
+--- a/apigx/model/repo_price_test.go
++++ b/apigx/model/repo_price_test.go
+@@ -15,41 +15,41 @@ func TestPriceUnknownIsNotZero(t *testing.T) {
+ 	db := newRepoDB(t)
+ 
+ 	// 没有任何快照 → ErrNoPriceRule
+-	_, _, err := GetEffectivePriceRule(db, 1, 9501, 0)
++	_, _, err := GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+ 	assert.ErrorIs(t, err, ErrNoPriceRule, "无快照必须显式报「没有价格」")
+ 
+ 	// 快照存在但**未被接受** → 仍算未知
+-	pending := &PriceRule{ScopeType: 1, ScopeID: 9501, Source: PriceRuleSourceModelsDev, Currency: "USD",
++	pending := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9501, Source: PriceRuleSourceModelsDev, Currency: "USD",
+ 		ValidationState: PriceValidationPending}
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, pending, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 2500, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+ 	// **未被接受的快照不生效**：取用时根本看不到它（旧价格继续使用 / 视为未知）
+-	_, _, err = GetEffectivePriceRule(db, 1, 9501, 0)
++	_, _, err = GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+ 	assert.ErrorIs(t, err, ErrNoPriceRule, "待校验的快照不得生效")
+ 
+ 	// 接受之后才可用
+-	require.NoError(t, db.Model(&PriceRule{}).Where("scope_type = 1 AND scope_id = 9501").
++	require.NoError(t, db.Model(&PriceRule{}).Where("scope_type = ? AND scope_id = 9501", PriceScopeChannel).
+ 		Update("validation_state", PriceValidationAccepted).Error)
+-	rule, items, err := GetEffectivePriceRule(db, 1, 9501, 0)
++	rule, items, err := GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+ 	require.NoError(t, err)
+ 	require.Len(t, items, 1)
+ 	assert.False(t, IsPriceUnknown(rule, &items[0]))
+ 	_, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+ 	require.True(t, ok)
+-	rule, items, err = GetEffectivePriceRule(db, 1, 9501, 0)
++	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+ 	require.NoError(t, err)
+ 	price, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+ 	require.True(t, ok)
+ 	assert.EqualValues(t, 2500, price)
+ 
+ 	// 非 USD 币种在**待汇率**时同样算未知
+-	cny := &PriceRule{ScopeType: 1, ScopeID: 9502, Source: PriceRuleSourceUpstreamQuote, Currency: "CNY",
++	cny := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9502, Source: PriceRuleSourceUpstreamQuote, Currency: "CNY",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, cny, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 18000, Currency: "CNY", UsdState: UsdStatePendingFx},
+ 	}))
+-	rule, items, err = GetEffectivePriceRule(db, 1, 9502, 0)
++	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9502, 0)
+ 	require.NoError(t, err)
+ 	assert.True(t, IsPriceUnknown(rule, &items[0]), "非 USD 且待换算时必须算未知")
+ 	_, ok = EffectiveUSDUnitPriceMicro(rule, &items[0])
+@@ -58,7 +58,7 @@ func TestPriceUnknownIsNotZero(t *testing.T) {
+ 	// 换算完成后可用（用保存的 USD 单价）
+ 	require.NoError(t, db.Model(&PriceRuleItem{}).Where("id = ?", items[0].ID).
+ 		Updates(map[string]any{"usd_state": UsdStateConverted, "usd_unit_price_micro": 2500}).Error)
+-	rule, items, err = GetEffectivePriceRule(db, 1, 9502, 0)
++	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9502, 0)
+ 	require.NoError(t, err)
+ 	price, ok = EffectiveUSDUnitPriceMicro(rule, &items[0])
+ 	require.True(t, ok)
+@@ -69,7 +69,7 @@ func TestPriceUnknownIsNotZero(t *testing.T) {
+ func TestPriceSyncCannotOverwriteManualOverride(t *testing.T) {
+ 	db := newRepoDB(t)
+ 
+-	manual := &PriceRule{ScopeType: 1, ScopeID: 9601, Source: PriceRuleSourceManual, Currency: "USD",
++	manual := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9601, Source: PriceRuleSourceManual, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, manual, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 9999, Currency: "USD", UsdState: UsdStateNotNeeded},
+@@ -77,7 +77,7 @@ func TestPriceSyncCannotOverwriteManualOverride(t *testing.T) {
+ 	assert.True(t, manual.ManualOverride, "人工来源应自动标记 ManualOverride")
+ 
+ 	// 同步想改写 → 必须被挡住
+-	sync := &PriceRule{ScopeType: 1, ScopeID: 9601, Source: PriceRuleSourceModelsDev, Currency: "USD",
++	sync := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9601, Source: PriceRuleSourceModelsDev, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	err := ApplyPriceSync(db, sync, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 1, Currency: "USD", UsdState: UsdStateNotNeeded},
+@@ -85,31 +85,31 @@ func TestPriceSyncCannotOverwriteManualOverride(t *testing.T) {
+ 	assert.ErrorIs(t, err, ErrPriceLocked, "人工覆盖的价格不得被同步改写")
+ 
+ 	// 人工价保持原值，且没有产生新版本
+-	rule, items, err := GetEffectivePriceRule(db, 1, 9601, 0)
++	rule, items, err := GetEffectivePriceRule(db, PriceScopeChannel, 9601, 0)
+ 	require.NoError(t, err)
+ 	assert.EqualValues(t, 9999, items[0].UnitPriceMicro)
+ 	assert.EqualValues(t, 1, rule.Version, "被挡下的同步不得产生新版本")
+ 
+ 	// 未人工覆盖的作用域可以被同步
+-	other := &PriceRule{ScopeType: 1, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
++	other := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, ApplyPriceSync(db, other, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 100, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+ 	// 再次同步 → 追加新版本（历史保留）
+-	second := &PriceRule{ScopeType: 1, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
++	second := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, ApplyPriceSync(db, second, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 200, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+-	rule, items, err = GetEffectivePriceRule(db, 1, 9602, 0)
++	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9602, 0)
+ 	require.NoError(t, err)
+ 	assert.EqualValues(t, 2, rule.Version)
+ 	assert.EqualValues(t, 200, items[0].UnitPriceMicro)
+ 
+ 	// 锁定之后同步被挡
+-	require.NoError(t, SetPriceRuleLock(db, 1, 9602, true))
+-	third := &PriceRule{ScopeType: 1, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
++	require.NoError(t, SetPriceRuleLock(db, PriceScopeChannel, 9602, true))
++	third := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	assert.ErrorIs(t, ApplyPriceSync(db, third, nil), ErrPriceLocked, "锁定后同步必须被挡")
+ }
+@@ -118,36 +118,36 @@ func TestPriceSyncCannotOverwriteManualOverride(t *testing.T) {
+ func TestPriceSnapshotScopesAreIsolated(t *testing.T) {
+ 	db := newRepoDB(t)
+ 
+-	channelA := &PriceRule{ScopeType: 1, ScopeID: 9701, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
++	channelA := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9701, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, channelA, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 111, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+-	channelB := &PriceRule{ScopeType: 1, ScopeID: 9702, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
++	channelB := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9702, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, channelB, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 222, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+ 
+ 	// 同一个 scope_id 但不同 scope_type（例如"渠道"与"供给"）也互不影响
+-	offering := &PriceRule{ScopeType: 2, ScopeID: 9701, Source: PriceRuleSourceManual, Currency: "USD",
++	offering := &PriceRule{ScopeType: PriceScopeOffering, ScopeID: 9701, Source: PriceRuleSourceManual, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, offering, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 333, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+ 
+ 	// A 的同步不能改到 B
+-	syncA := &PriceRule{ScopeType: 1, ScopeID: 9701, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
++	syncA := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9701, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted}
+ 	require.NoError(t, ApplyPriceSync(db, syncA, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 999, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+ 
+-	_, itemsB, err := GetEffectivePriceRule(db, 1, 9702, 0)
++	_, itemsB, err := GetEffectivePriceRule(db, PriceScopeChannel, 9702, 0)
+ 	require.NoError(t, err)
+ 	assert.EqualValues(t, 222, itemsB[0].UnitPriceMicro, "另一渠道的价格不得被同步污染")
+ 
+-	_, itemsOffering, err := GetEffectivePriceRule(db, 2, 9701, 0)
++	_, itemsOffering, err := GetEffectivePriceRule(db, PriceScopeOffering, 9701, 0)
+ 	require.NoError(t, err)
+ 	assert.EqualValues(t, 333, itemsOffering[0].UnitPriceMicro, "不同作用域类型之间同样不得串价")
+ 
+@@ -155,7 +155,7 @@ func TestPriceSnapshotScopesAreIsolated(t *testing.T) {
+ 	for _, scope := range []struct {
+ 		scopeType int
+ 		scopeID   int64
+-	}{{1, 9701}, {1, 9702}, {2, 9701}} {
++	}{{PriceScopeChannel, 9701}, {PriceScopeChannel, 9702}, {PriceScopeOffering, 9701}} {
+ 		rule, items, err := GetEffectivePriceRule(db, scope.scopeType, scope.scopeID, 0)
+ 		require.NoError(t, err)
+ 		price, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+@@ -167,26 +167,26 @@ func TestPriceSnapshotScopesAreIsolated(t *testing.T) {
+ // 生效区间与校验：历史版本可回看，非法输入被拒。
+ func TestPriceRuleVersioningAndValidation(t *testing.T) {
+ 	db := newRepoDB(t)
+-	base := &PriceRule{ScopeType: 1, ScopeID: 9801, Source: PriceRuleSourceModelsDev, Currency: "USD",
++	base := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9801, Source: PriceRuleSourceModelsDev, Currency: "USD",
+ 		ValidationState: PriceValidationAccepted, EffectiveFrom: 1000, EffectiveTo: 2000}
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, base, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 10, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
+ 	// 区间内可取到
+-	rule, _, err := GetEffectivePriceRule(db, 1, 9801, 1500)
++	rule, _, err := GetEffectivePriceRule(db, PriceScopeChannel, 9801, 1500)
+ 	require.NoError(t, err)
+ 	assert.EqualValues(t, 1, rule.Version)
+ 	// 区间外 → 视为没有价格（而不是"取到旧价"）
+-	_, _, err = GetEffectivePriceRule(db, 1, 9801, 2500)
++	_, _, err = GetEffectivePriceRule(db, PriceScopeChannel, 9801, 2500)
+ 	assert.ErrorIs(t, err, ErrNoPriceRule)
+ 
+ 	// 非法输入
+-	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: 1, Currency: "USD"}, nil), ErrInvalidArgument)
+-	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: 1, ScopeID: 9, Currency: ""}, nil), ErrInvalidArgument)
+-	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: 1, ScopeID: 9, Currency: "USD"}, []PriceRuleItem{
++	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, Currency: "USD"}, nil), ErrInvalidArgument)
++	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9, Currency: ""}, nil), ErrInvalidArgument)
++	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9, Currency: "USD"}, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 1, Currency: "USD"}, {Dimension: 1, UnitPriceMicro: 2, Currency: "USD"},
+ 	}), ErrInvalidArgument, "同维度重复必须被拒")
+-	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: 1, ScopeID: 9, Currency: "USD"}, []PriceRuleItem{
++	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9, Currency: "USD"}, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: -1, Currency: "USD"},
+ 	}), ErrInvalidArgument, "负价格必须被拒")
+ }
+@@ -194,7 +194,7 @@ func TestPriceRuleVersioningAndValidation(t *testing.T) {
+ // T2.1 来源价格摄入：可疑数据**留存待确认且不顶掉旧价**（计划书 §阶段 2 验收）。
+ func TestIngestSourcePriceKeepsOldPriceOnSuspiciousData(t *testing.T) {
+ 	db := newRepoDB(t)
+-	const scopeType = 1
++	const scopeType = PriceScopeChannel
+ 	const scopeID int64 = 9901
+ 
+ 	// 先有一条已生效的正常价格（line 1 = 2500 微美元 / 单位）
+@@ -286,7 +286,7 @@ func TestIngestSourcePriceKeepsOldPriceOnSuspiciousData(t *testing.T) {
+ // 非 USD 价格：有保存的汇率则按该汇率归一；没有汇率则**可生效但 USD 未知**（不误算为 0）。
+ func TestIngestNonUSDPriceUsesSavedFxRate(t *testing.T) {
+ 	db := newRepoDB(t)
+-	const scopeType = 1
++	const scopeType = PriceScopeChannel
+ 
+ 	// 有汇率：1 USD = 7.2 CNY → FxRateMicro = 7_200_000
+ 	res, err := IngestSourcePrice(db, SourcePriceIngest{
+diff --git a/apigx/price/mapping.go b/apigx/price/mapping.go
+new file mode 100644
+index 0000000..ed9332d
+--- /dev/null
++++ b/apigx/price/mapping.go
+@@ -0,0 +1,143 @@
++// Package price 负责把「来源价格」映射成 APIGX 的分项单价快照（T2.2）。
++//
++// # 口径（与底座对齐，不另立一套）
++//
++// 底座内部有两种价格表达：
++//   - **内置计价表达式**：直接就是 **USD per 1M tokens**（见 `setting/billing_setting/builtin_billing.go`
++//     与 `relay/helper/price.go` 里 `rawCost / 1_000_000 * common.QuotaPerUnit` 的换算）；
++//   - **旧倍率**（`model_ratio` / `completion_ratio` / 缓存倍率）：相对量，
++//     与底座自己的 `common.QuotaPerUnit` 绑定。
++//
++// 两者都能映射到我们的分项单价 `UnitPriceMicro` + `UnitScale = /1M tokens`：
++//
++//	USD/1M  →  UnitPriceMicro = USD/1M × 1_000_000（微美元/1M tokens）
++//	倍率 r  →  USD/1M = r × 1_000_000 / QuotaPerUnit
++//
++// 倍率那条**刻意用运行时的 `common.QuotaPerUnit`**，而不是写死经典的 "×2"：
++// 写死会在 QuotaPerUnit 被改动时静默算错价格。
++package price
++
++import (
++	"fmt"
++	"math"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++)
++
++// 计量维度（与 `apigx_price_rule_items.dimension` 注释一致）。
++const (
++	DimensionInputTokens      = 0
++	DimensionOutputTokens     = 1
++	DimensionCacheReadTokens  = 2
++	DimensionCacheWriteTokens = 3
++	DimensionReasoningTokens  = 4
++	DimensionRequestCount     = 9
++)
++
++// 单价单位（与 `apigx_price_rule_items.unit_scale` 注释一致）。
++const (
++	UnitScalePerMillionTokens = 0
++	UnitScalePerRequest       = 5
++)
++
++// maxUnitPriceMicro 是单个分项单价的合理上限（微美元 / 1M tokens ≈ 1000 美元）。
++//
++// 设它是为了**尽早暴露解析错误**：同步来源把"每 1K tokens"当成"每 1M tokens"、
++// 或者把人民币数值当美元塞进来时，会算出天文数字；宁可在写入前拒绝，
++// 也不要让一个错价进入计费。
++const maxUnitPriceMicro int64 = 1_000_000_000
++
++// ErrPriceOutOfRange 表示映射出的单价超出合理范围（通常是来源口径弄错）。
++var ErrPriceOutOfRange = fmt.Errorf("price: unit price out of range")
++
++// usdPerMillionToMicro 把 USD/1M tokens 转成微美元/1M tokens。
++func usdPerMillionToMicro(usdPerMillion float64) (int64, error) {
++	if math.IsNaN(usdPerMillion) || math.IsInf(usdPerMillion, 0) || usdPerMillion < 0 {
++		return 0, fmt.Errorf("%w: invalid usd value %v", apigxmodel.ErrInvalidArgument, usdPerMillion)
++	}
++	micro := usdPerMillion * 1_000_000
++	if micro > float64(maxUnitPriceMicro) {
++		return 0, fmt.Errorf("%w: %v USD per million is implausible", ErrPriceOutOfRange, usdPerMillion)
++	}
++	return int64(math.Round(micro)), nil
++}
++
++// ItemsFromUSDPerMillion 按「USD per 1M tokens」构造分项（底座内置价格的口径）。
++//
++// 传 0 表示该维度不单独计价，会被跳过（**不会**写成 0 元/1M 的分项，
++// 因为"不适用"与"免费"是两件事：写成 0 会让它在估算里表现为免费）。
++func ItemsFromUSDPerMillion(input, output, cacheRead, cacheWrite float64) ([]apigxmodel.PriceRuleItem, error) {
++	type entry struct {
++		dimension int
++		usd       float64
++	}
++	all := []entry{
++		{DimensionInputTokens, input},
++		{DimensionOutputTokens, output},
++		{DimensionCacheReadTokens, cacheRead},
++		{DimensionCacheWriteTokens, cacheWrite},
++	}
++	// 先整体校验再取用：**0 表示"该维度不单独计价"，负数/NaN 则是数据错误**，
++	// 两者必须区分——否则一个负价会被静默跳过，表现为"这个维度免费"。
++	for _, e := range all {
++		if math.IsNaN(e.usd) || math.IsInf(e.usd, 0) || e.usd < 0 {
++			return nil, fmt.Errorf("%w: invalid usd value %v for dimension %d",
++				apigxmodel.ErrInvalidArgument, e.usd, e.dimension)
++		}
++	}
++
++	items := make([]apigxmodel.PriceRuleItem, 0, 4)
++	for _, e := range all {
++		if e.usd == 0 {
++			continue
++		}
++		micro, err := usdPerMillionToMicro(e.usd)
++		if err != nil {
++			return nil, err
++		}
++		items = append(items, apigxmodel.PriceRuleItem{
++			Dimension: e.dimension, UnitScale: UnitScalePerMillionTokens,
++			UnitPriceMicro: micro, Currency: "USD",
++		})
++	}
++	return items, nil
++}
++
++// ItemsFromRatios 按底座的**旧倍率**构造分项。
++//
++// `modelRatio` 是输入价的基础倍率；输出/缓存倍率沿用底座语义（相对 `modelRatio` 的倍数）。
++// `quotaPerUnit` 必须传底座运行时的 `common.QuotaPerUnit`——倍率与美元的换算关系由它决定。
++func ItemsFromRatios(modelRatio, completionRatio, cacheRatio float64, quotaPerUnit float64) ([]apigxmodel.PriceRuleItem, error) {
++	if quotaPerUnit <= 0 {
++		return nil, fmt.Errorf("%w: quota per unit must be positive", apigxmodel.ErrInvalidArgument)
++	}
++	if modelRatio < 0 || completionRatio < 0 || cacheRatio < 0 {
++		return nil, fmt.Errorf("%w: negative ratio", apigxmodel.ErrInvalidArgument)
++	}
++	usdPerMillion := func(ratio float64) float64 { return ratio * 1_000_000 / quotaPerUnit }
++
++	input := usdPerMillion(modelRatio)
++	output := usdPerMillion(modelRatio * completionRatio)
++	cacheRead := 0.0
++	if cacheRatio > 0 {
++		cacheRead = usdPerMillion(modelRatio * cacheRatio)
++	}
++	return ItemsFromUSDPerMillion(input, output, cacheRead, 0)
++}
++
++// ChannelScope 返回价格快照的「渠道」作用域标识。
++//
++// 价格按**渠道**（而非全局）作用域化，是计划书验收里
++// 「单渠道同步不污染全局或其他分享者」的实现基础。
++// 注意用的是**价格自己的**作用域常量（0=供给/1=上游 Key/2=渠道），不是容量那一套。
++func ChannelScope(shareChannelID int64) (scopeType int, scopeID int64) {
++	return apigxmodel.PriceScopeChannel, shareChannelID
++}
++
++// UpstreamKeyScope 返回价格快照的「上游 Key」作用域标识。
++//
++// 同一渠道池里各把 Key 的上游分组倍率可能不同，因此价格要能按 Key 作用域化
++// （计划书验收：按实际执行 Key 的价格版本估算与预留，不借用池内最低价）。
++func UpstreamKeyScope(upstreamKeyID int64) (scopeType int, scopeID int64) {
++	return apigxmodel.PriceScopeUpstreamKey, upstreamKeyID
++}
+diff --git a/apigx/price/mapping_test.go b/apigx/price/mapping_test.go
+new file mode 100644
+index 0000000..604bf87
+--- /dev/null
++++ b/apigx/price/mapping_test.go
+@@ -0,0 +1,87 @@
++package price
++
++import (
++	"testing"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// 底座内置价格口径：USD per 1M tokens → 微美元/1M tokens。
++func TestItemsFromUSDPerMillion(t *testing.T) {
++	items, err := ItemsFromUSDPerMillion(2, 8, 0.5, 0)
++	require.NoError(t, err)
++	require.Len(t, items, 3, "缓存写为 0 表示不单独计价，不应生成分项")
++
++	byDimension := map[int]apigxmodel.PriceRuleItem{}
++	for _, item := range items {
++		byDimension[item.Dimension] = item
++	}
++	assert.EqualValues(t, 2_000_000, byDimension[DimensionInputTokens].UnitPriceMicro)
++	assert.EqualValues(t, 8_000_000, byDimension[DimensionOutputTokens].UnitPriceMicro)
++	assert.EqualValues(t, 500_000, byDimension[DimensionCacheReadTokens].UnitPriceMicro)
++	for _, item := range items {
++		assert.Equal(t, UnitScalePerMillionTokens, item.UnitScale)
++		assert.Equal(t, "USD", item.Currency)
++	}
++
++	// **不适用不等于免费**：价格为 0 的维度不生成分项，而不是生成 0 元分项
++	_, hasCacheWrite := byDimension[DimensionCacheWriteTokens]
++	assert.False(t, hasCacheWrite, "未计价的维度不得写成 0 元分项（那会在估算里表现为免费）")
++}
++
++// 旧倍率口径：换算**必须**用运行时的 QuotaPerUnit，不能写死经典的 "×2"。
++func TestItemsFromRatiosUsesRuntimeQuotaPerUnit(t *testing.T) {
++	// QuotaPerUnit = 500000（底座默认）→ 倍率 1 = 2 USD/1M tokens
++	items, err := ItemsFromRatios(1, 4, 0.25, 500_000)
++	require.NoError(t, err)
++	byDimension := map[int]apigxmodel.PriceRuleItem{}
++	for _, item := range items {
++		byDimension[item.Dimension] = item
++	}
++	assert.EqualValues(t, 2_000_000, byDimension[DimensionInputTokens].UnitPriceMicro)
++	assert.EqualValues(t, 8_000_000, byDimension[DimensionOutputTokens].UnitPriceMicro, "输出 = 输入 × completionRatio")
++	assert.EqualValues(t, 500_000, byDimension[DimensionCacheReadTokens].UnitPriceMicro)
++
++	// 换一个 QuotaPerUnit（同样是合法配置）→ 结果必须随之变化，证明用的是运行时值
++	items, err = ItemsFromRatios(1, 4, 0, 1_000_000)
++	require.NoError(t, err)
++	for _, item := range items {
++		if item.Dimension == DimensionInputTokens {
++			assert.EqualValues(t, 1_000_000, item.UnitPriceMicro,
++				"QuotaPerUnit 变化后价格必须跟着变：写死 ×2 会在这里静默算错")
++		}
++	}
++}
++
++// 离谱的价格要在写入前被拒：否则一个口径错误会直接进计费。
++func TestItemsRejectImplausiblePrices(t *testing.T) {
++	_, err := ItemsFromUSDPerMillion(1_000_000, 0, 0, 0) // 100 万美元/1M tokens
++	assert.ErrorIs(t, err, ErrPriceOutOfRange)
++
++	_, err = ItemsFromUSDPerMillion(-1, 0, 0, 0)
++	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
++
++	_, err = ItemsFromRatios(1, 1, 0, 0)
++	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument, "QuotaPerUnit 非法时必须拒绝而不是猜")
++
++	_, err = ItemsFromRatios(-1, 1, 0, 500_000)
++	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
++}
++
++// 作用域用**价格自己的**枚举（0=供给/1=上游 Key/2=渠道），与容量那套不同。
++func TestScopeHelpersUsePriceEnums(t *testing.T) {
++	scopeType, scopeID := ChannelScope(42)
++	assert.Equal(t, apigxmodel.PriceScopeChannel, scopeType)
++	assert.EqualValues(t, 42, scopeID)
++
++	scopeType, scopeID = UpstreamKeyScope(7)
++	assert.Equal(t, apigxmodel.PriceScopeUpstreamKey, scopeType)
++	assert.EqualValues(t, 7, scopeID)
++
++	// 回归保护：这套取值不得与容量作用域混同（容量里 1 = 渠道，价格里 1 = 上游 Key）
++	assert.NotEqual(t, apigxmodel.PriceScopeChannel, apigxmodel.CapacityScopeChannel,
++		"价格与容量的作用域枚举是两套，混用会把渠道价写成 Key 价")
++	assert.Equal(t, apigxmodel.PriceScopeOffering, 0)
++}
+-- 
+2.53.0.windows.1
+
