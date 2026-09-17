@@ -1,0 +1,768 @@
+From 094e6ce35258897ddc3f07bdfa5d012c523ae472 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:23:43 +0800
+Subject: [PATCH 78/78] =?UTF-8?q?feat(web):=20T3.9=E3=80=8C=E6=88=91?=
+ =?UTF-8?q?=E7=9A=84=E5=88=86=E4=BA=AB=E3=80=8D=E9=A1=B5=EF=BC=88=E5=88=86?=
+ =?UTF-8?q?=E4=BA=AB=E8=80=85=E5=B7=A5=E4=BD=9C=E6=B5=81=E8=B5=B7=E6=AD=A5?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- features/share/index.tsx: 分享分组表 + 渠道表(名称/协议/**Key 池模式**/**健康状态**)
+  复用 SectionPageLayout / **StaticDataTable**(项目封装, 按 data-table/README 指引) / 状态组件 / Card
+- lib/labels.ts: 枚举->i18n 键纯映射, **未知取值回退为带原值的键**(不静默显示空文案)
+- api.ts/types.ts: getShareGroups/getShareChannels; 字段与后端 listShareGroups/listChannels 逐一对照
+- routes/_authenticated/share/index.tsx: /share; 侧边栏加「我的分享」
+- __tests__/labels.test.ts: 5 条用例
+
+检查(全过): build ✅(路由树重生成) / typecheck ✅ / oxlint 0 错 0 警 ✅(修一处 no-duplicate-imports)
+  / 用例 19/19 ✅
+下一步: 渠道详情(单 Key 消耗/同步模型/匹配价格/授权与额度) -> 我的用量 -> 我的 API Key -> 任务中心 -> 管理后台
+---
+ .../features/share/__tests__/labels.test.ts   |  49 ++++++++
+ web/src/features/share/api.ts                 |  31 +++++
+ web/src/features/share/index.tsx              | 115 ++++++++++++++++++
+ web/src/features/share/lib/labels.ts          |  53 ++++++++
+ web/src/features/share/types.ts               |  56 +++++++++
+ web/src/hooks/use-sidebar-data.ts             |   6 +
+ web/src/i18n/locales/en.json                  |  23 +++-
+ web/src/i18n/locales/fr.json                  |  23 +++-
+ web/src/i18n/locales/ja.json                  |  23 +++-
+ web/src/i18n/locales/ru.json                  |  23 +++-
+ web/src/i18n/locales/vi.json                  |  23 +++-
+ web/src/i18n/locales/zh-TW.json               |  23 +++-
+ web/src/i18n/locales/zh.json                  |  23 +++-
+ web/src/routeTree.gen.ts                      |  21 ++++
+ web/src/routes/_authenticated/share/index.tsx |  24 ++++
+ 15 files changed, 509 insertions(+), 7 deletions(-)
+ create mode 100644 web/src/features/share/__tests__/labels.test.ts
+ create mode 100644 web/src/features/share/api.ts
+ create mode 100644 web/src/features/share/index.tsx
+ create mode 100644 web/src/features/share/lib/labels.ts
+ create mode 100644 web/src/features/share/types.ts
+ create mode 100644 web/src/routes/_authenticated/share/index.tsx
+
+diff --git a/web/src/features/share/__tests__/labels.test.ts b/web/src/features/share/__tests__/labels.test.ts
+new file mode 100644
+index 0000000..6f871de
+--- /dev/null
++++ b/web/src/features/share/__tests__/labels.test.ts
+@@ -0,0 +1,49 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it } from 'vitest'
++
++import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from '../lib/labels'
++
++describe('分享枚举文案映射', () => {
++  it('轮询与随机分别映射到各自文案键', () => {
++    expect(keyPoolModeLabelKey(0)).toBe('share.keyPool.polling')
++    expect(keyPoolModeLabelKey(1)).toBe('share.keyPool.random')
++  })
++
++  it('未知 Key 池模式回退为带原值的键（不静默显示空文案）', () => {
++    expect(keyPoolModeLabelKey(9)).toBe('share.keyPool.unknown:9')
++  })
++
++  it('四种可见性分别映射', () => {
++    expect(visibilityLabelKey(0)).toBe('share.visibility.public')
++    expect(visibilityLabelKey(1)).toBe('share.visibility.invite')
++    expect(visibilityLabelKey(2)).toBe('share.visibility.selected')
++    expect(visibilityLabelKey(3)).toBe('share.visibility.private')
++  })
++
++  it('未知可见性回退为带原值的键', () => {
++    expect(visibilityLabelKey(7)).toBe('share.visibility.unknown:7')
++  })
++
++  it('健康状态三态映射，未知回退保留原值', () => {
++    expect(healthLabelKey(0)).toBe('share.health.healthy')
++    expect(healthLabelKey(1)).toBe('share.health.degraded')
++    expect(healthLabelKey(2)).toBe('share.health.unavailable')
++    expect(healthLabelKey(5)).toBe('share.health.unknown:5')
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+new file mode 100644
+index 0000000..049c612
+--- /dev/null
++++ b/web/src/features/share/api.ts
+@@ -0,0 +1,31 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { api } from '@/lib/api'
++
++import type { ShareChannelListResponse, ShareGroupListResponse } from './types'
++
++// 「我的分享」数据访问层：只做请求与类型，错误交给 Query 失败回调（规范 3.9）。
++export async function getShareGroups(): Promise<ShareGroupListResponse> {
++  const res = await api.get('/api/apigx/share-groups')
++  return res.data
++}
++
++export async function getShareChannels(): Promise<ShareChannelListResponse> {
++  const res = await api.get('/api/apigx/channels')
++  return res.data
++}
+\ No newline at end of file
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+new file mode 100644
+index 0000000..6cea9b1
+--- /dev/null
++++ b/web/src/features/share/index.tsx
+@@ -0,0 +1,115 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useQuery } from '@tanstack/react-query'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { ErrorState } from '@/components/error-state'
++import { SectionPageLayout } from '@/components/layout'
++import { LoadingState } from '@/components/loading-state'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++
++import { getShareChannels, getShareGroups } from './api'
++import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/labels'
++import type { ShareChannel, ShareGroup } from './types'
++
++/** 我的分享：分组与渠道。 */
++export function MyShares() {
++  const { t } = useTranslation()
++
++  const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
++  const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
++
++  if (groupsQuery.isPending || channelsQuery.isPending) {
++    return <LoadingState />
++  }
++  if (groupsQuery.isError || channelsQuery.isError) {
++    return (
++      <ErrorState
++        onRetry={() => {
++          void groupsQuery.refetch()
++          void channelsQuery.refetch()
++        }}
++      />
++    )
++  }
++
++  const groups = groupsQuery.data?.data?.items ?? []
++  const channels = channelsQuery.data?.data?.items ?? []
++
++  const groupColumns: StaticDataTableColumn<ShareGroup>[] = [
++    { id: 'name', header: t('share.group.name'), cell: (row) => row.name },
++    {
++      id: 'visibility',
++      header: t('share.group.visibility'),
++      cell: (row) => t(visibilityLabelKey(row.default_visibility)),
++    },
++    { id: 'public_id', header: t('share.group.publicId'), cell: (row) => row.public_id },
++  ]
++
++  const channelColumns: StaticDataTableColumn<ShareChannel>[] = [
++    { id: 'name', header: t('share.channel.name'), cell: (row) => row.name },
++    { id: 'protocol', header: t('share.channel.protocol'), cell: (row) => row.protocol },
++    {
++      id: 'key_pool_mode',
++      header: t('share.channel.keyPoolMode'),
++      cell: (row) => t(keyPoolModeLabelKey(row.key_pool_mode)),
++    },
++    {
++      id: 'health_state',
++      header: t('share.channel.health'),
++      cell: (row) => t(healthLabelKey(row.health_state)),
++    },
++  ]
++
++  return (
++    <SectionPageLayout>
++      <SectionPageLayout.Title>{t('share.title')}</SectionPageLayout.Title>
++      <SectionPageLayout.Content>
++        <div className='space-y-6'>
++          <Card>
++            <CardHeader>
++              <CardTitle>{t('share.groups')}</CardTitle>
++            </CardHeader>
++            <CardContent>
++              {groups.length === 0 ? (
++                <EmptyState title={t('share.groups.empty')} />
++              ) : (
++                <StaticDataTable columns={groupColumns} data={groups} getRowKey={(row) => row.id} />
++              )}
++            </CardContent>
++          </Card>
++
++          <Card>
++            <CardHeader>
++              <CardTitle>{t('share.channels')}</CardTitle>
++            </CardHeader>
++            <CardContent>
++              {channels.length === 0 ? (
++                <EmptyState title={t('share.channels.empty')} />
++              ) : (
++                <StaticDataTable columns={channelColumns} data={channels} getRowKey={(row) => row.id} />
++              )}
++            </CardContent>
++          </Card>
++        </div>
++      </SectionPageLayout.Content>
++    </SectionPageLayout>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/features/share/lib/labels.ts b/web/src/features/share/lib/labels.ts
+new file mode 100644
+index 0000000..eb535d2
+--- /dev/null
++++ b/web/src/features/share/lib/labels.ts
+@@ -0,0 +1,53 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/// 枚举 → i18n 键的映射。
++//
++// 放在纯函数里而不是散在组件中：这样"未知取值必须显示原值"这条约定可以被测试固定住 ——
++// 否则后端新增枚举时界面会静默显示空白或错误文案（规范：枚举与文案统一约定）。
++
++/** Key 池模式：0=轮询 / 1=随机；未知取值回退为原值字符串。 */
++export function keyPoolModeLabelKey(mode: number): string {
++  if (mode === 1) {
++    return 'share.keyPool.random'
++  }
++  if (mode === 0) {
++    return 'share.keyPool.polling'
++  }
++  return `share.keyPool.unknown:${mode}`
++}
++
++/** 默认可见性：0=公开 / 1=邀请 / 2=指定用户 / 3=仅自己。 */
++export function visibilityLabelKey(visibility: number): string {
++  const map: Record<number, string> = {
++    0: 'share.visibility.public',
++    1: 'share.visibility.invite',
++    2: 'share.visibility.selected',
++    3: 'share.visibility.private',
++  }
++  return map[visibility] ?? `share.visibility.unknown:${visibility}`
++}
++
++/** 渠道健康状态：0=正常 / 1=降级 / 2=不可用（含未知回退）。 */
++export function healthLabelKey(state: number): string {
++  const map: Record<number, string> = {
++    0: 'share.health.healthy',
++    1: 'share.health.degraded',
++    2: 'share.health.unavailable',
++  }
++  return map[state] ?? `share.health.unknown:${state}`
++}
+\ No newline at end of file
+diff --git a/web/src/features/share/types.ts b/web/src/features/share/types.ts
+new file mode 100644
+index 0000000..04e606a
+--- /dev/null
++++ b/web/src/features/share/types.ts
+@@ -0,0 +1,56 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++// 「我的分享」的对外数据结构。字段与后端一致（`GET /api/apigx/share-groups`、`GET /api/apigx/channels`）。
++
++/** 分享分组。 */
++export interface ShareGroup {
++  id: number
++  public_id: string
++  name: string
++  /** 默认可见性（0=公开 / 1=邀请 / 2=指定用户 / 3=仅自己） */
++  default_visibility: number
++  /** 发布状态 */
++  publish_status: number
++  updated_at: number
++}
++
++/** 分享渠道。 */
++export interface ShareChannel {
++  id: number
++  public_id: string
++  name: string
++  /** 客户端协议族（如 openai） */
++  protocol: string
++  /** Key 池模式（0=轮询 / 1=随机） */
++  key_pool_mode: number
++  /** 健康状态（由逐 Key 结果推导） */
++  health_state: number
++  /** 上游 Base URL */
++  base_url: string
++}
++
++export interface ShareGroupListResponse {
++  success: boolean
++  data?: { items: ShareGroup[] }
++}
++
++export interface ShareChannelListResponse {
++  success: boolean
++  data?: { items: ShareChannel[] }
++}
+\ No newline at end of file
+diff --git a/web/src/hooks/use-sidebar-data.ts b/web/src/hooks/use-sidebar-data.ts
+index bc6c171..fd3b3ee 100644
+--- a/web/src/hooks/use-sidebar-data.ts
++++ b/web/src/hooks/use-sidebar-data.ts
+@@ -24,6 +24,7 @@ import {
+   FileText,
+   FlaskConical,
+   Store,
++  Share2,
+   Key,
+   LayoutDashboard,
+   ListTodo,
+@@ -68,6 +69,11 @@ export function useSidebarData(): SidebarData {
+             url: '/plaza',
+             icon: Store,
+           },
++          {
++            title: t('share.title'),
++            url: '/share',
++            icon: Share2,
++          },
+           {
+             title: t('Chat'),
+             icon: MessageSquare,
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 78b3526..a5d8649 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6551,5 +6551,26 @@
+   "plaza.detail.status": "Status",
+   "plaza.detail.selected": "Selected",
+   "plaza.detail.unknownPrice": "Price unknown",
+-  "plaza.detail.noSource": "No available source for this model"
++  "plaza.detail.noSource": "No available source for this model",
++  "share.title": "My Shares",
++  "share.groups": "Share groups",
++  "share.groups.empty": "No share group yet",
++  "share.channels": "Channels",
++  "share.channels.empty": "No channel yet",
++  "share.group.name": "Name",
++  "share.group.visibility": "Default visibility",
++  "share.group.publicId": "Public ID",
++  "share.channel.name": "Name",
++  "share.channel.protocol": "Protocol",
++  "share.channel.keyPoolMode": "Key pool mode",
++  "share.channel.health": "Health",
++  "share.keyPool.polling": "Polling",
++  "share.keyPool.random": "Random",
++  "share.visibility.public": "Public",
++  "share.visibility.invite": "Invite only",
++  "share.visibility.selected": "Selected users",
++  "share.visibility.private": "Private",
++  "share.health.healthy": "Healthy",
++  "share.health.degraded": "Degraded",
++  "share.health.unavailable": "Unavailable"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 5fa3005..793382d 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6551,5 +6551,26 @@
+   "plaza.detail.status": "Status",
+   "plaza.detail.selected": "Selected",
+   "plaza.detail.unknownPrice": "Price unknown",
+-  "plaza.detail.noSource": "No available source for this model"
++  "plaza.detail.noSource": "No available source for this model",
++  "share.title": "My Shares",
++  "share.groups": "Share groups",
++  "share.groups.empty": "No share group yet",
++  "share.channels": "Channels",
++  "share.channels.empty": "No channel yet",
++  "share.group.name": "Name",
++  "share.group.visibility": "Default visibility",
++  "share.group.publicId": "Public ID",
++  "share.channel.name": "Name",
++  "share.channel.protocol": "Protocol",
++  "share.channel.keyPoolMode": "Key pool mode",
++  "share.channel.health": "Health",
++  "share.keyPool.polling": "Polling",
++  "share.keyPool.random": "Random",
++  "share.visibility.public": "Public",
++  "share.visibility.invite": "Invite only",
++  "share.visibility.selected": "Selected users",
++  "share.visibility.private": "Private",
++  "share.health.healthy": "Healthy",
++  "share.health.degraded": "Degraded",
++  "share.health.unavailable": "Unavailable"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 9c7304b..9a849c1 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6551,5 +6551,26 @@
+   "plaza.detail.status": "Status",
+   "plaza.detail.selected": "Selected",
+   "plaza.detail.unknownPrice": "Price unknown",
+-  "plaza.detail.noSource": "No available source for this model"
++  "plaza.detail.noSource": "No available source for this model",
++  "share.title": "My Shares",
++  "share.groups": "Share groups",
++  "share.groups.empty": "No share group yet",
++  "share.channels": "Channels",
++  "share.channels.empty": "No channel yet",
++  "share.group.name": "Name",
++  "share.group.visibility": "Default visibility",
++  "share.group.publicId": "Public ID",
++  "share.channel.name": "Name",
++  "share.channel.protocol": "Protocol",
++  "share.channel.keyPoolMode": "Key pool mode",
++  "share.channel.health": "Health",
++  "share.keyPool.polling": "Polling",
++  "share.keyPool.random": "Random",
++  "share.visibility.public": "Public",
++  "share.visibility.invite": "Invite only",
++  "share.visibility.selected": "Selected users",
++  "share.visibility.private": "Private",
++  "share.health.healthy": "Healthy",
++  "share.health.degraded": "Degraded",
++  "share.health.unavailable": "Unavailable"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index b4d4f7d..2c5e23c 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6551,5 +6551,26 @@
+   "plaza.detail.status": "Status",
+   "plaza.detail.selected": "Selected",
+   "plaza.detail.unknownPrice": "Price unknown",
+-  "plaza.detail.noSource": "No available source for this model"
++  "plaza.detail.noSource": "No available source for this model",
++  "share.title": "My Shares",
++  "share.groups": "Share groups",
++  "share.groups.empty": "No share group yet",
++  "share.channels": "Channels",
++  "share.channels.empty": "No channel yet",
++  "share.group.name": "Name",
++  "share.group.visibility": "Default visibility",
++  "share.group.publicId": "Public ID",
++  "share.channel.name": "Name",
++  "share.channel.protocol": "Protocol",
++  "share.channel.keyPoolMode": "Key pool mode",
++  "share.channel.health": "Health",
++  "share.keyPool.polling": "Polling",
++  "share.keyPool.random": "Random",
++  "share.visibility.public": "Public",
++  "share.visibility.invite": "Invite only",
++  "share.visibility.selected": "Selected users",
++  "share.visibility.private": "Private",
++  "share.health.healthy": "Healthy",
++  "share.health.degraded": "Degraded",
++  "share.health.unavailable": "Unavailable"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 4ef9e93..4af4120 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6551,5 +6551,26 @@
+   "plaza.detail.status": "Status",
+   "plaza.detail.selected": "Selected",
+   "plaza.detail.unknownPrice": "Price unknown",
+-  "plaza.detail.noSource": "No available source for this model"
++  "plaza.detail.noSource": "No available source for this model",
++  "share.title": "My Shares",
++  "share.groups": "Share groups",
++  "share.groups.empty": "No share group yet",
++  "share.channels": "Channels",
++  "share.channels.empty": "No channel yet",
++  "share.group.name": "Name",
++  "share.group.visibility": "Default visibility",
++  "share.group.publicId": "Public ID",
++  "share.channel.name": "Name",
++  "share.channel.protocol": "Protocol",
++  "share.channel.keyPoolMode": "Key pool mode",
++  "share.channel.health": "Health",
++  "share.keyPool.polling": "Polling",
++  "share.keyPool.random": "Random",
++  "share.visibility.public": "Public",
++  "share.visibility.invite": "Invite only",
++  "share.visibility.selected": "Selected users",
++  "share.visibility.private": "Private",
++  "share.health.healthy": "Healthy",
++  "share.health.degraded": "Degraded",
++  "share.health.unavailable": "Unavailable"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index ba06423..016223b 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6551,5 +6551,26 @@
+   "plaza.detail.status": "Status",
+   "plaza.detail.selected": "Selected",
+   "plaza.detail.unknownPrice": "Price unknown",
+-  "plaza.detail.noSource": "No available source for this model"
++  "plaza.detail.noSource": "No available source for this model",
++  "share.title": "My Shares",
++  "share.groups": "Share groups",
++  "share.groups.empty": "No share group yet",
++  "share.channels": "Channels",
++  "share.channels.empty": "No channel yet",
++  "share.group.name": "Name",
++  "share.group.visibility": "Default visibility",
++  "share.group.publicId": "Public ID",
++  "share.channel.name": "Name",
++  "share.channel.protocol": "Protocol",
++  "share.channel.keyPoolMode": "Key pool mode",
++  "share.channel.health": "Health",
++  "share.keyPool.polling": "Polling",
++  "share.keyPool.random": "Random",
++  "share.visibility.public": "Public",
++  "share.visibility.invite": "Invite only",
++  "share.visibility.selected": "Selected users",
++  "share.visibility.private": "Private",
++  "share.health.healthy": "Healthy",
++  "share.health.degraded": "Degraded",
++  "share.health.unavailable": "Unavailable"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 2c0316b..f788452 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6551,5 +6551,26 @@
+   "plaza.detail.status": "状态",
+   "plaza.detail.selected": "已选中",
+   "plaza.detail.unknownPrice": "价格未知",
+-  "plaza.detail.noSource": "该模型暂无可用来源"
++  "plaza.detail.noSource": "该模型暂无可用来源",
++  "share.title": "我的分享",
++  "share.groups": "分享分组",
++  "share.groups.empty": "还没有分享分组",
++  "share.channels": "渠道",
++  "share.channels.empty": "还没有渠道",
++  "share.group.name": "名称",
++  "share.group.visibility": "默认可见性",
++  "share.group.publicId": "对外 ID",
++  "share.channel.name": "名称",
++  "share.channel.protocol": "协议",
++  "share.channel.keyPoolMode": "Key 池模式",
++  "share.channel.health": "健康状态",
++  "share.keyPool.polling": "轮询",
++  "share.keyPool.random": "随机",
++  "share.visibility.public": "公开",
++  "share.visibility.invite": "邀请",
++  "share.visibility.selected": "指定用户",
++  "share.visibility.private": "仅自己",
++  "share.health.healthy": "正常",
++  "share.health.degraded": "降级",
++  "share.health.unavailable": "不可用"
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index d143a6b..40076c9 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -48,6 +48,7 @@ import { Route as AuthenticatedPlazaModelRouteImport } from './routes/_authentic
+ import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
+ import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
+ import { Route as AuthenticatedSecurityIndexRouteImport } from './routes/_authenticated/security/index'
++import { Route as AuthenticatedShareIndexRouteImport } from './routes/_authenticated/share/index'
+ import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
+ import { Route as AuthenticatedSystemInfoIndexRouteImport } from './routes/_authenticated/system-info/index'
+ import { Route as AuthenticatedSystemSettingsIndexRouteImport } from './routes/_authenticated/system-settings/index'
+@@ -277,6 +278,11 @@ const AuthenticatedSecurityIndexRoute =
+     path: '/security/',
+     getParentRoute: () => AuthenticatedRouteRoute,
+   } as any)
++const AuthenticatedShareIndexRoute = AuthenticatedShareIndexRouteImport.update({
++  id: '/share/',
++  path: '/share/',
++  getParentRoute: () => AuthenticatedRouteRoute,
++} as any)
+ const AuthenticatedSubscriptionsIndexRoute =
+   AuthenticatedSubscriptionsIndexRouteImport.update({
+     id: '/subscriptions/',
+@@ -460,6 +466,7 @@ export interface FileRoutesByFullPath {
+   '/profile/': typeof AuthenticatedProfileIndexRoute
+   '/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
+   '/security/': typeof AuthenticatedSecurityIndexRoute
++  '/share/': typeof AuthenticatedShareIndexRoute
+   '/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
+   '/system-info/': typeof AuthenticatedSystemInfoIndexRoute
+   '/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
+@@ -522,6 +529,7 @@ export interface FileRoutesByTo {
+   '/profile': typeof AuthenticatedProfileIndexRoute
+   '/redemption-codes': typeof AuthenticatedRedemptionCodesIndexRoute
+   '/security': typeof AuthenticatedSecurityIndexRoute
++  '/share': typeof AuthenticatedShareIndexRoute
+   '/subscriptions': typeof AuthenticatedSubscriptionsIndexRoute
+   '/system-info': typeof AuthenticatedSystemInfoIndexRoute
+   '/system-settings': typeof AuthenticatedSystemSettingsIndexRoute
+@@ -588,6 +596,7 @@ export interface FileRoutesById {
+   '/_authenticated/profile/': typeof AuthenticatedProfileIndexRoute
+   '/_authenticated/redemption-codes/': typeof AuthenticatedRedemptionCodesIndexRoute
+   '/_authenticated/security/': typeof AuthenticatedSecurityIndexRoute
++  '/_authenticated/share/': typeof AuthenticatedShareIndexRoute
+   '/_authenticated/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
+   '/_authenticated/system-info/': typeof AuthenticatedSystemInfoIndexRoute
+   '/_authenticated/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
+@@ -653,6 +662,7 @@ export interface FileRouteTypes {
+     | '/profile/'
+     | '/redemption-codes/'
+     | '/security/'
++    | '/share/'
+     | '/subscriptions/'
+     | '/system-info/'
+     | '/system-settings/'
+@@ -715,6 +725,7 @@ export interface FileRouteTypes {
+     | '/profile'
+     | '/redemption-codes'
+     | '/security'
++    | '/share'
+     | '/subscriptions'
+     | '/system-info'
+     | '/system-settings'
+@@ -780,6 +791,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/profile/'
+     | '/_authenticated/redemption-codes/'
+     | '/_authenticated/security/'
++    | '/_authenticated/share/'
+     | '/_authenticated/subscriptions/'
+     | '/_authenticated/system-info/'
+     | '/_authenticated/system-settings/'
+@@ -1098,6 +1110,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedSecurityIndexRouteImport
+       parentRoute: typeof AuthenticatedRouteRoute
+     }
++    '/_authenticated/share/': {
++      id: '/_authenticated/share/'
++      path: '/share'
++      fullPath: '/share/'
++      preLoaderRoute: typeof AuthenticatedShareIndexRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/subscriptions/': {
+       id: '/_authenticated/subscriptions/'
+       path: '/subscriptions'
+@@ -1371,6 +1390,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedProfileIndexRoute: typeof AuthenticatedProfileIndexRoute
+   AuthenticatedRedemptionCodesIndexRoute: typeof AuthenticatedRedemptionCodesIndexRoute
+   AuthenticatedSecurityIndexRoute: typeof AuthenticatedSecurityIndexRoute
++  AuthenticatedShareIndexRoute: typeof AuthenticatedShareIndexRoute
+   AuthenticatedSubscriptionsIndexRoute: typeof AuthenticatedSubscriptionsIndexRoute
+   AuthenticatedSystemInfoIndexRoute: typeof AuthenticatedSystemInfoIndexRoute
+   AuthenticatedTaskPluginsIndexRoute: typeof AuthenticatedTaskPluginsIndexRoute
+@@ -1400,6 +1420,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedRedemptionCodesIndexRoute:
+     AuthenticatedRedemptionCodesIndexRoute,
+   AuthenticatedSecurityIndexRoute: AuthenticatedSecurityIndexRoute,
++  AuthenticatedShareIndexRoute: AuthenticatedShareIndexRoute,
+   AuthenticatedSubscriptionsIndexRoute: AuthenticatedSubscriptionsIndexRoute,
+   AuthenticatedSystemInfoIndexRoute: AuthenticatedSystemInfoIndexRoute,
+   AuthenticatedTaskPluginsIndexRoute: AuthenticatedTaskPluginsIndexRoute,
+diff --git a/web/src/routes/_authenticated/share/index.tsx b/web/src/routes/_authenticated/share/index.tsx
+new file mode 100644
+index 0000000..c0206b5
+--- /dev/null
++++ b/web/src/routes/_authenticated/share/index.tsx
+@@ -0,0 +1,24 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { createFileRoute } from '@tanstack/react-router'
++
++import { MyShares } from '@/features/share'
++
++export const Route = createFileRoute('/_authenticated/share/')({
++  component: MyShares,
++})
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+

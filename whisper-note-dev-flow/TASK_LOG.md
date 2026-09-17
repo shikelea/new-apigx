@@ -1163,3 +1163,19 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **按规范的检查（全过）**：`bun run build` ✅（路由树重新生成 ✓）；`bun run typecheck` ✅；`oxlint` ✅ **0 错 0 警**（期间修掉一处 `no-nested-ternary` —— 规范 3.2 明令禁止两层嵌套三元，已抽成小组件 ✓）；广场用例 ✅ **14/14**。
 
 **下一步（T3.9 续）**：按 §4 顺序做「我的分享 → 我的用量 → 我的 API Key → 任务中心 → 管理后台」；其中「我的分享」对应 §5.2 的"**重做分享者工作流**"，工作量最大。
+### T3.9 前端：「我的分享」页（分享者工作流起步）
+
+按 §4「我的分享：分组和渠道、Key 池策略及单 Key 消耗、同步模型、匹配价格、访问授权、额度与状态」实现**分组 + 渠道**两块 ✓（Key 池策略与健康状态已展示 ✓；"单 Key 消耗、同步模型、匹配价格、授权、额度"留作下一步 ✓）。
+
+| 文件 | 作用 |
+|---|---|
+| `src/features/share/index.tsx` | 页面：**分享分组表**（名称/默认可见性/对外 ID）+ **渠道表**（名称/协议/**Key 池模式**/**健康状态**）✓ 复用 `SectionPageLayout`、**`StaticDataTable`**（项目封装 ✓ 按 `data-table/README.md` 的指引："feature 代码一律从 `@/components/data-table` 导入" ✓）、状态组件、`Card` ✓ |
+| `src/features/share/lib/labels.ts` | **纯逻辑**：枚举 → i18n 键映射（Key 池模式/可见性/健康状态 ✓），**未知取值回退为带原值的键**（不静默显示空文案 ✓ —— 后端新增枚举时界面会显式暴露 ✓） |
+| `src/features/share/api.ts` / `types.ts` | 数据层：`getShareGroups`/`getShareChannels`；字段与后端 `listShareGroups`/`listChannels` **逐一对照** ✓ |
+| `src/routes/_authenticated/share/index.tsx` | 路由 `/share` ✓ |
+| `src/hooks/use-sidebar-data.ts` | 侧边栏加「我的分享」（紧跟「模型广场」✓） |
+| `__tests__/labels.test.ts` | 5 条用例（含"未知取值回退保留原值" ✓） |
+
+**按规范的检查（全过）**：`bun run build` ✅（路由树重新生成 ✓）；`typecheck` ✅；`oxlint` ✅ **0 错 0 警**（期间修掉一处 `no-duplicate-imports`：同一模块的值导入与类型导入必须合并 ✓）；用例 ✅ **19/19**（share 5 + plaza 14）。
+
+**下一步（T3.9 续）**：把「我的分享」补全（渠道详情：**单 Key 消耗**、同步模型、匹配价格、授权与额度 ✓），然后「我的用量 → 我的 API Key → 任务中心 → 管理后台」。
