@@ -2,6 +2,7 @@ package relayhook
 
 import (
 	"errors"
+	"net/http"
 	"sync"
 	"time"
 
@@ -117,10 +118,23 @@ func CheckSourceAllowed(c *gin.Context, channelID int) *types.NewAPIError {
 	}
 
 	if key.AllowFallback {
-		// 可回退：交给底座重试并重新选择渠道（不设置 SkipRetry）
-		return types.NewError(errors.New("source not allowed for this key, retry with another channel"),
-			types.ErrorCodeChannelNoAvailableKey)
+		// 可回退：交给底座重试并重新选择渠道（不设置 SkipRetry、**不中止上下文**，
+		// 否则底座就没有机会重选）。
+		return types.NewErrorWithStatusCode(
+			errors.New("source not allowed for this key, retry with another channel"),
+			types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden, types.ErrOptionWithNoRecordErrorLog())
 	}
-	return types.NewError(errors.New("source not allowed for this key"),
-		types.ErrorCodeChannelNoAvailableKey, types.ErrOptionWithSkipRetry())
+	// 不可回退：明确的拒绝。
+	//
+	// **必须在这里直接写出响应并中止上下文**，原因有二：
+	//  1. `Distribute` 调用 `SetupContextForSelectedChannel` 时**忽略了返回值**，
+	//     只返回错误并不会阻止请求继续（容量钩子之所以有效，正是因为它直接 abort）；
+	//  2. 若让错误沿中继链路传播，它会被当成**渠道故障**——实测会把健康渠道自动禁用
+	//     （后续请求变成 `model_not_found 503`），这是把"准入判断"误当成"上游故障"的典型后果。
+	abortJSON(c, http.StatusForbidden, "source_not_allowed",
+		"this API key is not allowed to use the selected source")
+	return types.NewErrorWithStatusCode(
+		errors.New("source not allowed for this key"),
+		types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden,
+		types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 }
