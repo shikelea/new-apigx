@@ -1,0 +1,454 @@
+From bb0ba427b84077282a2bd2bf5421167c5a390194 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:19:31 +0800
+Subject: [PATCH 43/43] =?UTF-8?q?feat(apigx):=20=E6=B1=87=E7=8E=87?=
+ =?UTF-8?q?=E5=BF=AB=E7=85=A7=E4=B8=8E=E5=A4=9A=E5=8D=95=E4=BD=8D=E4=BC=B0?=
+ =?UTF-8?q?=E7=AE=97=EF=BC=88T2.3=20=E4=B8=BB=E4=BD=93=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/model/repo_fx.go: 汇率快照只追加并**封版上一条**
+  (同一币种任何时刻只有一条生效, 否则"用哪条"是未定义行为)
+  价格规则写入时即带 FxRateID+FxRateMicro => 汇率变动不改写历史价格, 且可回溯当时用哪次汇率
+  * 方向唯一: 沿用模型定义 USD = quote / rate; 正反换算成对提供且往返一致; 方向值不对直接拒绝
+  * 没有汇率必须报"未知", **绝不退回 1:1**(退回会把 7.2 CNY 当 7.2 USD, 是不会报错的错价)
+- apigx/price/units.go: 多单位估算只在**同族**间换算(token 1M<->1K, 时间 分<->秒),
+  并提供归一化到基准单位的入口; **跨族一律报错**(张/次/文档之间没有可靠关系, 猜系数=静默错价)
+- 测试: 汇率 4 用例 + 单位换算 3 用例; apigx/price 13/13, apigx/model 全过
+- apigx + middleware 全量通过
+---
+ apigx/model/repo_fx.go         | 123 +++++++++++++++++++++++++++++++++
+ apigx/model/repo_price_test.go | 105 ++++++++++++++++++++++++++++
+ apigx/price/mapping_test.go    |  60 ++++++++++++++++
+ apigx/price/units.go           | 107 ++++++++++++++++++++++++++++
+ 4 files changed, 395 insertions(+)
+ create mode 100644 apigx/model/repo_fx.go
+ create mode 100644 apigx/price/units.go
+
+diff --git a/apigx/model/repo_fx.go b/apigx/model/repo_fx.go
+new file mode 100644
+index 0000000..b1faf97
+--- /dev/null
++++ b/apigx/model/repo_fx.go
+@@ -0,0 +1,123 @@
++package apigxmodel
++
++import (
++	"errors"
++	"fmt"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 汇率快照（`apigx_fx_rates`，T2.3）。
++//
++// # 为什么必须"存下来"而不是每次现查
++//
++// 计划书验收要求：**非美元价格按保存的汇率归一**、且**历史记录不随汇率更新改写**。
++// 价格规则在写入时就带上 `FxRateID` + `FxRateMicro`，因此：
++//   - 汇率后来怎么变，都不会改变已落库的历史价格；
++//   - 事后能回答"当时用的是哪一次汇率"（凭 `FxRateID` 回溯）。
++//
++// # 方向只有一个，避免歧义
++//
++// `ConversionDirection = 0` 固定含义：**USD = quote / rate**
++// （`RateMicro` 表示 1 USD 等于多少原币：7.123456 CNY → 7123456）。
++// 只有一种方向，就不存在"这次是乘还是除"的口径分歧。
++
++// FxDirectionUSDEqualsQuoteDivRate 是唯一支持的换算方向。
++const FxDirectionUSDEqualsQuoteDivRate int = 0
++
++// ErrNoFxRate 表示没有可用的汇率。
++//
++// 调用方**必须**把它当成"USD 价格未知"处理——绝不能退回 1:1，
++// 那会把 7.2 CNY 当成 7.2 USD，属于静默的严重错价。
++var ErrNoFxRate = errors.New("apigxmodel: no fx rate for currency")
++
++// CreateFxRateSnapshot 追加一条汇率快照，并**封版**上一条（单向，只允许一次）。
++//
++// 封版不是可选的：同一币种若同时存在两条生效汇率，"用哪一条"就变成未定义行为。
++func CreateFxRateSnapshot(db *gorm.DB, rate *FxRate) error {
++	if db == nil || rate == nil {
++		return fmt.Errorf("%w: rate is required", ErrInvalidArgument)
++	}
++	if len(rate.QuoteCurrency) != 3 {
++		return fmt.Errorf("%w: quote currency must be a 3-letter code", ErrInvalidArgument)
++	}
++	if rate.QuoteCurrency == "USD" {
++		// USD 对自己不需要汇率；允许写入会让"1 USD = ? USD"出现两种答案
++		return fmt.Errorf("%w: USD does not need an fx rate", ErrInvalidArgument)
++	}
++	if rate.RateMicro <= 0 {
++		return fmt.Errorf("%w: rate must be positive", ErrInvalidArgument)
++	}
++	if rate.BaseCurrency == "" {
++		rate.BaseCurrency = "USD"
++	}
++	if rate.BaseCurrency != "USD" {
++		return fmt.Errorf("%w: base currency must be USD", ErrInvalidArgument)
++	}
++	if rate.ConversionDirection != FxDirectionUSDEqualsQuoteDivRate {
++		return fmt.Errorf("%w: unsupported conversion direction %d", ErrInvalidArgument, rate.ConversionDirection)
++	}
++	if rate.EffectiveFrom == 0 {
++		rate.EffectiveFrom = common.GetTimestamp()
++	}
++	rate.CreatedAt = common.GetTimestamp()
++
++	return db.Transaction(func(tx *gorm.DB) error {
++		// 封版上一条（EffectiveTo == 0 的那条）
++		sealErr := tx.Model(&FxRate{}).
++			Where("quote_currency = ? AND effective_to = 0", rate.QuoteCurrency).
++			Update("effective_to", rate.EffectiveFrom).Error
++		if sealErr != nil {
++			return sealErr
++		}
++		return tx.Create(rate).Error
++	})
++}
++
++// GetEffectiveFxRate 取某币种在给定时刻生效的汇率。没有则返回 `ErrNoFxRate`。
++func GetEffectiveFxRate(db *gorm.DB, quoteCurrency string, at int64) (*FxRate, error) {
++	if db == nil || len(quoteCurrency) != 3 {
++		return nil, fmt.Errorf("%w: quote currency is required", ErrInvalidArgument)
++	}
++	if at == 0 {
++		at = common.GetTimestamp()
++	}
++	var rate FxRate
++	err := db.Where("quote_currency = ? AND base_currency = ? AND effective_from <= ?",
++		quoteCurrency, "USD", at).
++		Where("effective_to = 0 OR effective_to > ?", at).
++		Order("effective_from DESC").First(&rate).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, ErrNoFxRate
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &rate, nil
++}
++
++// QuoteToUSDMicro 按给定汇率把原币金额（微单位）换算成 USD（微单位）。
++//
++// 方向依据模型注释：`USD = quote / rate`。汇率缺失/非法时返回 `ok=false`——
++// **绝不退回 1:1**。
++func QuoteToUSDMicro(rate *FxRate, quoteMicro int64) (usdMicro int64, ok bool) {
++	if rate == nil || rate.RateMicro <= 0 {
++		return 0, false
++	}
++	if rate.ConversionDirection != FxDirectionUSDEqualsQuoteDivRate {
++		return 0, false
++	}
++	return quoteMicro * 1_000_000 / rate.RateMicro, true
++}
++
++// USDToQuoteMicro 是 `QuoteToUSDMicro` 的反向换算（USD = quote / rate ⇒ quote = USD × rate）。
++func USDToQuoteMicro(rate *FxRate, usdMicro int64) (quoteMicro int64, ok bool) {
++	if rate == nil || rate.RateMicro <= 0 {
++		return 0, false
++	}
++	if rate.ConversionDirection != FxDirectionUSDEqualsQuoteDivRate {
++		return 0, false
++	}
++	return usdMicro * rate.RateMicro / 1_000_000, true
++}
+diff --git a/apigx/model/repo_price_test.go b/apigx/model/repo_price_test.go
+index 344b6ec..80855ee 100644
+--- a/apigx/model/repo_price_test.go
++++ b/apigx/model/repo_price_test.go
+@@ -317,3 +317,108 @@ func TestIngestNonUSDPriceUsesSavedFxRate(t *testing.T) {
+ 	_, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
+ 	assert.False(t, usable, "缺汇率时 USD 价格必须显式未知，而不是 0")
+ }
++
++// ---- 汇率快照（T2.3） ----
++
++// 汇率快照只追加且封版上一条：历史价格不会因为汇率更新而改变。
++func TestFxRateSnapshotSealsPreviousVersion(t *testing.T) {
++	db := newRepoDB(t)
++
++	first := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, EffectiveFrom: 1000,
++		SourceLabel: "admin", ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
++	require.NoError(t, CreateFxRateSnapshot(db, first))
++
++	// 取到第一条
++	rate, err := GetEffectiveFxRate(db, "CNY", 1500)
++	require.NoError(t, err)
++	assert.EqualValues(t, 7_200_000, rate.RateMicro)
++
++	// 追加第二条（汇率变动）：第一条应被封版
++	second := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_400_000, EffectiveFrom: 2000,
++		SourceLabel: "admin", ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
++	require.NoError(t, CreateFxRateSnapshot(db, second))
++
++	// 历史时刻仍取到**当时**的汇率（历史不被改写）
++	rate, err = GetEffectiveFxRate(db, "CNY", 1500)
++	require.NoError(t, err)
++	assert.EqualValues(t, 7_200_000, rate.RateMicro, "历史时刻必须取到当时生效的汇率")
++	assert.EqualValues(t, first.ID, rate.ID)
++
++	// 当前时刻取到新汇率
++	rate, err = GetEffectiveFxRate(db, "CNY", 2500)
++	require.NoError(t, err)
++	assert.EqualValues(t, 7_400_000, rate.RateMicro)
++
++	// 同一币种任何时刻**只有一条**生效，避免"用哪条"变成未定义
++	var active int64
++	require.NoError(t, db.Model(&FxRate{}).Where("quote_currency = ? AND effective_to = 0", "CNY").Count(&active).Error)
++	assert.EqualValues(t, 1, active)
++}
++
++// 没有汇率时必须报"未知"，**绝不退回 1:1**——否则 7.2 CNY 会被当成 7.2 USD。
++func TestFxRateMissingIsNotOneToOne(t *testing.T) {
++	db := newRepoDB(t)
++
++	_, err := GetEffectiveFxRate(db, "JPY", 0)
++	assert.ErrorIs(t, err, ErrNoFxRate)
++
++	// 换算接口对 nil/非法汇率一律返回 ok=false，而不是拿 1:1 硬算
++	usd, ok := QuoteToUSDMicro(nil, 1_000_000)
++	assert.False(t, ok)
++	assert.Zero(t, usd)
++
++	usd, ok = QuoteToUSDMicro(&FxRate{RateMicro: 0}, 1_000_000)
++	assert.False(t, ok)
++
++	// 方向不对也拒绝（防止"乘还是除"的口径分歧被悄悄绕过）
++	usd, ok = QuoteToUSDMicro(&FxRate{RateMicro: 7_200_000, ConversionDirection: 99}, 7_200_000)
++	assert.False(t, ok)
++}
++
++// 换算方向与数值：USD = quote / rate；反向 quote = USD × rate。
++func TestFxRateConversionDirection(t *testing.T) {
++	rate := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
++
++	// 7200000 微人民币 ÷ 7.2 = 1000000 微美元（即 1 USD）
++	usd, ok := QuoteToUSDMicro(rate, 7_200_000)
++	require.True(t, ok)
++	assert.EqualValues(t, 1_000_000, usd)
++
++	// 反向：1 USD → 7.2 CNY
++	quote, ok := USDToQuoteMicro(rate, 1_000_000)
++	require.True(t, ok)
++	assert.EqualValues(t, 7_200_000, quote)
++
++	// 往返一致（取整误差为 0）
++	back, ok := QuoteToUSDMicro(rate, quote)
++	require.True(t, ok)
++	assert.EqualValues(t, 1_000_000, back)
++}
++
++// 非法汇率输入被拒（含"给 USD 配汇率"这种会让 1 USD = ? USD 出现两种答案的情况）。
++func TestCreateFxRateRejectsInvalidInput(t *testing.T) {
++	db := newRepoDB(t)
++	base := func() *FxRate {
++		return &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
++	}
++
++	bad := base()
++	bad.QuoteCurrency = "CN"
++	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
++
++	bad = base()
++	bad.QuoteCurrency = "USD"
++	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument, "USD 对自己不需要汇率")
++
++	bad = base()
++	bad.RateMicro = 0
++	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
++
++	bad = base()
++	bad.BaseCurrency = "EUR"
++	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
++
++	bad = base()
++	bad.ConversionDirection = 1
++	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
++}
+diff --git a/apigx/price/mapping_test.go b/apigx/price/mapping_test.go
+index 2489dd1..71ac470 100644
+--- a/apigx/price/mapping_test.go
++++ b/apigx/price/mapping_test.go
+@@ -276,3 +276,63 @@ func TestPerRequestPriceRejectsImplausibleAndZero(t *testing.T) {
+ 	_, err = perRequestItems(5_000_000)
+ 	assert.ErrorIs(t, err, ErrPriceOutOfRange)
+ }
++
++// ---- 多单位估算（T2.3） ----
++
++// 同族单位可换算：token 的 1K/1M、时间的 秒/分钟。
++func TestConvertUnitPriceMicroWithinFamily(t *testing.T) {
++	// 0.002 USD /1K tokens = 2 USD /1M tokens
++	perMillion, err := ConvertUnitPriceMicro(2000, UnitScalePerThousandTokens, UnitScalePerMillionTokens)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2_000_000, perMillion)
++
++	// 反向
++	perThousand, err := ConvertUnitPriceMicro(2_000_000, UnitScalePerMillionTokens, UnitScalePerThousandTokens)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2000, perThousand)
++
++	// 0.01 USD /秒 = 0.6 USD /分钟
++	perMinute, err := ConvertUnitPriceMicro(10_000, UnitScalePerSecond, UnitScalePerMinute)
++	require.NoError(t, err)
++	assert.EqualValues(t, 600_000, perMinute)
++
++	// 同单位原样返回
++	same, err := ConvertUnitPriceMicro(1234, UnitScalePerRequest, UnitScalePerRequest)
++	require.NoError(t, err)
++	assert.EqualValues(t, 1234, same)
++}
++
++// 跨族不可换算：必须报错，**不能猜一个系数**（猜错就是不会报错的错价）。
++func TestConvertUnitPriceMicroRejectsCrossFamily(t *testing.T) {
++	_, err := ConvertUnitPriceMicro(1000, UnitScalePerImage, UnitScalePerMillionTokens)
++	assert.ErrorIs(t, err, ErrUnitNotConvertible)
++
++	_, err = ConvertUnitPriceMicro(1000, UnitScalePerRequest, UnitScalePerSecond)
++	assert.ErrorIs(t, err, ErrUnitNotConvertible)
++
++	// 未知单位
++	_, err = ConvertUnitPriceMicro(1000, 99, UnitScalePerMillionTokens)
++	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
++
++	// 负价
++	_, err = ConvertUnitPriceMicro(-1, UnitScalePerSecond, UnitScalePerMinute)
++	assert.ErrorIs(t, err, apigxmodel.ErrInvalidArgument)
++}
++
++// 归一化到基准单位后可直接比较：不同来源用不同单位报价时能放在一起比。
++func TestNormalizeToCanonicalUnit(t *testing.T) {
++	// 0.002 USD/1K → 基准（/1M）
++	normalized, err := NormalizeToCanonicalUnit(2000, UnitScalePerThousandTokens)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2_000_000, normalized)
++
++	// 已经是基准单位：不变
++	normalized, err = NormalizeToCanonicalUnit(2_000_000, UnitScalePerMillionTokens)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2_000_000, normalized)
++
++	// 时间族基准是 /秒
++	normalized, err = NormalizeToCanonicalUnit(600_000, UnitScalePerMinute)
++	require.NoError(t, err)
++	assert.EqualValues(t, 10_000, normalized)
++}
+diff --git a/apigx/price/units.go b/apigx/price/units.go
+new file mode 100644
+index 0000000..193c94a
+--- /dev/null
++++ b/apigx/price/units.go
+@@ -0,0 +1,107 @@
++package price
++
++import (
++	"fmt"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++)
++
++// 多单位估算（T2.3）：把不同「单价单位」的分项换算到同一口径，才能比较与合并。
++//
++// 单位的取值定义在 `apigx_price_rule_items.unit_scale` 的注释里。
++// 这里只做**同族之间**的换算：
++//
++//	token 族：/1M tokens ↔ /1K tokens
++//	时间族  ：/分钟 ↔ /秒
++//
++// 跨族（例如 /张 与 /1M tokens）**不可换算**，必须报错而不是猜一个系数——
++// 猜错就是错价，而且不会有任何报错留下。
++
++// 单价单位（与 `unit_scale` 注释一致）。
++const (
++	UnitScalePerThousandTokens = 1
++	UnitScalePerImage          = 2
++	UnitScalePerSecond         = 3
++	UnitScalePerMinute         = 4
++	UnitScalePerThousandChars  = 6
++	UnitScalePerDocument       = 7
++)
++
++// ErrUnitNotConvertible 表示两个单位不在同一族，不能换算。
++var ErrUnitNotConvertible = fmt.Errorf("price: unit scales are not convertible")
++
++// ConvertUnitPriceMicro 把单价在单位之间换算。
++//
++// 例：`/1K tokens` 的 0.002 USD → `/1M tokens` 的 2 USD（×1000）；
++// `/秒` 的 0.01 USD → `/分钟` 的 0.6 USD（×60）。
++func ConvertUnitPriceMicro(priceMicro int64, from, to int) (int64, error) {
++	if from == to {
++		return priceMicro, nil
++	}
++	if priceMicro < 0 {
++		return 0, fmt.Errorf("%w: negative unit price", apigxmodel.ErrInvalidArgument)
++	}
++
++	// 每单位对应的"基数"：换算系数 = fromBase / toBase
++	base, ok := unitBase(from)
++	if !ok {
++		return 0, fmt.Errorf("%w: unknown unit scale %d", apigxmodel.ErrInvalidArgument, from)
++	}
++	toBase, ok := unitBase(to)
++	if !ok {
++		return 0, fmt.Errorf("%w: unknown unit scale %d", apigxmodel.ErrInvalidArgument, to)
++	}
++	if base.family != toBase.family {
++		return 0, fmt.Errorf("%w: %d (%s) -> %d (%s)", ErrUnitNotConvertible, from, base.family, to, toBase.family)
++	}
++
++	// priceMicro 是"每个 from 单位"的价格；先化成"每个基准单位"，再乘回 to 的规模
++	perBase := float64(priceMicro) * float64(toBase.size) / float64(base.size)
++	return int64(perBase + 0.5), nil
++}
++
++// NormalizeToCanonicalUnit 把单价换算到该族的**基准单位**
++// （token 族 → /1M tokens；时间族 → /秒），便于跨来源比较。
++func NormalizeToCanonicalUnit(priceMicro int64, from int) (int64, error) {
++	base, ok := unitBase(from)
++	if !ok {
++		return 0, fmt.Errorf("%w: unknown unit scale %d", apigxmodel.ErrInvalidArgument, from)
++	}
++	return ConvertUnitPriceMicro(priceMicro, from, base.canonical)
++}
++
++type unitInfo struct {
++	// family 是同族标识：只有同族之间才能换算。
++	family string
++	// size 是该单位相对于同族基准的规模（基准单位 size = 1）。
++	size int
++	// canonical 是该族的基准单位（比较时统一换算到它）。
++	canonical int
++}
++
++// unitBase 返回单位的分族与规模。
++//
++// 只有**确定无疑**的换算才写进来：token 的 1M/1K 与时间的 分钟/秒 是纯数量级关系；
++// 张/次/文档之间没有任何可靠关系，因此各自独立成族（等于不可换算）。
++func unitBase(unit int) (unitInfo, bool) {
++	switch unit {
++	case UnitScalePerMillionTokens:
++		return unitInfo{family: "tokens", size: 1_000_000, canonical: UnitScalePerMillionTokens}, true
++	case UnitScalePerThousandTokens:
++		return unitInfo{family: "tokens", size: 1_000, canonical: UnitScalePerMillionTokens}, true
++	case UnitScalePerSecond:
++		return unitInfo{family: "time", size: 1, canonical: UnitScalePerSecond}, true
++	case UnitScalePerMinute:
++		return unitInfo{family: "time", size: 60, canonical: UnitScalePerSecond}, true
++	case UnitScalePerImage:
++		return unitInfo{family: "image", size: 1, canonical: UnitScalePerImage}, true
++	case UnitScalePerThousandChars:
++		return unitInfo{family: "chars", size: 1_000, canonical: UnitScalePerThousandChars}, true
++	case UnitScalePerDocument:
++		return unitInfo{family: "document", size: 1, canonical: UnitScalePerDocument}, true
++	case UnitScalePerRequest:
++		return unitInfo{family: "request", size: 1, canonical: UnitScalePerRequest}, true
++	default:
++		return unitInfo{}, false
++	}
++}
+-- 
+2.53.0.windows.1
+
