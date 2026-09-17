@@ -1,0 +1,204 @@
+From 4cb99ba99fb78637408e5bc08a6c32bb37bf4920 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 12:03:24 +0800
+Subject: [PATCH 20/20] =?UTF-8?q?feat(apigx):=20=E7=B4=A2=E5=BC=95?=
+ =?UTF-8?q?=E6=98=A0=E5=B0=84=E8=BF=9B=E7=A8=8B=E5=86=85=E7=BC=93=E5=AD=98?=
+ =?UTF-8?q?=EF=BC=8CT1.5=20=E5=AE=8C=E6=88=90=EF=BC=88=E7=AB=AF=E5=88=B0?=
+ =?UTF-8?q?=E7=AB=AF=207/7=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/channelpool/mapping_cache.go: TTL 30s 缓存 + apply 时显式失效
+  必要性: MapBaseKeyIndexes 要解密该渠道全部凭据, 且被逐 Key 统计(每请求)调用
+  安全权衡: 缓存含投影明文 -> TTL 短、仅状态变化时失效、不写日志/不持久化
+- 统计改走缓存路径; apply 后失效(否则会翻译到变化前的凭据上)
+- 测试 19/19(新增缓存命中/失效、缓存路径翻译一致性)
+- 端到端重跑 7/7: 隔离生效、恢复后 200、统计完整、无凭据泄露
+---
+ apigx/channelpool/mapping_cache.go   | 75 ++++++++++++++++++++++++++++
+ apigx/channelpool/outcome.go         |  2 +-
+ apigx/channelpool/projection.go      |  3 ++
+ apigx/channelpool/projection_test.go | 60 ++++++++++++++++++++++
+ 4 files changed, 139 insertions(+), 1 deletion(-)
+ create mode 100644 apigx/channelpool/mapping_cache.go
+
+diff --git a/apigx/channelpool/mapping_cache.go b/apigx/channelpool/mapping_cache.go
+new file mode 100644
+index 0000000..6920bb0
+--- /dev/null
++++ b/apigx/channelpool/mapping_cache.go
+@@ -0,0 +1,75 @@
++package channelpool
++
++import (
++	"sync"
++	"time"
++
++	"gorm.io/gorm"
++)
++
++// 索引映射的进程内缓存。
++//
++// # 为什么必须有
++//
++// `MapBaseKeyIndexes` 要读底座渠道并**解密该渠道的全部凭据**才能建立索引映射。
++// 它被逐 Key 统计（每次请求结束）以及任何「按请求解析上游 Key 维度」的扩展调用，
++// 每次都重算的话，热路径上会反复解密全部凭据——既慢，也让明文在内存里反复出现。
++//
++// # 安全权衡（必须记录）
++//
++// 缓存里包含 `IndexToKeyValue`（投影进底座的凭据明文）与 `IndexToStableKey`。
++// 明文本来就要在投影/故障隔离时短暂存在，但缓存会**延长它的驻留时间**，
++// 因此：TTL 取短值（30s），并保证**只在 `apply`（池子或渠道状态变化）时失效**；
++// 绝不把该缓存写入日志、持久化或对外响应。
++const mappingCacheTTL = 30 * time.Second
++
++type cachedMapping struct {
++	projection *Projection
++	expiresAt  time.Time
++}
++
++var (
++	mappingCacheMu sync.RWMutex
++	mappingCache   = map[int64]cachedMapping{} // key = 分享渠道 ID
++)
++
++// MapBaseKeyIndexesCached 与 `MapBaseKeyIndexes` 等价，但带进程内缓存。
++//
++// 热路径（逐 Key 统计）应当用它；池子或渠道状态变化后由 `InvalidateMappingCache` 失效。
++func MapBaseKeyIndexesCached(db *gorm.DB, shareChannelID int64) (*Projection, error) {
++	now := time.Now()
++
++	mappingCacheMu.RLock()
++	if cached, ok := mappingCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
++		mappingCacheMu.RUnlock()
++		return cached.projection, nil
++	}
++	mappingCacheMu.RUnlock()
++
++	projection, err := MapBaseKeyIndexes(db, shareChannelID)
++	if err != nil {
++		return nil, err
++	}
++
++	mappingCacheMu.Lock()
++	mappingCache[shareChannelID] = cachedMapping{projection: projection, expiresAt: now.Add(mappingCacheTTL)}
++	mappingCacheMu.Unlock()
++	return projection, nil
++}
++
++// InvalidateMappingCache 丢弃某渠道的映射缓存。
++//
++// **必须在池子或渠道状态变化后调用**（`apply` 之后、逐 Key 状态变更之后），
++// 否则缓存会继续把索引翻译到变化前的凭据上。
++func InvalidateMappingCache(shareChannelID int64) {
++	mappingCacheMu.Lock()
++	delete(mappingCache, shareChannelID)
++	mappingCacheMu.Unlock()
++}
++
++// ResetMappingCacheForTest 清空全部映射缓存（仅测试使用）。
++func ResetMappingCacheForTest() {
++	mappingCacheMu.Lock()
++	mappingCache = map[int64]cachedMapping{}
++	mappingCacheMu.Unlock()
++}
+diff --git a/apigx/channelpool/outcome.go b/apigx/channelpool/outcome.go
+index 8667f8d..59496d2 100644
+--- a/apigx/channelpool/outcome.go
++++ b/apigx/channelpool/outcome.go
+@@ -52,7 +52,7 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
+ 
+ 	// 索引映射**以底座渠道实际的 Key 列表为准**（见 MapBaseKeyIndexes 的注释）：
+ 	// 按「当前可用 Key」重算会在隔离/删除之后让两套索引分歧，导致统计落空或记错凭据。
+-	projection, err := MapBaseKeyIndexes(db, shareChannel.ID)
++	projection, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index e5f77bc..78a20f9 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -244,6 +244,9 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
+ 	if restoredAutoDisabled {
+ 		basemodel.InitChannelCache()
+ 	}
++
++	// 池子与渠道状态都变了：映射缓存必须失效，否则后续统计会把索引翻译到变化前的凭据上。
++	InvalidateMappingCache(built.shareChannel.ID)
+ 	return nil
+ }
+ 
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index 37a77e2..90c4d6b 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -590,3 +590,63 @@ func TestRecordKeyOutcomeAfterIsolationStillMapsCorrectly(t *testing.T) {
+ 	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&a).Error)
+ 	assert.Zero(t, a.LastOKAt, "不得记到已隔离的那把上")
+ }
++
++// ---- 索引映射缓存 ----
++
++// 缓存必须能命中（避免每次统计都解密全部凭据），且**在池子变化后失效**。
++func TestMappingCacheHitsAndInvalidates(t *testing.T) {
++	db := setupProjectionEnv(t)
++	ResetMappingCacheForTest()
++	t.Cleanup(ResetMappingCacheForTest)
++	const owner int64 = 9701
++	const baseChannelID int64 = 9494
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
++	}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-cache-one-aaaa", "sk-cache-two-bbbb"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID) // apply 内部会失效缓存
++	require.NoError(t, err)
++
++	first, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
++	require.NoError(t, err)
++	require.Equal(t, 2, first.KeyCount)
++
++	// 命中同一份对象（不是重建）
++	second, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
++	require.NoError(t, err)
++	assert.Same(t, first, second, "TTL 内应命中缓存而不是重新解密构建")
++
++	// 显式失效后必须重建（拿到的是新对象）
++	InvalidateMappingCache(shareChannel.ID)
++	third, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
++	require.NoError(t, err)
++	assert.NotSame(t, first, third, "失效后必须重新构建")
++	assert.Equal(t, 2, third.KeyCount)
++}
++
++// 统计走缓存路径时，索引翻译结果必须与不带缓存时一致。
++func TestCachedMappingStillTranslatesCorrectly(t *testing.T) {
++	db := setupProjectionEnv(t)
++	ResetMappingCacheForTest()
++	t.Cleanup(ResetMappingCacheForTest)
++	const owner int64 = 9702
++	const baseChannelID int64 = 9495
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
++	}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-ct-one-aaaaaa", "sk-ct-two-bbbbbb"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 1, KeyOutcome{Success: true}))
++
++	var b apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&b).Error)
++	assert.Positive(t, b.LastOKAt, "缓存路径下索引 1 仍应翻译到 stable-b")
++}
+-- 
+2.53.0.windows.1
+
