@@ -6616,5 +6616,16 @@
   "share.limitMode.inherit": "继承",
   "share.limitMode.unlimited": "明确不限",
   "share.limitMode.value": "明确值",
-  "share.offering.submit": "提交审核"
+  "share.offering.submit": "提交审核",
+  "usage.title": "我的用量",
+  "usage.byModel": "按模型汇总",
+  "usage.recentRequests": "最近请求",
+  "usage.empty": "还没有用量记录",
+  "usage.model": "模型",
+  "usage.requests": "请求数",
+  "usage.tokens": "Token 数",
+  "usage.cost": "成本（USD）",
+  "usage.time": "时间",
+  "usage.source": "来源",
+  "usage.requestId": "请求 ID"
 }

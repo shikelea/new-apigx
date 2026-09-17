@@ -6616,5 +6616,16 @@
   "share.limitMode.inherit": "Inherit",
   "share.limitMode.unlimited": "Unlimited",
   "share.limitMode.value": "Explicit limit",
-  "share.offering.submit": "Submit for review"
+  "share.offering.submit": "Submit for review",
+  "usage.title": "My Usage",
+  "usage.byModel": "Usage by model",
+  "usage.recentRequests": "Recent requests",
+  "usage.empty": "No usage record yet",
+  "usage.model": "Model",
+  "usage.requests": "Requests",
+  "usage.tokens": "Tokens",
+  "usage.cost": "Cost (USD)",
+  "usage.time": "Time",
+  "usage.source": "Source",
+  "usage.requestId": "Request ID"
 }

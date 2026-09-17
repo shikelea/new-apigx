@@ -24,6 +24,7 @@ import {
   FileText,
   FlaskConical,
   Store,
+  Coins,
   Share2,
   Key,
   LayoutDashboard,
@@ -73,6 +74,11 @@ export function useSidebarData(): SidebarData {
             title: t('share.title'),
             url: '/share',
             icon: Share2,
+          },
+          {
+            title: t('usage.title'),
+            url: '/usage',
+            icon: Coins,
           },
           {
             title: t('Chat'),
