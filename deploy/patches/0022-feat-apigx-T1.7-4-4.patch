@@ -1,0 +1,525 @@
+From dc541e7817c6c9a29a2f82d97116fcd3ee031dae Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 12:22:03 +0800
+Subject: [PATCH 22/22] =?UTF-8?q?feat(apigx):=20=E5=AE=B9=E9=87=8F?=
+ =?UTF-8?q?=E4=B8=8A=E9=99=90=E6=94=B9=E7=94=B1=E7=AD=96=E7=95=A5=E5=BA=93?=
+ =?UTF-8?q?=E9=A9=B1=E5=8A=A8=EF=BC=88T1.7=EF=BC=8C=E7=AB=AF=E5=88=B0?=
+ =?UTF-8?q?=E7=AB=AF=204/4=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/model/repo_policy.go: 按主键/按范围读取 apigx_capacity_policies,
+  **只透传四态原始值**(未配置/禁用/继承/明确不限/明确值), 解释权统一归 capacity.Resolve
+- channelpool/policy_source.go: 策略链=渠道策略->环境变量兜底, 30s 缓存 + 失效入口
+- api: PUT /api/apigx/channels/:id/capacity-policy (四态校验后才落库)
+- 修 bug: 策略接口未把策略挂到渠道 FK 上 -> 读取侧找不到策略, 上限静默不生效
+- 端到端(无任何环境变量上限): 明确值1 -> 200x1+429x2; 明确不限 -> 全放行; 未配置 -> 全放行
+- 环境陷阱记录: 重启网关时旧进程占着 3000, 新进程 bind 失败, 导致验证打到旧进程
+---
+ apigx/api/share.go                 | 104 +++++++++++++++++++++++++
+ apigx/api/share_test.go            |  57 ++++++++++++++
+ apigx/channelpool/policy_source.go | 119 +++++++++++++++++++++++++++++
+ apigx/model/repo_policy.go         |  87 +++++++++++++++++++++
+ apigx/model/repo_test.go           |  46 +++++++++++
+ apigx/relayhook/capacity_hook.go   |  19 ++++-
+ 6 files changed, 431 insertions(+), 1 deletion(-)
+ create mode 100644 apigx/channelpool/policy_source.go
+ create mode 100644 apigx/model/repo_policy.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index ebae595..08f4380 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -17,6 +17,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+@@ -46,6 +47,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.POST("/:id/keys", h.createUpstreamKey)
+ 		channels.GET("/:id/keys", h.listUpstreamKeys)
+ 		channels.POST("/:id/apply", h.applyChannelPool)
++		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
+ 	}
+ 
+ 	keys := r.Group("/keys")
+@@ -536,3 +538,105 @@ func (h *handler) applyChannelPool(c *gin.Context) {
+ 	// 只回数量，不回任何凭据信息
+ 	ok(c, gin.H{"channel_id": shareChannel.ID, "applied_keys": projection.KeyCount})
+ }
++
++// ---------------------------------------------------------------------------
++// 渠道容量策略
++// ---------------------------------------------------------------------------
++
++type capacityPolicyRequest struct {
++	// ConcurrencyMode 遵循四态：0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值。
++	ConcurrencyMode  *int   `json:"concurrency_mode"`
++	ConcurrencyValue *int64 `json:"concurrency_value"`
++}
++
++// setChannelCapacityPolicy 为分享渠道设置容量策略（当前支持"并发"维度）。
++//
++// 写入的是**四态原始值**，不做解释：解释统一由 `apigx/capacity` 的四态解析器负责，
++// 避免接口层与解析层各有一套规则。策略变更后上限最长一个缓存 TTL 生效（准入宽严的变化，
++// 不影响任何记账正确性）。
++func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	shareChannel, err := apigxmodel.GetChannel(h.db, owner, id)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	var req capacityPolicyRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	if req.ConcurrencyMode == nil {
++		fail(c, http.StatusBadRequest, "missing_mode", "concurrency_mode is required")
++		return
++	}
++	value := int64(0)
++	if req.ConcurrencyValue != nil {
++		value = *req.ConcurrencyValue
++	}
++	// 先用四态解析器校验「模式 + 值」的组合，非法组合不允许落库
++	policy := capacity.Policy{Mode: *req.ConcurrencyMode, Value: value}
++	if err := policy.Validate(); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
++		return
++	}
++
++	// 无论新建还是更新，都必须把策略**挂到渠道上**（`apigx_channels.capacity_policy_id`）。
++	// 只写策略行不建立这层引用的话，读取侧按渠道的 FK 找不到策略——上限静默不生效。
++	// 这是本接口首版实现的真实缺陷，由端到端验证发现（策略=明确值 1 时并发 3 仍全部放行）。
++	linkPolicy := func(policyID int64) error {
++		return h.db.Model(&apigxmodel.Channel{}).
++			Where("id = ? AND owner_user_id = ? AND alive_flag = ?", shareChannel.ID, owner, apigxmodel.AliveFlagAlive).
++			Updates(map[string]any{"capacity_policy_id": policyID, "updated_at": common.GetTimestamp()}).Error
++	}
++
++	// 同一渠道只保留一条策略（唯一索引是 scope 维度），因此存在则更新
++	existing, err := apigxmodel.FindCapacityPolicyByScope(h.db, owner, apigxmodel.CapacityScopeChannel, shareChannel.ID)
++	switch {
++	case err == nil:
++		updateErr := h.db.Model(&apigxmodel.CapacityPolicy{}).Where("id = ?", existing.ID).
++			Updates(map[string]any{
++				"max_concurrency_mode": policy.Mode,
++				"max_concurrency":      policy.Value,
++				"policy_version":       existing.PolicyVersion + 1,
++				"updated_at":           common.GetTimestamp(),
++			}).Error
++		if updateErr != nil {
++			failFromRepo(c, updateErr)
++			return
++		}
++		existing.MaxConcurrencyMode = policy.Mode
++		existing.MaxConcurrency = policy.Value
++		if linkErr := linkPolicy(existing.ID); linkErr != nil {
++			failFromRepo(c, linkErr)
++			return
++		}
++		ok(c, gin.H{"id": existing.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
++	case errors.Is(err, apigxmodel.ErrNotFound):
++		created := &apigxmodel.CapacityPolicy{
++			OwnerUserID: owner, ScopeType: apigxmodel.CapacityScopeChannel, ScopeID: shareChannel.ID,
++			PolicyVersion:      1,
++			MaxConcurrencyMode: policy.Mode, MaxConcurrency: policy.Value,
++		}
++		now := common.GetTimestamp()
++		created.CreatedAt, created.UpdatedAt = now, now
++		if createErr := h.db.Create(created).Error; createErr != nil {
++			failFromRepo(c, createErr)
++			return
++		}
++		if linkErr := linkPolicy(created.ID); linkErr != nil {
++			failFromRepo(c, linkErr)
++			return
++		}
++		ok(c, gin.H{"id": created.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
++	default:
++		failFromRepo(c, err)
++	}
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 58528a2..1862d3e 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -423,3 +423,60 @@ func TestApplyChannelPoolIsOwnerScoped(t *testing.T) {
+ 	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelA, 10)+"/apply", 0, "")
+ 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+ }
++
++// ---- 渠道容量策略接口 ----
++
++func TestSetChannelCapacityPolicy(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 8201
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	groupID := env.createGroup(t, owner, "策略组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	// 明确值：创建策略并挂到渠道上
++	rec, body := env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
++		`{"concurrency_mode":4,"concurrency_value":3}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	policyID := int64(data["id"].(float64))
++
++	var stored apigxmodel.CapacityPolicy
++	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
++	assert.EqualValues(t, 4, stored.MaxConcurrencyMode)
++	assert.EqualValues(t, 3, stored.MaxConcurrency)
++	assert.EqualValues(t, 1, stored.PolicyVersion)
++
++	// 再次设置：应更新同一条（不新建），版本号递增
++	rec, body = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
++		`{"concurrency_mode":4,"concurrency_value":9}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, float64(policyID), data["id"], "同一渠道只保留一条策略")
++
++	var count int64
++	require.NoError(t, env.db.Model(&apigxmodel.CapacityPolicy{}).Count(&count).Error)
++	assert.EqualValues(t, 1, count)
++	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
++	assert.EqualValues(t, 9, stored.MaxConcurrency)
++	assert.EqualValues(t, 2, stored.PolicyVersion)
++
++	// 四态非法组合必须被拒（明确值要求 > 0）
++	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
++		`{"concurrency_mode":4,"concurrency_value":0}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code, "非法四态组合不得落库")
++	// 未配置模式但给了值，同样非法
++	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
++		`{"concurrency_mode":0,"concurrency_value":5}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	// 缺 mode
++	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner, `{}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++
++	// 越权：别人的渠道一律 404
++	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", 8202,
++		`{"concurrency_mode":4,"concurrency_value":1}`)
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++}
+diff --git a/apigx/channelpool/policy_source.go b/apigx/channelpool/policy_source.go
+new file mode 100644
+index 0000000..d247f22
+--- /dev/null
++++ b/apigx/channelpool/policy_source.go
+@@ -0,0 +1,119 @@
++package channelpool
++
++import (
++	"sync"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 容量策略的读取与缓存。
++//
++// # 为什么要有缓存
++//
++// 上限要在**每个请求**上解析（热路径），而策略存在数据库里。缓存按「分享渠道」维度存
++// 已经解析好的**策略链**，TTL 取短值；策略变更（分享者改上限）最长一个 TTL 后生效——
++// 这一点必须记录：容量上限不是「改了立刻全局生效」的配置，短暂延迟是可接受的，
++// 因为它只影响准入的宽严，不会造成记账错误。
++
++const policyCacheTTL = 30 * time.Second
++
++type cachedPolicies struct {
++	// concurrency 是并发维度的策略链（最具体在最前）。
++	concurrency []capacity.Policy
++	expiresAt   time.Time
++}
++
++var (
++	policyCacheMu sync.RWMutex
++	policyCache   = map[int64]cachedPolicies{} // key = 分享渠道 ID
++)
++
++// policyFromRaw 把「模式 + 值」的原始组合转成四态策略。
++//
++// 直接透传模式：**未配置（0）绝不被解释成「不限」**，解释权归 `capacity.Resolve`。
++func policyFromRaw(mode int, value int64) capacity.Policy {
++	return capacity.Policy{Mode: mode, Value: value}
++}
++
++// loadChannelConcurrencyChain 组装该分享渠道的并发上限策略链。
++//
++// 顺序是「最具体 → 最一般」：
++//  1. 渠道自身的容量策略（`apigx_channels.capacity_policy_id` → `apigx_capacity_policies`）
++//  2. 环境变量兜底（过渡期的部署级默认，值为 0 表示未配置）
++//
++// 两者都未配置时整条链仍未表态，`capacity.Resolve` 会返回 Unset —— 调用方据此
++// **不施加约束**。这正是「未配置 ≠ 不限」在行为层的体现：它是待补的过渡状态，
++// 而不是一个被解释成无限的默认值。
++func loadChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++	chain := make([]capacity.Policy, 0, 2)
++
++	if db != nil {
++		var shareChannel apigxmodel.Channel
++		if err := db.Where("id = ?", shareChannelID).First(&shareChannel).Error; err == nil && shareChannel.CapacityPolicyID > 0 {
++			if policy, err := apigxmodel.GetCapacityPolicy(db, shareChannel.CapacityPolicyID); err == nil {
++				mode, value := policy.Concurrency()
++				chain = append(chain, policyFromRaw(mode, value))
++			} else {
++				common.SysError("channelpool: load capacity policy failed: " + err.Error())
++			}
++		}
++	}
++
++	if envLimit > 0 {
++		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeValue, Value: envLimit})
++	} else {
++		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeUnset})
++	}
++	return chain
++}
++
++// ChannelConcurrencyChain 返回渠道并发维度的策略链（带缓存）。
++func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++	now := time.Now()
++	policyCacheMu.RLock()
++	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
++		policyCacheMu.RUnlock()
++		return cached.concurrency
++	}
++	policyCacheMu.RUnlock()
++
++	chain := loadChannelConcurrencyChain(db, shareChannelID, envLimit)
++
++	policyCacheMu.Lock()
++	policyCache[shareChannelID] = cachedPolicies{concurrency: chain, expiresAt: now.Add(policyCacheTTL)}
++	policyCacheMu.Unlock()
++	return chain
++}
++
++// InvalidatePolicyCache 丢弃某渠道的策略缓存（策略变更、渠道变更后调用）。
++func InvalidatePolicyCache(shareChannelID int64) {
++	policyCacheMu.Lock()
++	delete(policyCache, shareChannelID)
++	policyCacheMu.Unlock()
++}
++
++// ResetPolicyCacheForTest 清空全部策略缓存（仅测试使用）。
++func ResetPolicyCacheForTest() {
++	policyCacheMu.Lock()
++	policyCache = map[int64]cachedPolicies{}
++	policyCacheMu.Unlock()
++}
++
++// ShareChannelIDByBase 按底座渠道 ID 找出我们的分享渠道 ID。
++//
++// 返回 false 表示这不是我们的分享渠道（例如管理员自建的普通渠道），
++// 此时调用方应当只有环境变量兜底可用。
++func ShareChannelIDByBase(db *gorm.DB, baseChannelID int) (int64, bool) {
++	if db == nil || baseChannelID <= 0 {
++		return 0, false
++	}
++	var shareChannel apigxmodel.Channel
++	if err := db.Where("base_channel_id = ?", baseChannelID).First(&shareChannel).Error; err != nil {
++		return 0, false
++	}
++	return shareChannel.ID, true
++}
+diff --git a/apigx/model/repo_policy.go b/apigx/model/repo_policy.go
+new file mode 100644
+index 0000000..42eea14
+--- /dev/null
++++ b/apigx/model/repo_policy.go
+@@ -0,0 +1,87 @@
++package apigxmodel
++
++import (
++	"errors"
++	"fmt"
++
++	"gorm.io/gorm"
++)
++
++// 容量策略（`apigx_capacity_policies`）的读取。
++//
++// 每个维度都是「模式 + 值」的四态组合（见 docs/stage0/schema-draft.md §3.3）：
++// 未配置 / 禁用 / 继承 / 明确不限 / 明确值。**读取层不做解释**，只把原始值交给
++// `apigx/capacity` 的四态解析器（`capacity.Resolve`），避免两处各有一套解释规则。
++
++// CapacityScope 是策略的适用范围（`ScopeType`）。
++const (
++	// CapacityScopePlatform 平台级默认。
++	CapacityScopePlatform int = 0
++	// CapacityScopeChannel 分享渠道。
++	CapacityScopeChannel int = 1
++	// CapacityScopeUpstreamKey 单把上游凭据。
++	CapacityScopeUpstreamKey int = 2
++	// CapacityScopeUpstreamAccount 上游账户池。
++	CapacityScopeUpstreamAccount int = 3
++	// CapacityScopeUser 使用者。
++	CapacityScopeUser int = 4
++)
++
++// GetCapacityPolicy 按主键读取策略；不存在返回 ErrNotFound。
++func GetCapacityPolicy(db *gorm.DB, id int64) (*CapacityPolicy, error) {
++	if db == nil || id <= 0 {
++		return nil, fmt.Errorf("%w: policy id is required", ErrInvalidArgument)
++	}
++	var policy CapacityPolicy
++	err := db.Where("id = ?", id).First(&policy).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &policy, nil
++}
++
++// FindCapacityPolicyByScope 按「所有者 + 范围」读取策略；不存在返回 ErrNotFound。
++//
++// 唯一索引是 (ScopeType, ScopeID)，因此同一范围只会有一条策略。
++func FindCapacityPolicyByScope(db *gorm.DB, ownerUserID int64, scopeType int, scopeID int64) (*CapacityPolicy, error) {
++	if db == nil || scopeID <= 0 {
++		return nil, fmt.Errorf("%w: scope id is required", ErrInvalidArgument)
++	}
++	var policy CapacityPolicy
++	err := db.Where("owner_user_id = ? AND scope_type = ? AND scope_id = ?", ownerUserID, scopeType, scopeID).
++		First(&policy).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &policy, nil
++}
++
++// Concurrency 返回「并发」维度的原始四态值（模式 + 值）。
++func (p *CapacityPolicy) Concurrency() (int, int64) {
++	if p == nil {
++		return 0, 0
++	}
++	return p.MaxConcurrencyMode, p.MaxConcurrency
++}
++
++// RPM 返回「每分钟请求数」维度的原始四态值。
++func (p *CapacityPolicy) RPM() (int, int64) {
++	if p == nil {
++		return 0, 0
++	}
++	return p.RpmMode, p.RpmLimit
++}
++
++// TPM 返回「每分钟 token 数」维度的原始四态值。
++func (p *CapacityPolicy) TPM() (int, int64) {
++	if p == nil {
++		return 0, 0
++	}
++	return p.TpmMode, p.TpmLimit
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index f7282e0..163a461 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -291,3 +291,49 @@ func TestParseImportedKeysRejectsOversizedBatch(t *testing.T) {
+ 	_, err := ParseImportedKeys(b.String())
+ 	assert.ErrorIs(t, err, ErrImportRejected, "超批量上限必须整体拒绝")
+ }
++
++// ---- 容量策略读取（四态透传） ----
++
++// 读取层**不解释**四态：原样把「模式 + 值」交给 capacity.Resolve，避免两处各有一套规则。
++func TestCapacityPolicyReadsRawFourState(t *testing.T) {
++	db := newRepoDB(t)
++	const owner int64 = 9901
++
++	policy := &CapacityPolicy{
++		OwnerUserID: owner, ScopeType: CapacityScopeChannel, ScopeID: 555,
++		PolicyVersion: 1,
++		// 并发：明确值 7；RPM：明确不限；TPM：未配置
++		MaxConcurrencyMode: 4, MaxConcurrency: 7,
++		RpmMode: 3, RpmLimit: 0,
++		TpmMode: 0, TpmLimit: 0,
++	}
++	require.NoError(t, db.Create(policy).Error)
++
++	got, err := GetCapacityPolicy(db, policy.ID)
++	require.NoError(t, err)
++	mode, value := got.Concurrency()
++	assert.Equal(t, 4, mode, "明确值必须原样读出")
++	assert.EqualValues(t, 7, value)
++
++	rpmMode, rpmValue := got.RPM()
++	assert.Equal(t, 3, rpmMode, "明确不限必须原样读出，不能被折叠成 0")
++	assert.Zero(t, rpmValue)
++
++	tpmMode, _ := got.TPM()
++	assert.Zero(t, tpmMode, "未配置就是未配置，不得被解释成不限")
++
++	// 按范围查
++	byScope, err := FindCapacityPolicyByScope(db, owner, CapacityScopeChannel, 555)
++	require.NoError(t, err)
++	assert.Equal(t, policy.ID, byScope.ID)
++
++	// 不同所有者查不到（归属隔离）
++	_, err = FindCapacityPolicyByScope(db, 9902, CapacityScopeChannel, 555)
++	assert.ErrorIs(t, err, ErrNotFound)
++
++	// 不存在的策略
++	_, err = GetCapacityPolicy(db, 999999)
++	assert.ErrorIs(t, err, ErrNotFound)
++	_, err = GetCapacityPolicy(db, 0)
++	assert.ErrorIs(t, err, ErrInvalidArgument)
++}
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index 4880623..aa1a799 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -105,7 +105,24 @@ func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error
+ 		return nil
+ 	}
+ 
+-	if err := add(capacity.ChannelConcurrency(int64(channelID)), cfg.ChannelLimit); err != nil {
++	// 渠道维度：策略链 = 渠道自身的容量策略（apigx_capacity_policies） → 环境变量兜底。
++	// 策略存在数据库里，因此走 channelpool 的短 TTL 缓存；改上限最长一个 TTL 后生效。
++	if shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID); ok {
++		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit)
++		res, err := capacity.Resolve(chain...)
++		if err != nil {
++			return nil, err
++		}
++		switch res.Decision {
++		case capacity.DecisionLimited:
++			dims = append(dims, capacity.Dimension{Key: capacity.ChannelConcurrency(int64(channelID)), Limit: res.Value, Amount: 1})
++		case capacity.DecisionDisabled:
++			return nil, fmt.Errorf("capacity disabled on dimension %s", capacity.ChannelConcurrency(int64(channelID)))
++		default:
++			// unset / unlimited：本层不施加约束
++		}
++	} else if err := add(capacity.ChannelConcurrency(int64(channelID)), cfg.ChannelLimit); err != nil {
++		// 不是我们的分享渠道：退回环境变量（管理员自建渠道没有任何 APIGX 策略）
+ 		return nil, err
+ 	}
+ 	if tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId); tokenID > 0 {
+-- 
+2.53.0.windows.1
+
