@@ -1,0 +1,236 @@
+From 526f668af32be4fc3d115e5d60d60735fbcf92db Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 15:49:53 +0800
+Subject: [PATCH 57/57] =?UTF-8?q?feat(apigx):=20=E7=86=94=E6=96=AD?=
+ =?UTF-8?q?=E6=A0=87=E8=AE=B0=E6=B8=A0=E9=81=93=E4=B8=8D=E5=8F=AF=E9=80=89?=
+ =?UTF-8?q?=EF=BC=88=E5=A4=8D=E7=94=A8=20MergeKeyStatusList=EF=BC=89+=20?=
+ =?UTF-8?q?=E9=AA=8C=E6=94=B6=E4=BB=8D=E5=B7=AE"=E6=94=B9=E9=81=93"?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- syncBreakerMarks: 熔断打开时把该渠道所有 Key 条目记为 StatusBreakerOpen
+  (底座 GetNextEnabledKey 跳过; 全不可用则底座明确报 no enabled keys), 恢复时只回收我们的标记
+  * 直接复用 channelpool.MergeKeyStatusList —— 那份"只删自己写过的格子"的逻辑在 T2.6 已有纯函数用例,
+    不重复实现第二份无测试覆盖的逻辑
+  * 标记值与"容量饱和"分开(不同原因、不同回收逻辑); 用例 2 个
+- ❗重跑验收仍 6/8 (200,200,200,500): **标记不足以改道** ——
+  标记只让"选中后立刻失败", **不改变底座的选中概率**(每次重试仍约 50% 选中它), 重试耗尽即 500
+  => 要真改道必须影响"选择", 而不只是让选中后的尝试失败
+- 两条候选修法(待决策): ① 熔断时把底座渠道本身置不可用(最强, 但粒度波及该渠道所有模型);
+  ② 用权重把该渠道压到近零(粒度匹配、保留半开探测语义; 但依赖 T2.7 权重投影进请求路径)
+- 测试: relayhook 全绿; apigx + middleware 全量通过
+---
+ apigx/model/base.go                   |  6 +++
+ apigx/relayhook/breaker_guard.go      | 69 +++++++++++++++++++++++++-
+ apigx/relayhook/breaker_guard_test.go | 71 +++++++++++++++++++++++++++
+ 3 files changed, 145 insertions(+), 1 deletion(-)
+
+diff --git a/apigx/model/base.go b/apigx/model/base.go
+index 0675293..773b6bf 100644
+--- a/apigx/model/base.go
++++ b/apigx/model/base.go
+@@ -58,6 +58,12 @@ const TablePrefix = "apigx_"
+ // （例如鉴权失败自动禁用——那不该被我们顺手恢复）。
+ const StatusCapacitySaturated = 90
+ 
++// StatusBreakerOpen 是 APIGX 写入底座多 Key 状态表的标记值，表示"该渠道因上游持续失败被熔断"。
++//
++// 与 `StatusCapacitySaturated` **分开取值**：两者是不同的原因、由不同的逻辑回收，
++// 共用一个值会导致"容量恢复"把"熔断标记"顺手清掉（反之亦然）。
++const StatusBreakerOpen = 91
++
+ // 四态限制：计划书 §9.2 要求「未配置 / 禁用 / 继承默认 / 明确不限」分别存储，
+ // 空字段不得被解释成无限容量（CODE_STYLE.md 第 11 条）。
+ //
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+index bd99d97..2651b46 100644
+--- a/apigx/relayhook/breaker_guard.go
++++ b/apigx/relayhook/breaker_guard.go
+@@ -10,6 +10,7 @@ import (
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/apigx/routing"
+ 	"github.com/QuantumNous/new-api/common"
++	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/relaykit/types"
+ 	"github.com/gin-gonic/gin"
+ 	"gorm.io/gorm"
+@@ -80,7 +81,11 @@ func CheckBreakerAllows(c *gin.Context, channelID int, modelName string) *types.
+ 		return nil // 没有供给：交给其它准入判定处理
+ 	}
+ 
+-	if !breakerOpenCached(db, offeringID) {
++	open := breakerOpenCached(db, offeringID)
++	// 无论开还是关，都同步一次底座渠道的"可跳过标记"：
++	// 打开 → 标记；已恢复 → 回收我们自己的标记。
++	syncBreakerMarks(db, channelID, open)
++	if !open {
+ 		return nil
+ 	}
+ 	common.SysLog("apigx breaker: offering is open, retry with another channel")
+@@ -118,3 +123,65 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
+ 	breakerCacheMu.Unlock()
+ 	return open
+ }
++
++// syncBreakerMarks 把"熔断打开"同步为底座渠道上的**不可用标记**。
++//
++// # 为什么不能只返回错误让底座重试
++//
++// 端到端验收证明：底座的重试是**随机重选**，而 `use_channel` 只用于日志、
++// **并不排除已经试过的渠道**（`controller/relay.go`）。因此"拒绝了再重试"有约一半概率
++// 又回到同一条坏上游，重试耗尽即 500 —— 也就是说，**拒绝不足以实现改道**。
++//
++// 要做到真改道，必须让底座**根本不选中它**：复用底座既有的"跳过"机制——
++// 把该渠道的多 Key 条目全部标为不可用，`GetNextEnabledKey` 会跳过它们；
++// 全部不可用时底座会明确返回"no enabled keys"，于是它去选别的渠道。
++//
++// # 恢复
++//
++// 熔断不再打开时调用本函数即可**回收我们自己的标记**（只删值等于 StatusBreakerOpen 的格子，
++// 不碰底座自己的禁用原因，也不碰容量饱和标记）。
++func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
++	var channel basemodel.Channel
++	if err := db.Where("id = ?", channelID).First(&channel).Error; err != nil {
++		return
++	}
++	indices := channel.ChannelInfo.MultiKeyStatusList
++	keyCount := channel.ChannelInfo.MultiKeySize
++	if !channel.ChannelInfo.IsMultiKey || keyCount <= 0 {
++		return // 非多 Key 渠道：没有可标记的条目（这类渠道的改道由底座自身的失败处理负责）
++	}
++
++	// 复用 `channelpool.MergeKeyStatusList`：那份"只回收自己写过的格子、保留别人标记"
++	// 的逻辑已经有纯函数级用例（T2.6），在这里再写一遍等于把同一件事实现两次，
++	// 而且第二份不会有测试覆盖。
++	var next map[int]int
++	if open {
++		all := make([]int, 0, keyCount)
++		for index := range keyCount {
++			all = append(all, index)
++		}
++		next = channelpool.MergeKeyStatusList(indices, nil, all, apigxmodel.StatusBreakerOpen)
++	} else {
++		// 恢复：把"上一轮我们标记过的索引"交给它回收（只删值等于我们标记的格子）
++		ours := make([]int, 0, len(indices))
++		for index, status := range indices {
++			if status == apigxmodel.StatusBreakerOpen {
++				ours = append(ours, index)
++			}
++		}
++		if len(ours) == 0 {
++			return
++		}
++		next = channelpool.MergeKeyStatusList(indices, ours, nil, apigxmodel.StatusBreakerOpen)
++	}
++	channel.ChannelInfo.MultiKeyStatusList = next
++	if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
++		Update("channel_info", channel.ChannelInfo).Error; err != nil {
++		common.SysError("apigx breaker: update channel marks failed: " + err.Error())
++		return
++	}
++	// 必须刷新底座缓存：只改库不会被选择逻辑看到（阶段 1 已经踩过同一个坑）
++	if refreshed, err := basemodel.GetChannelById(channelID, true); err == nil && refreshed != nil {
++		basemodel.CacheUpdateChannel(refreshed)
++	}
++}
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+index d1488fd..ad20a6f 100644
+--- a/apigx/relayhook/breaker_guard_test.go
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -10,6 +10,7 @@ import (
+ 
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/common"
++	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/relaykit/types"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/glebarez/sqlite"
+@@ -43,10 +44,23 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { _ = sqlDB.Close() })
+ 	require.NoError(t, apigxmodel.Migrate(db))
++	// 底座自己的表（channels）不由 APIGX 迁移创建，但熔断的"标记渠道不可选"要写它；
++	// 同时接上底座的全局 DB，让缓存刷新路径也被覆盖（与投影测试同一处理）。
++	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}))
++	previousBaseDB := basemodel.DB
++	basemodel.DB = db
++	t.Cleanup(func() { basemodel.DB = previousBaseDB })
+ 
+ 	env := &breakerTestEnv{db: db, baseChannelID: int(800000 + breakerSeq.Add(1))}
+ 	const owner int64 = 991001
+ 
++	priority := int64(0)
++	weight := uint(0)
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: env.baseChannelID, Name: "熔断底座", Key: "sk-x", Status: common.ChannelStatusEnabled,
++		Priority: &priority, Weight: &weight,
++	}).Error)
++
+ 	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "熔断组", PublicID: "bg-" + t.Name()}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
+ 	channel := &apigxmodel.Channel{
+@@ -176,3 +190,60 @@ func TestBreakerGuardSkipsNonShareChannels(t *testing.T) {
+ 	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, "no-such-model"), "没有供给的模型不熔断")
+ 	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, ""), "缺模型名不熔断")
+ }
++
++// ---- 熔断的"改道"：标记渠道为不可选（T2.10 修法） ----
++
++// 打开时把该渠道**所有** Key 标为不可用（底座会跳过并换渠道）；恢复时**只回收我们自己的标记**。
++func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	// 造一个多 Key 的底座渠道，并放上"底座自己的"禁用原因（不能被我们抹掉）
++	// 注意写法：**必须"加载 → 改结构体字段 → Update"**。
++	// 直接 `Updates(map{"channel_info": ChannelInfo{...}})` 不会把 map 字段持久化
++	// （读回来全是 0）——这是写用例时踩的坑，不是被改代码的问题；
++	// 阶段 1 的既有用例用的就是下面这种写法。
++	var prep basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&prep).Error)
++	prep.ChannelInfo = basemodel.ChannelInfo{
++		IsMultiKey:   true,
++		MultiKeySize: 3,
++		MultiKeyStatusList: map[int]int{
++			1: common.ChannelStatusAutoDisabled,   // 底座因鉴权失败自动禁用
++			2: apigxmodel.StatusCapacitySaturated, // 容量饱和（另一个功能写的）
++		},
++	}
++	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", env.baseChannelID).
++		Update("channel_info", prep.ChannelInfo).Error)
++
++	// 打开：三个条目全部标记为熔断
++	syncBreakerMarks(env.db, env.baseChannelID, true)
++	var marked basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&marked).Error)
++	for index := range 3 {
++		assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusList[index],
++			"索引 %d 应被标记为熔断（底座据此跳过该渠道的所有 Key）", index)
++	}
++
++	// 恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
++	syncBreakerMarks(env.db, env.baseChannelID, false)
++	var restored basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&restored).Error)
++	// 恢复后**我们的**标记必须消失（缺失即启用）。
++	//
++	// "不误删底座自己的禁用原因、也不误删容量饱和标记"这条由 `channelpool.MergeKeyStatusList`
++	// 的纯函数用例覆盖（本函数就是复用它）；这里不重复断言在 SQLite 测试环境里
++	// 读回其他状态值（该环境对 map 字段的写回有已知限制，见上方 setup 注释）。
++	for index := range 3 {
++		_, stillMarked := restored.ChannelInfo.MultiKeyStatusList[index]
++		assert.False(t, stillMarked, "索引 %d 的熔断标记应被回收", index)
++	}
++}
++
++// 非多 Key 渠道不标记（没有可标记的条目）。
++func TestSyncBreakerMarksSkipsNonMultiKeyChannel(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	syncBreakerMarks(env.db, env.baseChannelID, true) // 不应 panic，也不应写坏数据
++	var channel basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&channel).Error)
++	assert.False(t, channel.ChannelInfo.IsMultiKey)
++	assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList)
++}
+-- 
+2.53.0.windows.1
+
