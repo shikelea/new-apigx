@@ -1,0 +1,550 @@
+From 2c2f315b5221b6a626f62026aa987ff708531aa6 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 22:22:28 +0800
+Subject: [PATCH 87/87] =?UTF-8?q?feat(web):=20T3.9=20=E4=BB=BB=E5=8A=A1?=
+ =?UTF-8?q?=E4=B8=AD=E5=BF=83=E9=A1=B5=E9=9D=A2=E5=AE=8C=E6=88=90=EF=BC=88?=
+ =?UTF-8?q?=E7=BB=93=E6=9E=9C=E5=A4=8D=E7=94=A8=E5=BA=95=E5=BA=A7=E6=B8=B2?=
+ =?UTF-8?q?=E6=9F=93=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- index.tsx: 任务表(提交时间/任务ID/类型/**状态**/进度/消耗额度/失败原因/**结果**)
+  结果列**直接复用底座 TaskArtifactsCell**(图片/视频/音频预览与历史格式都沿用底座实现), 不另写一套
+- types.ts(改): **改为复用底座 TaskLog 类型**(同一数据不该有两套类型, 否则两处漂移)
+- 路由 /task-center + 侧边栏; i18n 17 键
+- 状态显示: 已知六态用文案, **未知状态显示原值**(不静默变空白); 失败原因仅终态显示
+- 检查(全过): build ✅(顺带重生成路由树) / typecheck ✅ / oxlint 0 错 0 警 ✅ / 用例 20 文件 353 条全绿 ✅
+
+阶段3 前端(§4 页面)到此全部有实现
+仍待用户: ①任务"保留期限"需后端新增字段/接口 ②price-sync 的 UI 取向(单条/批量JSON/自动抓取)
+---
+ web/src/features/task-center/index.tsx        | 112 ++++++++++++++++++
+ web/src/features/task-center/types.ts         |  28 ++---
+ web/src/hooks/use-sidebar-data.ts             |   5 +
+ web/src/i18n/locales/en.json                  |  19 ++-
+ web/src/i18n/locales/fr.json                  |  19 ++-
+ web/src/i18n/locales/ja.json                  |  19 ++-
+ web/src/i18n/locales/ru.json                  |  19 ++-
+ web/src/i18n/locales/vi.json                  |  19 ++-
+ web/src/i18n/locales/zh-TW.json               |  19 ++-
+ web/src/i18n/locales/zh.json                  |  19 ++-
+ web/src/routeTree.gen.ts                      |  22 ++++
+ .../_authenticated/task-center/index.tsx      |  24 ++++
+ 12 files changed, 296 insertions(+), 28 deletions(-)
+ create mode 100644 web/src/features/task-center/index.tsx
+ create mode 100644 web/src/routes/_authenticated/task-center/index.tsx
+
+diff --git a/web/src/features/task-center/index.tsx b/web/src/features/task-center/index.tsx
+new file mode 100644
+index 0000000..38557a4
+--- /dev/null
++++ b/web/src/features/task-center/index.tsx
+@@ -0,0 +1,112 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useQuery } from '@tanstack/react-query'
++import dayjs from 'dayjs'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { ErrorState } from '@/components/error-state'
++import { SectionPageLayout } from '@/components/layout'
++import { LoadingState } from '@/components/loading-state'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { TaskArtifactsCell } from '@/features/usage-logs/components/task-artifacts'
++
++import { getMyTasks } from './api'
++import { isTaskTerminal, taskStatusLabelKey } from './lib/status'
++import type { UserTask } from './types'
++
++const PAGE_SIZE = 50
++
++/** 任务中心：查看自己的异步任务状态与结果。 */
++export function TaskCenter() {
++  const { t } = useTranslation()
++
++  const query = useQuery({
++    queryKey: ['apigx-my-tasks', PAGE_SIZE],
++    queryFn: () => getMyTasks(1, PAGE_SIZE),
++  })
++
++  const tasks = query.data?.data?.items ?? []
++
++  if (query.isPending) {
++    return <LoadingState />
++  }
++  if (query.isError) {
++    return (
++      <ErrorState
++        onRetry={() => {
++          void query.refetch()
++        }}
++      />
++    )
++  }
++
++  const columns: StaticDataTableColumn<UserTask>[] = [
++    {
++      id: 'submit_time',
++      header: t('taskCenter.submitTime'),
++      cell: (row) => dayjs.unix(row.submit_time).format('YYYY-MM-DD HH:mm:ss'),
++    },
++    { id: 'task_id', header: t('taskCenter.taskId'), cell: (row) => row.task_id },
++    { id: 'action', header: t('taskCenter.action'), cell: (row) => row.action },
++    { id: 'status', header: t('taskCenter.status'), cell: (row) => <TaskStatus status={row.status} /> },
++    { id: 'progress', header: t('taskCenter.progress'), cell: (row) => row.progress ?? '' },
++    { id: 'quota', header: t('taskCenter.quota'), cell: (row) => String(row.quota) },
++    {
++      id: 'fail_reason',
++      header: t('taskCenter.failReason'),
++      cell: (row) => (isTaskTerminal(row.status) ? (row.fail_reason ?? '') : ''),
++    },
++    {
++      id: 'artifacts',
++      header: t('taskCenter.artifacts'),
++      cell: (row) => <TaskArtifactsCell key={row.task_id} log={row} />,
++    },
++  ]
++
++  return (
++    <SectionPageLayout>
++      <SectionPageLayout.Title>{t('taskCenter.title')}</SectionPageLayout.Title>
++      <SectionPageLayout.Content>
++        <Card>
++          <CardHeader>
++            <CardTitle>{t('taskCenter.myTasks')}</CardTitle>
++          </CardHeader>
++          <CardContent>
++            {tasks.length === 0 ? (
++              <EmptyState title={t('taskCenter.empty')} />
++            ) : (
++              <StaticDataTable columns={columns} data={tasks} getRowKey={(row) => row.id} />
++            )}
++          </CardContent>
++        </Card>
++      </SectionPageLayout.Content>
++    </SectionPageLayout>
++  )
++}
++
++/** 状态徽标：已知状态用文案，**未知状态显示原值**（不静默变空白）。 */
++function TaskStatus(props: { status: string }) {
++  const { t } = useTranslation()
++  const labelKey = taskStatusLabelKey(props.status)
++  const label = labelKey === '' ? props.status : t(labelKey)
++  return (
++    <span className={isTaskTerminal(props.status) ? 'font-medium' : 'text-muted-foreground'}>{label}</span>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/features/task-center/types.ts b/web/src/features/task-center/types.ts
+index c4617ed..9e32a0b 100644
+--- a/web/src/features/task-center/types.ts
++++ b/web/src/features/task-center/types.ts
+@@ -16,33 +16,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-// 「任务中心」的对外数据结构（字段与后端 `GET /api/task/self` 一致）。
++// 「任务中心」的对外数据结构。
++//
++// **刻意复用底座的 `TaskLog`**：`/api/task/self` 返回的就是底座的任务行，
++// 结果渲染（`TaskArtifactsCell`）也认这个类型 —— 再定义一份等价类型只会造成两处漂移。
++import type { TaskLog } from '@/features/usage-logs/types'
+ 
+-/** 一个异步任务。 */
+-export interface UserTask {
+-  id: number
+-  created_at: number
+-  updated_at: number
+-  task_id: string
+-  platform: string
+-  channel_id: number
+-  quota: number
+-  /** 任务类型（如 text2video） */
+-  action: string
+-  /** 状态：厂商词表 NOT_START / SUBMITTED / QUEUED / IN_PROGRESS / SUCCESS / FAILURE */
+-  status: string
+-  fail_reason: string
+-  submit_time: number
+-  start_time: number
+-  finish_time: number
+-  progress: string
+-}
++export type UserTask = TaskLog
+ 
+ export interface UserTaskListResponse {
+   success: boolean
+   message?: string
+   data?: {
+-    items: UserTask[] | null
++    items: TaskLog[] | null
+     total: number
+     page: number
+     page_size: number
+diff --git a/web/src/hooks/use-sidebar-data.ts b/web/src/hooks/use-sidebar-data.ts
+index 24c5a14..a049a7b 100644
+--- a/web/src/hooks/use-sidebar-data.ts
++++ b/web/src/hooks/use-sidebar-data.ts
+@@ -86,6 +86,11 @@ export function useSidebarData(): SidebarData {
+             url: '/apigx-platform',
+             icon: Settings2,
+           },
++          {
++            title: t('taskCenter.title'),
++            url: '/task-center',
++            icon: ListTodo,
++          },
+           {
+             title: t('Chat'),
+             icon: MessageSquare,
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 3df7838..83fb538 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6670,5 +6670,22 @@
+   "apigxPlatform.channelId": "Channel ID",
+   "apigxPlatform.noOffering": "No offering in this channel",
+   "apigxPlatform.publish": "Publish",
+-  "apigxPlatform.reject": "Reject"
++  "apigxPlatform.reject": "Reject",
++  "taskCenter.title": "Task center",
++  "taskCenter.myTasks": "My tasks",
++  "taskCenter.empty": "No task yet",
++  "taskCenter.submitTime": "Submit time",
++  "taskCenter.taskId": "Task ID",
++  "taskCenter.action": "Type",
++  "taskCenter.status": "Status",
++  "taskCenter.progress": "Progress",
++  "taskCenter.quota": "Quota used",
++  "taskCenter.failReason": "Failure reason",
++  "taskCenter.artifacts": "Result",
++  "taskCenter.status.notStart": "Not started",
++  "taskCenter.status.submitted": "Submitted",
++  "taskCenter.status.queued": "Queued",
++  "taskCenter.status.inProgress": "In progress",
++  "taskCenter.status.success": "Succeeded",
++  "taskCenter.status.failure": "Failed"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 654bb57..d01fed9 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6670,5 +6670,22 @@
+   "apigxPlatform.channelId": "Channel ID",
+   "apigxPlatform.noOffering": "No offering in this channel",
+   "apigxPlatform.publish": "Publish",
+-  "apigxPlatform.reject": "Reject"
++  "apigxPlatform.reject": "Reject",
++  "taskCenter.title": "Task center",
++  "taskCenter.myTasks": "My tasks",
++  "taskCenter.empty": "No task yet",
++  "taskCenter.submitTime": "Submit time",
++  "taskCenter.taskId": "Task ID",
++  "taskCenter.action": "Type",
++  "taskCenter.status": "Status",
++  "taskCenter.progress": "Progress",
++  "taskCenter.quota": "Quota used",
++  "taskCenter.failReason": "Failure reason",
++  "taskCenter.artifacts": "Result",
++  "taskCenter.status.notStart": "Not started",
++  "taskCenter.status.submitted": "Submitted",
++  "taskCenter.status.queued": "Queued",
++  "taskCenter.status.inProgress": "In progress",
++  "taskCenter.status.success": "Succeeded",
++  "taskCenter.status.failure": "Failed"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index ef810d5..0e0e118 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6670,5 +6670,22 @@
+   "apigxPlatform.channelId": "Channel ID",
+   "apigxPlatform.noOffering": "No offering in this channel",
+   "apigxPlatform.publish": "Publish",
+-  "apigxPlatform.reject": "Reject"
++  "apigxPlatform.reject": "Reject",
++  "taskCenter.title": "Task center",
++  "taskCenter.myTasks": "My tasks",
++  "taskCenter.empty": "No task yet",
++  "taskCenter.submitTime": "Submit time",
++  "taskCenter.taskId": "Task ID",
++  "taskCenter.action": "Type",
++  "taskCenter.status": "Status",
++  "taskCenter.progress": "Progress",
++  "taskCenter.quota": "Quota used",
++  "taskCenter.failReason": "Failure reason",
++  "taskCenter.artifacts": "Result",
++  "taskCenter.status.notStart": "Not started",
++  "taskCenter.status.submitted": "Submitted",
++  "taskCenter.status.queued": "Queued",
++  "taskCenter.status.inProgress": "In progress",
++  "taskCenter.status.success": "Succeeded",
++  "taskCenter.status.failure": "Failed"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index dc46088..f409105 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6670,5 +6670,22 @@
+   "apigxPlatform.channelId": "Channel ID",
+   "apigxPlatform.noOffering": "No offering in this channel",
+   "apigxPlatform.publish": "Publish",
+-  "apigxPlatform.reject": "Reject"
++  "apigxPlatform.reject": "Reject",
++  "taskCenter.title": "Task center",
++  "taskCenter.myTasks": "My tasks",
++  "taskCenter.empty": "No task yet",
++  "taskCenter.submitTime": "Submit time",
++  "taskCenter.taskId": "Task ID",
++  "taskCenter.action": "Type",
++  "taskCenter.status": "Status",
++  "taskCenter.progress": "Progress",
++  "taskCenter.quota": "Quota used",
++  "taskCenter.failReason": "Failure reason",
++  "taskCenter.artifacts": "Result",
++  "taskCenter.status.notStart": "Not started",
++  "taskCenter.status.submitted": "Submitted",
++  "taskCenter.status.queued": "Queued",
++  "taskCenter.status.inProgress": "In progress",
++  "taskCenter.status.success": "Succeeded",
++  "taskCenter.status.failure": "Failed"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 6dc21e5..8c2c684 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6670,5 +6670,22 @@
+   "apigxPlatform.channelId": "Channel ID",
+   "apigxPlatform.noOffering": "No offering in this channel",
+   "apigxPlatform.publish": "Publish",
+-  "apigxPlatform.reject": "Reject"
++  "apigxPlatform.reject": "Reject",
++  "taskCenter.title": "Task center",
++  "taskCenter.myTasks": "My tasks",
++  "taskCenter.empty": "No task yet",
++  "taskCenter.submitTime": "Submit time",
++  "taskCenter.taskId": "Task ID",
++  "taskCenter.action": "Type",
++  "taskCenter.status": "Status",
++  "taskCenter.progress": "Progress",
++  "taskCenter.quota": "Quota used",
++  "taskCenter.failReason": "Failure reason",
++  "taskCenter.artifacts": "Result",
++  "taskCenter.status.notStart": "Not started",
++  "taskCenter.status.submitted": "Submitted",
++  "taskCenter.status.queued": "Queued",
++  "taskCenter.status.inProgress": "In progress",
++  "taskCenter.status.success": "Succeeded",
++  "taskCenter.status.failure": "Failed"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index d1c9638..06aca5d 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6670,5 +6670,22 @@
+   "apigxPlatform.channelId": "Channel ID",
+   "apigxPlatform.noOffering": "No offering in this channel",
+   "apigxPlatform.publish": "Publish",
+-  "apigxPlatform.reject": "Reject"
++  "apigxPlatform.reject": "Reject",
++  "taskCenter.title": "Task center",
++  "taskCenter.myTasks": "My tasks",
++  "taskCenter.empty": "No task yet",
++  "taskCenter.submitTime": "Submit time",
++  "taskCenter.taskId": "Task ID",
++  "taskCenter.action": "Type",
++  "taskCenter.status": "Status",
++  "taskCenter.progress": "Progress",
++  "taskCenter.quota": "Quota used",
++  "taskCenter.failReason": "Failure reason",
++  "taskCenter.artifacts": "Result",
++  "taskCenter.status.notStart": "Not started",
++  "taskCenter.status.submitted": "Submitted",
++  "taskCenter.status.queued": "Queued",
++  "taskCenter.status.inProgress": "In progress",
++  "taskCenter.status.success": "Succeeded",
++  "taskCenter.status.failure": "Failed"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 9096e4d..365259b 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6670,5 +6670,22 @@
+   "apigxPlatform.channelId": "渠道 ID",
+   "apigxPlatform.noOffering": "该渠道暂无供给",
+   "apigxPlatform.publish": "发布",
+-  "apigxPlatform.reject": "驳回"
++  "apigxPlatform.reject": "驳回",
++  "taskCenter.title": "任务中心",
++  "taskCenter.myTasks": "我的任务",
++  "taskCenter.empty": "还没有任务",
++  "taskCenter.submitTime": "提交时间",
++  "taskCenter.taskId": "任务 ID",
++  "taskCenter.action": "类型",
++  "taskCenter.status": "状态",
++  "taskCenter.progress": "进度",
++  "taskCenter.quota": "消耗额度",
++  "taskCenter.failReason": "失败原因",
++  "taskCenter.artifacts": "结果",
++  "taskCenter.status.notStart": "未开始",
++  "taskCenter.status.submitted": "已提交",
++  "taskCenter.status.queued": "排队中",
++  "taskCenter.status.inProgress": "进行中",
++  "taskCenter.status.success": "成功",
++  "taskCenter.status.failure": "失败"
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index d9f73c1..fc99ded 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -54,6 +54,7 @@ import { Route as AuthenticatedShareChannelIdRouteImport } from './routes/_authe
+ import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
+ import { Route as AuthenticatedSystemInfoIndexRouteImport } from './routes/_authenticated/system-info/index'
+ import { Route as AuthenticatedSystemSettingsIndexRouteImport } from './routes/_authenticated/system-settings/index'
++import { Route as AuthenticatedTaskCenterIndexRouteImport } from './routes/_authenticated/task-center/index'
+ import { Route as AuthenticatedTaskPluginsIndexRouteImport } from './routes/_authenticated/task-plugins/index'
+ import { Route as AuthenticatedUsageLogsIndexRouteImport } from './routes/_authenticated/usage-logs/index'
+ import { Route as AuthenticatedUsageLogsSectionRouteImport } from './routes/_authenticated/usage-logs/$section'
+@@ -316,6 +317,12 @@ const AuthenticatedSystemSettingsIndexRoute =
+     path: '/',
+     getParentRoute: () => AuthenticatedSystemSettingsRouteRoute,
+   } as any)
++const AuthenticatedTaskCenterIndexRoute =
++  AuthenticatedTaskCenterIndexRouteImport.update({
++    id: '/task-center/',
++    path: '/task-center/',
++    getParentRoute: () => AuthenticatedRouteRoute,
++  } as any)
+ const AuthenticatedTaskPluginsIndexRoute =
+   AuthenticatedTaskPluginsIndexRouteImport.update({
+     id: '/task-plugins/',
+@@ -492,6 +499,7 @@ export interface FileRoutesByFullPath {
+   '/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
+   '/system-info/': typeof AuthenticatedSystemInfoIndexRoute
+   '/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
++  '/task-center/': typeof AuthenticatedTaskCenterIndexRoute
+   '/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
+   '/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
+   '/usage/': typeof AuthenticatedUsageIndexRoute
+@@ -558,6 +566,7 @@ export interface FileRoutesByTo {
+   '/subscriptions': typeof AuthenticatedSubscriptionsIndexRoute
+   '/system-info': typeof AuthenticatedSystemInfoIndexRoute
+   '/system-settings': typeof AuthenticatedSystemSettingsIndexRoute
++  '/task-center': typeof AuthenticatedTaskCenterIndexRoute
+   '/task-plugins': typeof AuthenticatedTaskPluginsIndexRoute
+   '/usage-logs': typeof AuthenticatedUsageLogsIndexRoute
+   '/usage': typeof AuthenticatedUsageIndexRoute
+@@ -628,6 +637,7 @@ export interface FileRoutesById {
+   '/_authenticated/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
+   '/_authenticated/system-info/': typeof AuthenticatedSystemInfoIndexRoute
+   '/_authenticated/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
++  '/_authenticated/task-center/': typeof AuthenticatedTaskCenterIndexRoute
+   '/_authenticated/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
+   '/_authenticated/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
+   '/_authenticated/usage/': typeof AuthenticatedUsageIndexRoute
+@@ -697,6 +707,7 @@ export interface FileRouteTypes {
+     | '/subscriptions/'
+     | '/system-info/'
+     | '/system-settings/'
++    | '/task-center/'
+     | '/task-plugins/'
+     | '/usage-logs/'
+     | '/usage/'
+@@ -763,6 +774,7 @@ export interface FileRouteTypes {
+     | '/subscriptions'
+     | '/system-info'
+     | '/system-settings'
++    | '/task-center'
+     | '/task-plugins'
+     | '/usage-logs'
+     | '/usage'
+@@ -832,6 +844,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/subscriptions/'
+     | '/_authenticated/system-info/'
+     | '/_authenticated/system-settings/'
++    | '/_authenticated/task-center/'
+     | '/_authenticated/task-plugins/'
+     | '/_authenticated/usage-logs/'
+     | '/_authenticated/usage/'
+@@ -1190,6 +1203,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedSystemSettingsIndexRouteImport
+       parentRoute: typeof AuthenticatedSystemSettingsRouteRoute
+     }
++    '/_authenticated/task-center/': {
++      id: '/_authenticated/task-center/'
++      path: '/task-center'
++      fullPath: '/task-center/'
++      preLoaderRoute: typeof AuthenticatedTaskCenterIndexRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/task-plugins/': {
+       id: '/_authenticated/task-plugins/'
+       path: '/task-plugins'
+@@ -1454,6 +1474,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedShareIndexRoute: typeof AuthenticatedShareIndexRoute
+   AuthenticatedSubscriptionsIndexRoute: typeof AuthenticatedSubscriptionsIndexRoute
+   AuthenticatedSystemInfoIndexRoute: typeof AuthenticatedSystemInfoIndexRoute
++  AuthenticatedTaskCenterIndexRoute: typeof AuthenticatedTaskCenterIndexRoute
+   AuthenticatedTaskPluginsIndexRoute: typeof AuthenticatedTaskPluginsIndexRoute
+   AuthenticatedUsageLogsIndexRoute: typeof AuthenticatedUsageLogsIndexRoute
+   AuthenticatedUsageIndexRoute: typeof AuthenticatedUsageIndexRoute
+@@ -1487,6 +1508,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedShareIndexRoute: AuthenticatedShareIndexRoute,
+   AuthenticatedSubscriptionsIndexRoute: AuthenticatedSubscriptionsIndexRoute,
+   AuthenticatedSystemInfoIndexRoute: AuthenticatedSystemInfoIndexRoute,
++  AuthenticatedTaskCenterIndexRoute: AuthenticatedTaskCenterIndexRoute,
+   AuthenticatedTaskPluginsIndexRoute: AuthenticatedTaskPluginsIndexRoute,
+   AuthenticatedUsageLogsIndexRoute: AuthenticatedUsageLogsIndexRoute,
+   AuthenticatedUsageIndexRoute: AuthenticatedUsageIndexRoute,
+diff --git a/web/src/routes/_authenticated/task-center/index.tsx b/web/src/routes/_authenticated/task-center/index.tsx
+new file mode 100644
+index 0000000..898cb8e
+--- /dev/null
++++ b/web/src/routes/_authenticated/task-center/index.tsx
+@@ -0,0 +1,24 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { createFileRoute } from '@tanstack/react-router'
++
++import { TaskCenter } from '@/features/task-center'
++
++export const Route = createFileRoute('/_authenticated/task-center/')({
++  component: TaskCenter,
++})
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+
