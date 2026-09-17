@@ -1,0 +1,322 @@
+From 4ddae470d8421d1b3d8d44a7fd0c969c0b32e788 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 07:47:40 +0800
+Subject: [PATCH 97/97] =?UTF-8?q?feat:=20=E6=A8=A1=E5=9E=8B=E5=B9=BF?=
+ =?UTF-8?q?=E5=9C=BA=E5=B8=A6=E3=80=8C=E8=B4=A8=E9=87=8F=E6=91=98=E8=A6=81?=
+ =?UTF-8?q?=E3=80=8D=EF=BC=88=E8=AE=A1=E5=88=92=E4=B9=A6=20=C2=A74=20?=
+ =?UTF-8?q?=E6=98=8E=E7=A1=AE=E8=A6=81=E6=B1=82=E7=9A=84=E4=B8=80=E9=A1=B9?=
+ =?UTF-8?q?=EF=BC=8C=E6=AD=A4=E5=89=8D=E7=BC=BA=E5=A4=B1=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+计划书 §4 写明模型广场要显示"模型卡片、可访问来源数和**质量摘要**"；我此前只做了来源数与能力徽标。
+
+- repo_plaza: PlazaItem 增加 SampleCount / ReliabilityLowerBoundPpm / LatencyMsP50 / Insufficient / Stale，
+  取数走 **ResolveQualityView(db, offeringID, QualityWindowSixHour, now)** ——
+  与路由/解释**同一个窗口、同一套口径**，避免"广场说 98%、路由解释说样本不足"这种自相矛盾
+- API: 广场**列表与详情**都返回这些字段
+- 前端: 卡片显示「质量: <摘要>」；新增纯逻辑 describePlazaQuality（样本不足/陈旧如实标注，
+  否则显示 Wilson 下界百分比），并复用既有的 formatPpm 语义；+3 条用例
+- 用例: TestPlazaCarriesQualitySummary（已发布公开供给必带质量字段；**无样本时必须 insufficient=true**）
+
+实测（重启后）: 广场 200，条目含 sample_count / reliability_lower_bound_ppm / insufficient
+  —— aiping 的两个供给有 4 个样本但正确地标为 **insufficient=true**（低于 20 样本阈值），
+     界面会显示"样本不足"而不是一个会误导的 4.56%
+
+检查: go build ✅ / apigx/api 用例 ✅ / typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅
+  / **整个前端套件 146 文件 1753 用例全绿** ✅
+---
+ apigx/api/share.go                            | 21 +++++++----
+ apigx/api/share_test.go                       | 36 ++++++++++++++++++
+ apigx/model/repo_plaza.go                     | 37 ++++++++++++++-----
+ .../features/plaza/__tests__/format.test.ts   | 18 ++++++++-
+ web/src/features/plaza/index.tsx              |  7 ++++
+ web/src/features/plaza/lib/format.ts          | 24 +++++++++++-
+ web/src/features/plaza/types.ts               |  6 +++
+ web/src/i18n/locales/en.json                  |  3 +-
+ web/src/i18n/locales/zh.json                  |  3 +-
+ 9 files changed, 132 insertions(+), 23 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index c6bb800..b07fa64 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -1303,14 +1303,19 @@ func (h *handler) getPlazaItem(c *gin.Context) {
+ // 只输出对外可见字段：**不含**渠道内部 ID、上游地址、凭据、成本价或任何内部标识。
+ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
+ 	out := gin.H{
+-		"offering_public_id": item.OfferingPublicID,
+-		"group_public_id":    item.GroupPublicID,
+-		"group_name":         item.GroupName,
+-		"model":              item.UpstreamModelID,
+-		"channel_public_id":  item.ChannelPublicID,
+-		"owner_user_id":      item.OwnerUserID,
+-		"capabilities":       item.Capabilities,
+-		"updated_at":         item.UpdatedAt,
++		"offering_public_id":          item.OfferingPublicID,
++		"sample_count":                item.SampleCount,
++		"reliability_lower_bound_ppm": item.ReliabilityLowerBoundPpm,
++		"latency_ms_p50":              item.LatencyMsP50,
++		"insufficient":                item.Insufficient,
++		"stale":                       item.Stale,
++		"group_public_id":             item.GroupPublicID,
++		"group_name":                  item.GroupName,
++		"model":                       item.UpstreamModelID,
++		"channel_public_id":           item.ChannelPublicID,
++		"owner_user_id":               item.OwnerUserID,
++		"capabilities":                item.Capabilities,
++		"updated_at":                  item.UpdatedAt,
+ 	}
+ 	if len(item.UnverifiedCapabilities) > 0 {
+ 		out["unverified_capabilities"] = item.UnverifiedCapabilities
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index c5c112f..e4c363f 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1070,3 +1070,39 @@ func TestShareGroupNameAndDescription(t *testing.T) {
+ 		`{"name":"`+strings.Repeat("字", 65)+`"}`)
+ 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+ }
++
++// 广场必须带**质量摘要**（计划书 §4），且**样本不足时要如实标注**而不是编一个数字。
++func TestPlazaCarriesQualitySummary(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 9301
++
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "质量组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
++	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座质量", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
++
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"quality-model"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++
++	// 先配价再发布（与产品规则一致：未配置价格不得发布）
++	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
++
++	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	items, _ := body["data"].(map[string]any)["items"].([]any)
++	require.NotEmpty(t, items, "已发布且分组公开的供给应当出现在广场")
++	first, _ := items[0].(map[string]any)
++
++	// 关键字段必须在（没有样本时也要在，只是 insufficient=true）
++	require.Contains(t, first, "reliability_lower_bound_ppm")
++	require.Contains(t, first, "sample_count")
++	assert.Equal(t, true, first["insufficient"], "没有样本时必须标为样本不足，而不是给出一个看起来可信的数字")
++	assert.Equal(t, float64(0), first["reliability_lower_bound_ppm"])
++}
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index 02251d2..ffd6277 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -30,6 +30,12 @@ const (
+ // 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
+ // 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
+ type PlazaItem struct {
++	// 质量摘要（最近 6 小时窗口）：样本不足时 Insufficient 为 true，界面必须显示"样本不足"而不是编一个数字。
++	SampleCount              int64
++	ReliabilityLowerBoundPpm int64
++	LatencyMsP50             int64
++	Insufficient             bool
++	Stale                    bool
+ 	// GroupPublicID/GroupName 用于广场按"分享分组"组织（我们的模式）。
+ 	GroupPublicID    string
+ 	GroupName        string
+@@ -118,6 +124,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 	}
+ 
+ 	type row struct {
++		ID              int64
+ 		GroupPublicID   string
+ 		GroupName       string
+ 		PublicID        string
+@@ -128,7 +135,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 		UpdatedAt       int64
+ 	}
+ 	var rows []row
+-	err := query.Select("o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
++	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
+ 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
+ 		"g.public_id AS group_public_id, g.name AS group_name, " +
+ 		"o.capabilities AS capabilities, o.updated_at AS updated_at").
+@@ -144,16 +151,26 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 			_ = common.UnmarshalJsonStr(r.Capabilities, &declared)
+ 		}
+ 		effective, unverified := projectCapabilities(declared)
++		// 质量摘要：与路由/解释用的是同一个窗口与同一种口径（Wilson 下界），避免两处结论不一致
++		quality, qErr := ResolveQualityView(db, r.ID, QualityWindowSixHour, common.GetTimestamp())
++		if qErr != nil {
++			quality = QualityView{Insufficient: true}
++		}
+ 		items = append(items, PlazaItem{
+-			OfferingPublicID:       r.PublicID,
+-			UpstreamModelID:        r.UpstreamModelID,
+-			ChannelPublicID:        r.ChannelPublicID,
+-			GroupPublicID:          r.GroupPublicID,
+-			GroupName:              r.GroupName,
+-			OwnerUserID:            r.OwnerUserID,
+-			Capabilities:           effective,
+-			UnverifiedCapabilities: unverified,
+-			UpdatedAt:              r.UpdatedAt,
++			OfferingPublicID:         r.PublicID,
++			SampleCount:              quality.SampleCount,
++			ReliabilityLowerBoundPpm: quality.ReliabilityLowerBoundPpm,
++			LatencyMsP50:             quality.LatencyMsP50,
++			Insufficient:             quality.Insufficient,
++			Stale:                    quality.Stale,
++			UpstreamModelID:          r.UpstreamModelID,
++			ChannelPublicID:          r.ChannelPublicID,
++			GroupPublicID:            r.GroupPublicID,
++			GroupName:                r.GroupName,
++			OwnerUserID:              r.OwnerUserID,
++			Capabilities:             effective,
++			UnverifiedCapabilities:   unverified,
++			UpdatedAt:                r.UpdatedAt,
+ 		})
+ 	}
+ 	return items, total, nil
+diff --git a/web/src/features/plaza/__tests__/format.test.ts b/web/src/features/plaza/__tests__/format.test.ts
+index 3795997..8f7851c 100644
+--- a/web/src/features/plaza/__tests__/format.test.ts
++++ b/web/src/features/plaza/__tests__/format.test.ts
+@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import { describe, expect, it } from 'vitest'
+ 
+-import { describeCandidateQuality, formatMicroUSD, formatPpm } from '../lib/format'
++import { describeCandidateQuality, describePlazaQuality, formatMicroUSD, formatPpm } from '../lib/format'
+ import type { RouteExplainCandidate } from '../types'
+ 
+ function candidate(overrides: Partial<RouteExplainCandidate> = {}): RouteExplainCandidate {
+@@ -68,4 +68,18 @@ describe('候选质量描述', () => {
+   it('正常时给出可靠性下界百分数', () => {
+     expect(describeCandidateQuality(candidate())).toBe('98.00%')
+   })
+-})
+\ No newline at end of file
++})
++
++describe('广场卡片的质量摘要', () => {
++  it('没有样本时显示"样本不足"，而不是编一个百分比', () => {
++    expect(describePlazaQuality({ sample_count: 0, insufficient: true })).toBe('insufficient')
++  })
++
++  it('数据陈旧时显示 stale', () => {
++    expect(describePlazaQuality({ sample_count: 100, insufficient: false, stale: true })).toBe('stale')
++  })
++
++  it('正常时显示可靠性下界百分比（与路由候选同一口径）', () => {
++    expect(describePlazaQuality({ sample_count: 100, insufficient: false, reliability_lower_bound_ppm: 980000 })).toBe('98.00%')
++  })
++})
+diff --git a/web/src/features/plaza/index.tsx b/web/src/features/plaza/index.tsx
+index 5251d9b..610cc04 100644
+--- a/web/src/features/plaza/index.tsx
++++ b/web/src/features/plaza/index.tsx
+@@ -31,6 +31,7 @@ import { Input } from '@/components/ui/input'
+ 
+ import { getPlaza } from './api'
+ import { aggregatePlazaItems, filterPlazaCards, groupPlazaCards } from './lib/aggregate'
++import { describePlazaQuality } from './lib/format'
+ 
+ /** 模型广场：分享者提供的模型，按模型聚合展示可访问来源数与能力。 */
+ export function Plaza() {
+@@ -98,6 +99,12 @@ export function Plaza() {
+                   <div className='text-muted-foreground text-sm'>
+                     {t('plaza.sources', { count: card.offerings.length })}
+                   </div>
++                  {/* 质量摘要：取该模型**最好的一条来源**作为卡片上的代表值（样本不足/陈旧会如实显示） */}
++                  {card.offerings.length > 0 ? (
++                    <div className='text-muted-foreground text-xs'>
++                      {t('Quality')}: {describePlazaQuality(card.offerings[0])}
++                    </div>
++                  ) : null}
+                   {card.capabilities.length > 0 ? (
+                     <div className='flex flex-wrap gap-2'>
+                       {card.capabilities.map((capability) => (
+diff --git a/web/src/features/plaza/lib/format.ts b/web/src/features/plaza/lib/format.ts
+index 380e19f..528b1d5 100644
+--- a/web/src/features/plaza/lib/format.ts
++++ b/web/src/features/plaza/lib/format.ts
+@@ -44,4 +44,26 @@ export function describeCandidateQuality(candidate: RouteExplainCandidate): stri
+     return 'stale'
+   }
+   return formatPpm(candidate.reliability_lower_bound_ppm, candidate.sample_count)
+-}
+\ No newline at end of file
++}
++
++/**
++ * 广场卡片上的**质量摘要**文案（计划书 §4：模型广场显示质量摘要）。
++ *
++ * 与路由候选用的是**同一套判定语义**（样本不足 / 陈旧 → 明确标注，否则显示 Wilson 下界），
++ * 避免同一个供给在广场说"98%"、在路由解释里说"样本不足"这种自相矛盾。
++ */
++export function describePlazaQuality(item: {
++  sample_count?: number
++  reliability_lower_bound_ppm?: number
++  insufficient?: boolean
++  stale?: boolean
++}): string {
++  const samples = item.sample_count ?? 0
++  if (item.insufficient === true || samples <= 0) {
++    return 'insufficient'
++  }
++  if (item.stale === true) {
++    return 'stale'
++  }
++  return formatPpm(item.reliability_lower_bound_ppm ?? 0, samples)
++}
+diff --git a/web/src/features/plaza/types.ts b/web/src/features/plaza/types.ts
+index cca1f25..4f46aa9 100644
+--- a/web/src/features/plaza/types.ts
++++ b/web/src/features/plaza/types.ts
+@@ -38,6 +38,12 @@ export interface PlazaOfferingItem {
+   capabilities?: string[]
+   /** 尚未验证的能力（后端仅在存在时返回） */
+   unverified_capabilities?: string[]
++  /** 质量摘要（最近 6 小时窗口）：样本不足时 insufficient 为 true，界面必须显示"样本不足" */
++  sample_count?: number
++  reliability_lower_bound_ppm?: number
++  latency_ms_p50?: number
++  insufficient?: boolean
++  stale?: boolean
+   /** 更新时间（UTC epoch 秒） */
+   updated_at: number
+ }
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 15da1b8..6892757 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6694,5 +6694,6 @@
+   "Name is required (1-64 characters)": "Name is required (1-64 characters)",
+   "Describe what this share group provides": "Describe what this share group provides",
+   "Share group": "Share group",
+-  "Ungrouped": "Ungrouped"
++  "Ungrouped": "Ungrouped",
++  "Quality": "Quality"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 49c4d7b..e1189b6 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6694,5 +6694,6 @@
+   "Name is required (1-64 characters)": "名称必填（1-64 个字符）",
+   "Describe what this share group provides": "介绍一下这个分享分组提供什么",
+   "Share group": "分享分组",
+-  "Ungrouped": "未分组"
++  "Ungrouped": "未分组",
++  "Quality": "质量"
+ }
+-- 
+2.53.0.windows.1
+
