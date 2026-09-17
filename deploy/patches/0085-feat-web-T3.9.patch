@@ -1,0 +1,340 @@
+From 415e6ee90272a13cf52e746bebe98a6814e39d79 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 22:16:31 +0800
+Subject: [PATCH 85/85] =?UTF-8?q?feat(web):=20T3.9=20=E5=B9=B3=E5=8F=B0?=
+ =?UTF-8?q?=E9=A1=B5=E8=A1=A5=E4=BE=9B=E7=BB=99=E5=AE=A1=E6=A0=B8=EF=BC=88?=
+ =?UTF-8?q?=E5=8F=91=E5=B8=83/=E9=A9=B3=E5=9B=9E=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- index.tsx: 供给审核卡(输入渠道 ID -> 列出该渠道供给 -> 逐条发布/驳回)
+- api.ts(扩): publishOffering/rejectOffering(与分享者 submit 分开, 分属两侧)
+- lib/price.ts(扩): isOfferingReviewable —— **只有"已提交"可审核**(草稿直接发布会跳过提交;
+  对已发布/已驳回再审核会覆盖既有结论); 未知状态一律不可审核; +2 条用例
+- 复用分享 feature 的 getChannelOfferings, 不重复实现
+- 已知限制(如实): 无"列出全部渠道"的平台侧接口(/share-groups/:id/channels 是按所有者的)
+  => 审核界面只能按渠道 ID 查; 若要"列出全部待审供给"需**新增平台侧列表接口**(后端新增, 等用户点头)
+
+检查(全过): typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅ / 用例 8/8 ✅
+---
+ .../apigx-platform/__tests__/price.test.ts    | 23 +++++-
+ web/src/features/apigx-platform/api.ts        | 11 +++
+ web/src/features/apigx-platform/index.tsx     | 74 ++++++++++++++++++-
+ web/src/features/apigx-platform/lib/price.ts  | 14 ++++
+ web/src/i18n/locales/en.json                  |  7 +-
+ web/src/i18n/locales/fr.json                  |  7 +-
+ web/src/i18n/locales/ja.json                  |  7 +-
+ web/src/i18n/locales/ru.json                  |  7 +-
+ web/src/i18n/locales/vi.json                  |  7 +-
+ web/src/i18n/locales/zh-TW.json               |  7 +-
+ web/src/i18n/locales/zh.json                  |  7 +-
+ 11 files changed, 161 insertions(+), 10 deletions(-)
+
+diff --git a/web/src/features/apigx-platform/__tests__/price.test.ts b/web/src/features/apigx-platform/__tests__/price.test.ts
+index f255bab..38c304a 100644
+--- a/web/src/features/apigx-platform/__tests__/price.test.ts
++++ b/web/src/features/apigx-platform/__tests__/price.test.ts
+@@ -17,7 +17,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import { describe, expect, it } from 'vitest'
+ 
+-import { canSubmitManualPrice, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from '../lib/price'
++import {
++  canSubmitManualPrice,
++  isOfferingReviewable,
++  OFFERING_STATUS_DRAFT,
++  OFFERING_STATUS_PUBLISHED,
++  OFFERING_STATUS_REJECTED,
++  OFFERING_STATUS_SUBMITTED,
++  parseUsdPerMillion,
++  PRICE_SCOPE_OPTIONS,
++} from '../lib/price'
+ 
+ describe('每百万 token 价格解析', () => {
+   it('合法数字被接受', () => {
+@@ -57,4 +66,16 @@ describe('价格作用域选项', () => {
+   it('与后端的三种作用域一一对应', () => {
+     expect(PRICE_SCOPE_OPTIONS.map((option) => option.value)).toEqual([0, 1, 2])
+   })
++})
++describe('供给审核规则', () => {
++  it('只有"已提交"的供给可被审核', () => {
++    expect(isOfferingReviewable(OFFERING_STATUS_SUBMITTED)).toBe(true)
++    expect(isOfferingReviewable(OFFERING_STATUS_DRAFT)).toBe(false)
++    expect(isOfferingReviewable(OFFERING_STATUS_PUBLISHED)).toBe(false)
++    expect(isOfferingReviewable(OFFERING_STATUS_REJECTED)).toBe(false)
++  })
++
++  it('未知状态一律不可审核（不猜）', () => {
++    expect(isOfferingReviewable(9)).toBe(false)
++  })
+ })
+\ No newline at end of file
+diff --git a/web/src/features/apigx-platform/api.ts b/web/src/features/apigx-platform/api.ts
+index 29f850b..3f33ce3 100644
+--- a/web/src/features/apigx-platform/api.ts
++++ b/web/src/features/apigx-platform/api.ts
+@@ -33,4 +33,15 @@ export async function setManualPrice(payload: ManualPricePayload): Promise<{ suc
+ export async function applyRouteRanking(payload: ApplyRouteRankingPayload): Promise<{ success: boolean; data?: unknown }> {
+   const res = await api.post('/api/apigx/route-apply', payload)
+   return res.data
++}
++// 供给审核（平台侧动作：发布 / 驳回）。
++// 与分享者的 `submit` 分开：这两个动作在**平台侧**页面出现，接口也要求审核者身份。
++export async function publishOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post(`/api/apigx/offerings/${offeringId}/publish`)
++  return res.data
++}
++
++export async function rejectOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post(`/api/apigx/offerings/${offeringId}/reject`)
++  return res.data
+ }
+\ No newline at end of file
+diff --git a/web/src/features/apigx-platform/index.tsx b/web/src/features/apigx-platform/index.tsx
+index 8973828..de61f7f 100644
+--- a/web/src/features/apigx-platform/index.tsx
++++ b/web/src/features/apigx-platform/index.tsx
+@@ -29,9 +29,11 @@ import { Label } from '@/components/ui/label'
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+ import { Switch } from '@/components/ui/switch'
+ import { formatMicroUSD } from '@/features/plaza/lib/format'
++import { getChannelOfferings } from '@/features/share/api'
++import type { Offering } from '@/features/share/types'
+ 
+-import { applyRouteRanking, getPriceRules, setManualPrice } from './api'
+-import { canSubmitManualPrice, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
++import { applyRouteRanking, getPriceRules, publishOffering, rejectOffering, setManualPrice } from './api'
++import { canSubmitManualPrice, isOfferingReviewable, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
+ import type { PriceDimension } from './types'
+ 
+ /** 平台管理：价格规则（查询与人工覆盖）与路由排名应用。均为平台侧动作。 */
+@@ -47,6 +49,24 @@ export function ApigxPlatform() {
+   const [strategy, setStrategy] = useState('auto')
+   const [dryRun, setDryRun] = useState(true)
+ 
++  const [reviewChannelId, setReviewChannelId] = useState('')
++  const reviewChannel = Number.parseInt(reviewChannelId.trim(), 10)
++  const canReview = Number.isFinite(reviewChannel) && reviewChannel > 0
++
++  const offeringsQuery = useQuery({
++    queryKey: ['apigx-review-offerings', reviewChannel],
++    queryFn: () => getChannelOfferings(reviewChannel),
++    enabled: canReview,
++  })
++
++  const reviewMutation = useMutation({
++    mutationFn: (input: { id: number; publish: boolean }) =>
++      input.publish ? publishOffering(input.id) : rejectOffering(input.id),
++    onSuccess: () => {
++      void offeringsQuery.refetch()
++    },
++  })
++
+   const parsedScopeId = Number.parseInt(scopeId.trim(), 10)
+   const canQuery = Number.isFinite(parsedScopeId) && parsedScopeId > 0
+ 
+@@ -73,6 +93,35 @@ export function ApigxPlatform() {
+     mutationFn: () => applyRouteRanking({ model, strategy, dry_run: dryRun }),
+   })
+ 
++  const offerings = offeringsQuery.data?.data?.items ?? []
++  const reviewColumns: StaticDataTableColumn<Offering>[] = [
++    { id: 'model', header: t('apigxPlatform.model'), cell: (row) => row.upstream_model_id },
++    {
++      id: 'actions',
++      header: '',
++      cell: (row) => (
++        <div className='flex gap-2'>
++          <Button
++            size='sm'
++            variant='outline'
++            disabled={!isOfferingReviewable(row.status) || reviewMutation.isPending}
++            onClick={() => reviewMutation.mutate({ id: row.id, publish: true })}
++          >
++            {t('apigxPlatform.publish')}
++          </Button>
++          <Button
++            size='sm'
++            variant='outline'
++            disabled={!isOfferingReviewable(row.status) || reviewMutation.isPending}
++            onClick={() => reviewMutation.mutate({ id: row.id, publish: false })}
++          >
++            {t('apigxPlatform.reject')}
++          </Button>
++        </div>
++      ),
++    },
++  ]
++
+   const dimensions = priceQuery.data?.data?.dimensions ?? []
+   const priceColumns: StaticDataTableColumn<PriceDimension>[] = [
+     { id: 'dimension', header: t('apigxPlatform.dimension'), cell: (row) => row.dimension },
+@@ -182,6 +231,27 @@ export function ApigxPlatform() {
+               </Button>
+             </CardContent>
+           </Card>
++          <Card>
++            <CardHeader>
++              <CardTitle>{t('apigxPlatform.review')}</CardTitle>
++            </CardHeader>
++            <CardContent className='space-y-4'>
++              <div className='space-y-1 sm:max-w-xs'>
++                <Label>{t('apigxPlatform.channelId')}</Label>
++                <Input
++                  value={reviewChannelId}
++                  onChange={(event) => setReviewChannelId(event.target.value)}
++                  inputMode='numeric'
++                />
++              </div>
++              {canReview && offerings.length === 0 && !offeringsQuery.isFetching ? (
++                <EmptyState title={t('apigxPlatform.noOffering')} />
++              ) : null}
++              {offerings.length > 0 ? (
++                <StaticDataTable columns={reviewColumns} data={offerings} getRowKey={(row) => row.id} />
++              ) : null}
++            </CardContent>
++          </Card>
+         </div>
+       </SectionPageLayout.Content>
+     </SectionPageLayout>
+diff --git a/web/src/features/apigx-platform/lib/price.ts b/web/src/features/apigx-platform/lib/price.ts
+index af4f04a..8e86a5a 100644
+--- a/web/src/features/apigx-platform/lib/price.ts
++++ b/web/src/features/apigx-platform/lib/price.ts
+@@ -54,4 +54,18 @@ export function canSubmitManualPrice(form: {
+     return false
+   }
+   return parseUsdPerMillion(form.inputPrice) !== null && parseUsdPerMillion(form.outputPrice) !== null
++}
++/**
++ * 供给是否处于"可审核"状态。
++ *
++ * 只有**已提交**的供给能被发布或驳回：对草稿直接发布会让分享者跳过提交这一步，
++ * 对已发布/已驳回的再审核会覆盖既有结论 —— 因此这里把规则固化下来（与后端状态机一致）。
++ */
++export const OFFERING_STATUS_DRAFT = 0
++export const OFFERING_STATUS_SUBMITTED = 1
++export const OFFERING_STATUS_PUBLISHED = 2
++export const OFFERING_STATUS_REJECTED = 3
++
++export function isOfferingReviewable(status: number): boolean {
++  return status === OFFERING_STATUS_SUBMITTED
+ }
+\ No newline at end of file
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index b00d98d..3df7838 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6665,5 +6665,10 @@
+   "apigxPlatform.strategy.throughput": "Throughput",
+   "apigxPlatform.strategy.reliability": "Reliability",
+   "apigxPlatform.dryRun": "Dry run (do not write)",
+-  "apigxPlatform.apply": "Apply"
++  "apigxPlatform.apply": "Apply",
++  "apigxPlatform.review": "Offering review",
++  "apigxPlatform.channelId": "Channel ID",
++  "apigxPlatform.noOffering": "No offering in this channel",
++  "apigxPlatform.publish": "Publish",
++  "apigxPlatform.reject": "Reject"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 4f4be4a..654bb57 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6665,5 +6665,10 @@
+   "apigxPlatform.strategy.throughput": "Throughput",
+   "apigxPlatform.strategy.reliability": "Reliability",
+   "apigxPlatform.dryRun": "Dry run (do not write)",
+-  "apigxPlatform.apply": "Apply"
++  "apigxPlatform.apply": "Apply",
++  "apigxPlatform.review": "Offering review",
++  "apigxPlatform.channelId": "Channel ID",
++  "apigxPlatform.noOffering": "No offering in this channel",
++  "apigxPlatform.publish": "Publish",
++  "apigxPlatform.reject": "Reject"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 539da66..ef810d5 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6665,5 +6665,10 @@
+   "apigxPlatform.strategy.throughput": "Throughput",
+   "apigxPlatform.strategy.reliability": "Reliability",
+   "apigxPlatform.dryRun": "Dry run (do not write)",
+-  "apigxPlatform.apply": "Apply"
++  "apigxPlatform.apply": "Apply",
++  "apigxPlatform.review": "Offering review",
++  "apigxPlatform.channelId": "Channel ID",
++  "apigxPlatform.noOffering": "No offering in this channel",
++  "apigxPlatform.publish": "Publish",
++  "apigxPlatform.reject": "Reject"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 171f274..dc46088 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6665,5 +6665,10 @@
+   "apigxPlatform.strategy.throughput": "Throughput",
+   "apigxPlatform.strategy.reliability": "Reliability",
+   "apigxPlatform.dryRun": "Dry run (do not write)",
+-  "apigxPlatform.apply": "Apply"
++  "apigxPlatform.apply": "Apply",
++  "apigxPlatform.review": "Offering review",
++  "apigxPlatform.channelId": "Channel ID",
++  "apigxPlatform.noOffering": "No offering in this channel",
++  "apigxPlatform.publish": "Publish",
++  "apigxPlatform.reject": "Reject"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 5f7ea20..6dc21e5 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6665,5 +6665,10 @@
+   "apigxPlatform.strategy.throughput": "Throughput",
+   "apigxPlatform.strategy.reliability": "Reliability",
+   "apigxPlatform.dryRun": "Dry run (do not write)",
+-  "apigxPlatform.apply": "Apply"
++  "apigxPlatform.apply": "Apply",
++  "apigxPlatform.review": "Offering review",
++  "apigxPlatform.channelId": "Channel ID",
++  "apigxPlatform.noOffering": "No offering in this channel",
++  "apigxPlatform.publish": "Publish",
++  "apigxPlatform.reject": "Reject"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index f3d2bda..d1c9638 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6665,5 +6665,10 @@
+   "apigxPlatform.strategy.throughput": "Throughput",
+   "apigxPlatform.strategy.reliability": "Reliability",
+   "apigxPlatform.dryRun": "Dry run (do not write)",
+-  "apigxPlatform.apply": "Apply"
++  "apigxPlatform.apply": "Apply",
++  "apigxPlatform.review": "Offering review",
++  "apigxPlatform.channelId": "Channel ID",
++  "apigxPlatform.noOffering": "No offering in this channel",
++  "apigxPlatform.publish": "Publish",
++  "apigxPlatform.reject": "Reject"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 3d8be37..9096e4d 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6665,5 +6665,10 @@
+   "apigxPlatform.strategy.throughput": "高吞吐",
+   "apigxPlatform.strategy.reliability": "高可靠",
+   "apigxPlatform.dryRun": "试算（不写库）",
+-  "apigxPlatform.apply": "应用"
++  "apigxPlatform.apply": "应用",
++  "apigxPlatform.review": "供给审核",
++  "apigxPlatform.channelId": "渠道 ID",
++  "apigxPlatform.noOffering": "该渠道暂无供给",
++  "apigxPlatform.publish": "发布",
++  "apigxPlatform.reject": "驳回"
+ }
+-- 
+2.53.0.windows.1
+
