@@ -1,0 +1,84 @@
+From 8078761be635f53be09c39b346e32c25f65f1e5e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 19:32:07 +0800
+Subject: [PATCH 69/69] =?UTF-8?q?fix(tasks):=20kling=20=E6=8F=92=E4=BB=B6?=
+ =?UTF-8?q?=E7=8A=B6=E6=80=81=E6=98=A0=E5=B0=84=E6=96=B9=E5=90=91=E5=8F=8D?=
+ =?UTF-8?q?=E4=BA=86=EF=BC=88D-022=EF=BC=89=E2=80=94=E2=80=94=E8=A7=86?=
+ =?UTF-8?q?=E9=A2=91=E4=BB=BB=E5=8A=A1=E6=B0=B8=E8=BF=9C=E5=8D=A1=20queued?=
+ =?UTF-8?q?=20=E7=9A=84=E7=9C=9F=E5=AE=9E=E5=8E=9F=E5=9B=A0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+定位(日志证据):
+  - system_tasks: async_task_poll 每~30s 运行且每次 succeeded => 轮询在跑
+  - 日志 `Channel #142 pending video tasks: N` => 轮询抓到了我们的任务, 适配器解析正常
+  - 紧接着成片 `poll unrecognized ... unknown task status: IN_PROGRESS/SUCCESS/FAILURE`
+  - 代码比对: 插件轮询解析钩子 parseTaskResult 的表**方向反了**
+    ({submitted:"SUBMITTED",...} 用宿主词表查上游值 => 上游 IN_PROGRESS 查不到 => UNKNOWN)
+    => **kling 视频任务永远停在 queued**; 对真实 Kling 同样成立(它返回的就是这套词)
+
+已修: parseTaskResult 改为 上游->宿主 映射; native.taskStatus 直通分支同样补归一化
+效果(日志证据): `unknown task status: X` 告警**消失**, 失败原因可正确取出
+
+❗仍未到终态: 现在是 `poll unrecognized (http=200)` => 卡在宿主更后面的判定
+  下一步: 查 service/task_polling.go L315-362 的状态机还要求什么
+  在到达终态前 T3.6 仍不算通过
+---
+ plugins/tasks/kling/plugin.js | 27 +++++++++++++++++++++++----
+ 1 file changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/plugins/tasks/kling/plugin.js b/plugins/tasks/kling/plugin.js
+index 8793393..54e8311 100644
+--- a/plugins/tasks/kling/plugin.js
++++ b/plugins/tasks/kling/plugin.js
+@@ -210,12 +210,24 @@ export const native = {
+     return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
+   },
+   taskStatus: function (ctx, task) {
++    // **状态词必须归一化**：宿主只认 submitted / processing / succeed / failed。
++    //
++    // 这里的直通分支此前把上游原始状态（IN_PROGRESS / SUCCESS / FAILURE）原样返回，
++    // 宿主于是每次都判为 "unknown task status"，任务**永远停在 queued**——
++    // 而且这对**真实 Kling 同样成立**（它返回的正是这套词）。
++    // 实测证据：`Channel #142 pending video tasks: 4` 之后是成片的
++    // `poll unrecognized ... unknown task status: IN_PROGRESS/SUCCESS/FAILURE`。
++    const statusMap = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
+     if (task.data && typeof task.data === "object" && !Array.isArray(task.data)) {
+       const result = task.data,
+         data = result.data && typeof result.data === "object" ? result.data : {};
+-      return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
++      const patched = Object.assign({}, data, { task_id: task.task_id });
++      const rawStatus = data.task_status;
++      if (typeof rawStatus === "string" && statusMap[rawStatus]) {
++        patched.task_status = statusMap[rawStatus];
++      }
++      return Object.assign({}, result, { data: patched });
+     }
+-    const statusMap = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
+     return { code: 0, data: { task_id: task.task_id, task_status: statusMap[task.status] || "submitted", task_status_msg: task.fail_reason || "" } };
+   },
+   error: function (ctx, error) {
+@@ -282,10 +294,17 @@ export function buildQueryRequest(ctx) {
+ 
+ export function parseTaskResult(ctx, body) {
+   const data = body.data || {};
+-  const statuses = { submitted: "SUBMITTED", processing: "IN_PROGRESS", succeed: "SUCCESS", failed: "FAILURE" };
++  // **映射方向：上游 → 宿主。**
++  //
++  // 这里原来是反的（`{submitted:"SUBMITTED", processing:"IN_PROGRESS", ...}` 拿宿主词表去查上游值），
++  // 于是上游返回 `IN_PROGRESS` 查不到 ⇒ 一律回 `UNKNOWN` ⇒ 宿主报
++  // `poll unrecognized ... unknown task status: IN_PROGRESS`，
++  // **kling 视频任务永远停在 queued**（阶段 3 验收实测，日志成片）。
++  // 同文件 `native.taskStatus` 里的表方向是对的，这里与它保持一致。
++  const statuses = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
+   const status = statuses[data.task_status];
+   if (!status) return { status: "UNKNOWN", reason: "unknown task status: " + String(data.task_status || "") };
+-  const videos = status === "SUCCESS" && data.task_result && data.task_result.videos ? data.task_result.videos : [];
++  const videos = status === "succeed" && data.task_result && data.task_result.videos ? data.task_result.videos : [];
+   const result = { code: body.code || 0, taskId: data.task_id, status: status, reason: data.task_status_msg || "" };
+   if (videos.length && videos[0].url) result.url = videos[0].url;
+   const units = Number.parseFloat(data.final_unit_deduction || "");
+-- 
+2.53.0.windows.1
+

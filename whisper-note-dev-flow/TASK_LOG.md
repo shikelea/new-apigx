@@ -817,3 +817,23 @@
 - 只有 `UpdateVideoTasks fail` 或两者都没有 ⇒ **插件注册表里没有 kling**（插件运行时未加载），属**环境/配置**问题。
 
 **结论**：T3.6 的"创建/绑定/鉴权/取消声明"已通过 ✓；**"状态推进"未打通** ✗，且已把范围缩到"插件适配器解析"这一处。
+### T3.6 进展：**修掉一个真实底座缺陷**（kling 插件状态映射方向反了，台账 D-022）
+
+**定位过程（全部有日志证据）**
+1. `system_tasks` 表显示 `async_task_poll` 每约 30 秒运行且**每次 succeeded** ⇒ 轮询在跑 ✓；
+2. 日志 `Channel #142 pending video tasks: N` ⇒ **轮询确实抓到了我们的任务** ✓，适配器解析正常 ✓；
+3. 紧接着是成片的 `poll unrecognized ... unknown task status: IN_PROGRESS / SUCCESS / FAILURE` ⇒
+   **宿主不认识上游返回的状态词** ✓；
+4. 比对代码：插件导出的**轮询解析钩子** `parseTaskResult` 里那张表是**反的**——
+   `{submitted:"SUBMITTED", processing:"IN_PROGRESS", ...}` 用**宿主词表去查上游值** ✗，
+   于是上游给 `IN_PROGRESS` 一律查不到 ⇒ 回 `UNKNOWN` ⇒ **kling 视频任务永远停在 queued** ✗。
+   （同文件 `native.taskStatus` 里的表方向是对的 ⇒ 这里是笔误级的方向错误 ✓；
+   而且**对真实 Kling 同样成立**，因为它返回的正是这套词 ✓。）
+
+**已修**：`parseTaskResult` 改为**上游 → 宿主**映射（`NOT_START/SUBMITTED/QUEUED→submitted`、`IN_PROGRESS→processing`、`SUCCESS→succeed`、`FAILURE→failed`）✓；
+`native.taskStatus` 的直通分支同样补上归一化 ✓。**效果（日志证据）**：`unknown task status: X` 的告警**消失** ✓，失败原因也能正确取出 ✓。
+
+**❗仍未到终态**：现在是 `poll unrecognized (failures=N, http=200)` —— 状态词已能被识别，卡在宿主**更后面**的判定
+（可能与 `code`/`status`/`task_result` 的组合或结算前置条件有关）。**下一步**：查 `service/task_polling.go` 里
+`unknown`/`unrecognized` 之后那条判定分支（L315-362 那段的状态机）到底还要求什么。
+**在任务能到达成功/失败终态之前，T3.6 仍不算通过** —— 但本轮已把"永远卡住"的真实原因消除。
