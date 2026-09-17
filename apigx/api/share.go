@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/apigx/price"
 	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/apigx/routing"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
@@ -71,6 +72,12 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		plaza.GET("", h.listPlaza)
 		plaza.GET("/:publicId", h.getPlazaItem)
 	}
+
+	// 价格快照（T2.1/T2.2）：人工覆盖与单渠道同步。**平台侧动作**——
+	// 价格决定计费，不能让分享者随意改写他人可见的价格。
+	r.GET("/price-rules", h.listPriceRules)
+	r.PUT("/price-rules", h.setManualPriceRule)
+	r.POST("/channels/:id/price-sync", h.syncChannelPrice)
 
 	// 可解释路由结果（T2.9）：只读，不写库、不投影
 	r.GET("/route-explain", h.explainRoute)
@@ -1375,5 +1382,190 @@ func (h *handler) applyRouteRanking(c *gin.Context) {
 		"explanation": explanation,
 		"updated":     applyResult.Updated,
 		"skipped":     skipped,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 价格快照：人工覆盖、单渠道同步、读取（T2.1 / T2.2）
+// ---------------------------------------------------------------------------
+
+// setManualPriceRule 建立**人工覆盖**的价格快照（可选锁定）。
+//
+// 人工覆盖的语义（计划书）：**优先且锁定**——同步不得改写它。锁定后由人工再改才能变更。
+func (h *handler) setManualPriceRule(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	var req struct {
+		ScopeType int    `json:"scope_type"`
+		ScopeID   int64  `json:"scope_id"`
+		Currency  string `json:"currency"`
+		// 单位统一用 **USD per 1M tokens**（与底座内置计价口径一致），0 表示该维度不单独计价。
+		InputUSDPerMillion  float64 `json:"input_usd_per_million"`
+		OutputUSDPerMillion float64 `json:"output_usd_per_million"`
+		Lock                bool    `json:"lock"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	if req.ScopeID <= 0 {
+		fail(c, http.StatusBadRequest, "invalid_body", "scope_id is required")
+		return
+	}
+	if req.ScopeType != apigxmodel.PriceScopeOffering && req.ScopeType != apigxmodel.PriceScopeChannel &&
+		req.ScopeType != apigxmodel.PriceScopeUpstreamKey {
+		fail(c, http.StatusBadRequest, "invalid_scope", "unsupported price scope type")
+		return
+	}
+	items, err := price.ItemsFromUSDPerMillion(req.InputUSDPerMillion, req.OutputUSDPerMillion, 0, 0)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid_price", err.Error())
+		return
+	}
+	if len(items) == 0 {
+		fail(c, http.StatusBadRequest, "invalid_price", "at least one dimension price is required")
+		return
+	}
+	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	if currency == "" {
+		currency = "USD"
+	}
+	rule := &apigxmodel.PriceRule{
+		ScopeType: req.ScopeType, ScopeID: req.ScopeID,
+		Source: apigxmodel.PriceRuleSourceManual, Currency: currency,
+		PricingMode:     apigxmodel.PriceModePerDimension,
+		ValidationState: apigxmodel.PriceValidationAccepted,
+	}
+	if err := apigxmodel.CreatePriceRuleSnapshot(h.db, rule, items); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if req.Lock {
+		if err := apigxmodel.SetPriceRuleLock(h.db, req.ScopeType, req.ScopeID, true); err != nil {
+			failFromRepo(c, err)
+			return
+		}
+	}
+	ok(c, gin.H{"id": rule.ID, "version": rule.Version, "locked": req.Lock, "source": "manual"})
+}
+
+// listPriceRules 读取某作用域的**生效快照**与全部版本（含待确认）。
+//
+// 刻意同时给出两者：只给"生效价"会让被挡下的可疑版本变成看不见的垃圾数据
+// （计划书要求"待确认"可见）。
+func (h *handler) listPriceRules(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid {
+		return
+	}
+	scopeType, err := strconv.Atoi(c.DefaultQuery("scope_type", "0"))
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid_query", "invalid scope_type")
+		return
+	}
+	scopeID, err := strconv.ParseInt(c.DefaultQuery("scope_id", "0"), 10, 64)
+	if err != nil || scopeID <= 0 {
+		fail(c, http.StatusBadRequest, "invalid_query", "scope_id is required")
+		return
+	}
+
+	effective, items, effErr := apigxmodel.GetEffectivePriceRule(h.db, scopeType, scopeID, 0)
+	response := gin.H{"price_known": false}
+	if effErr == nil {
+		// **价格未知 ≠ 零**：这里逐维度给出"可用价格"，不可用的维度根本不出现
+		dimensions := make([]gin.H, 0, len(items))
+		for i := range items {
+			item := &items[i]
+			usdMicro, ok := apigxmodel.EffectiveUSDUnitPriceMicro(effective, item)
+			if !ok {
+				dimensions = append(dimensions, gin.H{"dimension": item.Dimension, "price_known": false})
+				continue
+			}
+			dimensions = append(dimensions, gin.H{
+				"dimension": item.Dimension, "unit_scale": item.UnitScale,
+				"usd_unit_price_micro": usdMicro, "price_known": true,
+			})
+		}
+		response["price_known"] = len(dimensions) > 0
+		response["effective"] = gin.H{
+			"version": effective.Version, "source": effective.Source, "currency": effective.Currency,
+			"manual_override": effective.ManualOverride, "locked": effective.Locked,
+			"dimensions": dimensions,
+		}
+	} else if !errors.Is(effErr, apigxmodel.ErrNoPriceRule) {
+		failFromRepo(c, effErr)
+		return
+	} else {
+		response["reason"] = "no_accepted_snapshot"
+	}
+
+	versions, err := apigxmodel.ListPriceRuleSnapshots(h.db, scopeType, scopeID, 20)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	history := make([]gin.H, 0, len(versions))
+	for i := range versions {
+		item := &versions[i]
+		history = append(history, gin.H{
+			"version": item.Version, "source": item.Source,
+			"validation_state": item.ValidationState, "validation_note": item.ValidationNote,
+			"manual_override": item.ManualOverride, "locked": item.Locked, "created_at": item.CreatedAt,
+		})
+	}
+	response["versions"] = history
+	ok(c, response)
+}
+
+// syncChannelPrice 按渠道摄入一批来源价格（单渠道同步）。
+//
+// **作用域隔离**由 `price.SyncChannelPrices` 保证：有供给落到供给作用域、否则落到渠道作用域，
+// 任何情况下都**不写全局**——这是"单渠道同步不污染全局或其他分享者"的实现层体现。
+func (h *handler) syncChannelPrice(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	channelID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req struct {
+		Source   int `json:"source"`
+		Readings []struct {
+			UpstreamModelID     string  `json:"upstream_model_id"`
+			InputUSDPerMillion  float64 `json:"input_usd_per_million"`
+			OutputUSDPerMillion float64 `json:"output_usd_per_million"`
+			SourceRef           string  `json:"source_ref"`
+			RawRecord           string  `json:"raw_record"`
+		} `json:"readings"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	if len(req.Readings) == 0 {
+		fail(c, http.StatusBadRequest, "invalid_body", "readings is required")
+		return
+	}
+	readings := make([]price.Reading, 0, len(req.Readings))
+	for _, item := range req.Readings {
+		readings = append(readings, price.Reading{
+			UpstreamModelID:     item.UpstreamModelID,
+			InputUSDPerMillion:  item.InputUSDPerMillion,
+			OutputUSDPerMillion: item.OutputUSDPerMillion,
+			Source:              req.Source,
+			SourceRef:           item.SourceRef,
+			RawRecord:           item.RawRecord,
+		})
+	}
+	report, err := price.SyncChannelPrices(h.db, owner, channelID, readings)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{
+		"applied": report.Applied, "pending": report.Pending,
+		"skipped": report.Skipped, "notes": report.Notes,
 	})
 }

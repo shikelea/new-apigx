@@ -866,3 +866,101 @@ func TestRouteApplyEndpoint(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPost, "/api/route-apply", owner, `{"model":"apply-x","strategy":"bogus"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// ---- 价格：人工覆盖 / 单渠道同步 / 未知不为零（T2.1、T2.2 验收） ----
+
+func TestPriceRuleEndpointsEnforceAcceptanceInvariants(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8901
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "价格组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"price-x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+
+	// ① **价格未知 ≠ 零**：没有任何快照时，接口如实说"未知"，而不是给 0
+	rec, body = env.do(t, http.MethodGet,
+		"/api/price-rules?scope_type=0&scope_id="+strconv.FormatInt(offeringID, 10), owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, _ := body["data"].(map[string]any)
+	assert.Equal(t, false, data["price_known"], "没有价格快照时必须标为未知")
+	assert.Equal(t, "no_accepted_snapshot", data["reason"])
+
+	// ② 普通用户不得设置价格（价格决定计费，属平台侧动作）
+	rec, _ = env.doWithRole(t, http.MethodPut, "/api/price-rules", owner,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":2}`,
+		common.RoleCommonUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// ③ 平台设置**人工覆盖**（并锁定）
+	rec, body = env.do(t, http.MethodPut, "/api/price-rules", owner,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":2,"output_usd_per_million":8,"lock":true}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec, body = env.do(t, http.MethodGet,
+		"/api/price-rules?scope_type=0&scope_id="+strconv.FormatInt(offeringID, 10), owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, true, data["price_known"])
+	effective, _ := data["effective"].(map[string]any)
+	assert.Equal(t, true, effective["manual_override"])
+	assert.Equal(t, true, effective["locked"])
+	dimensions, _ := effective["dimensions"].([]any)
+	require.Len(t, dimensions, 2, "输入与输出两个维度")
+	first, _ := dimensions[0].(map[string]any)
+	assert.EqualValues(t, 2_000_000, first["usd_unit_price_micro"], "2 USD/1M tokens = 2000000 微美元/1M")
+
+	// ④ **人工覆盖不被同步改写**：同一作用域发起同步 → 必须被跳过且不产生新版本
+	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/price-sync", owner,
+		`{"source":5,"readings":[{"upstream_model_id":"price-x","input_usd_per_million":1,"output_usd_per_million":1}]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.EqualValues(t, 0, data["applied"], "人工覆盖的价格不得被同步改写")
+	assert.Equal(t, "manual_override", data["notes"].(map[string]any)["price-x"])
+
+	rec, body = env.do(t, http.MethodGet,
+		"/api/price-rules?scope_type=0&scope_id="+strconv.FormatInt(offeringID, 10), owner, "")
+	data, _ = body["data"].(map[string]any)
+	effective, _ = data["effective"].(map[string]any)
+	assert.EqualValues(t, 1, effective["version"], "被挡下的同步不得产生新版本")
+	versions, _ := data["versions"].([]any)
+	require.Len(t, versions, 1, "版本历史里只有人工那一条")
+
+	// ⑤ 未锁定的作用域可以同步，且**单渠道同步不污染他人**
+	otherBase := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(otherBase), Name: "底座2", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	otherChannelID := env.createChannel(t, owner, groupID, otherBase)
+
+	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(otherChannelID, 10)+"/price-sync", owner,
+		`{"source":5,"readings":[{"upstream_model_id":"price-sync-x","input_usd_per_million":3}]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.EqualValues(t, 1, data["applied"], "没有人工覆盖时应正常落库（落到渠道作用域）")
+
+	// 另一个渠道（第一条渠道）**不受影响**
+	rec, body = env.do(t, http.MethodGet,
+		"/api/price-rules?scope_type=2&scope_id="+strconv.FormatInt(channelID, 10), owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, false, data["price_known"], "别的渠道不得因为这次同步而有价格")
+
+	// 而同步过的渠道确实拿到了价格
+	rec, body = env.do(t, http.MethodGet,
+		"/api/price-rules?scope_type=2&scope_id="+strconv.FormatInt(otherChannelID, 10), owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, true, data["price_known"])
+
+	// ⑥ 离谱价格被拒（把"每 1K"当"每 1M"这类口径错误不该进计费）
+	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":5000000}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
