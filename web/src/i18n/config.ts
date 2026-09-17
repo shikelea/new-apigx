@@ -48,6 +48,10 @@ i18n
     supportedLngs: ['en', 'zhCN', 'fr', 'ru', 'ja', 'vi', 'zhTW'],
     load: 'currentOnly',
     nsSeparator: false, // Allow literal colons in keys (e.g., URLs, labels)
+    // 语言文件是**扁平**的（键即英文原文）。默认的 keySeparator `.` 会把形如
+    // `plaza.title` 的键拆成嵌套路径而查不到，界面就会直接显示键名本身。
+    // 关掉分层后两种写法都能命中（不带点的英文键照旧直接命中），不改变既有文案。
+    keySeparator: false,
     debug: import.meta.env.DEV,
     interpolation: {
       escapeValue: false, // not needed for react as it escapes by default

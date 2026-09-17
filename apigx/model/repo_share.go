@@ -191,6 +191,20 @@ func ListChannelsByGroup(db *gorm.DB, ownerUserID, shareGroupID int64, limit int
 	return channels, err
 }
 
+// ListChannelsByOwner 列出某用户的**全部**渠道（不限分组）。
+//
+// 与 ListChannelsByGroup 只差"是否按分组过滤"：分组维度需要先校验分组归属，
+// 这里不需要，因此直接按 owner 查；排序与 limit 语义保持一致，避免两处行为分叉。
+func ListChannelsByOwner(db *gorm.DB, ownerUserID int64, limit int) ([]Channel, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var channels []Channel
+	err := db.Where("owner_user_id = ?", ownerUserID).
+		Order("updated_at DESC, id DESC").Limit(limit).Find(&channels).Error
+	return channels, err
+}
+
 // DeleteChannel 软删除渠道（墓碑语义）。
 func DeleteChannel(db *gorm.DB, ownerUserID, id int64) error {
 	return softDeleteByOwner(db, &Channel{}, ownerUserID, id)

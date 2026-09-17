@@ -48,6 +48,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 
 	channels := r.Group("/channels")
 	{
+		// 列出登录用户的**全部**渠道（"我的分享"页需要它；此前只有按分组的 /share-groups/:id/channels）。
+		channels.GET("", h.listAllChannels)
 		channels.POST("", h.createChannel)
 		channels.GET("/:id", h.getChannel)
 		channels.DELETE("/:id", h.deleteChannel)
@@ -1675,4 +1677,28 @@ func (h *handler) getTaskRetention(c *gin.Context) {
 		source = "env"
 	}
 	ok(c, gin.H{"days": days, "source": source})
+}
+
+// listAllChannels 列出当前用户的**全部**分享渠道（不限分组）。
+//
+// 与 listChannels 的差别只有"是否按分组过滤"；字段完全一致，
+// 避免同一个列表在两处各有一套字段定义（前端也只认一套）。
+func (h *handler) listAllChannels(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	channels, err := apigxmodel.ListChannelsByOwner(h.db, owner, 200)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	items := make([]gin.H, 0, len(channels))
+	for _, ch := range channels {
+		items = append(items, gin.H{
+			"id": ch.ID, "public_id": ch.PublicID, "name": ch.Name, "protocol": ch.Protocol,
+			"key_pool_mode": ch.KeyPoolMode, "health_state": ch.HealthState, "base_url": ch.BaseURL,
+		})
+	}
+	ok(c, gin.H{"items": items})
 }
