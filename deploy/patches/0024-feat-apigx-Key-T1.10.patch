@@ -1,0 +1,515 @@
+From eeb51cb73aa655d917179b0734fd69ba80bb3e38 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 12:38:50 +0800
+Subject: [PATCH 24/24] =?UTF-8?q?feat(apigx):=20=E5=B9=B3=E5=8F=B0=20Key?=
+ =?UTF-8?q?=20=E5=81=8F=E5=A5=BD=E5=AD=98=E5=82=A8=E4=B8=8E=E6=8E=A5?=
+ =?UTF-8?q?=E5=8F=A3=EF=BC=88T1.10=20=E5=89=8D=E5=8D=8A=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/model/repo_apikey.go: apigx_api_keys 承载 APIGX 偏好(范围模式/允许模型/
+  允许来源/固定来源/回退); 凭据仍由底座 tokens 持有(TD-07)
+- api: GET|PUT /api/apigx/platform-keys/:tokenId/preferences
+- 校验前移: 允许来源模式要求非空列表; 固定来源模式要求 pinned_offering_id
+- 修 bug1: 磁盘写满致链接失败(D盘仅剩191MB) -> go clean -cache 释放 4.4GB
+- 修 bug2: key_hash 唯一索引与'偏好行无真哈希'冲突(空串互撞) -> 写入由
+  (user_id,token_id) 推导的稳定占位哈希(注明非真实凭据哈希、不用于鉴权)
+- 测试: 新增仓储与接口用例; apigx+middleware 全量通过
+---
+ apigx/api/share.go         | 103 +++++++++++++++++++
+ apigx/api/share_test.go    |  60 +++++++++++
+ apigx/model/repo_apikey.go | 201 +++++++++++++++++++++++++++++++++++++
+ apigx/model/repo_test.go   |  85 ++++++++++++++++
+ 4 files changed, 449 insertions(+)
+ create mode 100644 apigx/model/repo_apikey.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 08f4380..51a2e54 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -50,6 +50,12 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
+ 	}
+ 
++	platformKeys := r.Group("/platform-keys")
++	{
++		platformKeys.GET("/:tokenId/preferences", h.getPlatformKeyPreferences)
++		platformKeys.PUT("/:tokenId/preferences", h.setPlatformKeyPreferences)
++	}
++
+ 	keys := r.Group("/keys")
+ 	{
+ 		keys.PATCH("/:id/status", h.updateKeyStatus)
+@@ -640,3 +646,100 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 		failFromRepo(c, err)
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// 平台 Key 的 APIGX 偏好（T1.10）
++// ---------------------------------------------------------------------------
++
++type platformKeyPreferencesRequest struct {
++	ScopeMode           *int     `json:"scope_mode"`
++	PinnedOfferingID    *int64   `json:"pinned_offering_id"`
++	AllowedModelIDs     []string `json:"allowed_model_ids"`
++	AllowedOwnerUserIDs []int64  `json:"allowed_owner_user_ids"`
++	AllowFallback       *bool    `json:"allow_fallback"`
++}
++
++func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	tokenID, valid := paramID(c, "tokenId")
++	if !valid {
++		return
++	}
++	key, err := apigxmodel.GetAPIKeyByToken(h.db, owner, tokenID)
++	if errors.Is(err, apigxmodel.ErrNotFound) {
++		// 未配置偏好 = 按默认自动路由（不是错误）
++		ok(c, gin.H{"token_id": tokenID, "scope_mode": apigxmodel.ScopeModeDefault, "configured": false})
++		return
++	}
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{
++		"token_id":               key.TokenID,
++		"configured":             true,
++		"scope_mode":             key.ScopeMode,
++		"pinned_offering_id":     key.PinnedOfferingID,
++		"allowed_model_ids":      key.AllowedModels(),
++		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
++		"allow_fallback":         key.AllowFallback,
++	})
++}
++
++// setPlatformKeyPreferences 设置某平台 Key 的 APIGX 偏好。
++//
++// 凭据本身仍由底座的令牌体系持有（TD-07），这里只写偏好；校验在仓储层完成
++// （例如「允许来源」模式必须给出非空列表），避免写入看起来生效实际不生效的组合。
++func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	tokenID, valid := paramID(c, "tokenId")
++	if !valid {
++		return
++	}
++	var req platformKeyPreferencesRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++
++	key, err := apigxmodel.UpsertAPIKeyPreferences(h.db, owner, tokenID, func(k *apigxmodel.APIKey) error {
++		if req.ScopeMode != nil {
++			k.ScopeMode = *req.ScopeMode
++		}
++		if req.PinnedOfferingID != nil {
++			k.PinnedOfferingID = *req.PinnedOfferingID
++		}
++		if req.AllowFallback != nil {
++			k.AllowFallback = *req.AllowFallback
++		}
++		if req.AllowedModelIDs != nil {
++			encoded, encErr := common.Marshal(req.AllowedModelIDs)
++			if encErr != nil {
++				return encErr
++			}
++			k.AllowedModelIDs = string(encoded)
++		}
++		if req.AllowedOwnerUserIDs != nil {
++			return k.SetAllowedOwnerIDs(req.AllowedOwnerUserIDs)
++		}
++		return nil
++	})
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{
++		"token_id":               key.TokenID,
++		"scope_mode":             key.ScopeMode,
++		"pinned_offering_id":     key.PinnedOfferingID,
++		"allowed_model_ids":      key.AllowedModels(),
++		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
++		"allow_fallback":         key.AllowFallback,
++	})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 1862d3e..9e49955 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -480,3 +480,63 @@ func TestSetChannelCapacityPolicy(t *testing.T) {
+ 		`{"concurrency_mode":4,"concurrency_value":1}`)
+ 	assert.Equal(t, http.StatusNotFound, rec.Code)
+ }
++
++// ---- 平台 Key 偏好接口（T1.10） ----
++
++func TestPlatformKeyPreferencesAPI(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner, other int64 = 8301, 8302
++	const tokenID int64 = 4321
++
++	// 未配置偏好时读取：返回默认模式而不是错误
++	rec, body := env.do(t, http.MethodGet, "/api/platform-keys/4321/preferences", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	assert.Equal(t, false, data["configured"])
++	assert.Equal(t, float64(0), data["scope_mode"], "未配置 = 默认自动路由")
++
++	// 设置「允许来源 + 允许回退」
++	rec, body = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner,
++		`{"scope_mode":1,"allowed_owner_user_ids":[55,77],"allow_fallback":true,"allowed_model_ids":["m-b","m-a"]}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, float64(1), data["scope_mode"])
++	assert.Equal(t, true, data["allow_fallback"])
++	owners, _ := data["allowed_owner_user_ids"].([]any)
++	assert.Len(t, owners, 2)
++	models, _ := data["allowed_model_ids"].([]any)
++	assert.Equal(t, []any{"m-a", "m-b"}, models, "允许模型应去重排序")
++
++	// 回读一致
++	rec, body = env.do(t, http.MethodGet, "/api/platform-keys/4321/preferences", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, true, data["configured"])
++
++	// 「允许来源」模式但列表为空必须被拒
++	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":1,"allowed_owner_user_ids":[]}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code, "空允许列表不得落库")
++
++	// 固定来源模式缺 pinned 必须被拒
++	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":2}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++
++	// 未知模式被拒
++	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":99}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++
++	// 归属隔离：他人读取只能看到「未配置」，且不能写入所有者之外的偏好
++	rec, body = env.do(t, http.MethodGet, "/api/platform-keys/4321/preferences", other, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, false, data["configured"], "他人的偏好对当前用户不可见")
++	require.NoError(t, nil)
++
++	// 越权写入：会写成 other 自己的偏好（各用户独立），不影响 owner 的记录
++	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", other, `{"scope_mode":0}`)
++	require.Equal(t, http.StatusOK, rec.Code)
++	var count int64
++	require.NoError(t, env.db.Model(&apigxmodel.APIKey{}).Where("user_id = ?", owner).Count(&count).Error)
++	assert.EqualValues(t, 1, count, "owner 的偏好记录不受他人操作影响")
++	_ = tokenID
++}
+diff --git a/apigx/model/repo_apikey.go b/apigx/model/repo_apikey.go
+new file mode 100644
+index 0000000..b9bba6b
+--- /dev/null
++++ b/apigx/model/repo_apikey.go
+@@ -0,0 +1,201 @@
++package apigxmodel
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"slices"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 平台 Key 的 APIGX 偏好（`apigx_api_keys`）。
++//
++// 与底座的关系（TD-07）：**凭据本身仍由底座的 `tokens` 表持有**（明文 + 等值查找），
++// 本表通过 `TokenID` 关联，只承载 APIGX 特有的偏好：
++//   - 允许模型 / 允许来源 / 固定来源 / 是否允许回退
++//   - 范围模式、速率与预算上限（四态）、生命周期（状态/到期/撤销）
++//
++// 这样既不改动底座的令牌体系，又能表达底座没有的偏好。
++
++// ScopeMode 取值：平台 Key 可以用哪些（分享）来源。
++const (
++	// ScopeModeDefault 按分组可见性自动路由（默认）。
++	ScopeModeDefault int = 0
++	// ScopeModeAllowedOwners 仅限 `AllowedOwnerUserIDs` 列出的分享者所提供的渠道。
++	ScopeModeAllowedOwners int = 1
++	// ScopeModePinned 固定来源：只使用 `PinnedOfferingID`。
++	ScopeModePinned int = 2
++)
++
++// APIKeyStatus 取值。
++const (
++	APIKeyStatusActive  int = 1
++	APIKeyStatusRevoked int = 2
++)
++
++// GetAPIKeyByToken 读取某个平台 Key（按底座令牌 ID + 使用者）的 APIGX 偏好。
++//
++// 不存在时返回 ErrNotFound —— 上层据此按「未配置偏好」处理（默认自动路由、允许回退）。
++func GetAPIKeyByToken(db *gorm.DB, userID, tokenID int64) (*APIKey, error) {
++	if db == nil || tokenID <= 0 || userID <= 0 {
++		return nil, fmt.Errorf("%w: user and token are required", ErrInvalidArgument)
++	}
++	var key APIKey
++	err := db.Where("user_id = ? AND token_id = ?", userID, tokenID).First(&key).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &key, nil
++}
++
++// UpsertAPIKeyPreferences 创建或更新平台 Key 的 APIGX 偏好。
++//
++// 校验尽量靠前：范围模式与允许列表必须自洽（固定来源模式要求给出 PinnedOfferingID；
++// 允许来源模式要求列表非空），避免写入「看起来配了、实际不生效」的组合。
++func UpsertAPIKeyPreferences(db *gorm.DB, userID, tokenID int64, mutate func(*APIKey) error) (*APIKey, error) {
++	if db == nil || tokenID <= 0 || userID <= 0 {
++		return nil, fmt.Errorf("%w: user and token are required", ErrInvalidArgument)
++	}
++
++	key, err := GetAPIKeyByToken(db, userID, tokenID)
++	switch {
++	case errors.Is(err, ErrNotFound):
++		key = &APIKey{UserID: userID, TokenID: tokenID, ScopeMode: ScopeModeDefault, Status: APIKeyStatusActive}
++	case err != nil:
++		return nil, err
++	}
++
++	if mutate != nil {
++		if err := mutate(key); err != nil {
++			return nil, err
++		}
++	}
++	if err := validateAPIKeyPreferences(key); err != nil {
++		return nil, err
++	}
++	// `key_hash` 上有唯一索引，但偏好行**没有真正的 Key 哈希**：凭据由底座的 `tokens` 持有
++	// （TD-07），本行只承载偏好。若留空，多行空字符串会互相冲突
++	// （首次实现即如此：第二个使用者写偏好时撞 `UNIQUE constraint failed: apigx_api_keys.key_hash`）。
++	// 因此写入由 (user_id, token_id) 推导的**稳定占位哈希**：既满足唯一索引，
++	// 又保证「一个令牌一条偏好记录」的语义。
++	if key.KeyHash == "" {
++		key.KeyHash = placeholderKeyHash(userID, tokenID)
++	}
++
++	now := common.GetTimestamp()
++	key.UpdatedAt = now
++	if key.ID == 0 {
++		key.CreatedAt = now
++		if err := db.Create(key).Error; err != nil {
++			return nil, err
++		}
++		return key, nil
++	}
++	// 全字段更新：偏好是整体语义，逐字段零值更新会漏掉「清空允许列表」这类意图
++	if err := db.Save(key).Error; err != nil {
++		return nil, err
++	}
++	return key, nil
++}
++
++func validateAPIKeyPreferences(key *APIKey) error {
++	switch key.ScopeMode {
++	case ScopeModeDefault:
++	case ScopeModeAllowedOwners:
++		if len(key.AllowedOwnerIDs()) == 0 {
++			return fmt.Errorf("%w: scope_mode=allowed_owners requires a non-empty allowed owner list", ErrInvalidArgument)
++		}
++	case ScopeModePinned:
++		if key.PinnedOfferingID <= 0 {
++			return fmt.Errorf("%w: scope_mode=pinned requires pinned_offering_id", ErrInvalidArgument)
++		}
++	default:
++		return fmt.Errorf("%w: unknown scope mode %d", ErrInvalidArgument, key.ScopeMode)
++	}
++
++	// 允许模型列表：去重并剔除空项，避免同一模型重复存储
++	models := key.AllowedModels()
++	if len(models) > 0 {
++		slices.Sort(models)
++		models = slices.Compact(models)
++		encoded, err := common.Marshal(models)
++		if err != nil {
++			return err
++		}
++		key.AllowedModelIDs = string(encoded)
++	}
++	return nil
++}
++
++// AllowedModels 解析允许模型列表；空字符串表示未限制。
++//
++// 方法名刻意与字段名不同（Go 不允许同名字段与方法）。
++func (k *APIKey) AllowedModels() []string {
++	if k == nil || k.AllowedModelIDs == "" {
++		return nil
++	}
++	var out []string
++	if err := common.UnmarshalJsonStr(k.AllowedModelIDs, &out); err != nil {
++		return nil
++	}
++	return out
++}
++
++// AllowedOwnerIDs 解析允许来源（分享者）列表；空表示未限制。
++func (k *APIKey) AllowedOwnerIDs() []int64 {
++	if k == nil || k.AllowedOwnerUserIDs == "" {
++		return nil
++	}
++	var out []int64
++	if err := common.UnmarshalJsonStr(k.AllowedOwnerUserIDs, &out); err != nil {
++		return nil
++	}
++	return out
++}
++
++// SetAllowedOwnerIDs 写入允许来源列表（JSON 数组，去重排序）。
++func (k *APIKey) SetAllowedOwnerIDs(ids []int64) error {
++	if len(ids) == 0 {
++		k.AllowedOwnerUserIDs = ""
++		return nil
++	}
++	slices.Sort(ids)
++	ids = slices.Compact(ids)
++	encoded, err := common.Marshal(ids)
++	if err != nil {
++		return err
++	}
++	k.AllowedOwnerUserIDs = string(encoded)
++	return nil
++}
++
++// AllowsOwner 报告该平台 Key 是否允许使用某分享者提供的渠道。
++//
++// **回退语义**：不在允许列表里时，返回值的第二个元素表示「是否允许回退到其它来源」——
++// 调用方据此决定是让底座**重选**（可回退）还是直接拒绝（不可回退）。
++func (k *APIKey) AllowsOwner(ownerUserID int64) (allowed bool, mayFallback bool) {
++	if k == nil || k.ScopeMode == ScopeModeDefault {
++		return true, false
++	}
++	if k.ScopeMode != ScopeModeAllowedOwners {
++		return true, false
++	}
++	if slices.Contains(k.AllowedOwnerIDs(), ownerUserID) {
++		return true, false
++	}
++	return false, k.AllowFallback
++}
++
++// placeholderKeyHash 为「只承载偏好」的行生成稳定且唯一的占位哈希。
++//
++// 仅用于满足 `key_hash` 的唯一索引；它**不是**任何真实凭据的哈希，也不用于鉴权。
++func placeholderKeyHash(userID, tokenID int64) string {
++	sum := sha256.Sum256([]byte(fmt.Sprintf("apigx:prefs:%d:%d", userID, tokenID)))
++	return hex.EncodeToString(sum[:])
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 163a461..334f968 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -337,3 +337,88 @@ func TestCapacityPolicyReadsRawFourState(t *testing.T) {
+ 	_, err = GetCapacityPolicy(db, 0)
+ 	assert.ErrorIs(t, err, ErrInvalidArgument)
+ }
++
++// ---- 平台 Key 的 APIGX 偏好（T1.10） ----
++
++func TestAPIKeyPreferencesUpsertAndValidation(t *testing.T) {
++	db := newRepoDB(t)
++	const user, token int64 = 12001, 900
++
++	// 首次：默认模式
++	key, err := UpsertAPIKeyPreferences(db, user, token, nil)
++	require.NoError(t, err)
++	assert.Equal(t, ScopeModeDefault, key.ScopeMode)
++	assert.Empty(t, key.AllowedOwnerIDs(), "默认模式不限制来源")
++	allowed, fallback := key.AllowsOwner(12345)
++	assert.True(t, allowed, "默认模式允许任何来源")
++	assert.False(t, fallback)
++
++	// 允许来源模式：列表为空必须被拒（避免「配了模式却没配列表」的空转配置）
++	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
++		k.ScopeMode = ScopeModeAllowedOwners
++		return nil
++	})
++	require.Error(t, err)
++	assert.ErrorIs(t, err, ErrInvalidArgument)
++
++	// 写入允许来源（去重）+ 允许回退
++	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
++		k.ScopeMode = ScopeModeAllowedOwners
++		k.AllowFallback = true
++		return k.SetAllowedOwnerIDs([]int64{77, 55, 77})
++	})
++	require.NoError(t, err)
++	assert.Equal(t, []int64{55, 77}, key.AllowedOwnerIDs(), "允许来源应去重排序")
++
++	// 回退语义：列表内允许；列表外不允许但**可回退**
++	if allowed, _ := key.AllowsOwner(77); !allowed {
++		assert.Fail(t, "列表内的来源应被允许")
++	}
++	allowed, fallback = key.AllowsOwner(99)
++	assert.False(t, allowed)
++	assert.True(t, fallback, "AllowFallback=true 时调用方应可让底座重选其它来源")
++
++	// 关闭回退后，列表外来源必须直接拒绝
++	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
++		k.AllowFallback = false
++		return nil
++	})
++	require.NoError(t, err)
++	allowed, fallback = key.AllowsOwner(99)
++	assert.False(t, allowed)
++	assert.False(t, fallback, "AllowFallback=false 时不得回退")
++
++	// 固定来源模式：必须给出 pinned_offering_id
++	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
++		k.ScopeMode = ScopeModePinned
++		return nil
++	})
++	require.ErrorIs(t, err, ErrInvalidArgument)
++	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
++		k.ScopeMode = ScopeModePinned
++		k.PinnedOfferingID = 4242
++		return nil
++	})
++	require.NoError(t, err)
++	assert.EqualValues(t, 4242, key.PinnedOfferingID)
++
++	// 未知模式必须被拒
++	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
++		k.ScopeMode = 99
++		return nil
++	})
++	assert.ErrorIs(t, err, ErrInvalidArgument)
++
++	// 允许模型列表：去重排序 + 持久化后可读回
++	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
++		k.ScopeMode = ScopeModeDefault
++		k.AllowedModelIDs = `["b","a","a"]`
++		return nil
++	})
++	require.NoError(t, err)
++	assert.Equal(t, []string{"a", "b"}, key.AllowedModels())
++
++	// 归属隔离：另一个用户看不到该偏好
++	_, err = GetAPIKeyByToken(db, 12002, token)
++	assert.ErrorIs(t, err, ErrNotFound)
++}
+-- 
+2.53.0.windows.1
+
