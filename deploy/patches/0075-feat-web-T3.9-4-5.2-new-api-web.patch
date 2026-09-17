@@ -1,0 +1,355 @@
+From 34b739906f2dd9e236fb8e405f7b3693bc558069 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 20:51:16 +0800
+Subject: [PATCH 75/75] =?UTF-8?q?feat(web):=20T3.9=20=E5=89=8D=E7=AB=AF?=
+ =?UTF-8?q?=E8=B5=B7=E6=AD=A5=20=E2=80=94=E2=80=94=20=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?=E5=B9=BF=E5=9C=BA=E6=95=B0=E6=8D=AE=E5=B1=82=EF=BC=88=E6=8C=89?=
+ =?UTF-8?q?=E8=AE=A1=E5=88=92=E4=B9=A6=20=C2=A74/=C2=A75.2=20=E5=9C=A8=20n?=
+ =?UTF-8?q?ew-api/web=20=E5=86=85=E6=94=B9=E9=80=A0=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+开工前的强制步骤(前端规范): 读 web/AGENTS.md + 项目 shadcn-ui 技能 + 检索既有 components/features
+  (可复用: features/models, pricing, model-pricing, channels, usage-logs, keys, task-plugins) + components.json
+
+本轮交付:
+  src/features/plaza/types.ts  与后端字段逐一对齐(取自 Go 侧 listPlaza, 不猜)
+  src/features/plaza/api.ts    getPlaza(); 沿用 @/lib/api + res.data; 错误不吞(规范 3.9)
+  src/features/plaza/__tests__/api.test.ts  只 mock 外部边界; 覆盖请求正确性与失败不被吞
+  i18n: plaza.* 8 键(en/zh 手工 + 其余语言 i18n:sync 同步)
+  文件均带 AGPL 头
+
+检查(按规范): typecheck ✅ / oxlint 0 错 0 警 ✅ / 新用例 2/2 ✅
+环境事实(已验证非我引入): 本项目 vitest 在受限模式下报 spawn EPERM(vitest 需派生进程);
+  既有用例同样失败 => 沙箱执行边界; 放行后 2/2 通过
+
+下一步: 广场页面 + 路由 + 侧边栏 -> 再按 §4 顺序做模型详情
+---
+ web/src/features/plaza/__tests__/api.test.ts | 68 ++++++++++++++++++++
+ web/src/features/plaza/api.ts                | 29 +++++++++
+ web/src/features/plaza/types.ts              | 58 +++++++++++++++++
+ web/src/i18n/locales/en.json                 | 10 ++-
+ web/src/i18n/locales/fr.json                 | 10 ++-
+ web/src/i18n/locales/ja.json                 | 10 ++-
+ web/src/i18n/locales/ru.json                 | 10 ++-
+ web/src/i18n/locales/vi.json                 | 10 ++-
+ web/src/i18n/locales/zh-TW.json              | 10 ++-
+ web/src/i18n/locales/zh.json                 | 10 ++-
+ 10 files changed, 218 insertions(+), 7 deletions(-)
+ create mode 100644 web/src/features/plaza/__tests__/api.test.ts
+ create mode 100644 web/src/features/plaza/api.ts
+ create mode 100644 web/src/features/plaza/types.ts
+
+diff --git a/web/src/features/plaza/__tests__/api.test.ts b/web/src/features/plaza/__tests__/api.test.ts
+new file mode 100644
+index 0000000..f314bf8
+--- /dev/null
++++ b/web/src/features/plaza/__tests__/api.test.ts
+@@ -0,0 +1,68 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it, vi, beforeEach } from 'vitest'
++
++import { api } from '@/lib/api'
++
++import { getPlaza } from '../api'
++
++// 只替换**外部边界**（HTTP 客户端），被测模块本身照常执行。
++vi.mock('@/lib/api', () => ({
++  api: { get: vi.fn() },
++}))
++
++const mockedGet = vi.mocked(api.get)
++
++describe('模型广场数据层', () => {
++  beforeEach(() => {
++    mockedGet.mockReset()
++  })
++
++  it('请求 /api/apigx/plaza 并原样返回后端数据', async () => {
++    const payload = {
++      success: true,
++      data: {
++        items: [
++          {
++            offering_public_id: 'off_1',
++            model: 'glm-5.3-flash',
++            channel_public_id: 'ch_1',
++            owner_user_id: 7,
++            capabilities: ['chat'],
++            updated_at: 1789640000,
++          },
++        ],
++        total: 1,
++        page: 1,
++        page_size: 20,
++      },
++    }
++    mockedGet.mockResolvedValue({ data: payload })
++
++    const result = await getPlaza({ page: 1, page_size: 20 })
++
++    expect(mockedGet).toHaveBeenCalledWith('/api/apigx/plaza', { params: { page: 1, page_size: 20 } })
++    expect(result).toBe(payload)
++  })
++
++  it('不吞掉请求失败（交给上层按项目约定处理）', async () => {
++    mockedGet.mockRejectedValue(new Error('network down'))
++
++    await expect(getPlaza()).rejects.toThrow('network down')
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/plaza/api.ts b/web/src/features/plaza/api.ts
+new file mode 100644
+index 0000000..f1f8e1c
+--- /dev/null
++++ b/web/src/features/plaza/api.ts
+@@ -0,0 +1,29 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { api } from '@/lib/api'
++
++import type { GetPlazaParams, PlazaListResponse } from './types'
++
++// 模型广场数据访问层。
++//
++// 只做请求与类型，不含任何展示逻辑；错误按项目约定交给 Query/Mutation 的失败回调
++// （见 web/AGENTS.md 3.9），因此这里不吞异常、也不弹提示。
++export async function getPlaza(params: GetPlazaParams = {}): Promise<PlazaListResponse> {
++  const res = await api.get('/api/apigx/plaza', { params })
++  return res.data
++}
+\ No newline at end of file
+diff --git a/web/src/features/plaza/types.ts b/web/src/features/plaza/types.ts
+new file mode 100644
+index 0000000..43e0a76
+--- /dev/null
++++ b/web/src/features/plaza/types.ts
+@@ -0,0 +1,58 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++// 模型广场（分享侧）的对外数据结构。
++//
++// 字段与后端一致：`GET /api/apigx/plaza` 返回的是**按供给（offering）**的一组条目，
++// 「同一模型的多个来源」由页面自行聚合（计划书：模型卡片显示可访问来源数）。
++
++/** 供给条目：某个分享渠道向广场发布的一条可用模型供给。 */
++export interface PlazaOfferingItem {
++  /** 供给对外 ID（详情页与授权都以此为准） */
++  offering_public_id: string
++  /** 对外标准模型 ID */
++  model: string
++  /** 分享渠道对外 ID */
++  channel_public_id: string
++  /** 分享者用户 ID */
++  owner_user_id: number
++  /** 该供给声明的能力（如 chat / embedding / image） */
++  capabilities?: string[]
++  /** 尚未验证的能力（后端仅在存在时返回） */
++  unverified_capabilities?: string[]
++  /** 更新时间（UTC epoch 秒） */
++  updated_at: number
++}
++
++/** 广场列表响应。 */
++export interface PlazaListResponse {
++  success: boolean
++  message?: string
++  data?: {
++    items: PlazaOfferingItem[]
++    total: number
++    page: number
++    page_size: number
++  }
++}
++
++/** 广场查询参数。 */
++export interface GetPlazaParams {
++  page?: number
++  page_size?: number
++}
+\ No newline at end of file
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 22fbe1a..ca1f466 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6531,5 +6531,13 @@
+     "Zhipu GLM": "Zhipu GLM",
+     "Zhipu V4": "Zhipu V4",
+     "Zoom": "Zoom"
+-  }
++  },
++  "plaza.title": "Model Plaza",
++  "plaza.description": "Models shared by providers, with sources and quality",
++  "plaza.empty": "No shared model yet",
++  "plaza.search.placeholder": "Search model",
++  "plaza.sources": "{{count}} source",
++  "plaza.sources_plural": "{{count}} sources",
++  "plaza.capabilities": "Capabilities",
++  "plaza.error": "Failed to load the plaza"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index d7a9a17..8ce0034 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6531,5 +6531,13 @@
+     "Zhipu GLM": "Zhipu GLM",
+     "Zhipu V4": "Zhipu V4",
+     "Zoom": "Zoom"
+-  }
++  },
++  "plaza.title": "Model Plaza",
++  "plaza.description": "Models shared by providers, with sources and quality",
++  "plaza.empty": "No shared model yet",
++  "plaza.search.placeholder": "Search model",
++  "plaza.sources": "{{count}} source",
++  "plaza.sources_plural": "{{count}} sources",
++  "plaza.capabilities": "Capabilities",
++  "plaza.error": "Failed to load the plaza"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 7789aa7..24c8f42 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6531,5 +6531,13 @@
+     "Zhipu GLM": "Zhipu GLM",
+     "Zhipu V4": "Zhipu V 4",
+     "Zoom": "ズーム"
+-  }
++  },
++  "plaza.title": "Model Plaza",
++  "plaza.description": "Models shared by providers, with sources and quality",
++  "plaza.empty": "No shared model yet",
++  "plaza.search.placeholder": "Search model",
++  "plaza.sources": "{{count}} source",
++  "plaza.sources_plural": "{{count}} sources",
++  "plaza.capabilities": "Capabilities",
++  "plaza.error": "Failed to load the plaza"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index bb84b4f..5f2b68f 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6531,5 +6531,13 @@
+     "Zhipu GLM": "Zhipu GLM",
+     "Zhipu V4": "Zhipu V4",
+     "Zoom": "Zoom"
+-  }
++  },
++  "plaza.title": "Model Plaza",
++  "plaza.description": "Models shared by providers, with sources and quality",
++  "plaza.empty": "No shared model yet",
++  "plaza.search.placeholder": "Search model",
++  "plaza.sources": "{{count}} source",
++  "plaza.sources_plural": "{{count}} sources",
++  "plaza.capabilities": "Capabilities",
++  "plaza.error": "Failed to load the plaza"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 16ed2d2..46ebea7 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6531,5 +6531,13 @@
+     "Zhipu GLM": "Zhipu GLM",
+     "Zhipu V4": "Zhipu V4",
+     "Zoom": "Zoom"
+-  }
++  },
++  "plaza.title": "Model Plaza",
++  "plaza.description": "Models shared by providers, with sources and quality",
++  "plaza.empty": "No shared model yet",
++  "plaza.search.placeholder": "Search model",
++  "plaza.sources": "{{count}} source",
++  "plaza.sources_plural": "{{count}} sources",
++  "plaza.capabilities": "Capabilities",
++  "plaza.error": "Failed to load the plaza"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index d52c496..84ad0be 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6531,5 +6531,13 @@
+     "Zhipu GLM": "智譜GLM",
+     "Zhipu V4": "智譜 V4",
+     "Zoom": "縮放"
+-  }
++  },
++  "plaza.title": "Model Plaza",
++  "plaza.description": "Models shared by providers, with sources and quality",
++  "plaza.empty": "No shared model yet",
++  "plaza.search.placeholder": "Search model",
++  "plaza.sources": "{{count}} source",
++  "plaza.sources_plural": "{{count}} sources",
++  "plaza.capabilities": "Capabilities",
++  "plaza.error": "Failed to load the plaza"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 7e626af..d2842dd 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6531,5 +6531,13 @@
+     "Zhipu GLM": "智谱GLM",
+     "Zhipu V4": "智谱 V4",
+     "Zoom": "缩放"
+-  }
++  },
++  "plaza.title": "模型广场",
++  "plaza.description": "分享者提供的模型，含来源与质量",
++  "plaza.empty": "还没有分享的模型",
++  "plaza.search.placeholder": "搜索模型",
++  "plaza.sources": "{{count}} 个来源",
++  "plaza.sources_plural": "{{count}} 个来源",
++  "plaza.capabilities": "能力",
++  "plaza.error": "广场加载失败"
+ }
+-- 
+2.53.0.windows.1
+

@@ -1114,3 +1114,20 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 | 管理后台 | 注册政策、资源审核、模型映射、系统状态 | 平台侧接口（含能力矩阵 `GET /api/apigx/capabilities`） |
 
 **先做哪一个**：建议从**模型广场 + 模型详情**起（计划书列在最前、且是"分享"的入口 ✓），跑通"检索→复用→i18n→typecheck/lint→测试"整条前端流程后再铺开 ✓。
+### T3.9 前端：模型广场（第一个纵向切片完成）
+
+**按计划书 §5.2「保留可用表单与后台组件，重做分享广场及分享者工作流」在 `new-api/web/` 内改造** ✓（不新建前端工程）。开工前按规范完成了强制步骤：读 `web/AGENTS.md` ✓、读项目 `shadcn-ui` 技能 ✓、检索既有 `src/components/` 与 `src/features/` ✓（发现可复用：`features/models`、`pricing`、`model-pricing`、`channels`、`usage-logs`、`keys`、`task-plugins` ✓）、读 `components.json` 确认别名与图标库 ✓。
+
+**本轮交付（数据层纵向切片）**
+- `src/features/plaza/types.ts` —— 与后端字段**逐一对齐**（`offering_public_id`／`model`／`channel_public_id`／`owner_user_id`／`capabilities`／`unverified_capabilities?`／`updated_at`），字段名取自 Go 侧 `listPlaza`，**不猜** ✓；
+- `src/features/plaza/api.ts` —— `getPlaza()`，沿用项目既有写法（`@/lib/api` + `res.data`），错误**不吞**、交给 Query 失败回调（规范 3.9）✓；
+- `src/features/plaza/__tests__/api.test.ts` —— 只 mock **外部边界**（HTTP 客户端），覆盖"请求路径与参数正确"与"失败不被吞掉"两条 ✓；
+- i18n：新增 8 个键（`plaza.*`，en/zh 手工 ✓，其余语言经 `bun run i18n:sync` 同步 ✓）；
+- 文件均带项目要求的 AGPL 头 ✓。
+
+**按规范执行的检查**：`bun run typecheck` ✅ 通过；`bun x oxlint src/features/plaza` ✅ **0 错 0 警**；新用例 ✅ **2/2 通过**。
+
+**📌 环境事实（已验证，非我引入）**：本项目 **vitest 在受限模式下无法运行** —— 加载 `vitest.config.ts` 时报 `spawn EPERM`（vitest 需**派生进程**）。**既有用例以完全相同的方式失败** ✓（我跑过 `model-pricing/__tests__/pricing.test.ts` 对照 ✓）⇒ 属沙箱执行边界，不是仓库问题 ✓。放行后新用例 **2/2 通过** ✓。**后续凡涉及前端测试，都需要在放行模式下运行** ✓。
+**另**：`bun run copyright:check` 报出的缺头文件**都不是本次新增的**（既有文件），与本次改动无关 ✓。
+
+**下一步（T3.9 续）**：广场**页面**（搜索 + 类型筛选 + 卡片/来源数）→ 路由 `src/routes/_authenticated/plaza/index.tsx` → 侧边栏条目（`useSidebarData`）→ 随后按 §4 顺序做**模型详情**。
