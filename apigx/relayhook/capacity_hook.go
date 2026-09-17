@@ -105,7 +105,24 @@ func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error
 		return nil
 	}
 
-	if err := add(capacity.ChannelConcurrency(int64(channelID)), cfg.ChannelLimit); err != nil {
+	// 渠道维度：策略链 = 渠道自身的容量策略（apigx_capacity_policies） → 环境变量兜底。
+	// 策略存在数据库里，因此走 channelpool 的短 TTL 缓存；改上限最长一个 TTL 后生效。
+	if shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID); ok {
+		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit)
+		res, err := capacity.Resolve(chain...)
+		if err != nil {
+			return nil, err
+		}
+		switch res.Decision {
+		case capacity.DecisionLimited:
+			dims = append(dims, capacity.Dimension{Key: capacity.ChannelConcurrency(int64(channelID)), Limit: res.Value, Amount: 1})
+		case capacity.DecisionDisabled:
+			return nil, fmt.Errorf("capacity disabled on dimension %s", capacity.ChannelConcurrency(int64(channelID)))
+		default:
+			// unset / unlimited：本层不施加约束
+		}
+	} else if err := add(capacity.ChannelConcurrency(int64(channelID)), cfg.ChannelLimit); err != nil {
+		// 不是我们的分享渠道：退回环境变量（管理员自建渠道没有任何 APIGX 策略）
 		return nil, err
 	}
 	if tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId); tokenID > 0 {

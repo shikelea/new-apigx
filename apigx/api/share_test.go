@@ -423,3 +423,60 @@ func TestApplyChannelPoolIsOwnerScoped(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelA, 10)+"/apply", 0, "")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
+
+// ---- 渠道容量策略接口 ----
+
+func TestSetChannelCapacityPolicy(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8201
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "策略组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	// 明确值：创建策略并挂到渠道上
+	rec, body := env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+		`{"concurrency_mode":4,"concurrency_value":3}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	policyID := int64(data["id"].(float64))
+
+	var stored apigxmodel.CapacityPolicy
+	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
+	assert.EqualValues(t, 4, stored.MaxConcurrencyMode)
+	assert.EqualValues(t, 3, stored.MaxConcurrency)
+	assert.EqualValues(t, 1, stored.PolicyVersion)
+
+	// 再次设置：应更新同一条（不新建），版本号递增
+	rec, body = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+		`{"concurrency_mode":4,"concurrency_value":9}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, float64(policyID), data["id"], "同一渠道只保留一条策略")
+
+	var count int64
+	require.NoError(t, env.db.Model(&apigxmodel.CapacityPolicy{}).Count(&count).Error)
+	assert.EqualValues(t, 1, count)
+	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
+	assert.EqualValues(t, 9, stored.MaxConcurrency)
+	assert.EqualValues(t, 2, stored.PolicyVersion)
+
+	// 四态非法组合必须被拒（明确值要求 > 0）
+	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+		`{"concurrency_mode":4,"concurrency_value":0}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "非法四态组合不得落库")
+	// 未配置模式但给了值，同样非法
+	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+		`{"concurrency_mode":0,"concurrency_value":5}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// 缺 mode
+	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner, `{}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 越权：别人的渠道一律 404
+	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", 8202,
+		`{"concurrency_mode":4,"concurrency_value":1}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}

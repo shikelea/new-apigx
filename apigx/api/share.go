@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
@@ -46,6 +47,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.POST("/:id/keys", h.createUpstreamKey)
 		channels.GET("/:id/keys", h.listUpstreamKeys)
 		channels.POST("/:id/apply", h.applyChannelPool)
+		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
 	}
 
 	keys := r.Group("/keys")
@@ -535,4 +537,106 @@ func (h *handler) applyChannelPool(c *gin.Context) {
 
 	// 只回数量，不回任何凭据信息
 	ok(c, gin.H{"channel_id": shareChannel.ID, "applied_keys": projection.KeyCount})
+}
+
+// ---------------------------------------------------------------------------
+// 渠道容量策略
+// ---------------------------------------------------------------------------
+
+type capacityPolicyRequest struct {
+	// ConcurrencyMode 遵循四态：0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值。
+	ConcurrencyMode  *int   `json:"concurrency_mode"`
+	ConcurrencyValue *int64 `json:"concurrency_value"`
+}
+
+// setChannelCapacityPolicy 为分享渠道设置容量策略（当前支持"并发"维度）。
+//
+// 写入的是**四态原始值**，不做解释：解释统一由 `apigx/capacity` 的四态解析器负责，
+// 避免接口层与解析层各有一套规则。策略变更后上限最长一个缓存 TTL 生效（准入宽严的变化，
+// 不影响任何记账正确性）。
+func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	shareChannel, err := apigxmodel.GetChannel(h.db, owner, id)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	var req capacityPolicyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	if req.ConcurrencyMode == nil {
+		fail(c, http.StatusBadRequest, "missing_mode", "concurrency_mode is required")
+		return
+	}
+	value := int64(0)
+	if req.ConcurrencyValue != nil {
+		value = *req.ConcurrencyValue
+	}
+	// 先用四态解析器校验「模式 + 值」的组合，非法组合不允许落库
+	policy := capacity.Policy{Mode: *req.ConcurrencyMode, Value: value}
+	if err := policy.Validate(); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_policy", err.Error())
+		return
+	}
+
+	// 无论新建还是更新，都必须把策略**挂到渠道上**（`apigx_channels.capacity_policy_id`）。
+	// 只写策略行不建立这层引用的话，读取侧按渠道的 FK 找不到策略——上限静默不生效。
+	// 这是本接口首版实现的真实缺陷，由端到端验证发现（策略=明确值 1 时并发 3 仍全部放行）。
+	linkPolicy := func(policyID int64) error {
+		return h.db.Model(&apigxmodel.Channel{}).
+			Where("id = ? AND owner_user_id = ? AND alive_flag = ?", shareChannel.ID, owner, apigxmodel.AliveFlagAlive).
+			Updates(map[string]any{"capacity_policy_id": policyID, "updated_at": common.GetTimestamp()}).Error
+	}
+
+	// 同一渠道只保留一条策略（唯一索引是 scope 维度），因此存在则更新
+	existing, err := apigxmodel.FindCapacityPolicyByScope(h.db, owner, apigxmodel.CapacityScopeChannel, shareChannel.ID)
+	switch {
+	case err == nil:
+		updateErr := h.db.Model(&apigxmodel.CapacityPolicy{}).Where("id = ?", existing.ID).
+			Updates(map[string]any{
+				"max_concurrency_mode": policy.Mode,
+				"max_concurrency":      policy.Value,
+				"policy_version":       existing.PolicyVersion + 1,
+				"updated_at":           common.GetTimestamp(),
+			}).Error
+		if updateErr != nil {
+			failFromRepo(c, updateErr)
+			return
+		}
+		existing.MaxConcurrencyMode = policy.Mode
+		existing.MaxConcurrency = policy.Value
+		if linkErr := linkPolicy(existing.ID); linkErr != nil {
+			failFromRepo(c, linkErr)
+			return
+		}
+		ok(c, gin.H{"id": existing.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
+	case errors.Is(err, apigxmodel.ErrNotFound):
+		created := &apigxmodel.CapacityPolicy{
+			OwnerUserID: owner, ScopeType: apigxmodel.CapacityScopeChannel, ScopeID: shareChannel.ID,
+			PolicyVersion:      1,
+			MaxConcurrencyMode: policy.Mode, MaxConcurrency: policy.Value,
+		}
+		now := common.GetTimestamp()
+		created.CreatedAt, created.UpdatedAt = now, now
+		if createErr := h.db.Create(created).Error; createErr != nil {
+			failFromRepo(c, createErr)
+			return
+		}
+		if linkErr := linkPolicy(created.ID); linkErr != nil {
+			failFromRepo(c, linkErr)
+			return
+		}
+		ok(c, gin.H{"id": created.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
+	default:
+		failFromRepo(c, err)
+	}
 }

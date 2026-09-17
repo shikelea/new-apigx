@@ -291,3 +291,49 @@ func TestParseImportedKeysRejectsOversizedBatch(t *testing.T) {
 	_, err := ParseImportedKeys(b.String())
 	assert.ErrorIs(t, err, ErrImportRejected, "超批量上限必须整体拒绝")
 }
+
+// ---- 容量策略读取（四态透传） ----
+
+// 读取层**不解释**四态：原样把「模式 + 值」交给 capacity.Resolve，避免两处各有一套规则。
+func TestCapacityPolicyReadsRawFourState(t *testing.T) {
+	db := newRepoDB(t)
+	const owner int64 = 9901
+
+	policy := &CapacityPolicy{
+		OwnerUserID: owner, ScopeType: CapacityScopeChannel, ScopeID: 555,
+		PolicyVersion: 1,
+		// 并发：明确值 7；RPM：明确不限；TPM：未配置
+		MaxConcurrencyMode: 4, MaxConcurrency: 7,
+		RpmMode: 3, RpmLimit: 0,
+		TpmMode: 0, TpmLimit: 0,
+	}
+	require.NoError(t, db.Create(policy).Error)
+
+	got, err := GetCapacityPolicy(db, policy.ID)
+	require.NoError(t, err)
+	mode, value := got.Concurrency()
+	assert.Equal(t, 4, mode, "明确值必须原样读出")
+	assert.EqualValues(t, 7, value)
+
+	rpmMode, rpmValue := got.RPM()
+	assert.Equal(t, 3, rpmMode, "明确不限必须原样读出，不能被折叠成 0")
+	assert.Zero(t, rpmValue)
+
+	tpmMode, _ := got.TPM()
+	assert.Zero(t, tpmMode, "未配置就是未配置，不得被解释成不限")
+
+	// 按范围查
+	byScope, err := FindCapacityPolicyByScope(db, owner, CapacityScopeChannel, 555)
+	require.NoError(t, err)
+	assert.Equal(t, policy.ID, byScope.ID)
+
+	// 不同所有者查不到（归属隔离）
+	_, err = FindCapacityPolicyByScope(db, 9902, CapacityScopeChannel, 555)
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	// 不存在的策略
+	_, err = GetCapacityPolicy(db, 999999)
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = GetCapacityPolicy(db, 0)
+	assert.ErrorIs(t, err, ErrInvalidArgument)
+}
