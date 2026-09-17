@@ -1,0 +1,120 @@
+From a9c8a38de57ef559bad73ee215212d202331a92f Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 12:28:48 +0800
+Subject: [PATCH 23/23] =?UTF-8?q?fix(apigx):=20=E5=AE=B9=E9=87=8F=E7=A7=9F?=
+ =?UTF-8?q?=E7=BA=A6=E6=8C=89=E6=AF=8F=E6=AC=A1=E5=B0=9D=E8=AF=95=E8=8E=B7?=
+ =?UTF-8?q?=E5=8F=96=EF=BC=88=E5=A4=8D=E7=94=A8=E5=BA=95=E5=BA=A7=E9=87=8D?=
+ =?UTF-8?q?=E8=AF=95=E9=87=8D=E9=80=89=EF=BC=89=EF=BC=8C=E5=8F=B0=E8=B4=A6?=
+ =?UTF-8?q?=20D-016?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+问题: 租约只在请求开始时取一次, 而底座的失败重试会重新选渠道(getChannel 里调
+CacheGetRandomSatisfiedChannel) -> 重试换渠道后租约仍挂在旧渠道上, 新渠道未做容量检查。
+
+修法: 把预留移到 SetupContextForSelectedChannel(每次尝试必经), 每次按当次渠道与凭据预留,
+进入新尝试前释放上一次租约; Distribute 尾部只负责最终释放(ReleaseFromContext)。
+
+附带结论: 候选重选不需要自己写循环 —— 底座的重试循环就是重选实现。
+
+验证(重构位置属高风险): 策略库渠道上限 4/4 + 账户池上限 4/4 均通过; apigx+middleware 全量通过。
+---
+ apigx/relayhook/capacity_hook.go | 48 ++++++++++++++++++++++++++++++++
+ middleware/distributor.go        | 17 ++++++-----
+ 2 files changed, 58 insertions(+), 7 deletions(-)
+
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index aa1a799..4f5901b 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -290,3 +290,51 @@ func abortJSON(c *gin.Context, status int, code, message string) {
+ 		"error": gin.H{"message": message, "type": "new_api_error", "code": code},
+ 	})
+ }
++
++// ---------------------------------------------------------------------------
++// 每次尝试的租约（与底座的「重试会重新选渠道」对齐）
++// ---------------------------------------------------------------------------
++
++// leaseContextKey 是存放在 gin 上下文里的租约键。
++const leaseContextKey = "apigx_capacity_lease"
++
++// AcquireForAttempt 为**本次尝试**获取容量租约。
++//
++// 必须由「每一次尝试都会经过」的位置调用（底座的 `SetupContextForSelectedChannel`）：
++// 底座的失败重试会**重新选择渠道**并再次经过该函数，因此：
++//   - 每次尝试都按**当次选中的渠道与凭据**重新预留，不会出现「换了渠道却仍用旧渠道的租约」；
++//   - 进入新尝试前会先释放上一次的租约，避免重试链上累积占用；
++//   - 请求结束由调用方（Distributor 的 defer）统一释放最后一次租约。
++//
++// 返回 false 表示**容量不足或账本不可用，且已经写出错误响应**，调用方必须停止本次尝试。
++func AcquireForAttempt(c *gin.Context, channelID int) bool {
++	if c == nil {
++		return true
++	}
++	// 上一次尝试的租约先归还：否则重试会同时占用两个渠道的容量
++	ReleaseFromContext(c)
++
++	lease, ok := Acquire(c, channelID)
++	if !ok {
++		return false
++	}
++	if lease != nil {
++		c.Set(leaseContextKey, lease)
++	}
++	return true
++}
++
++// ReleaseFromContext 释放上下文里持有的租约（幂等；无租约时为空操作）。
++func ReleaseFromContext(c *gin.Context) {
++	if c == nil {
++		return
++	}
++	value, exists := c.Get(leaseContextKey)
++	if !exists {
++		return
++	}
++	if lease, ok := value.(*Lease); ok {
++		lease.Release()
++	}
++	c.Set(leaseContextKey, (*Lease)(nil))
++}
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 4dba8dd..a946c1d 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -189,13 +189,9 @@ func Distribute() func(c *gin.Context) {
+ 		// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
+ 		// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
+ 		if channel != nil {
+-			lease, ok := relayhook.Acquire(c, channel.Id)
+-			if !ok {
+-				return
+-			}
+-			if lease != nil {
+-				defer lease.Release()
+-			}
++			// 容量租约由 SetupContextForSelectedChannel **按每次尝试**获取（底座的失败重试
++			// 会重新选渠道并再次经过那里），这里只负责在请求全部结束后释放最后一次的租约。
++			defer relayhook.ReleaseFromContext(c)
+ 		}
+ 		c.Next()
+ 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
+@@ -717,6 +713,13 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
+ 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
+ 	}
++	// APIGX 共享容量控制（T1.7）：**每次尝试**都按当次选中的渠道与凭据预留容量。
++	// 放在这个函数里而不是 Distributor 里，是因为底座的失败重试会**重新选择渠道**并再次
++	// 经过这里——只有在这里预留，才能保证「本次真正使用的渠道与凭据」都被容量约束到，
++	// 也才能借用底座既有的重选机制（无需自己写一套候选循环）。
++	if !relayhook.AcquireForAttempt(c, channel.Id) {
++		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
++	}
+ 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
+ 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+ 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, channel.GetBaseURL())
+-- 
+2.53.0.windows.1
+
