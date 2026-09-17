@@ -154,7 +154,20 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
 
 	// 复用底座的更新路径：它会重算 MultiKeySize 并按当前 Key 列表裁剪越界的索引状态。
-	return baseChannel.Update()
+	if err := baseChannel.Update(); err != nil {
+		return err
+	}
+
+	// **必须同步刷新底座的内存渠道缓存**（复用底座自己的缓存函数）。
+	//
+	// 底座运行时读的是内存缓存、每 SYNC_FREQUENCY（默认 60s）才从库里同步一次。
+	// 只写库不刷缓存的话，投影在最长一个同步周期内**对运行中的网关不生效**：
+	// 请求仍按旧渠道（单 Key、is_multi_key=false）发出，于是
+	//   - 分享者点「应用」后的「已生效」是假的；
+	//   - 逐 Key 统计与隔离针对的索引也不是真正被使用的那把凭据。
+	// 这个问题正是由端到端验证发现的（单测里没有缓存，永远暴露不出来）。
+	basemodel.CacheUpdateChannel(&baseChannel)
+	return nil
 }
 
 // baseMultiKeyMode 把分享渠道的池策略映射为底座的选择方式。
