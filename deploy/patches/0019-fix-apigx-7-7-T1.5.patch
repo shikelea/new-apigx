@@ -1,0 +1,60 @@
+From e78179bfdf4533ca49523b1633a23f6f09320b66 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 11:59:17 +0800
+Subject: [PATCH 19/19] =?UTF-8?q?fix(apigx):=20=E6=81=A2=E5=A4=8D=E8=87=AA?=
+ =?UTF-8?q?=E5=8A=A8=E7=A6=81=E7=94=A8=E6=B8=A0=E9=81=93=E5=90=8E=E9=87=8D?=
+ =?UTF-8?q?=E5=BB=BA=E5=BA=95=E5=BA=A7=E8=B7=AF=E7=94=B1=E7=B4=A2=E5=BC=95?=
+ =?UTF-8?q?=EF=BC=8C=E7=AB=AF=E5=88=B0=E7=AB=AF=207/7=20=E9=80=9A=E8=BF=87?=
+ =?UTF-8?q?=EF=BC=88T1.5=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+根因(读底座源码确认): CacheUpdateChannelStatus 在渠道被置为非启用时会把该渠道从
+group2model2channels(模型→渠道路由索引)里删掉, 而重新启用时不会加回来。
+=> 只改状态 + CacheUpdateChannel 会出现'库里一切正常、请求却 no available channel'。
+修法: 恢复后调用底座 InitChannelCache() 重建路由索引(复用底座入口)。
+
+端到端 7/7: 401 -> 该 Key 隔离; 恢复另一把 + apply -> 渠道自动恢复并重新纳入路由 ->
+第二次请求 200; 统计完整(last_ok 与 last_err 均在); 响应不含凭据。
+apigx + middleware 全量通过。
+---
+ apigx/channelpool/projection.go | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index 1ec22c8..e5f77bc 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -213,7 +213,8 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
+ 	// 因此当分享者恢复或新增一把 Key 并 apply 之后，渠道本身也必须跟着恢复——
+ 	// 否则会出现「池里有可用 Key、渠道却仍然全池停摆」的矛盾状态（端到端验证时即如此）。
+ 	// 只恢复**自动禁用**的渠道：人工禁用的是管理员的决定，不能被我们悄悄改回来。
+-	if baseChannel.Status == common.ChannelStatusAutoDisabled {
++	restoredAutoDisabled := baseChannel.Status == common.ChannelStatusAutoDisabled
++	if restoredAutoDisabled {
+ 		baseChannel.Status = common.ChannelStatusEnabled
+ 	}
+ 
+@@ -231,6 +232,18 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
+ 	//   - 逐 Key 统计与隔离针对的索引也不是真正被使用的那把凭据。
+ 	// 这个问题正是由端到端验证发现的（单测里没有缓存，永远暴露不出来）。
+ 	basemodel.CacheUpdateChannel(&baseChannel)
++
++	// 恢复自动禁用的渠道时，**必须重建底座的「模型→渠道」路由索引**。
++	//
++	// 原因（已核实底座源码）：`CacheUpdateChannelStatus` 在渠道被置为非启用时会把该渠道
++	// 从 `group2model2channels` 里删掉，而**重新启用时并不会加回来**。
++	// 因此只改状态 + `CacheUpdateChannel` 会出现「库里一切正常、请求却报
++	// no available channel for model」的现象（端到端验证时正是如此：库内渠道启用、
++	// 有可用 Key、abilities 也齐全，但请求 503 且不达上游）。
++	// `InitChannelCache` 是底座提供的重建入口，这里复用它而不是自己去维护那张索引表。
++	if restoredAutoDisabled {
++		basemodel.InitChannelCache()
++	}
+ 	return nil
+ }
+ 
+-- 
+2.53.0.windows.1
+
