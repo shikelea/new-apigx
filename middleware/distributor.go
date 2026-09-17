@@ -754,6 +754,11 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
 		return sourceErr
 	}
+	// 熔断生效（T2.8）：该供给处于"熔断打开"时返回**可重试**错误，
+	// 由底座的重选机制换一条渠道——不自己写候选循环，也不永久禁用渠道。
+	if breakerErr := relayhook.CheckBreakerAllows(c, channel.Id, modelName); breakerErr != nil {
+		return breakerErr
+	}
 	return nil
 }
 
