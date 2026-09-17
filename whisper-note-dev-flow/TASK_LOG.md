@@ -1301,3 +1301,25 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **检查（全过）**：`typecheck` ✅ 0 错；`oxlint` ✅ 0 错 0 警；`build` ✅；用例 ✅ 8/8（本 feature ✓）。
 
 **下一步**：`price-sync`（按上游 readings 同步价格 ✓）、「任务中心」✓。
+### T3.9 前端：任务中心（对照计划后**缩小了范围**，数据层已就位）
+
+**先对照计划与底座，再决定做什么** ✓ —— 结果发现两件事，因此没有另造一个并行页面 ✗：
+
+1. **底座已有任务视图，但它是管理员向的** ✓：`features/usage-logs` 里已有 `task-logs-columns` / `task-artifacts` / `task-details-dialog` ✓（列含 提交时间 / User / Plugin / Task ID / Status / **Artifacts** / Details ✓，走 `/api/task` ✓）。
+2. **用户侧接口 `/api/task/self` 前端从未调用** ✗ ⇒ **普通用户看不到自己的异步任务** ✗ —— 这才是 §4「任务中心」真正的缺口 ✓。
+3. **"保留期限"在后端与前端都没有任何字段** ✗（全仓搜 `expire` / `retention` 无结果 ✓）⇒ 计划书要求的"保留期限"**目前无数据来源** ✓，我不会编一个字段出来 ✗（**这是需要后端补的缺口** ✓，已在下面列出 ✓）。
+
+**本轮交付（数据层，UI 与结果复用下一步）**
+
+| 文件 | 作用 |
+|---|---|
+| `src/features/task-center/api.ts` | `getMyTasks()` 走**用户侧** `/api/task/self` ✓（刻意与管理员用的 `/api/task` 区分开 ✓）|
+| `src/features/task-center/types.ts` | 字段与后端 Task 模型**逐一对照** ✓（`task_id/platform/action/status/progress/quota/fail_reason/submit_time/...` ✓）|
+| `src/features/task-center/lib/status.ts` | **状态映射**：厂商词表六态（NOT_START / SUBMITTED / QUEUED / IN_PROGRESS / SUCCESS / FAILURE ✓ —— 阶段 3 修 kling 插件时确认过 ✓）→ 文案键，**未知状态返回空串由界面显示原值** ✓；`isTaskTerminal` ✓ |
+| `__tests__/status.test.ts` | 4 条用例 ✓ |
+
+**复用取向（下一步接线时）**：结果渲染直接复用底座的 `TaskArtifactsCell` ✓（它接收 `TaskLog` ✓ —— 因此**不另造一套结果渲染与类型** ✓）。
+
+**检查**：`typecheck` ✅ 0 错；`oxlint` ✅ 0 错 0 警；用例 ✅ 4/4。
+
+**❗需要你决定的一处后端缺口**：计划书要求任务中心显示「**保留期限**」✓，但**后端没有该字段/接口** ✗。要满足这一条需要**后端新增**（例如任务行记录产物过期时间，或按插件配置给出保留策略 ✓）—— **你点头我再做** ✓（不擅自扩后端范围 ✓）。
