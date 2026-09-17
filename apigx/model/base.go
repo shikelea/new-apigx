@@ -50,6 +50,14 @@ package apigxmodel
 // TablePrefix 是所有 APIGX 表的统一前缀，用于「新增文件集中、命名空间不相交」的约束。
 const TablePrefix = "apigx_"
 
+// StatusCapacitySaturated 是 APIGX 写入**底座多 Key 状态表**的标记值，表示"该 Key 容量已满"。
+//
+// 取值刻意落在底座 `common.ChannelStatus*`（1/2/3…）之外：
+// 底座只要看到**非 Enabled** 就会跳过该 Key，而用一个属于自己的值，
+// 我们的清理逻辑就能只回收自己的标记、不误删底座自己的禁用原因
+// （例如鉴权失败自动禁用——那不该被我们顺手恢复）。
+const StatusCapacitySaturated = 90
+
 // 四态限制：计划书 §9.2 要求「未配置 / 禁用 / 继承默认 / 明确不限」分别存储，
 // 空字段不得被解释成无限容量（CODE_STYLE.md 第 11 条）。
 //

@@ -813,3 +813,134 @@ func TestCompleteAttemptIsIdempotent(t *testing.T) {
 	// 非法状态被拒
 	assert.ErrorIs(t, apigxmodel.CompleteAttempt(db, uid, 99, 0), apigxmodel.ErrInvalidArgument)
 }
+
+// ---- Key 加权与剩余容量（T2.6） ----
+
+// 加权轮询的经典形式：把 Key 按权重展开，底座的轮询/随机就会按比例选中。
+func TestBuildWeightedKeyIndexesProportionalToWeight(t *testing.T) {
+	expanded := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 3}, {Index: 1, Weight: 1}})
+	require.Len(t, expanded, 4)
+	assert.Equal(t, []int{0, 0, 0, 1}, expanded, "权重 3:1 应展开为 3 次与 1 次")
+
+	// 权重 0 视为 1：**不能等于"没有机会"**（否则没配权重的 Key 永远选不到）
+	zero := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 0}, {Index: 1, Weight: 2}})
+	require.Len(t, zero, 3)
+	assert.Contains(t, zero, 0, "权重 0 的 Key 仍应出现一次")
+	assert.Equal(t, 2, countIndex(zero, 1))
+
+	// 展开上限：权重写错（例如 10000）不得把列表撑爆
+	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}})
+	assert.Len(t, huge, 16, "单 Key 展开次数应有上限")
+
+	// 顺序确定：与传入顺序无关，按索引升序展开
+	reordered := BuildWeightedKeyIndexes([]KeyWeight{{Index: 1, Weight: 1}, {Index: 0, Weight: 3}})
+	assert.Equal(t, expanded, reordered, "展开结果必须与传入顺序无关（可复现）")
+
+	assert.Empty(t, BuildWeightedKeyIndexes(nil))
+}
+
+// 剩余容量：已满的 Key 要被标出来让底座跳过；未配置上限**不等于**已满。
+func TestSaturatedKeyIndexes(t *testing.T) {
+	saturated := SaturatedKeyIndexes([]KeyLoad{
+		{Index: 0, InUse: 2, Limit: 2},  // 已满
+		{Index: 1, InUse: 1, Limit: 2},  // 有余量
+		{Index: 2, InUse: 99, Limit: 0}, // 未配置上限：不得算作已满
+		{Index: 3, InUse: 5, Limit: 3},  // 超限
+	})
+	assert.Equal(t, []int{0, 3}, saturated)
+	assert.Empty(t, SaturatedKeyIndexes(nil))
+}
+
+// 状态表合并：只回收**我们自己**写的标记，底座自己的禁用原因必须原样保留。
+func TestMergeKeyStatusListKeepsBaseMarks(t *testing.T) {
+	const baseAutoDisabled = common.ChannelStatusAutoDisabled
+	current := map[int]int{
+		0: baseAutoDisabled,                   // 底座因鉴权失败自动禁用
+		1: apigxmodel.StatusCapacitySaturated, // 我们上一轮标的"容量满"
+	}
+
+	// 本轮：索引 1 已恢复余量，索引 2 变为已满
+	merged := MergeKeyStatusList(current, []int{1}, []int{2}, apigxmodel.StatusCapacitySaturated)
+
+	assert.Equal(t, baseAutoDisabled, merged[0], "底座自己的禁用原因不得被我们抹掉")
+	_, ourOldMarkStillThere := merged[1]
+	assert.False(t, ourOldMarkStillThere, "我们上一轮的标记在恢复后应被回收（缺失即启用）")
+	assert.Equal(t, apigxmodel.StatusCapacitySaturated, merged[2])
+
+	// 全部清空时返回 nil（底座把 nil 状态表视为"全部启用"）
+	assert.Nil(t, MergeKeyStatusList(map[int]int{1: apigxmodel.StatusCapacitySaturated}, []int{1}, nil,
+		apigxmodel.StatusCapacitySaturated))
+}
+
+func countIndex(indexes []int, target int) int {
+	count := 0
+	for _, index := range indexes {
+		if index == target {
+			count++
+		}
+	}
+	return count
+}
+
+// 接线：投影出的底座多 Key 列表必须是**按权重展开**的，且每个槽位仍映射回同一把 Key
+// （否则逐 Key 统计与失效隔离会被打乱）。
+func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
+	db := setupProjectionEnv(t)
+	ResetMappingCacheForTest()
+	t.Cleanup(ResetMappingCacheForTest)
+
+	const owner int64 = 9951
+	const baseChannelID int64 = 9897
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "加权组", PublicID: "wg1"}
+	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
+	channel := &apigxmodel.Channel{
+		PublicID: "wc1", OwnerUserID: owner, ShareGroupID: group.ID,
+		Name: "加权渠道", BaseChannelID: baseChannelID, KeyPoolMode: apigxmodel.KeyPoolModePolling,
+	}
+	require.NoError(t, apigxmodel.CreateChannel(db, channel))
+
+	// 两把 Key：权重 3:1
+	for i, spec := range []struct {
+		stable string
+		secret string
+		weight int64
+	}{{"stable-a", "sk-aaa", 3}, {"stable-b", "sk-bbb", 1}} {
+		encrypted, err := secretbox.Encrypt(spec.secret)
+		require.NoError(t, err)
+		fingerprint, err := secretbox.Fingerprint(spec.secret)
+		require.NoError(t, err)
+		require.NoError(t, db.Create(&apigxmodel.UpstreamKey{
+			ChannelID: channel.ID, StableKeyID: spec.stable, Name: spec.stable,
+			SecretRef: encrypted, SecretFingerprint: fingerprint,
+			Status: apigxmodel.UpstreamKeyStatusEnabled, Weight: spec.weight,
+			CredentialVersion: 1, CreatedAt: common.GetTimestamp() + int64(i),
+		}).Error)
+	}
+
+	// 投影（含写库）：池模式已在建渠道时设为轮询
+	projection, err := ProjectKeyPool(db, channel.ID)
+	require.NoError(t, err)
+	require.NotNil(t, projection)
+	assert.Equal(t, 4, projection.KeyCount, "权重 3:1 应展开成 4 个槽位")
+
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+	assert.Equal(t, 4, len(strings.Split(base.Key, "\n")), "投影出的底座 key 列表应有 4 项")
+	assert.Equal(t, 4, base.ChannelInfo.MultiKeySize)
+
+	// 展开后每个槽位都映射回同一把 Key
+	countA, countB := 0, 0
+	for index := range 4 {
+		switch projection.IndexToStableKey[index] {
+		case "stable-a":
+			countA++
+		case "stable-b":
+			countB++
+		}
+	}
+	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
+	assert.Equal(t, 1, countB)
+}

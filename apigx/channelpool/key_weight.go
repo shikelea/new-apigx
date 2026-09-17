@@ -1,0 +1,132 @@
+package channelpool
+
+import (
+	"sort"
+
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+)
+
+// Key 加权与剩余容量策略（T2.6）。
+//
+// # 复用底座的哪一部分
+//
+// 底座的 `Channel.GetNextEnabledKey`（`model/channel.go`）已经提供了两个我们需要的旋钮，
+// 因此**不重写选择器**：
+//   - `ChannelInfo.MultiKeyStatusList`：`getStatus(i)` **缺失即视为启用**，
+//     只有状态等于 `common.ChannelStatusEnabled` 的索引会被选用 ⇒ 把"已满/冷却中"的
+//     Key 标成非启用值，底座就会**自己跳过**它；
+//   - `MultiKeyMode`（轮询/随机）：它在一份**列表**上做轮询或均匀随机，
+//     因此把列表按权重展开（权重 3 的 Key 出现 3 次）即可得到**加权轮询/加权随机**，
+//     两种模式都自然成立，且不需要改底座。
+//
+// # 为什么用"展开"实现加权
+//
+// 底座没有 per-Key 权重字段。展开是唯一**无需改底座**、且对轮询与随机都等价有效的做法
+// （加权轮询的经典 WRR 形式）。代价是投影后的 key 列表会变长，因此设了展开上限，
+// 并把权重 0 视为 1 —— 与底座对渠道权重的 +10 平滑是同一个精神：
+// **权重 0 不等于"没有机会"**，否则一把没配权重的 Key 会永远选不到。
+
+// maxWeightedKeyExpansion 是单个 Key 的最大展开次数（防止权重写错把列表撑爆）。
+const maxWeightedKeyExpansion = 16
+
+// KeyWeight 是一把参与加权的上游 Key。
+type KeyWeight struct {
+	// Index 是该 Key 在**投影后底座 key 列表**中的索引。
+	Index int
+	// Weight 是分享者配置的权重；0 视为 1。
+	Weight int64
+}
+
+// BuildWeightedKeyIndexes 按权重把 Key 展开成一个索引序列（WRR）。
+//
+// 返回的序列用于投影到底座的多 Key 列表：轮询会按序列顺序取，随机会在序列上均匀取，
+// 两种情况下的选中概率都与权重成正比。
+func BuildWeightedKeyIndexes(keys []KeyWeight) []int {
+	if len(keys) == 0 {
+		return nil
+	}
+	// 按索引排序，保证结果确定（便于测试与复现）
+	ordered := make([]KeyWeight, len(keys))
+	copy(ordered, keys)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Index < ordered[j].Index })
+
+	total := 0
+	expanded := make([]int, 0, len(ordered))
+	for _, key := range ordered {
+		times := key.Weight
+		if times <= 0 {
+			times = 1
+		}
+		if times > maxWeightedKeyExpansion {
+			times = maxWeightedKeyExpansion
+		}
+		for range times {
+			expanded = append(expanded, key.Index)
+		}
+		total += int(times)
+	}
+	return expanded
+}
+
+// KeyLoad 是一把 Key 的容量占用情况。
+type KeyLoad struct {
+	Index int
+	// InUse / Limit：Limit <= 0 表示未配置上限（不施加约束）。
+	InUse int64
+	Limit int64
+}
+
+// SaturatedKeyIndexes 返回已满（或超限）的 Key 索引。
+//
+// 这些索引应当被标记为"非启用"，让底座的 `GetNextEnabledKey` 跳过它们——
+// 当合格 Key 全部被跳过时，底座会明确返回"no enabled keys"，
+// 调用方据此把渠道视为不可选（计划书验收：「无合格 Key 时渠道不可选」）。
+func SaturatedKeyIndexes(keys []KeyLoad) []int {
+	saturated := make([]int, 0, len(keys))
+	for _, key := range keys {
+		if key.Limit <= 0 {
+			continue // 未配置上限 ≠ 已满
+		}
+		if key.InUse >= key.Limit {
+			saturated = append(saturated, key.Index)
+		}
+	}
+	sort.Ints(saturated)
+	return saturated
+}
+
+// MergeKeyStatusList 把"容量饱和"的索引并入底座的多 Key 状态表。
+//
+// # 为什么必须传入上一轮的标记
+//
+// 底座的状态表同时承载**它自己的**禁用标记（例如鉴权失败自动禁用）。
+// 若我们直接整表覆盖或整表清空，就会把底座自己的标记一并抹掉
+// （那等于把一把鉴权失败的 Key 重新放回池子）。
+//
+// 因此这里采用"只回收自己写过的格子"的做法：调用方把上一轮我们标记过的索引传进来，
+// 本次不再饱和的格子会被**删除**（恢复"缺失即启用"），底座自己的标记原样保留。
+func MergeKeyStatusList(current map[int]int, previousOurMarks []int, saturated []int, markValue int) map[int]int {
+	merged := make(map[int]int, len(current)+len(saturated))
+	for index, status := range current {
+		merged[index] = status
+	}
+	// 回收上一轮我们自己的标记（只在值仍等于我们的标记值时删除）
+	for _, index := range previousOurMarks {
+		if status, ok := merged[index]; ok && status == markValue {
+			delete(merged, index)
+		}
+	}
+	for _, index := range saturated {
+		merged[index] = markValue
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+// KeySaturationStatusValue 是我们为"容量饱和"写入底座状态表的值。
+//
+// 只要**不等于** `common.ChannelStatusEnabled`，底座就会跳过该 Key；
+// 用一个与底座自身禁用原因不同的值，是为了让 `MergeKeyStatusList` 能安全地只回收自己的标记。
+const KeySaturationStatusValue = apigxmodel.StatusCapacitySaturated

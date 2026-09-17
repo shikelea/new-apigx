@@ -167,6 +167,15 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 	secrets := make([]string, 0, len(keys))
 	indexToStable := make(map[int]string, len(keys))
 	indexToKeyValue := make(map[int]string, len(keys))
+
+	// 先收集可解密的 Key（失败的跳过并记录），再按**权重展开**（T2.6）：
+	// 底座没有 per-Key 权重，而它的轮询/随机都作用在"一份列表"上，
+	// 因此把权重 3 的 Key 在列表里放 3 次即可得到加权轮询/加权随机。
+	//
+	// 展开后**每个重复槽位仍映射回同一把 Key**，所以密钥归属、逐 Key 统计、
+	// 失效隔离都不受影响（它们都靠索引映射回 StableKeyID）。
+	plaintexts := make([]string, 0, len(keys))
+	weights := make([]KeyWeight, 0, len(keys))
 	for i := range keys {
 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
 		if err != nil {
@@ -175,9 +184,13 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 				keys[i].ID, keys[i].StableKeyID, err))
 			continue
 		}
-		indexToStable[len(secrets)] = keys[i].StableKeyID
-		indexToKeyValue[len(secrets)] = plain
-		secrets = append(secrets, plain)
+		weights = append(weights, KeyWeight{Index: len(plaintexts), Weight: keys[i].Weight})
+		plaintexts = append(plaintexts, plain)
+	}
+	for _, slot := range BuildWeightedKeyIndexes(weights) {
+		indexToStable[len(secrets)] = keys[slot].StableKeyID
+		indexToKeyValue[len(secrets)] = plaintexts[slot]
+		secrets = append(secrets, plaintexts[slot])
 	}
 	if len(secrets) == 0 {
 		return nil, ErrNoUsableKey
