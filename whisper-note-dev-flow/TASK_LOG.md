@@ -1146,3 +1146,20 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **按规范的检查（全过）**：`bun run typecheck` ✅；`bunx oxlint`（涉及文件）✅ **0 错 0 警**；**`bun run build` 生产构建成功** ✅（顺带由 `@tanstack/router-plugin` **重新生成路由树** ✓ —— 新增路由文件后这是必须的一步，否则 typecheck 会报 `FileRoutesByPath` 不认识新路径 ✓）；广场用例 ✅ **8/8 通过**（聚合 6 + 数据层 2 ✓）。
 
 **下一步（T3.9 续）**：**模型详情**页（能力与协议 / 分享来源表 / 价格与质量对比 / 调用配置 —— 接 `route-explain` ✓），然后按 §4 顺序做「我的分享 → 我的用量 → 我的 API Key → 任务中心 → 管理后台」。
+### T3.9 前端：模型详情页（接可解释路由结果）
+
+按计划书 §4「模型详情：模型介绍、能力与协议、**分享来源表**、**价格与质量对比**、调用配置」实现 ✓：
+
+| 文件 | 作用 |
+|---|---|
+| `src/features/plaza/components/model-detail.tsx` | 详情页：能力徽标 + **分享来源表**（渠道/分享者/能力）+ **价格与质量对比表**（名次、可靠性下界、延迟 P50、输入/输出价格、状态/被排除原因）。价格未知时显示"价格未知"而不是 0 ✓ |
+| `src/features/plaza/lib/format.ts` | **纯逻辑**：ppm→百分数、微美元→美元、候选质量描述（**样本不足/陈旧如实标注**，不把"没有数据"显示成 0% ✓）|
+| `src/features/plaza/api.ts`（扩） | 新增 `getRouteExplain(model, strategy?)` ✓ |
+| `src/features/plaza/types.ts`（扩） | 新增 `RouteExplainCandidate` / `RouteExplainResponse`，字段与后端 `routing.CandidateExplanation` **逐一对照**（ppm 与微美元单位写在注释里 ✓） |
+| `src/routes/_authenticated/plaza/$model.tsx`（新路由） | `/plaza/:model` ✓ |
+| `src/features/plaza/index.tsx`（改） | 广场卡片标题链到详情 ✓（否则详情不可达 ✓） |
+| `__tests__/format.test.ts` | 6 条用例（含"无样本时不显示 0%"与"样本不足/陈旧如实标注" ✓） |
+
+**按规范的检查（全过）**：`bun run build` ✅（路由树重新生成 ✓）；`bun run typecheck` ✅；`oxlint` ✅ **0 错 0 警**（期间修掉一处 `no-nested-ternary` —— 规范 3.2 明令禁止两层嵌套三元，已抽成小组件 ✓）；广场用例 ✅ **14/14**。
+
+**下一步（T3.9 续）**：按 §4 顺序做「我的分享 → 我的用量 → 我的 API Key → 任务中心 → 管理后台」；其中「我的分享」对应 §5.2 的"**重做分享者工作流**"，工作量最大。

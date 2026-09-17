@@ -1,0 +1,748 @@
+From 284b57e48eaf0d6a4d9bc4bae26c49cf3f1eb95c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:14:07 +0800
+Subject: [PATCH 77/77] =?UTF-8?q?feat(web):=20T3.9=20=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?=E8=AF=A6=E6=83=85=E9=A1=B5=EF=BC=88=E6=8E=A5=E5=8F=AF=E8=A7=A3?=
+ =?UTF-8?q?=E9=87=8A=E8=B7=AF=E7=94=B1=E7=BB=93=E6=9E=9C=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- components/model-detail.tsx: 能力徽标 + 分享来源表 + **价格与质量对比表**
+  (名次/可靠性下界/延迟 P50/输入输出价格/状态或被排除原因; 价格未知显示"价格未知"而非 0)
+- lib/format.ts: ppm->百分数 / 微美元->美元 / 候选质量描述(样本不足、陈旧如实标注, 不把无数据当 0%)
+- api.ts + types.ts: 新增 getRouteExplain 与 RouteExplainCandidate/Response
+  (字段与后端 routing.CandidateExplanation 逐一对照; ppm 与微美元单位写进注释)
+- routes/_authenticated/plaza/$model.tsx: /plaza/:model
+- index.tsx: 广场卡片标题链到详情(否则详情不可达)
+- __tests__/format.test.ts: 6 条用例
+
+检查(全过): build ✅(路由树重新生成) / typecheck ✅ / oxlint 0 错 0 警 ✅(修掉一处嵌套三元, 规范 3.2)
+  / 用例 14/14 ✅
+下一步: 按 §4 顺序做「我的分享(重做分享者工作流)」-> 我的用量 -> 我的 API Key -> 任务中心 -> 管理后台
+---
+ .../features/plaza/__tests__/format.test.ts   |  71 ++++++++
+ web/src/features/plaza/api.ts                 |  13 +-
+ .../plaza/components/model-detail.tsx         | 158 ++++++++++++++++++
+ web/src/features/plaza/index.tsx              |   7 +-
+ web/src/features/plaza/lib/format.ts          |  47 ++++++
+ web/src/features/plaza/types.ts               |  40 +++++
+ web/src/i18n/locales/en.json                  |  14 +-
+ web/src/i18n/locales/fr.json                  |  14 +-
+ web/src/i18n/locales/ja.json                  |  14 +-
+ web/src/i18n/locales/ru.json                  |  14 +-
+ web/src/i18n/locales/vi.json                  |  14 +-
+ web/src/i18n/locales/zh-TW.json               |  14 +-
+ web/src/i18n/locales/zh.json                  |  14 +-
+ web/src/routeTree.gen.ts                      |  21 +++
+ .../routes/_authenticated/plaza/$model.tsx    |  29 ++++
+ 15 files changed, 475 insertions(+), 9 deletions(-)
+ create mode 100644 web/src/features/plaza/__tests__/format.test.ts
+ create mode 100644 web/src/features/plaza/components/model-detail.tsx
+ create mode 100644 web/src/features/plaza/lib/format.ts
+ create mode 100644 web/src/routes/_authenticated/plaza/$model.tsx
+
+diff --git a/web/src/features/plaza/__tests__/format.test.ts b/web/src/features/plaza/__tests__/format.test.ts
+new file mode 100644
+index 0000000..3795997
+--- /dev/null
++++ b/web/src/features/plaza/__tests__/format.test.ts
+@@ -0,0 +1,71 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it } from 'vitest'
++
++import { describeCandidateQuality, formatMicroUSD, formatPpm } from '../lib/format'
++import type { RouteExplainCandidate } from '../types'
++
++function candidate(overrides: Partial<RouteExplainCandidate> = {}): RouteExplainCandidate {
++  return {
++    offering_public_id: 'off_1',
++    channel_public_id: 'ch_1',
++    owner_user_id: 1,
++    model_name: 'glm-5.3-flash',
++    rank: 0,
++    selected: true,
++    score: 1,
++    sample_count: 100,
++    success_rate_ppm: 990000,
++    reliability_lower_bound_ppm: 980000,
++    latency_ms_p50: 120,
++    insufficient: false,
++    stale: false,
++    price_known: true,
++    input_price_micro: 2000000,
++    output_price_micro: 8000000,
++    ...overrides,
++  }
++}
++
++describe('广场数值格式化', () => {
++  it('ppm 按百分数展示（两位小数）', () => {
++    expect(formatPpm(981246, 100)).toBe('98.12%')
++  })
++
++  it('没有样本时不显示 0%，而是留空（避免把"没有数据"当成"成功率 0"）', () => {
++    expect(formatPpm(0, 0)).toBe('')
++  })
++
++  it('微美元按 6 位小数展示', () => {
++    expect(formatMicroUSD(2000000)).toBe('2.000000')
++  })
++})
++
++describe('候选质量描述', () => {
++  it('样本不足时明确写"样本不足"并给出样本数', () => {
++    expect(describeCandidateQuality(candidate({ insufficient: true, sample_count: 3 }))).toBe('insufficient(3)')
++  })
++
++  it('数据陈旧时标记为 stale', () => {
++    expect(describeCandidateQuality(candidate({ stale: true }))).toBe('stale')
++  })
++
++  it('正常时给出可靠性下界百分数', () => {
++    expect(describeCandidateQuality(candidate())).toBe('98.00%')
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/plaza/api.ts b/web/src/features/plaza/api.ts
+index f1f8e1c..c4ed798 100644
+--- a/web/src/features/plaza/api.ts
++++ b/web/src/features/plaza/api.ts
+@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import { api } from '@/lib/api'
+ 
+-import type { GetPlazaParams, PlazaListResponse } from './types'
++import type { GetPlazaParams, PlazaListResponse, RouteExplainResponse } from './types'
+ 
+ // 模型广场数据访问层。
+ //
+@@ -26,4 +26,15 @@ import type { GetPlazaParams, PlazaListResponse } from './types'
+ export async function getPlaza(params: GetPlazaParams = {}): Promise<PlazaListResponse> {
+   const res = await api.get('/api/apigx/plaza', { params })
+   return res.data
++}
++
++/**
++ * 取某模型的可解释路由结果（只读）。
++ *
++ * 计划书（§4 模型详情）要求展示「价格与质量对比」，这份响应正好逐候选给出
++ * 延迟、可靠性下界、样本数与价格，以及被排除的原因。
++ */
++export async function getRouteExplain(model: string, strategy?: string): Promise<RouteExplainResponse> {
++  const res = await api.get('/api/apigx/route-explain', { params: { model, strategy } })
++  return res.data
+ }
+\ No newline at end of file
+diff --git a/web/src/features/plaza/components/model-detail.tsx b/web/src/features/plaza/components/model-detail.tsx
+new file mode 100644
+index 0000000..25c3dd7
+--- /dev/null
++++ b/web/src/features/plaza/components/model-detail.tsx
+@@ -0,0 +1,158 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useQuery } from '@tanstack/react-query'
++import { useTranslation } from 'react-i18next'
++
++import { EmptyState } from '@/components/empty-state'
++import { ErrorState } from '@/components/error-state'
++import { LoadingState } from '@/components/loading-state'
++import { Badge } from '@/components/ui/badge'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
++
++import { getPlaza, getRouteExplain } from '../api'
++import { describeCandidateQuality, formatMicroUSD } from '../lib/format'
++import type { RouteExplainCandidate } from '../types'
++
++/** 模型详情：来源表 + 价格与质量对比（数据来自广场与可解释路由结果）。 */
++export function ModelDetail(props: { model: string }) {
++  const { t } = useTranslation()
++
++  const plazaQuery = useQuery({ queryKey: ['apigx-plaza'], queryFn: () => getPlaza({ page: 1, page_size: 100 }) })
++  const explainQuery = useQuery({
++    queryKey: ['apigx-route-explain', props.model],
++    queryFn: () => getRouteExplain(props.model),
++  })
++
++  if (plazaQuery.isPending || explainQuery.isPending) {
++    return <LoadingState />
++  }
++  if (plazaQuery.isError || explainQuery.isError) {
++    return (
++      <ErrorState
++        onRetry={() => {
++          void plazaQuery.refetch()
++          void explainQuery.refetch()
++        }}
++      />
++    )
++  }
++
++  const offerings = (plazaQuery.data?.data?.items ?? []).filter((item) => item.model === props.model)
++  const candidates = explainQuery.data?.data?.candidates ?? []
++
++  if (offerings.length === 0) {
++    return <EmptyState title={t('plaza.detail.noSource')} />
++  }
++
++  return (
++    <div className='space-y-6'>
++      <Card>
++        <CardHeader>
++          <CardTitle className='break-all'>{props.model}</CardTitle>
++        </CardHeader>
++        <CardContent>
++          <div className='flex flex-wrap gap-2'>
++            {[...new Set(offerings.flatMap((item) => item.capabilities ?? []))].map((capability) => (
++              <Badge key={capability} variant='secondary'>
++                {capability}
++              </Badge>
++            ))}
++          </div>
++        </CardContent>
++      </Card>
++
++      <Card>
++        <CardHeader>
++          <CardTitle>{t('plaza.detail.sources')}</CardTitle>
++        </CardHeader>
++        <CardContent>
++          <Table>
++            <TableHeader>
++              <TableRow>
++                <TableHead>{t('plaza.detail.channel')}</TableHead>
++                <TableHead>{t('plaza.detail.owner')}</TableHead>
++                <TableHead>{t('plaza.capabilities')}</TableHead>
++              </TableRow>
++            </TableHeader>
++            <TableBody>
++              {offerings.map((item) => (
++                <TableRow key={item.offering_public_id}>
++                  <TableCell className='break-all font-mono text-xs'>{item.channel_public_id}</TableCell>
++                  <TableCell>{item.owner_user_id}</TableCell>
++                  <TableCell>{(item.capabilities ?? []).join(', ')}</TableCell>
++                </TableRow>
++              ))}
++            </TableBody>
++          </Table>
++        </CardContent>
++      </Card>
++
++      <Card>
++        <CardHeader>
++          <CardTitle>{t('plaza.detail.compare')}</CardTitle>
++        </CardHeader>
++        <CardContent>
++          <Table>
++            <TableHeader>
++              <TableRow>
++                <TableHead>{t('plaza.detail.rank')}</TableHead>
++                <TableHead>{t('plaza.detail.quality')}</TableHead>
++                <TableHead>{t('plaza.detail.latency')}</TableHead>
++                <TableHead>{t('plaza.detail.price')}</TableHead>
++                <TableHead>{t('plaza.detail.status')}</TableHead>
++              </TableRow>
++            </TableHeader>
++            <TableBody>
++              {candidates.map((candidate) => (
++                <TableRow key={candidate.offering_public_id}>
++                  <TableCell>{candidate.rank}</TableCell>
++                  <TableCell>{describeCandidateQuality(candidate)}</TableCell>
++                  <TableCell>{candidate.latency_ms_p50 > 0 ? `${candidate.latency_ms_p50} ms` : ''}</TableCell>
++                  <TableCell>
++                    {candidate.price_known
++                      ? `${formatMicroUSD(candidate.input_price_micro)} / ${formatMicroUSD(candidate.output_price_micro)}`
++                      : t('plaza.detail.unknownPrice')}
++                  </TableCell>
++                  <TableCell>
++                    <CandidateStatus candidate={candidate} selectedLabel={t('plaza.detail.selected')} />
++                  </TableCell>
++                </TableRow>
++              ))}
++            </TableBody>
++          </Table>
++        </CardContent>
++      </Card>
++    </div>
++  )
++}
++/**
++ * 候选状态徽标。
++ *
++ * 抽成组件而不是在 JSX 里写嵌套三元 —— 项目 lint 明确禁止两层以上嵌套三元
++ * （web/AGENTS.md 3.2），而"被排除 / 已选中 / 其它"本身就是三个分支。
++ */
++function CandidateStatus(props: { candidate: RouteExplainCandidate; selectedLabel: string }) {
++  if (props.candidate.excluded_reason) {
++    return <Badge variant='outline'>{props.candidate.excluded_reason}</Badge>
++  }
++  if (props.candidate.selected) {
++    return <Badge>{props.selectedLabel}</Badge>
++  }
++  return null
++}
+\ No newline at end of file
+diff --git a/web/src/features/plaza/index.tsx b/web/src/features/plaza/index.tsx
+index c82075f..201f0ed 100644
+--- a/web/src/features/plaza/index.tsx
++++ b/web/src/features/plaza/index.tsx
+@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+ import { useQuery } from '@tanstack/react-query'
++import { Link } from '@tanstack/react-router'
+ import { useMemo, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ 
+@@ -82,7 +83,11 @@ export function Plaza() {
+             {cards.map((card) => (
+               <Card key={card.model}>
+                 <CardHeader>
+-                  <CardTitle className='break-all text-base'>{card.model}</CardTitle>
++                  <CardTitle className='break-all text-base'>
++                    <Link to='/plaza/$model' params={{ model: card.model }} className='hover:underline'>
++                      {card.model}
++                    </Link>
++                  </CardTitle>
+                 </CardHeader>
+                 <CardContent className='space-y-3'>
+                   <div className='text-muted-foreground text-sm'>
+diff --git a/web/src/features/plaza/lib/format.ts b/web/src/features/plaza/lib/format.ts
+new file mode 100644
+index 0000000..380e19f
+--- /dev/null
++++ b/web/src/features/plaza/lib/format.ts
+@@ -0,0 +1,47 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import type { RouteExplainCandidate } from '../types'
++
++/**
++ * ppm（百万分比）转百分数文本；样本量为 0 时返回空串，避免把"没有数据"显示成 "0%"。
++ *
++ * 计划书要求「显示样本不足及陈旧数据」——因此这里不把缺失值伪装成 0，
++ * 由调用方配合 `insufficient` / `stale` 标记展示。
++ */
++export function formatPpm(ppm: number, sampleCount: number): string {
++  if (sampleCount <= 0) {
++    return ''
++  }
++  return `${(ppm / 10000).toFixed(2)}%`
++}
++
++/** 微美元转美元文本（保留 6 位，价格常小到 1e-6 量级）。 */
++export function formatMicroUSD(micro: number): string {
++  return (micro / 1_000_000).toFixed(6)
++}
++
++/** 候选的质量文本：样本不足时明确写出"样本不足"，而不是给一个看起来可信的数字。 */
++export function describeCandidateQuality(candidate: RouteExplainCandidate): string {
++  if (candidate.insufficient) {
++    return `insufficient(${candidate.sample_count})`
++  }
++  if (candidate.stale) {
++    return 'stale'
++  }
++  return formatPpm(candidate.reliability_lower_bound_ppm, candidate.sample_count)
++}
+\ No newline at end of file
+diff --git a/web/src/features/plaza/types.ts b/web/src/features/plaza/types.ts
+index 43e0a76..a57913a 100644
+--- a/web/src/features/plaza/types.ts
++++ b/web/src/features/plaza/types.ts
+@@ -55,4 +55,44 @@ export interface PlazaListResponse {
+ export interface GetPlazaParams {
+   page?: number
+   page_size?: number
++}
++
++/**
++ * 「这个模型为什么选了/没选某条来源」的单个候选。
++ *
++ * 字段与后端 `routing.CandidateExplanation` 一致；比例类字段单位为 **ppm（百万分比）**，
++ * 价格类字段单位为 **微美元**，展示时由 `lib/format.ts` 统一换算。
++ */
++export interface RouteExplainCandidate {
++  offering_public_id: string
++  channel_public_id: string
++  owner_user_id: number
++  model_name: string
++  rank: number
++  selected: boolean
++  score: number
++  reasons?: string[]
++  sample_count: number
++  success_rate_ppm: number
++  reliability_lower_bound_ppm: number
++  latency_ms_p50: number
++  insufficient: boolean
++  stale: boolean
++  price_known: boolean
++  input_price_micro: number
++  output_price_micro: number
++  /** 被排除的原因（仅在被排除时返回） */
++  excluded_reason?: string
++}
++
++/** `GET /api/apigx/route-explain` 的响应。 */
++export interface RouteExplainResponse {
++  success: boolean
++  message?: string
++  data?: {
++    strategy: string
++    candidates: RouteExplainCandidate[] | null
++    cold_start: boolean
++    reason?: string
++  }
+ }
+\ No newline at end of file
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index ca1f466..78b3526 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6539,5 +6539,17 @@
+   "plaza.sources": "{{count}} source",
+   "plaza.sources_plural": "{{count}} sources",
+   "plaza.capabilities": "Capabilities",
+-  "plaza.error": "Failed to load the plaza"
++  "plaza.error": "Failed to load the plaza",
++  "plaza.detail.sources": "Sources",
++  "plaza.detail.channel": "Channel",
++  "plaza.detail.owner": "Provider",
++  "plaza.detail.compare": "Price & quality comparison",
++  "plaza.detail.rank": "Rank",
++  "plaza.detail.quality": "Reliability (lower bound)",
++  "plaza.detail.latency": "Latency P50",
++  "plaza.detail.price": "Price (input / output, USD)",
++  "plaza.detail.status": "Status",
++  "plaza.detail.selected": "Selected",
++  "plaza.detail.unknownPrice": "Price unknown",
++  "plaza.detail.noSource": "No available source for this model"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 8ce0034..5fa3005 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6539,5 +6539,17 @@
+   "plaza.sources": "{{count}} source",
+   "plaza.sources_plural": "{{count}} sources",
+   "plaza.capabilities": "Capabilities",
+-  "plaza.error": "Failed to load the plaza"
++  "plaza.error": "Failed to load the plaza",
++  "plaza.detail.sources": "Sources",
++  "plaza.detail.channel": "Channel",
++  "plaza.detail.owner": "Provider",
++  "plaza.detail.compare": "Price & quality comparison",
++  "plaza.detail.rank": "Rank",
++  "plaza.detail.quality": "Reliability (lower bound)",
++  "plaza.detail.latency": "Latency P50",
++  "plaza.detail.price": "Price (input / output, USD)",
++  "plaza.detail.status": "Status",
++  "plaza.detail.selected": "Selected",
++  "plaza.detail.unknownPrice": "Price unknown",
++  "plaza.detail.noSource": "No available source for this model"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 24c8f42..9c7304b 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6539,5 +6539,17 @@
+   "plaza.sources": "{{count}} source",
+   "plaza.sources_plural": "{{count}} sources",
+   "plaza.capabilities": "Capabilities",
+-  "plaza.error": "Failed to load the plaza"
++  "plaza.error": "Failed to load the plaza",
++  "plaza.detail.sources": "Sources",
++  "plaza.detail.channel": "Channel",
++  "plaza.detail.owner": "Provider",
++  "plaza.detail.compare": "Price & quality comparison",
++  "plaza.detail.rank": "Rank",
++  "plaza.detail.quality": "Reliability (lower bound)",
++  "plaza.detail.latency": "Latency P50",
++  "plaza.detail.price": "Price (input / output, USD)",
++  "plaza.detail.status": "Status",
++  "plaza.detail.selected": "Selected",
++  "plaza.detail.unknownPrice": "Price unknown",
++  "plaza.detail.noSource": "No available source for this model"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 5f2b68f..b4d4f7d 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6539,5 +6539,17 @@
+   "plaza.sources": "{{count}} source",
+   "plaza.sources_plural": "{{count}} sources",
+   "plaza.capabilities": "Capabilities",
+-  "plaza.error": "Failed to load the plaza"
++  "plaza.error": "Failed to load the plaza",
++  "plaza.detail.sources": "Sources",
++  "plaza.detail.channel": "Channel",
++  "plaza.detail.owner": "Provider",
++  "plaza.detail.compare": "Price & quality comparison",
++  "plaza.detail.rank": "Rank",
++  "plaza.detail.quality": "Reliability (lower bound)",
++  "plaza.detail.latency": "Latency P50",
++  "plaza.detail.price": "Price (input / output, USD)",
++  "plaza.detail.status": "Status",
++  "plaza.detail.selected": "Selected",
++  "plaza.detail.unknownPrice": "Price unknown",
++  "plaza.detail.noSource": "No available source for this model"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 46ebea7..4ef9e93 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6539,5 +6539,17 @@
+   "plaza.sources": "{{count}} source",
+   "plaza.sources_plural": "{{count}} sources",
+   "plaza.capabilities": "Capabilities",
+-  "plaza.error": "Failed to load the plaza"
++  "plaza.error": "Failed to load the plaza",
++  "plaza.detail.sources": "Sources",
++  "plaza.detail.channel": "Channel",
++  "plaza.detail.owner": "Provider",
++  "plaza.detail.compare": "Price & quality comparison",
++  "plaza.detail.rank": "Rank",
++  "plaza.detail.quality": "Reliability (lower bound)",
++  "plaza.detail.latency": "Latency P50",
++  "plaza.detail.price": "Price (input / output, USD)",
++  "plaza.detail.status": "Status",
++  "plaza.detail.selected": "Selected",
++  "plaza.detail.unknownPrice": "Price unknown",
++  "plaza.detail.noSource": "No available source for this model"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 84ad0be..ba06423 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6539,5 +6539,17 @@
+   "plaza.sources": "{{count}} source",
+   "plaza.sources_plural": "{{count}} sources",
+   "plaza.capabilities": "Capabilities",
+-  "plaza.error": "Failed to load the plaza"
++  "plaza.error": "Failed to load the plaza",
++  "plaza.detail.sources": "Sources",
++  "plaza.detail.channel": "Channel",
++  "plaza.detail.owner": "Provider",
++  "plaza.detail.compare": "Price & quality comparison",
++  "plaza.detail.rank": "Rank",
++  "plaza.detail.quality": "Reliability (lower bound)",
++  "plaza.detail.latency": "Latency P50",
++  "plaza.detail.price": "Price (input / output, USD)",
++  "plaza.detail.status": "Status",
++  "plaza.detail.selected": "Selected",
++  "plaza.detail.unknownPrice": "Price unknown",
++  "plaza.detail.noSource": "No available source for this model"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index d2842dd..2c0316b 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6539,5 +6539,17 @@
+   "plaza.sources": "{{count}} 个来源",
+   "plaza.sources_plural": "{{count}} 个来源",
+   "plaza.capabilities": "能力",
+-  "plaza.error": "广场加载失败"
++  "plaza.error": "广场加载失败",
++  "plaza.detail.sources": "分享来源",
++  "plaza.detail.channel": "渠道",
++  "plaza.detail.owner": "分享者",
++  "plaza.detail.compare": "价格与质量对比",
++  "plaza.detail.rank": "名次",
++  "plaza.detail.quality": "可靠性（下界）",
++  "plaza.detail.latency": "延迟 P50",
++  "plaza.detail.price": "价格（输入 / 输出，USD）",
++  "plaza.detail.status": "状态",
++  "plaza.detail.selected": "已选中",
++  "plaza.detail.unknownPrice": "价格未知",
++  "plaza.detail.noSource": "该模型暂无可用来源"
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index 3885e0e..d143a6b 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -44,6 +44,7 @@ import { Route as AuthenticatedModelsIndexRouteImport } from './routes/_authenti
+ import { Route as AuthenticatedModelsSectionRouteImport } from './routes/_authenticated/models/$section'
+ import { Route as AuthenticatedPlaygroundIndexRouteImport } from './routes/_authenticated/playground/index'
+ import { Route as AuthenticatedPlazaIndexRouteImport } from './routes/_authenticated/plaza/index'
++import { Route as AuthenticatedPlazaModelRouteImport } from './routes/_authenticated/plaza/$model'
+ import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
+ import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
+ import { Route as AuthenticatedSecurityIndexRouteImport } from './routes/_authenticated/security/index'
+@@ -253,6 +254,11 @@ const AuthenticatedPlazaIndexRoute = AuthenticatedPlazaIndexRouteImport.update({
+   path: '/plaza/',
+   getParentRoute: () => AuthenticatedRouteRoute,
+ } as any)
++const AuthenticatedPlazaModelRoute = AuthenticatedPlazaModelRouteImport.update({
++  id: '/plaza/$model',
++  path: '/plaza/$model',
++  getParentRoute: () => AuthenticatedRouteRoute,
++} as any)
+ const AuthenticatedProfileIndexRoute =
+   AuthenticatedProfileIndexRouteImport.update({
+     id: '/profile/',
+@@ -442,6 +448,7 @@ export interface FileRoutesByFullPath {
+   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
+   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
+   '/models/$section': typeof AuthenticatedModelsSectionRoute
++  '/plaza/$model': typeof AuthenticatedPlazaModelRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/channels/': typeof AuthenticatedChannelsIndexRoute
+@@ -503,6 +510,7 @@ export interface FileRoutesByTo {
+   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
+   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
+   '/models/$section': typeof AuthenticatedModelsSectionRoute
++  '/plaza/$model': typeof AuthenticatedPlazaModelRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/channels': typeof AuthenticatedChannelsIndexRoute
+@@ -568,6 +576,7 @@ export interface FileRoutesById {
+   '/_authenticated/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
+   '/_authenticated/errors/$error': typeof AuthenticatedErrorsErrorRoute
+   '/_authenticated/models/$section': typeof AuthenticatedModelsSectionRoute
++  '/_authenticated/plaza/$model': typeof AuthenticatedPlazaModelRoute
+   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
+@@ -632,6 +641,7 @@ export interface FileRouteTypes {
+     | '/dashboard/$section'
+     | '/errors/$error'
+     | '/models/$section'
++    | '/plaza/$model'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
+     | '/channels/'
+@@ -693,6 +703,7 @@ export interface FileRouteTypes {
+     | '/dashboard/$section'
+     | '/errors/$error'
+     | '/models/$section'
++    | '/plaza/$model'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
+     | '/channels'
+@@ -757,6 +768,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/dashboard/$section'
+     | '/_authenticated/errors/$error'
+     | '/_authenticated/models/$section'
++    | '/_authenticated/plaza/$model'
+     | '/_authenticated/usage-logs/$section'
+     | '/_authenticated/usage-logs/audit'
+     | '/_authenticated/channels/'
+@@ -1058,6 +1070,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPlazaIndexRouteImport
+       parentRoute: typeof AuthenticatedRouteRoute
+     }
++    '/_authenticated/plaza/$model': {
++      id: '/_authenticated/plaza/$model'
++      path: '/plaza/$model'
++      fullPath: '/plaza/$model'
++      preLoaderRoute: typeof AuthenticatedPlazaModelRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/profile/': {
+       id: '/_authenticated/profile/'
+       path: '/profile'
+@@ -1340,6 +1359,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedDashboardSectionRoute: typeof AuthenticatedDashboardSectionRoute
+   AuthenticatedErrorsErrorRoute: typeof AuthenticatedErrorsErrorRoute
+   AuthenticatedModelsSectionRoute: typeof AuthenticatedModelsSectionRoute
++  AuthenticatedPlazaModelRoute: typeof AuthenticatedPlazaModelRoute
+   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
+   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
+   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
+@@ -1367,6 +1387,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedDashboardSectionRoute: AuthenticatedDashboardSectionRoute,
+   AuthenticatedErrorsErrorRoute: AuthenticatedErrorsErrorRoute,
+   AuthenticatedModelsSectionRoute: AuthenticatedModelsSectionRoute,
++  AuthenticatedPlazaModelRoute: AuthenticatedPlazaModelRoute,
+   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
+   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
+   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
+diff --git a/web/src/routes/_authenticated/plaza/$model.tsx b/web/src/routes/_authenticated/plaza/$model.tsx
+new file mode 100644
+index 0000000..50883e6
+--- /dev/null
++++ b/web/src/routes/_authenticated/plaza/$model.tsx
+@@ -0,0 +1,29 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { createFileRoute } from '@tanstack/react-router'
++
++import { ModelDetail } from '@/features/plaza/components/model-detail'
++
++function PlazaModelDetail() {
++  const params = Route.useParams()
++  return <ModelDetail model={params.model} />
++}
++
++export const Route = createFileRoute('/_authenticated/plaza/$model')({
++  component: PlazaModelDetail,
++})
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+
