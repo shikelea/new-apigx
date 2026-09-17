@@ -1,0 +1,353 @@
+From c26b40fa4f25ebb9beb5fd4efedc1f9b0b8d9d06 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:14:06 +0800
+Subject: [PATCH 41/41] =?UTF-8?q?feat(apigx):=20=E5=8D=95=E6=B8=A0?=
+ =?UTF-8?q?=E9=81=93=E4=BB=B7=E6=A0=BC=E5=90=8C=E6=AD=A5=E4=B8=8E=E9=9A=94?=
+ =?UTF-8?q?=E7=A6=BB=EF=BC=88T2.2=20=E5=AE=8C=E6=88=90=E4=B8=BB=E4=BD=93?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/price/sync.go: SyncChannelPrices 把价格读数同步到渠道及其供给
+  * 作用域落点: 有供给->供给作用域; 无供给->渠道作用域; **任何情况都不写全局**
+    => 验收条款"单渠道同步不污染全局或其他分享者"的实现层体现
+  * 人工覆盖: 跳过而非报错(旧价继续用), 报告中记 manual_override —— 同步不应因人工价整体失败
+  * 口径离谱: 不写任何版本, 只报 implausible_price
+  * 越权同步按"渠道不存在"处理(ErrNotFound), 不泄露存在性
+  * SourceRef + RawRecord 随快照保存, 可追溯价格出处
+- 测试: apigx/price 8/8(新增 4 个同步用例: 不污染他人/人工覆盖/离谱读数/退化到渠道作用域)
+- apigx + middleware 全量通过
+---
+ apigx/price/mapping_test.go | 156 ++++++++++++++++++++++++++++++++++++
+ apigx/price/sync.go         | 142 ++++++++++++++++++++++++++++++++
+ 2 files changed, 298 insertions(+)
+ create mode 100644 apigx/price/sync.go
+
+diff --git a/apigx/price/mapping_test.go b/apigx/price/mapping_test.go
+index 604bf87..d854315 100644
+--- a/apigx/price/mapping_test.go
++++ b/apigx/price/mapping_test.go
+@@ -1,11 +1,16 @@
+ package price
+ 
+ import (
++	"path/filepath"
++	"strconv"
++	"sync/atomic"
+ 	"testing"
+ 
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/glebarez/sqlite"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
+ )
+ 
+ // 底座内置价格口径：USD per 1M tokens → 微美元/1M tokens。
+@@ -85,3 +90,154 @@ func TestScopeHelpersUsePriceEnums(t *testing.T) {
+ 		"价格与容量的作用域枚举是两套，混用会把渠道价写成 Key 价")
+ 	assert.Equal(t, apigxmodel.PriceScopeOffering, 0)
+ }
++
++// ---- 单渠道同步的作用域与隔离（T2.2） ----
++
++// 同步只能触达「这个渠道」与「这个渠道自己的供给」，绝不写全局，也不碰别的分享者。
++func TestSyncChannelPricesDoesNotPolluteOthers(t *testing.T) {
++	db := newPriceTestDB(t)
++
++	const ownerA, ownerB int64 = 7101, 7102
++	channelA := seedShareChannel(t, db, ownerA, "A渠道")
++	channelB := seedShareChannel(t, db, ownerB, "B渠道")
++	offeringA := seedOffering(t, db, ownerA, channelA, "gpt-x")
++
++	// A 同步自己的价格
++	report, err := SyncChannelPrices(db, ownerA, channelA, []Reading{
++		{UpstreamModelID: "gpt-x", InputUSDPerMillion: 2, OutputUSDPerMillion: 8,
++			Source: apigxmodel.PriceRuleSourceModelsDev, SourceRef: "models.dev/gpt-x", RawRecord: `{"in":2}`},
++	})
++	require.NoError(t, err)
++	assert.Equal(t, 1, report.Applied)
++	assert.Empty(t, report.Skipped)
++
++	// 价格落在**供给**作用域（而不是全局，也不是渠道）
++	rule, items, err := apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeOffering, offeringA, 0)
++	require.NoError(t, err)
++	require.Len(t, items, 2)
++	assert.EqualValues(t, 2_000_000, items[0].UnitPriceMicro)
++	assert.EqualValues(t, 8_000_000, items[1].UnitPriceMicro)
++	assert.Equal(t, apigxmodel.PriceRuleSourceModelsDev, rule.Source)
++	assert.Equal(t, "models.dev/gpt-x", rule.SourceRef, "来源标识要能追溯价格出处")
++	assert.NotEmpty(t, rule.RawRecord)
++
++	// B 的渠道与供给**不受影响**
++	_, _, err = apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeChannel, channelB, 0)
++	assert.ErrorIs(t, err, apigxmodel.ErrNoPriceRule, "别人的渠道不得被写入价格")
++
++	// 全局作用域从未被写过：用一个不存在的"全局"标识反查，确认没有任何 scope 为空的快照
++	var globalCount int64
++	require.NoError(t, db.Model(&apigxmodel.PriceRule{}).Where("scope_type = ? OR scope_id = 0", -1).Count(&globalCount).Error)
++	assert.Zero(t, globalCount)
++
++	// 越权同步被拒（与"渠道不存在"同义）
++	_, err = SyncChannelPrices(db, ownerB, channelA, []Reading{{UpstreamModelID: "gpt-x", InputUSDPerMillion: 99}})
++	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
++}
++
++// 人工覆盖后，同步放弃但**不是失败**（旧价继续用，只报告跳过）。
++func TestSyncChannelPricesRespectsManualOverride(t *testing.T) {
++	db := newPriceTestDB(t)
++	const owner int64 = 7201
++	channel := seedShareChannel(t, db, owner, "C渠道")
++	offering := seedOffering(t, db, owner, channel, "gpt-y")
++
++	// 人工价（供给作用域）
++	manual := &apigxmodel.PriceRule{
++		ScopeType: apigxmodel.PriceScopeOffering, ScopeID: offering,
++		Source: apigxmodel.PriceRuleSourceManual, Currency: "USD",
++		ValidationState: apigxmodel.PriceValidationAccepted,
++	}
++	require.NoError(t, apigxmodel.CreatePriceRuleSnapshot(db, manual, []apigxmodel.PriceRuleItem{
++		{Dimension: DimensionInputTokens, UnitScale: UnitScalePerMillionTokens, UnitPriceMicro: 9_999_999, Currency: "USD"},
++	}))
++
++	report, err := SyncChannelPrices(db, owner, channel, []Reading{
++		{UpstreamModelID: "gpt-y", InputUSDPerMillion: 2, OutputUSDPerMillion: 8, Source: apigxmodel.PriceRuleSourceModelsDev},
++	})
++	require.NoError(t, err, "人工覆盖应导致跳过，而不是报错")
++	assert.Zero(t, report.Applied)
++	assert.Contains(t, report.Skipped, "gpt-y")
++	assert.Equal(t, "manual_override", report.Notes["gpt-y"])
++
++	// 人工价仍然是生效价
++	_, items, err := apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeOffering, offering, 0)
++	require.NoError(t, err)
++	assert.EqualValues(t, 9_999_999, items[0].UnitPriceMicro)
++}
++
++// 口径离谱的读数不写任何版本，只报告 —— 不让错价进入计费。
++func TestSyncChannelPricesSkipsImplausibleReadings(t *testing.T) {
++	db := newPriceTestDB(t)
++	const owner int64 = 7301
++	channel := seedShareChannel(t, db, owner, "D渠道")
++	seedOffering(t, db, owner, channel, "gpt-z")
++
++	report, err := SyncChannelPrices(db, owner, channel, []Reading{
++		{UpstreamModelID: "gpt-z", InputUSDPerMillion: 5_000_000, Source: apigxmodel.PriceRuleSourceOpenRouter},
++	})
++	require.NoError(t, err)
++	assert.Zero(t, report.Applied)
++	assert.Equal(t, "implausible_price", report.Notes["gpt-z"])
++
++	_, _, err = apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeChannel, channel, 0)
++	assert.ErrorIs(t, err, apigxmodel.ErrNoPriceRule, "离谱读数不得写下任何价格")
++}
++
++// 没有对应供给时退化到渠道作用域（渠道级默认价），仍然不写全局。
++func TestSyncChannelPricesFallsBackToChannelScope(t *testing.T) {
++	db := newPriceTestDB(t)
++	const owner int64 = 7401
++	channel := seedShareChannel(t, db, owner, "E渠道")
++
++	report, err := SyncChannelPrices(db, owner, channel, []Reading{
++		{UpstreamModelID: "no-offering-yet", InputUSDPerMillion: 1, OutputUSDPerMillion: 4,
++			Source: apigxmodel.PriceRuleSourceUpstreamQuote},
++	})
++	require.NoError(t, err)
++	assert.Equal(t, 1, report.Applied)
++
++	rule, items, err := apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeChannel, channel, 0)
++	require.NoError(t, err)
++	assert.EqualValues(t, 1_000_000, items[0].UnitPriceMicro)
++	assert.Equal(t, "USD", rule.Currency)
++}
++
++// ---- fixture ----
++
++// newPriceTestDB 建一个独立的 SQLite 库并跑迁移（与 apigx/model 的测试同一套结构）。
++func newPriceTestDB(t *testing.T) *gorm.DB {
++	t.Helper()
++	dsn := filepath.Join(t.TempDir(), "apigx_price_test.db")
++	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, apigxmodel.Migrate(db))
++	return db
++}
++
++var priceSeq atomic.Int64
++
++// seedShareChannel 建一个属于 owner 的分享渠道。
++func seedShareChannel(t *testing.T, db *gorm.DB, ownerUserID int64, name string) int64 {
++	t.Helper()
++	publicID := "ch" + strconv.FormatInt(priceSeq.Add(1), 10) + name
++	group := &apigxmodel.ShareGroup{OwnerUserID: ownerUserID, Name: name + "-组", PublicID: "g" + publicID}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	channel := &apigxmodel.Channel{
++		PublicID: publicID, OwnerUserID: ownerUserID, ShareGroupID: group.ID,
++		Name: name, BaseChannelID: priceSeq.Add(1) + 100000,
++	}
++	require.NoError(t, apigxmodel.CreateChannel(db, channel))
++	return channel.ID
++}
++
++// seedOffering 为渠道建一条供给（价格优先落到供给作用域）。
++func seedOffering(t *testing.T, db *gorm.DB, ownerUserID, channelID int64, upstreamModelID string) int64 {
++	t.Helper()
++	offering := &apigxmodel.ModelOffering{ChannelID: channelID, UpstreamModelID: upstreamModelID}
++	require.NoError(t, apigxmodel.CreateModelOffering(db, ownerUserID, offering))
++	return offering.ID
++}
+diff --git a/apigx/price/sync.go b/apigx/price/sync.go
+new file mode 100644
+index 0000000..05647d4
+--- /dev/null
++++ b/apigx/price/sync.go
+@@ -0,0 +1,142 @@
++package price
++
++import (
++	"errors"
++	"fmt"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"gorm.io/gorm"
++)
++
++// 单渠道价格同步（T2.2）。
++//
++// # 为什么作用域落到「供给」而不是全局
++//
++// 同一个上游模型名在不同分享渠道上就是**不同的供给**，价格本来就可以不同
++// （计划书验收：价格变体不互相覆盖）。因此同步结果的落点是：
++//
++//	有对应供给 → 写到**供给**作用域（`PriceScopeOffering`）
++//	没有供给   → 退化到**渠道**作用域（`PriceScopeChannel`）
++//
++// **任何情况下都不写全局作用域**——这正是验收条款
++// 「单渠道同步不污染全局或其他分享者」在实现层的体现：
++// 一次同步能触达的作用域只有"这个渠道"和"这个渠道自己的供给"。
++
++// Reading 是一次同步中「某个上游模型」的价格读数。
++type Reading struct {
++	// UpstreamModelID 是**上游**模型名（与供给的 `upstream_model_id` 对齐）。
++	UpstreamModelID string
++	// 各维度价格，单位 USD per 1M tokens（底座内置口径）。0 表示该维度不单独计价。
++	InputUSDPerMillion      float64
++	OutputUSDPerMillion     float64
++	CacheReadUSDPerMillion  float64
++	CacheWriteUSDPerMillion float64
++	// Source 价格来源（`PriceRuleSource*`）。
++	Source int
++	// SourceRef 来源标识（如 "models.dev/openai/gpt-4o"）。
++	SourceRef string
++	// RawRecord 原始记录（留存以便复核可疑版本）。
++	RawRecord string
++	// Currency 原币种；空视为 USD。
++	Currency string
++	// FxRateID/FxRateMicro 保存的汇率（非 USD 需要）。
++	FxRateID    int64
++	FxRateMicro int64
++}
++
++// SyncReport 汇总一次同步的结果。
++type SyncReport struct {
++	// Applied 已生效（新建或追加了生效版本）。
++	Applied int
++	// Pending 写入待确认（不生效，旧价继续用）。
++	Pending int
++	// Skipped 被跳过且没有写任何版本（例如人工锁定）。
++	Skipped []string
++	// Notes 记录每个被跳过/待确认模型的短原因。
++	Notes map[string]string
++}
++
++// SyncChannelPrices 把一批价格读数同步到某个分享渠道（及其供给）的价格快照。
++//
++// 前置：调用方必须是该渠道的所有者（否则返回 `ErrNotFound`，与"渠道不存在"同义，
++// 不泄露存在性）。
++func SyncChannelPrices(db *gorm.DB, ownerUserID, shareChannelID int64, readings []Reading) (SyncReport, error) {
++	report := SyncReport{Notes: map[string]string{}}
++	if db == nil {
++		return report, fmt.Errorf("%w: db is required", apigxmodel.ErrInvalidArgument)
++	}
++	if _, err := apigxmodel.GetChannel(db, ownerUserID, shareChannelID); err != nil {
++		return report, err
++	}
++
++	// 该渠道自己的供给：建立"上游模型名 → 供给 ID"的映射，用于把价格落到供给作用域
++	offerings, err := apigxmodel.ListModelOfferingsByChannel(db, ownerUserID, shareChannelID)
++	if err != nil {
++		return report, err
++	}
++	offeringByModel := make(map[string]int64, len(offerings))
++	for i := range offerings {
++		offeringByModel[offerings[i].UpstreamModelID] = offerings[i].ID
++	}
++
++	for _, reading := range readings {
++		modelID := reading.UpstreamModelID
++		if modelID == "" {
++			continue
++		}
++		items, mapErr := ItemsFromUSDPerMillion(
++			reading.InputUSDPerMillion, reading.OutputUSDPerMillion,
++			reading.CacheReadUSDPerMillion, reading.CacheWriteUSDPerMillion)
++		if mapErr != nil {
++			// 口径错误（如把"每 1K"当"每 1M"）：**不写任何版本**，只报告
++			report.Skipped = append(report.Skipped, modelID)
++			report.Notes[modelID] = "implausible_price"
++			continue
++		}
++
++		scopeType, scopeID := ChannelScope(shareChannelID)
++		// 供给存在则落到供给作用域：价格天然是"某个渠道的某个模型"的属性
++		if offeringID, ok := offeringByModel[modelID]; ok {
++			scopeType, scopeID = apigxmodel.PriceScopeOffering, offeringID
++		}
++
++		currency := reading.Currency
++		if currency == "" {
++			currency = "USD"
++		}
++		// 有对应供给、或调用方给了价格读数的模型，视为"模型已知"；
++		// 真正未知的模型（既无供给又无价格）根本不会出现在 readings 里。
++		result, ingestErr := apigxmodel.IngestSourcePrice(db, apigxmodel.SourcePriceIngest{
++			ScopeType: scopeType, ScopeID: scopeID,
++			Source: reading.Source, SourceRef: reading.SourceRef,
++			Currency: currency, PricingMode: apigxmodel.PriceModePerDimension,
++			Items: items, RawRecord: reading.RawRecord,
++			ModelKnown: true,
++			FxRateID:   reading.FxRateID, FxRateMicro: reading.FxRateMicro,
++		})
++		if ingestErr != nil {
++			if errors.Is(ingestErr, apigxmodel.ErrPriceLocked) {
++				// 人工覆盖：同步放弃，但**不是失败**——旧价继续用
++				report.Skipped = append(report.Skipped, modelID)
++				report.Notes[modelID] = "manual_override"
++				continue
++			}
++			return report, ingestErr
++		}
++		if result.Applied {
++			report.Applied++
++			continue
++		}
++		report.Pending++
++		report.Notes[modelID] = result.Note
++	}
++	return report, nil
++}
++
++// SourceRefFor 生成一条来源标识（来源名 + 上游模型名），便于事后追溯价格出处。
++func SourceRefFor(sourceName, upstreamModelID string) string {
++	if sourceName == "" {
++		return upstreamModelID
++	}
++	return sourceName + "/" + upstreamModelID
++}
+-- 
+2.53.0.windows.1
+
