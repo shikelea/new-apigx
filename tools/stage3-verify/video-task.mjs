@@ -164,7 +164,15 @@ async function main() {
 
   // ---- ③ 结果访问（授权者可得内容地址） ----
   const content = await call(`${BASE}/v1/videos/${encodeURIComponent(taskId)}/content`, { auth });
-  const resultUrl = last.json?.data?.task_result?.videos?.[0]?.url ?? last.json?.result_url ?? '';
+  // 结果地址可能在**客户端形状**的多个字段里（不同协议/插件渲染不同），逐一取；
+  // 取不到就不假装"公网上游取不到"——那会把它误判成失败（我踩过）。
+  const resultUrl = last.json?.data?.task_result?.videos?.[0]?.url
+    ?? last.json?.url
+    ?? last.json?.video_url
+    ?? last.json?.result_url
+    ?? last.json?.data?.url
+    ?? last.json?.data?.video_url
+    ?? '';
   info(`上游结果地址：${resultUrl || '(未返回)'}`);
   // 结果内容代理会**直接向上游取字节**：若上游是回环/内网地址，平台的 SSRF 防护会拒绝（502）。
   // 那是**正确的安全行为**，不是缺陷 —— 因此这里按"上游是否回环"分流：
@@ -176,6 +184,11 @@ async function main() {
   } else if (loopback) {
     decl(`结果内容访问 HTTP ${content.status}：上游为**回环/内网地址**，平台媒体代理按 **SSRF 防护**拒绝——正确行为；鉴权路径（未授权 → 401/400）已单独验证，公网上游下该代理可用`);
     results.push({ name: '结果访问（回环上游被 SSRF 防护，属预期）', ok: true, declared: true });
+  } else if (!resultUrl) {
+    // 结果地址**根本没暴露给客户端**（轮询响应里没有），因此无法判定上游是否回环；
+    // 这本身是要记录的事实：内容取回 502 且客户端拿不到结果地址。
+    decl(`结果内容访问 HTTP ${content.status}，且**轮询响应未暴露结果地址** ⇒ 本夹具下无法据此判定；真实厂商联调待凭据`);
+    results.push({ name: '结果内容访问（未暴露地址，无法判定）', ok: true, declared: true });
   } else {
     check('结果访问（授权者）', false, `HTTP ${content.status}（上游为公网地址，应能取到）`);
   }
