@@ -1,0 +1,435 @@
+From 2aa018fc872a05008c0172f8efb215ab57ad2100 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 07:59:04 +0800
+Subject: [PATCH 101/101] =?UTF-8?q?feat(catalog):=20=E5=80=99=E9=80=89?=
+ =?UTF-8?q?=E7=A1=AE=E8=AE=A4=E5=B7=A5=E4=BD=9C=E6=B5=81=20+=20=E6=89=B9?=
+ =?UTF-8?q?=E9=87=8F=E5=8C=B9=E9=85=8D=EF=BC=88=C2=A74=E3=80=8C=E6=89=B9?=
+ =?UTF-8?q?=E9=87=8F=E5=8C=B9=E9=85=8D=E3=80=81=E4=BA=BA=E5=B7=A5=E8=A6=86?=
+ =?UTF-8?q?=E7=9B=96=E3=80=8D=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- GET  /api/model-catalog/candidates (可选 state, 平台侧)
+- POST /api/model-catalog/candidates/:id/confirm —— 目标可给 target_canonical_model_id,
+  也可给 api_model_id: **不存在时顺手创建标准模型**(否则管理员要绕去别处建模型, 这一步会被跳过, 候选永远堆着)
+- POST /api/model-catalog/candidates/:id/reject
+- POST /api/model-catalog/bulk-confirm —— 把**归一化后同名**的待确认候选一次性指到同一标准模型
+
+**状态单向推进**: 所有动作都带 WHERE confirmation_state=待确认 =>
+  重复确认 404 / 已确认不能再拒绝 / 已拒绝不能再确认（用例逐条覆盖）
+
+用例过程中我自己两个错都被抓住:
+  1) 断言"3 条候选"实为 2 条(同名两点归一化去重 => 幂等生效; 我注释里写了却断言 3)
+  2) 用 items[0] 取行(列表按 id 倒序, 取到的是另一条) => 改为**按身份取行**
+  教训: 取数据要按身份, 不按下标/顺序
+
+检查: go build ✅ / apigx/model + apigx/api 用例 ✅
+下一步: 平台侧的候选确认界面
+---
+ apigx/api/share.go          | 150 +++++++++++++++++++++++++++++++++
+ apigx/api/share_test.go     |  57 +++++++++++++
+ apigx/model/repo_catalog.go | 160 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 367 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index f686284..2f9a4fa 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -90,6 +90,16 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	// 因此做成可配置项，不引入任务表结构变更与迁移风险。
+ 	r.GET("/task-retention", h.getTaskRetention)
+ 
++	// 模型目录（§4「模型目录」+ §4「批量匹配、人工覆盖」）：候选列表与确认动作。
++	// 全部是**平台侧**动作（确认映射会影响对外标准 ID 与价格匹配，不能由分享者自行决定）。
++	catalog := r.Group("/model-catalog")
++	{
++		catalog.GET("/candidates", h.listAliasCandidates)
++		catalog.POST("/candidates/:id/confirm", h.confirmAliasCandidate)
++		catalog.POST("/candidates/:id/reject", h.rejectAliasCandidate)
++		catalog.POST("/bulk-confirm", h.bulkConfirmAliases)
++	}
++
+ 	// 能力矩阵（T3.7/T3.8）：**支持范围的唯一事实来源**——界面/文档/验收脚本都从这里取，
+ 	// 避免各自发挥而宣称了没做到的能力（计划书：尚未支持的维度不能在界面宣称已生效）。
+ 	r.GET("/capabilities", h.listCapabilities)
+@@ -1765,3 +1775,143 @@ func (h *handler) updateShareGroup(c *gin.Context) {
+ 	}
+ 	ok(c, gin.H{"id": id, "name": name, "description": description})
+ }
++
++// listAliasCandidates 列出别名候选（默认只看待确认的）。
++func (h *handler) listAliasCandidates(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	state := 0
++	if raw := c.Query("state"); raw != "" {
++		parsed, err := strconv.Atoi(raw)
++		if err != nil || parsed < 0 || parsed > 2 {
++			fail(c, http.StatusBadRequest, "invalid_query", "state must be 0..2")
++			return
++		}
++		state = parsed
++	}
++	page, pageSize := 1, 50
++	if raw := c.Query("page"); raw != "" {
++		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
++			page = parsed
++		}
++	}
++	if raw := c.Query("page_size"); raw != "" {
++		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
++			pageSize = parsed
++		}
++	}
++	rows, total, err := apigxmodel.ListAliasCandidates(h.db, state, pageSize, (page-1)*pageSize)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	items := make([]gin.H, 0, len(rows))
++	for _, row := range rows {
++		items = append(items, gin.H{
++			"id": row.ID, "external_model_id": row.ExternalModelID, "normalized_model_id": row.NormalizedModelID,
++			"scope_type": row.ScopeType, "scope_id": row.ScopeID, "source": row.Source, "source_ref": row.SourceRef,
++			"confirmation_state": row.ConfirmationState, "target_canonical_model_id": row.TargetCanonicalID,
++		})
++	}
++	ok(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
++}
++
++// resolveConfirmTarget 从请求里取"确认到哪个标准模型"：既支持给现成的 ID，也支持给对外标准 ID
++// （后者不存在时**顺手创建** —— 否则管理员要先绕去别处建模型，这一步就会被跳过，候选永远堆着）。
++func (h *handler) resolveConfirmTarget(c *gin.Context, apiModelID string, canonicalID int64, description string, modalityType int) (int64, bool) {
++	if canonicalID > 0 {
++		return canonicalID, true
++	}
++	if strings.TrimSpace(apiModelID) == "" {
++		fail(c, http.StatusBadRequest, "invalid_body", "api_model_id or target_canonical_model_id is required")
++		return 0, false
++	}
++	model, err := apigxmodel.EnsureCanonicalModel(h.db, apiModelID, description, modalityType)
++	if err != nil {
++		failFromRepo(c, err)
++		return 0, false
++	}
++	return model.ID, true
++}
++
++// confirmAliasCandidate 确认一个候选（平台侧）。
++func (h *handler) confirmAliasCandidate(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req struct {
++		APIModelID             string `json:"api_model_id"`
++		TargetCanonicalModelID int64  `json:"target_canonical_model_id"`
++		Description            string `json:"description"`
++		ModalityType           int    `json:"modality_type"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
++	if !okTarget {
++		return
++	}
++	if err := apigxmodel.ConfirmAliasCandidate(h.db, id, target, owner); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": target})
++}
++
++// rejectAliasCandidate 拒绝一个候选（平台侧）。
++func (h *handler) rejectAliasCandidate(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	if err := apigxmodel.RejectAliasCandidate(h.db, id, owner); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmRejected})
++}
++
++// bulkConfirmAliases 批量确认：把所有**归一化后同名**的待确认候选一次性指到同一个标准模型（§4）。
++func (h *handler) bulkConfirmAliases(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	var req struct {
++		NormalizedModelID      string `json:"normalized_model_id"`
++		APIModelID             string `json:"api_model_id"`
++		TargetCanonicalModelID int64  `json:"target_canonical_model_id"`
++		Description            string `json:"description"`
++		ModalityType           int    `json:"modality_type"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	if strings.TrimSpace(req.NormalizedModelID) == "" {
++		fail(c, http.StatusBadRequest, "invalid_body", "normalized_model_id is required")
++		return
++	}
++	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
++	if !okTarget {
++		return
++	}
++	affected, err := apigxmodel.BulkConfirmAliases(h.db, req.NormalizedModelID, target, owner)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"confirmed": affected, "target_canonical_model_id": target})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index e7d2960..408f4fc 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1151,3 +1151,60 @@ func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
+ 	assert.Equal(t, "standard-model-1", first["canonical_model_id"])
+ 	assert.Equal(t, "这是标准模型的介绍", first["model_description"])
+ }
++
++// 别名确认工作流：计划书 §4「批量匹配、人工覆盖」。重点是**单向推进**与"确认后才对外生效"。
++func TestAliasConfirmationWorkflow(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 9501
++
++	// 造三条候选：两条同名（大小写/空白不同）、一条不同名
++	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "Vendor-Model-A"))
++	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "  vendor-model-a "))
++	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "vendor-model-b"))
++
++	rec, body := env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	items, _ := body["data"].(map[string]any)["items"].([]any)
++	// 登记了三个**名字**，但其中两个归一化后同名 => 只会有 2 条候选（幂等生效）
++	require.Len(t, items, 2, "同名候选应被归一化去重")
++	// 按**身份**取行，不按下标 —— 列表按 id 倒序，用下标会取错（我踩过）
++	var candidateA, candidateB apigxmodel.ModelAlias
++	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-a").First(&candidateA).Error)
++	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-b").First(&candidateB).Error)
++	id := candidateA.ID
++
++	// 确认：**顺手创建标准模型**
++	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
++		`{"api_model_id":"vendor-model-a","description":"介绍A","modality_type":1}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	// 重复确认必须 404（单向：已经确认过的不再改动）
++	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
++		`{"api_model_id":"vendor-model-a"}`)
++	assert.Equal(t, http.StatusNotFound, rec.Code, "重复确认应被拒（单向推进）")
++
++	// 已确认的不能再被拒绝
++	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/reject", owner, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code, "已确认的候选不得被拒绝")
++
++	// 另一条候选：拒绝后不能再确认
++	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/reject", owner, "")
++	assert.Equal(t, http.StatusOK, rec.Code)
++	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/confirm", owner,
++		`{"api_model_id":"vendor-model-b"}`)
++	assert.Equal(t, http.StatusNotFound, rec.Code, "已拒绝的候选不得再被确认")
++
++	// 批量匹配：把所有**归一化后同名**的待确认候选一次确认（此处同名两条已被归一化为一条，故为 0 或 1）
++	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "bulk-name-x"))
++	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/bulk-confirm", owner,
++		`{"normalized_model_id":"bulk-name-x","api_model_id":"bulk-name-x"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	affected := body["data"].(map[string]any)["confirmed"].(float64)
++	assert.EqualValues(t, 1, affected, "批量匹配应确认同名候选")
++
++	// 批量确认后，解析就通了（只认已确认）
++	canonical, okModel, err := apigxmodel.ResolveCanonicalModel(env.db, "BULK-NAME-X")
++	require.NoError(t, err)
++	require.True(t, okModel)
++	assert.Equal(t, "bulk-name-x", canonical.APIModelID)
++}
+diff --git a/apigx/model/repo_catalog.go b/apigx/model/repo_catalog.go
+index 5532b89..adcfbde 100644
+--- a/apigx/model/repo_catalog.go
++++ b/apigx/model/repo_catalog.go
+@@ -224,3 +224,163 @@ func ResolveCanonicalModels(db *gorm.DB, externalModelIDs []string) (map[string]
+ 	}
+ 	return out, nil
+ }
++
++// AliasCandidateView 是候选列表对外的一行（含来源与建议目标）。
++type AliasCandidateView struct {
++	ID                int64
++	ExternalModelID   string
++	NormalizedModelID string
++	ScopeType         int
++	ScopeID           int64
++	Source            int
++	SourceRef         string
++	ConfirmationState int
++	TargetCanonicalID int64
++}
++
++// ListAliasCandidates 列出候选（默认只看待确认的），按 ID 倒序。
++//
++// 只读：确认/拒绝的动作在下面两个函数里，且都**只从"待确认"推进**。
++func ListAliasCandidates(db *gorm.DB, state int, limit, offset int) ([]AliasCandidateView, int64, error) {
++	if db == nil {
++		return nil, 0, errors.New("apigxmodel: nil db")
++	}
++	if limit <= 0 || limit > 200 {
++		limit = 50
++	}
++	if offset < 0 {
++		offset = 0
++	}
++	query := db.Model(&ModelAlias{}).Where("confirmation_state = ? AND deleted_at IS NULL", state)
++	var total int64
++	if err := query.Count(&total).Error; err != nil {
++		return nil, 0, err
++	}
++	var rows []ModelAlias
++	if err := query.Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
++		return nil, 0, err
++	}
++	out := make([]AliasCandidateView, 0, len(rows))
++	for _, row := range rows {
++		out = append(out, AliasCandidateView{
++			ID: row.ID, ExternalModelID: row.ExternalModelID, NormalizedModelID: row.NormalizedModelID,
++			ScopeType: row.ScopeType, ScopeID: row.ScopeID, Source: row.Source, SourceRef: row.SourceRef,
++			ConfirmationState: row.ConfirmationState, TargetCanonicalID: row.TargetCanonicalModelID,
++		})
++	}
++	return out, total, nil
++}
++
++// EnsureCanonicalModel 按对外标准 ID 找标准模型；不存在则创建（草稿→生效由调用方决定）。
++//
++// 存在的意义：管理员确认候选时，往往**还没有**标准模型行 —— 要求他先去别处建一个再回来确认，
++// 这一步就会被跳过（于是候选永远堆着）。这里允许"确认时顺手建标准模型"。
++func EnsureCanonicalModel(db *gorm.DB, apiModelID, description string, modalityType int) (CanonicalModel, error) {
++	if db == nil {
++		return CanonicalModel{}, errors.New("apigxmodel: nil db")
++	}
++	apiModelID = strings.TrimSpace(apiModelID)
++	if apiModelID == "" {
++		return CanonicalModel{}, fmt.Errorf("%w: api_model_id is required", ErrInvalidArgument)
++	}
++	var existing CanonicalModel
++	err := db.Model(&CanonicalModel{}).Where("api_model_id = ?", apiModelID).First(&existing).Error
++	if err == nil {
++		// 只补"空着的介绍"：不覆盖已有描述（那是别人维护过的内容）
++		if existing.Description == "" && strings.TrimSpace(description) != "" {
++			if updErr := db.Model(&CanonicalModel{}).Where("id = ?", existing.ID).
++				Updates(map[string]any{"description": description, "updated_at": common.GetTimestamp()}).Error; updErr != nil {
++				return CanonicalModel{}, updErr
++			}
++			existing.Description = description
++		}
++		return existing, nil
++	}
++	if !errors.Is(err, gorm.ErrRecordNotFound) {
++		return CanonicalModel{}, err
++	}
++
++	now := common.GetTimestamp()
++	created := CanonicalModel{
++		APIModelID: apiModelID, Description: description,
++		ModalityType: modalityType, Status: 1, CreatedAt: now, UpdatedAt: now,
++	}
++	if err := db.Create(&created).Error; err != nil {
++		return CanonicalModel{}, err
++	}
++	return created, nil
++}
++
++// ConfirmAliasCandidate 确认一个候选（**只从"待确认"推进**）。
++//
++// 已确认/已拒绝的行不动：确认是**单向**的，重复提交不会改变结论，
++// 也不会把别人已经拒绝过的候选又悄悄确认回来。
++func ConfirmAliasCandidate(db *gorm.DB, id, targetCanonicalID, confirmedByUserID int64) error {
++	if db == nil {
++		return errors.New("apigxmodel: nil db")
++	}
++	if targetCanonicalID <= 0 {
++		return fmt.Errorf("%w: target canonical model is required", ErrInvalidArgument)
++	}
++	res := db.Model(&ModelAlias{}).
++		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
++		Updates(map[string]any{
++			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
++			"target_canonical_model_id": targetCanonicalID,
++			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": common.GetTimestamp(),
++			"updated_at": common.GetTimestamp(),
++		})
++	if res.Error != nil {
++		return res.Error
++	}
++	if res.RowsAffected == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// RejectAliasCandidate 拒绝一个候选（同样只从"待确认"推进）。
++func RejectAliasCandidate(db *gorm.DB, id, confirmedByUserID int64) error {
++	if db == nil {
++		return errors.New("apigxmodel: nil db")
++	}
++	res := db.Model(&ModelAlias{}).
++		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
++		Updates(map[string]any{
++			"confirmation_state": AliasConfirmRejected, "relation": AliasRelationCandidate,
++			"confirmed_by_user_id": confirmedByUserID, "confirmed_at": common.GetTimestamp(),
++			"updated_at": common.GetTimestamp(),
++		})
++	if res.Error != nil {
++		return res.Error
++	}
++	if res.RowsAffected == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// BulkConfirmAliases 把**归一化后同名**的待确认候选一次性确认到同一个标准模型（§4「批量匹配」）。
++//
++// 返回确认的行数。只动待确认的行 —— 已确认/已拒绝的保持不变。
++func BulkConfirmAliases(db *gorm.DB, normalizedModelID string, targetCanonicalID, confirmedByUserID int64) (int64, error) {
++	if db == nil {
++		return 0, errors.New("apigxmodel: nil db")
++	}
++	normalized := NormalizeModelIDForAlias(normalizedModelID)
++	if normalized == "" || targetCanonicalID <= 0 {
++		return 0, fmt.Errorf("%w: normalized model id and target are required", ErrInvalidArgument)
++	}
++	now := common.GetTimestamp()
++	res := db.Model(&ModelAlias{}).
++		Where("normalized_model_id = ? AND confirmation_state = ? AND deleted_at IS NULL", normalized, AliasConfirmPending).
++		Updates(map[string]any{
++			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
++			"target_canonical_model_id": targetCanonicalID,
++			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": now, "updated_at": now,
++		})
++	if res.Error != nil {
++		return 0, res.Error
++	}
++	return res.RowsAffected, nil
++}
+-- 
+2.53.0.windows.1
+
