@@ -224,3 +224,163 @@ func ResolveCanonicalModels(db *gorm.DB, externalModelIDs []string) (map[string]
 	}
 	return out, nil
 }
+
+// AliasCandidateView 是候选列表对外的一行（含来源与建议目标）。
+type AliasCandidateView struct {
+	ID                int64
+	ExternalModelID   string
+	NormalizedModelID string
+	ScopeType         int
+	ScopeID           int64
+	Source            int
+	SourceRef         string
+	ConfirmationState int
+	TargetCanonicalID int64
+}
+
+// ListAliasCandidates 列出候选（默认只看待确认的），按 ID 倒序。
+//
+// 只读：确认/拒绝的动作在下面两个函数里，且都**只从"待确认"推进**。
+func ListAliasCandidates(db *gorm.DB, state int, limit, offset int) ([]AliasCandidateView, int64, error) {
+	if db == nil {
+		return nil, 0, errors.New("apigxmodel: nil db")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	query := db.Model(&ModelAlias{}).Where("confirmation_state = ? AND deleted_at IS NULL", state)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var rows []ModelAlias
+	if err := query.Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	out := make([]AliasCandidateView, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, AliasCandidateView{
+			ID: row.ID, ExternalModelID: row.ExternalModelID, NormalizedModelID: row.NormalizedModelID,
+			ScopeType: row.ScopeType, ScopeID: row.ScopeID, Source: row.Source, SourceRef: row.SourceRef,
+			ConfirmationState: row.ConfirmationState, TargetCanonicalID: row.TargetCanonicalModelID,
+		})
+	}
+	return out, total, nil
+}
+
+// EnsureCanonicalModel 按对外标准 ID 找标准模型；不存在则创建（草稿→生效由调用方决定）。
+//
+// 存在的意义：管理员确认候选时，往往**还没有**标准模型行 —— 要求他先去别处建一个再回来确认，
+// 这一步就会被跳过（于是候选永远堆着）。这里允许"确认时顺手建标准模型"。
+func EnsureCanonicalModel(db *gorm.DB, apiModelID, description string, modalityType int) (CanonicalModel, error) {
+	if db == nil {
+		return CanonicalModel{}, errors.New("apigxmodel: nil db")
+	}
+	apiModelID = strings.TrimSpace(apiModelID)
+	if apiModelID == "" {
+		return CanonicalModel{}, fmt.Errorf("%w: api_model_id is required", ErrInvalidArgument)
+	}
+	var existing CanonicalModel
+	err := db.Model(&CanonicalModel{}).Where("api_model_id = ?", apiModelID).First(&existing).Error
+	if err == nil {
+		// 只补"空着的介绍"：不覆盖已有描述（那是别人维护过的内容）
+		if existing.Description == "" && strings.TrimSpace(description) != "" {
+			if updErr := db.Model(&CanonicalModel{}).Where("id = ?", existing.ID).
+				Updates(map[string]any{"description": description, "updated_at": common.GetTimestamp()}).Error; updErr != nil {
+				return CanonicalModel{}, updErr
+			}
+			existing.Description = description
+		}
+		return existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return CanonicalModel{}, err
+	}
+
+	now := common.GetTimestamp()
+	created := CanonicalModel{
+		APIModelID: apiModelID, Description: description,
+		ModalityType: modalityType, Status: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.Create(&created).Error; err != nil {
+		return CanonicalModel{}, err
+	}
+	return created, nil
+}
+
+// ConfirmAliasCandidate 确认一个候选（**只从"待确认"推进**）。
+//
+// 已确认/已拒绝的行不动：确认是**单向**的，重复提交不会改变结论，
+// 也不会把别人已经拒绝过的候选又悄悄确认回来。
+func ConfirmAliasCandidate(db *gorm.DB, id, targetCanonicalID, confirmedByUserID int64) error {
+	if db == nil {
+		return errors.New("apigxmodel: nil db")
+	}
+	if targetCanonicalID <= 0 {
+		return fmt.Errorf("%w: target canonical model is required", ErrInvalidArgument)
+	}
+	res := db.Model(&ModelAlias{}).
+		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
+		Updates(map[string]any{
+			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
+			"target_canonical_model_id": targetCanonicalID,
+			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": common.GetTimestamp(),
+			"updated_at": common.GetTimestamp(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RejectAliasCandidate 拒绝一个候选（同样只从"待确认"推进）。
+func RejectAliasCandidate(db *gorm.DB, id, confirmedByUserID int64) error {
+	if db == nil {
+		return errors.New("apigxmodel: nil db")
+	}
+	res := db.Model(&ModelAlias{}).
+		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
+		Updates(map[string]any{
+			"confirmation_state": AliasConfirmRejected, "relation": AliasRelationCandidate,
+			"confirmed_by_user_id": confirmedByUserID, "confirmed_at": common.GetTimestamp(),
+			"updated_at": common.GetTimestamp(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// BulkConfirmAliases 把**归一化后同名**的待确认候选一次性确认到同一个标准模型（§4「批量匹配」）。
+//
+// 返回确认的行数。只动待确认的行 —— 已确认/已拒绝的保持不变。
+func BulkConfirmAliases(db *gorm.DB, normalizedModelID string, targetCanonicalID, confirmedByUserID int64) (int64, error) {
+	if db == nil {
+		return 0, errors.New("apigxmodel: nil db")
+	}
+	normalized := NormalizeModelIDForAlias(normalizedModelID)
+	if normalized == "" || targetCanonicalID <= 0 {
+		return 0, fmt.Errorf("%w: normalized model id and target are required", ErrInvalidArgument)
+	}
+	now := common.GetTimestamp()
+	res := db.Model(&ModelAlias{}).
+		Where("normalized_model_id = ? AND confirmation_state = ? AND deleted_at IS NULL", normalized, AliasConfirmPending).
+		Updates(map[string]any{
+			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
+			"target_canonical_model_id": targetCanonicalID,
+			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": now, "updated_at": now,
+		})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
+}

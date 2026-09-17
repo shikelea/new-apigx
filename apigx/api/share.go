@@ -90,6 +90,16 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	// 因此做成可配置项，不引入任务表结构变更与迁移风险。
 	r.GET("/task-retention", h.getTaskRetention)
 
+	// 模型目录（§4「模型目录」+ §4「批量匹配、人工覆盖」）：候选列表与确认动作。
+	// 全部是**平台侧**动作（确认映射会影响对外标准 ID 与价格匹配，不能由分享者自行决定）。
+	catalog := r.Group("/model-catalog")
+	{
+		catalog.GET("/candidates", h.listAliasCandidates)
+		catalog.POST("/candidates/:id/confirm", h.confirmAliasCandidate)
+		catalog.POST("/candidates/:id/reject", h.rejectAliasCandidate)
+		catalog.POST("/bulk-confirm", h.bulkConfirmAliases)
+	}
+
 	// 能力矩阵（T3.7/T3.8）：**支持范围的唯一事实来源**——界面/文档/验收脚本都从这里取，
 	// 避免各自发挥而宣称了没做到的能力（计划书：尚未支持的维度不能在界面宣称已生效）。
 	r.GET("/capabilities", h.listCapabilities)
@@ -1764,4 +1774,144 @@ func (h *handler) updateShareGroup(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"id": id, "name": name, "description": description})
+}
+
+// listAliasCandidates 列出别名候选（默认只看待确认的）。
+func (h *handler) listAliasCandidates(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	state := 0
+	if raw := c.Query("state"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 2 {
+			fail(c, http.StatusBadRequest, "invalid_query", "state must be 0..2")
+			return
+		}
+		state = parsed
+	}
+	page, pageSize := 1, 50
+	if raw := c.Query("page"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+	if raw := c.Query("page_size"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+			pageSize = parsed
+		}
+	}
+	rows, total, err := apigxmodel.ListAliasCandidates(h.db, state, pageSize, (page-1)*pageSize)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	items := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, gin.H{
+			"id": row.ID, "external_model_id": row.ExternalModelID, "normalized_model_id": row.NormalizedModelID,
+			"scope_type": row.ScopeType, "scope_id": row.ScopeID, "source": row.Source, "source_ref": row.SourceRef,
+			"confirmation_state": row.ConfirmationState, "target_canonical_model_id": row.TargetCanonicalID,
+		})
+	}
+	ok(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
+}
+
+// resolveConfirmTarget 从请求里取"确认到哪个标准模型"：既支持给现成的 ID，也支持给对外标准 ID
+// （后者不存在时**顺手创建** —— 否则管理员要先绕去别处建模型，这一步就会被跳过，候选永远堆着）。
+func (h *handler) resolveConfirmTarget(c *gin.Context, apiModelID string, canonicalID int64, description string, modalityType int) (int64, bool) {
+	if canonicalID > 0 {
+		return canonicalID, true
+	}
+	if strings.TrimSpace(apiModelID) == "" {
+		fail(c, http.StatusBadRequest, "invalid_body", "api_model_id or target_canonical_model_id is required")
+		return 0, false
+	}
+	model, err := apigxmodel.EnsureCanonicalModel(h.db, apiModelID, description, modalityType)
+	if err != nil {
+		failFromRepo(c, err)
+		return 0, false
+	}
+	return model.ID, true
+}
+
+// confirmAliasCandidate 确认一个候选（平台侧）。
+func (h *handler) confirmAliasCandidate(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req struct {
+		APIModelID             string `json:"api_model_id"`
+		TargetCanonicalModelID int64  `json:"target_canonical_model_id"`
+		Description            string `json:"description"`
+		ModalityType           int    `json:"modality_type"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
+	if !okTarget {
+		return
+	}
+	if err := apigxmodel.ConfirmAliasCandidate(h.db, id, target, owner); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": target})
+}
+
+// rejectAliasCandidate 拒绝一个候选（平台侧）。
+func (h *handler) rejectAliasCandidate(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	if err := apigxmodel.RejectAliasCandidate(h.db, id, owner); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmRejected})
+}
+
+// bulkConfirmAliases 批量确认：把所有**归一化后同名**的待确认候选一次性指到同一个标准模型（§4）。
+func (h *handler) bulkConfirmAliases(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	var req struct {
+		NormalizedModelID      string `json:"normalized_model_id"`
+		APIModelID             string `json:"api_model_id"`
+		TargetCanonicalModelID int64  `json:"target_canonical_model_id"`
+		Description            string `json:"description"`
+		ModalityType           int    `json:"modality_type"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.NormalizedModelID) == "" {
+		fail(c, http.StatusBadRequest, "invalid_body", "normalized_model_id is required")
+		return
+	}
+	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
+	if !okTarget {
+		return
+	}
+	affected, err := apigxmodel.BulkConfirmAliases(h.db, req.NormalizedModelID, target, owner)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"confirmed": affected, "target_canonical_model_id": target})
 }

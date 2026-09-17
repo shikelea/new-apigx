@@ -1151,3 +1151,60 @@ func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
 	assert.Equal(t, "standard-model-1", first["canonical_model_id"])
 	assert.Equal(t, "这是标准模型的介绍", first["model_description"])
 }
+
+// 别名确认工作流：计划书 §4「批量匹配、人工覆盖」。重点是**单向推进**与"确认后才对外生效"。
+func TestAliasConfirmationWorkflow(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 9501
+
+	// 造三条候选：两条同名（大小写/空白不同）、一条不同名
+	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "Vendor-Model-A"))
+	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "  vendor-model-a "))
+	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "vendor-model-b"))
+
+	rec, body := env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	// 登记了三个**名字**，但其中两个归一化后同名 => 只会有 2 条候选（幂等生效）
+	require.Len(t, items, 2, "同名候选应被归一化去重")
+	// 按**身份**取行，不按下标 —— 列表按 id 倒序，用下标会取错（我踩过）
+	var candidateA, candidateB apigxmodel.ModelAlias
+	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-a").First(&candidateA).Error)
+	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-b").First(&candidateB).Error)
+	id := candidateA.ID
+
+	// 确认：**顺手创建标准模型**
+	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
+		`{"api_model_id":"vendor-model-a","description":"介绍A","modality_type":1}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 重复确认必须 404（单向：已经确认过的不再改动）
+	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
+		`{"api_model_id":"vendor-model-a"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "重复确认应被拒（单向推进）")
+
+	// 已确认的不能再被拒绝
+	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/reject", owner, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "已确认的候选不得被拒绝")
+
+	// 另一条候选：拒绝后不能再确认
+	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/reject", owner, "")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/confirm", owner,
+		`{"api_model_id":"vendor-model-b"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "已拒绝的候选不得再被确认")
+
+	// 批量匹配：把所有**归一化后同名**的待确认候选一次确认（此处同名两条已被归一化为一条，故为 0 或 1）
+	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "bulk-name-x"))
+	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/bulk-confirm", owner,
+		`{"normalized_model_id":"bulk-name-x","api_model_id":"bulk-name-x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	affected := body["data"].(map[string]any)["confirmed"].(float64)
+	assert.EqualValues(t, 1, affected, "批量匹配应确认同名候选")
+
+	// 批量确认后，解析就通了（只认已确认）
+	canonical, okModel, err := apigxmodel.ResolveCanonicalModel(env.db, "BULK-NAME-X")
+	require.NoError(t, err)
+	require.True(t, okModel)
+	assert.Equal(t, "bulk-name-x", canonical.APIModelID)
+}
