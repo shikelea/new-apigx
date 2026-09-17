@@ -800,3 +800,20 @@
 **❗未解决（下一步）**：平台侧的 **`async_task_poll` 系统任务没有推进该任务**（`main.go:143` 提到它必须在系统任务运行器启动前注册）。
 需要查明：该系统任务在当前配置下是否启用、插件运行时（Sobek）是否就绪、以及轮询是否只处理特定 `platform`。
 **在状态推进打通之前，视频这一项不能算通过**——这也是阶段 3 该抓的缺口。
+### T3.6 状态推进：已定位到"轮询在跑但跳过该平台"
+
+**证据链（全部来自实测）**
+| 观察 | 事实 |
+|---|---|
+| 任务行 | `platform=kling action=text_to_video status=NOT_START channel=142 user=1`（**创建与绑定正确** ✓） |
+| 系统任务表 | `async_task_poll` 行号 30–39，**每约 30 秒一次、每次 `succeeded`** ⇒ 轮询**在跑** ✓ |
+| 任务状态 | 长时间保持 `queued`／库中 `NOT_START` ✗ ⇒ 轮询**没有推进它** |
+| 分发代码 | `service/task_polling.go:212` 用 `GetTaskAdaptorFunc(platform)` → `relay.GetTaskAdaptor` → **插件注册表** `pluginruntime.DefaultRegistry`；解析不到就**静默跳过** ⇒ 与"系统任务成功、任务却不动"完全吻合 |
+
+**已排除**：`constant.UpdateTask`（`common/init.go:191` = `GetEnvOrDefaultBool("UPDATE_TASK", true)`，**默认 true** ✓；我曾误以为它是数据库选项并试图设置，**那是无效操作**，已更正）。
+
+**下一步（便宜且决定性）**：网关日志里 `UpdateVideoTasks` 与 `updateBatchTasks` 两条路径各有日志——`渠道 #N 未完成的任务有: M` 与 `UpdateVideoTasks fail: ...`。直接查这两条即可判定：
+- 有 `未完成的任务有: 1` ⇒ 适配器解析成功、问题在推进逻辑；
+- 只有 `UpdateVideoTasks fail` 或两者都没有 ⇒ **插件注册表里没有 kling**（插件运行时未加载），属**环境/配置**问题。
+
+**结论**：T3.6 的"创建/绑定/鉴权/取消声明"已通过 ✓；**"状态推进"未打通** ✗，且已把范围缩到"插件适配器解析"这一处。
