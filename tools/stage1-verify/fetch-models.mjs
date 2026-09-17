@@ -66,7 +66,7 @@ async function main() {
   if (created.status !== 200 || created.json?.success === false) throw new Error('建底座渠道失败：' + created.text.slice(0, 120));
   let base = null;
   for (let i = 0; i < 10 && !base; i++) {
-    const list = await call(`${BASE}/api/channel/?page=1&page_size=200`, { auth: authA });
+    const list = await call(`${BASE}/api/channel/?page=1&page_size=1000`, { auth: authA });
     base = (list.json?.data?.items ?? []).find((c) => c?.name === channelName);
     if (!base) await new Promise((r) => setTimeout(r, 2000));
   }

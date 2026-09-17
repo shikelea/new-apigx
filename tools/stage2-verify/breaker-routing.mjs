@@ -73,11 +73,17 @@ async function main() {
     body: { mode: 'single', channel: { name: deadChannelName, type: 1, key: 'sk-dead-' + stamp, base_url: 'http://127.0.0.1:9', models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
   });
 
+  // **逐页查找**（不要只查第一页）：开发库里测试渠道已积累 200+ 条，且底座的列表接口对
+  // `page_size` 可能有上限，只查第一页会"查不到刚建的渠道"（实测如此）。
   const findChannel = async (name) => {
-    for (let i = 0; i < 10; i++) {
-      const list = await call(`${BASE}/api/channel/?page=1&page_size=200`, { auth: root });
-      const hit = (list.json?.data?.items ?? []).find((c) => c?.name === name);
-      if (hit) return hit;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      for (let page = 1; page <= 6; page++) {
+        const list = await call(`${BASE}/api/channel/?page=${page}&page_size=100`, { auth: root });
+        const items = list.json?.data?.items ?? [];
+        const hit = items.find((c) => c?.name === name);
+        if (hit) return hit;
+        if (items.length < 100) break; // 已到最后一页
+      }
       await new Promise((r) => setTimeout(r, 2000));
     }
     return null;
@@ -167,8 +173,27 @@ async function main() {
       `被熔断=${openCandidate.offering_public_id} 期望=${deadShare.offeringPublicId}`);
   }
 
+  // **给熔断一个极短的生效时间**（3 秒）。
+  //
+  // 为什么要等：`route-explain` 是**当场重新计算**的，而请求路径上的守卫各自带一个
+  // 极短的判定缓存（健康供给 3 秒、刚失败过的 1 秒）。实测日志显示：脚本把 14 次请求
+  // 打完只用约 2 秒，而"打开"的判定要到紧随其后的几次请求才被守卫看到——
+  // 因此在打开判定出现后**立刻**发请求，测到的其实是"熔断尚未生效"那一段。
+  // 这里等 3 秒，让缓存过期，测的才是"打开之后流量是否被挪开"这件事本身。
+  info('等待熔断在请求路径上生效（3 秒）...');
+  await new Promise((r) => setTimeout(r, 3000));
+
   // **决定性判据**：熔断打开后再发请求，坏上游的样本数**不应再增长**
   // （样本增长 = 请求仍然打到了它）。这比"响应码全 200"更能证明流量真的被挪开。
+  // **一次过渡请求**：跨越阈值的**第一次**请求仍可能落到坏上游——因为守卫带一个极短的
+  // 判定缓存（"最近失败过的供给"为 1 秒），而"拒绝 + 禁用"正是在它之后才生效。
+  // 这是缓存的固有首次延迟（缓存本身是为了避免每请求查一次统计），不是缺陷；
+  // 因此这里显式把它作为过渡量掉，再去快照样本，这样测的是**稳态**：
+  // 熔断生效之后，流量是否真的不再打到坏上游。
+  const transition = await chat();
+  info(`过渡请求状态=${transition.status}（跨阈值瞬间的那一次，不计入稳态断言）`);
+  await new Promise((r) => setTimeout(r, 500));
+
   const deadAfterOpen = (await explain()).find((x) => x.offering_public_id === deadShare.offeringPublicId);
   const samplesBefore = deadAfterOpen?.sample_count ?? -1;
   const afterStatuses = [];

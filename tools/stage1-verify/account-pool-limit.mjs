@@ -54,7 +54,7 @@ async function main() {
   });
   if (created.status !== 200) throw new Error('建底座渠道失败：' + created.text.slice(0, 160));
   const channelName = 'POOL底座-' + stamp;
-  const listRes = await call(`${BASE}/api/channel/?page=1&page_size=200`, { auth: root });
+  const listRes = await call(`${BASE}/api/channel/?page=1&page_size=1000`, { auth: root });
   const all = listRes.json?.data?.items ?? listRes.json?.data ?? [];
   const baseChannel = (Array.isArray(all) ? all : []).find((c) => c?.name === channelName);
   if (!baseChannel?.id) throw new Error('查不到刚建的底座渠道');
