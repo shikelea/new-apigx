@@ -383,6 +383,13 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
 		return nil, types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
+	// APIGX 每日预算维度（T1.7）：预算计数**在窗口内不归还**，且预留的是**可执行金额**
+	// （`preConsumedQuota` 此刻已算出），因此放在会话建立之前最合适。
+	// 放在这里也意味着它**独立于计费偏好**：无论走钱包还是订阅，都要先过预算。
+	if budgetErr := CheckAPIGXDailyBudget(c, relayInfo, preConsumedQuota); budgetErr != nil {
+		return nil, budgetErr
+	}
+
 	// APIGX 免费共享模式：跳过「充值余额前置条件」，改用只记账的资金来源。
 	// 放在最前面，因此不经过 tryWallet 的 userQuota 检查，也不受计费偏好分支影响。
 	// 实现见 service/apigx_usage_only.go（不改价格、不伪造余额、不走 FreeModel 短路）。

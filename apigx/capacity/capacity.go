@@ -111,6 +111,20 @@ func ChannelTPM(channelID int64, window int64) string {
 	return "channel:" + i64(channelID) + ":tpm:" + i64(window)
 }
 
+// UserDailyBudgetMicro 使用者的每日预算窗口（金额单位为**微美元**）。
+//
+// 与并发/速率不同，预算维度预留的是**金额**：准入时能拿到本次要预扣的额度
+// （底座在会话创建前已算出 `preConsumedQuota`），因此预留是可执行的，
+// 不需要凭空估算 token（计划书 §9.2 对 TPM 的告诫同样适用于此）。
+func UserDailyBudgetMicro(userID int64, day int64) string {
+	return "user:" + i64(userID) + ":budget:" + i64(day)
+}
+
+// UserDailyRequestCount 使用者的每日请求数窗口。
+func UserDailyRequestCount(userID int64, day int64) string {
+	return "user:" + i64(userID) + ":dailyreq:" + i64(day)
+}
+
 // AsyncTaskSlot 异步任务槽位（与 HTTP 并发分开记账，计划书 §9.2 第 3 条）。
 func AsyncTaskSlot(scope string, id int64) string {
 	return scope + ":" + i64(id) + ":tasks"
