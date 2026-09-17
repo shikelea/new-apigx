@@ -1,0 +1,235 @@
+From 983d11c4307a05cbdd5b06d3432d266418856e84 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:01:08 +0800
+Subject: [PATCH 29/29] =?UTF-8?q?feat(apigx):=20=E4=B8=80=E9=94=AE?=
+ =?UTF-8?q?=E8=8E=B7=E5=8F=96=E4=B8=8A=E6=B8=B8=E6=A8=A1=E5=9E=8B=EF=BC=88?=
+ =?UTF-8?q?T1.8=20=E5=AE=8C=E6=88=90=EF=BC=8C=E7=AB=AF=E5=88=B0=E7=AB=AF?=
+ =?UTF-8?q?=208/8=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- controller/channel.go: 3 行导出包装 FetchChannelUpstreamModelIDsForAPIGX
+  （台账 D-017），复用底座按渠道类型分派到 40+ 家 provider 的取模型能力，
+  而不是自己重写一套适配器
+- api: POST /api/apigx/channels/:id/fetch-models（body 中 import=true 可一并落库）
+- repo: ImportModelOfferings 幂等导入（已存在的跳过），导入的供给仍是草稿
+  （导入 != 发布）
+- 端到端: 从替身上游拉到 3 个模型 / 预览不落库 / 导入 3 条草稿 /
+  重复导入 created=0 skipped=3 / 越权 404
+- 仓储新增导入用例; apigx + middleware 全量通过
+---
+ apigx/api/share.go           | 60 ++++++++++++++++++++++++++++++++++++
+ apigx/model/repo_offering.go | 48 +++++++++++++++++++++++++++++
+ apigx/model/repo_test.go     | 31 +++++++++++++++++++
+ controller/channel.go        | 10 ++++++
+ 4 files changed, 149 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index d7ea717..d0aab4c 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -23,6 +23,7 @@ import (
+ 	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+ 	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/controller"
+ 	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/gin-gonic/gin"
+ 	"gorm.io/gorm"
+@@ -52,6 +53,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
+ 		channels.POST("/:id/offerings", h.createOffering)
+ 		channels.GET("/:id/offerings", h.listOfferings)
++		channels.POST("/:id/fetch-models", h.fetchUpstreamModels)
+ 	}
+ 
+ 	offerings := r.Group("/offerings")
+@@ -1046,3 +1048,61 @@ func isDuplicateError(err error) bool {
+ 		strings.Contains(msg, "duplicate entry") ||
+ 		strings.Contains(msg, "duplicate key value")
+ }
++
++type fetchModelsRequest struct {
++	// Import 为 true 时，把拉取到的模型**批量导入为草稿供给**（一键获取的落库动作）。
++	Import bool `json:"import"`
++}
++
++// fetchUpstreamModels 一键获取该渠道的上游模型列表（可选直接导入为草稿供给）。
++//
++// **复用底座的取模型能力**：按渠道类型分派到对应 provider 适配器（40+ 家）的实现已经在底座里，
++// 这里通过 `controller.FetchChannelUpstreamModelIDsForAPIGX`（3 行导出包装，台账 D-017）调用它，
++// 而不是自己重写一套。归属仍由服务端强制：先按 owner 取出分享渠道，再用它绑定的底座渠道去拉取。
++func (h *handler) fetchUpstreamModels(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req fetchModelsRequest
++	_ = c.ShouldBindJSON(&req) // 允许空 body（仅预览）
++
++	shareChannel, err := apigxmodel.GetChannel(h.db, owner, id)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if shareChannel.BaseChannelID <= 0 {
++		fail(c, http.StatusBadRequest, "invalid_channel", "share channel has no base channel")
++		return
++	}
++	var baseChannel basemodel.Channel
++	if err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
++		failFromRepo(c, err)
++		return
++	}
++
++	modelIDs, err := controller.FetchChannelUpstreamModelIDsForAPIGX(&baseChannel)
++	if err != nil {
++		// 上游取列表失败通常是凭据/网络问题：对外给明确原因，但不泄露上游原始报文
++		common.SysError("apigx api: fetch upstream models failed: " + err.Error())
++		fail(c, http.StatusBadGateway, "upstream_fetch_failed", "failed to fetch models from upstream")
++		return
++	}
++
++	result := gin.H{"models": modelIDs}
++	if req.Import {
++		created, skipped, importErr := apigxmodel.ImportModelOfferings(h.db, owner, shareChannel.ID, modelIDs)
++		if importErr != nil {
++			failFromRepo(c, importErr)
++			return
++		}
++		result["created"] = created
++		result["skipped"] = skipped
++	}
++	ok(c, result)
++}
+diff --git a/apigx/model/repo_offering.go b/apigx/model/repo_offering.go
+index 630ae26..7d6e500 100644
+--- a/apigx/model/repo_offering.go
++++ b/apigx/model/repo_offering.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/hex"
+ 	"errors"
+ 	"fmt"
++	"strings"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+ 	"gorm.io/gorm"
+@@ -194,3 +195,50 @@ func (o *ModelOffering) CapabilityOf() Capability {
+ 	_ = common.UnmarshalJsonStr(o.Capabilities, &caps)
+ 	return caps
+ }
++
++// ImportModelOfferings 批量导入供给（一键获取上游模型列表后的落库动作）。
++//
++// 幂等：已存在（存活）的同名供给会被跳过而不是报错——上游模型列表反复拉取是常态，
++// 报错会让分享者必须先手工比对。返回新建数量与被跳过的模型名，便于界面如实回显。
++//
++// 新导入的供给仍然是**草稿**：导入不等于发布（发布要显式提交审核）。
++func ImportModelOfferings(db *gorm.DB, ownerUserID, channelID int64, upstreamModelIDs []string) (created int, skipped []string, err error) {
++	if len(upstreamModelIDs) == 0 {
++		return 0, nil, nil
++	}
++	if _, err := GetChannel(db, ownerUserID, channelID); err != nil {
++		return 0, nil, err
++	}
++
++	existing := make(map[string]struct{})
++	var alive []ModelOffering
++	if err := db.Where("channel_id = ?", channelID).Find(&alive).Error; err != nil {
++		return 0, nil, err
++	}
++	for i := range alive {
++		existing[alive[i].UpstreamModelID] = struct{}{}
++	}
++
++	seen := make(map[string]struct{}, len(upstreamModelIDs))
++	for _, modelID := range upstreamModelIDs {
++		trimmed := strings.TrimSpace(modelID)
++		if trimmed == "" {
++			continue
++		}
++		if _, dup := seen[trimmed]; dup {
++			continue
++		}
++		seen[trimmed] = struct{}{}
++		if _, exists := existing[trimmed]; exists {
++			skipped = append(skipped, trimmed)
++			continue
++		}
++		offering := &ModelOffering{ChannelID: channelID, UpstreamModelID: trimmed}
++		if err := CreateModelOffering(db, ownerUserID, offering); err != nil {
++			return created, skipped, err
++		}
++		existing[trimmed] = struct{}{}
++		created++
++	}
++	return created, skipped, nil
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 70f6cdc..7a57051 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -509,3 +509,34 @@ func TestListModelOfferingsByChannelScopesByOwner(t *testing.T) {
+ 	// 驳回后可以修改并重新提交
+ 	require.NoError(t, SubmitModelOffering(db, ownerA, target.ID))
+ }
++
++// ---- 一键获取后的批量导入（T1.8） ----
++
++func TestImportModelOfferingsIsIdempotentAndDraft(t *testing.T) {
++	db := newRepoDB(t)
++	const owner, other int64 = 13201, 13202
++	_, channel := seedGroupAndChannel(t, db, owner)
++
++	created, skipped, err := ImportModelOfferings(db, owner, channel.ID, []string{"m1", " m2 ", "m1", "", "m3"})
++	require.NoError(t, err)
++	assert.Equal(t, 3, created, "去空白、去批内重复、忽略空项")
++	assert.Empty(t, skipped)
++
++	// 再次导入同一批：全部跳过，不报错（上游模型列表反复拉取是常态）
++	created, skipped, err = ImportModelOfferings(db, owner, channel.ID, []string{"m1", "m2", "m4"})
++	require.NoError(t, err)
++	assert.Equal(t, 1, created)
++	assert.ElementsMatch(t, []string{"m1", "m2"}, skipped)
++
++	// 导入的供给仍是草稿（导入 ≠ 发布）
++	list, err := ListModelOfferingsByChannel(db, owner, channel.ID)
++	require.NoError(t, err)
++	require.Len(t, list, 4)
++	for i := range list {
++		assert.Equal(t, OfferingStatusDraft, list[i].Status, "导入的供给必须从草稿开始")
++	}
++
++	// 归属：用别人的渠道导入必须被拒
++	_, _, err = ImportModelOfferings(db, other, channel.ID, []string{"x"})
++	assert.ErrorIs(t, err, ErrNotFound)
++}
+diff --git a/controller/channel.go b/controller/channel.go
+index 997c541..08c035d 100644
+--- a/controller/channel.go
++++ b/controller/channel.go
+@@ -301,6 +301,16 @@ func applyFetchModelsHeaderOverrides(channel *model.Channel, key string, headers
+ 	return nil
+ }
+ 
++// FetchChannelUpstreamModelIDsForAPIGX 导出「按渠道类型向对应上游拉取模型列表」的能力。
++//
++// 存在理由（APIGX 一键获取模型，T1.8）：真正干活的 `fetchChannelUpstreamModelIDs` 会按
++// 渠道类型分派到 40+ 家 provider 的适配器；APIGX 侧要复用这份能力就必须有一个**导出入口**，
++// 自己实现等于把这些适配器全部重写一遍（违反二开第一原则，CODE_STYLE 第 25 条）。
++// 台账见 docs/stage0/upstream-diff.md 的 D-017。
++func FetchChannelUpstreamModelIDsForAPIGX(channel *model.Channel) ([]string, error) {
++	return fetchChannelUpstreamModelIDs(channel)
++}
++
+ func FetchUpstreamModels(c *gin.Context) {
+ 	id, err := strconv.Atoi(c.Param("id"))
+ 	if err != nil {
+-- 
+2.53.0.windows.1
+
