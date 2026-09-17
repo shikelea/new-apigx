@@ -1,0 +1,164 @@
+From d618e6903b558cb8f173c8a25ccd2d93fd15c12e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 12:54:48 +0800
+Subject: [PATCH 27/27] =?UTF-8?q?feat(apigx):=20=E7=94=A8=E9=87=8F?=
+ =?UTF-8?q?=E8=AE=B0=E5=BD=95=E6=8E=A5=E5=8F=A3=EF=BC=88T1.11=EF=BC=8C?=
+ =?UTF-8?q?=E7=AB=AF=E5=88=B0=E7=AB=AF=2012/12=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- api: GET /api/apigx/usage 复用底座 model.GetUserLogs(分页/过滤/独立日志库含 ClickHouse)
+- 补齐 APIGX 关心的两项: 实际来源(底座 channel_id -> 对外 public_id + 所有者, kind=share/platform)
+  与金额换算(用底座 common.QuotaPerUnit, 不写死)
+- 归属由服务端强制: 只按登录用户过滤, 不接受客户端 user 参数
+- 如实暴露精度: 底座日志 UseTime 为整秒, 故返回 elapsed_seconds(原先的假毫秒会让亚秒请求显示 0ms)
+- 端到端: 12/12(模型/token/成本/耗时/来源/归属隔离/泄露扫描)
+- 环境发现: 底座每用户会话数上限, 反复 E2E 会 409 AUTH_SESSION_LIMIT; 脚本改为复用缓存会话
+---
+ apigx/api/share.go                 | 94 ++++++++++++++++++++++++++++++
+ apigx/channelpool/policy_source.go | 15 +++++
+ 2 files changed, 109 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 003e377..08b753c 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -23,6 +23,7 @@ import (
+ 	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+ 	"github.com/QuantumNous/new-api/common"
++	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/gin-gonic/gin"
+ 	"gorm.io/gorm"
+ )
+@@ -51,6 +52,11 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
+ 	}
+ 
++	usage := r.Group("/usage")
++	{
++		usage.GET("", h.listUsage)
++	}
++
+ 	platformKeys := r.Group("/platform-keys")
+ 	{
+ 		platformKeys.GET("/:tokenId/preferences", h.getPlatformKeyPreferences)
+@@ -747,3 +753,91 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
+ 		"allow_fallback":         key.AllowFallback,
+ 	})
+ }
++
++// ---------------------------------------------------------------------------
++// 用量记录（T1.11，使用者视角）
++// ---------------------------------------------------------------------------
++
++// listUsage 返回**当前使用者自己**的用量记录。
++//
++// 复用底座的 `model.GetUserLogs`：它已经处理了分页、过滤、以及**独立日志库**
++// （含 ClickHouse）的分支，自己写查询会把这些全部重做一遍（二开第一原则，CODE_STYLE 第 25 条）。
++//
++// 在底座日志的基础上补两项 APIGX 关心的事：**实际提供服务的分享来源**
++// （底座只给 channel_id，我们翻译成对外的 public_id 与所有者）以及金额换算。
++// 归属由服务端强制：只按登录用户过滤，不接受任何客户端传入的 user 参数。
++func (h *handler) listUsage(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	page, pageSize := 1, 20
++	if raw := c.Query("page"); raw != "" {
++		if parsed, convErr := strconv.Atoi(raw); convErr == nil && parsed > 0 {
++			page = parsed
++		}
++	}
++	if raw := c.Query("page_size"); raw != "" {
++		if parsed, convErr := strconv.Atoi(raw); convErr == nil && parsed > 0 && parsed <= 100 {
++			pageSize = parsed
++		}
++	}
++	start := int64(0)
++	if raw := c.Query("start"); raw != "" {
++		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
++			start = parsed
++		}
++	}
++	end := common.GetTimestamp()
++	if raw := c.Query("end"); raw != "" {
++		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
++			end = parsed
++		}
++	}
++
++	logs, total, err := basemodel.GetUserLogs(int(owner), 0, start, end, c.Query("model"), "", (page-1)*pageSize, pageSize, "", "", "")
++	if err != nil {
++		common.SysError("apigx api: list usage failed: " + err.Error())
++		fail(c, http.StatusInternalServerError, "internal_error", "failed to load usage records")
++		return
++	}
++
++	items := make([]gin.H, 0, len(logs))
++	for _, entry := range logs {
++		item := gin.H{
++			"created_at":        entry.CreatedAt,
++			"model":             entry.ModelName,
++			"prompt_tokens":     entry.PromptTokens,
++			"completion_tokens": entry.CompletionTokens,
++			"total_tokens":      entry.PromptTokens + entry.CompletionTokens,
++			// 底座以「quota」为记账单位；这里换算成微美元（1e-6 USD）便于使用者理解。
++			// 换算率用底座的 QuotaPerUnit（与计费同一来源，不自己写死）。
++			"cost_micro_usd": quotaToMicroUSD(entry.Quota),
++			// 底座的日志只记录**整秒**（UseTime 为秒）。这里如实暴露秒级精度，
++			// 不做「秒 × 1000」这种假毫秒——那会让亚秒请求显示成 0 ms，属于误导。
++			"elapsed_seconds": entry.UseTime,
++			"is_stream":       entry.IsStream,
++			"request_id":      entry.RequestId,
++		}
++		// 实际来源：底座的 channel_id 翻译成对外可见的分享来源信息
++		if publicID, ownerUserID, found := channelpool.ShareChannelPublicInfoByBase(h.db, entry.ChannelId); found {
++			item["source"] = gin.H{"channel_public_id": publicID, "owner_user_id": ownerUserID, "kind": "share"}
++		} else if entry.ChannelId > 0 {
++			item["source"] = gin.H{"kind": "platform"}
++		}
++		items = append(items, item)
++	}
++
++	ok(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
++}
++
++// quotaToMicroUSD 把底座的 quota 记账单位换算为微美元。
++//
++// 换算率取底座的 `common.QuotaPerUnit`（与计费同一来源）；该值为 0 时不做换算，
++// 避免除零把金额显示成无意义的巨大数字。
++func quotaToMicroUSD(quota int) int64 {
++	if common.QuotaPerUnit <= 0 {
++		return 0
++	}
++	return int64(float64(quota) / common.QuotaPerUnit * 1_000_000)
++}
+diff --git a/apigx/channelpool/policy_source.go b/apigx/channelpool/policy_source.go
+index af88ec0..4a1377d 100644
+--- a/apigx/channelpool/policy_source.go
++++ b/apigx/channelpool/policy_source.go
+@@ -132,3 +132,18 @@ func ShareChannelOwnerByBase(db *gorm.DB, baseChannelID int) (int64, bool) {
+ 	}
+ 	return shareChannel.OwnerUserID, true
+ }
++
++// ShareChannelPublicInfoByBase 按底座渠道 ID 返回分享渠道的公开信息。
++//
++// 用于「用量记录」里展示**实际提供服务的分享来源**：只暴露对外可见的 public_id 与所有者，
++// 不暴露内部行 ID、上游地址或任何凭据相关字段。
++func ShareChannelPublicInfoByBase(db *gorm.DB, baseChannelID int) (publicID string, ownerUserID int64, ok bool) {
++	if db == nil || baseChannelID <= 0 {
++		return "", 0, false
++	}
++	var shareChannel apigxmodel.Channel
++	if err := db.Where("base_channel_id = ?", baseChannelID).First(&shareChannel).Error; err != nil {
++		return "", 0, false
++	}
++	return shareChannel.PublicID, shareChannel.OwnerUserID, true
++}
+-- 
+2.53.0.windows.1
+
