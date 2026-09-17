@@ -1,0 +1,272 @@
+From 72c20deaf302e559ffe16728d08787f1f02be21c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 11:19:39 +0800
+Subject: [PATCH 16/16] =?UTF-8?q?feat(apigx):=20=E6=88=90=E5=8A=9F?=
+ =?UTF-8?q?=E8=B7=AF=E5=BE=84=E9=80=90=20Key=20=E7=BB=9F=E8=AE=A1=20+=20?=
+ =?UTF-8?q?=E4=BF=AE=E6=8E=89=E7=BB=9F=E8=AE=A1=E5=86=99=E5=BA=95=E5=BA=A7?=
+ =?UTF-8?q?=E7=9A=84=E7=9C=9F=20bug?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- channelpool.RecordSuccessFromContext: 复用底座已有的成功点
+  (Distributor 中 c.Next() 后、状态<400 的分支, 不新增钩子位置), 台账 D-015
+- 修 bug: RecordKeyOutcome 原复用 ProjectKeyPool, 而它会写底座渠道并清空按下标状态表与
+  轮询游标 -> 每次记录统计都抹掉底座的 Key 健康状态(既慢又错)。
+  已拆为 buildPool(只读)/BuildKeyPoolProjection/writePoolToBaseChannel(唯一写处)。
+- 新回归测试: 记录统计后底座 MultiKeyStatusList 与 MultiKeyPollingIndex 必须原封不动
+- channelpool 16/16; apigx 全量 + middleware 通过
+---
+ apigx/channelpool/key_stats.go       | 25 +++++++++
+ apigx/channelpool/outcome.go         |  4 +-
+ apigx/channelpool/projection.go      | 54 +++++++++++++++---
+ apigx/channelpool/projection_test.go | 82 ++++++++++++++++++++++++++++
+ middleware/distributor.go            |  4 ++
+ 5 files changed, 159 insertions(+), 10 deletions(-)
+
+diff --git a/apigx/channelpool/key_stats.go b/apigx/channelpool/key_stats.go
+index 50c250c..3da94a6 100644
+--- a/apigx/channelpool/key_stats.go
++++ b/apigx/channelpool/key_stats.go
+@@ -86,3 +86,28 @@ func SetDBProvider(fn func() *gorm.DB) {
+ }
+ 
+ func defaultDB() *gorm.DB { return dbProvider() }
++
++// RecordSuccessFromContext 依据请求上下文，把一次**成功**调用记到对应的上游凭据上。
++//
++// 由底座的 `middleware.Distribute` 在 `c.Next()` 之后、响应状态 < 400 时调用
++// （见 docs/stage0/upstream-diff.md 的 D-015）——底座自己也在那一处记录渠道亲和性，
++// 因此上下文里的 Key 索引仍然有效，且天然只覆盖成功响应。
++//
++// 与失败路径同样的四条约束：默认关闭、只对多 Key 渠道生效、不记录任何凭据信息、失败不影响请求。
++func RecordSuccessFromContext(c *gin.Context, channelID int) {
++	if !keyStatsEnabled.Load() || c == nil || channelID <= 0 {
++		return
++	}
++	if !common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
++		return
++	}
++	keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
++
++	db := defaultDB()
++	if db == nil {
++		return
++	}
++	if err := RecordKeyOutcome(db, channelID, keyIndex, KeyOutcome{Success: true}); err != nil {
++		common.SysError("channelpool: record key success failed: " + err.Error())
++	}
++}
+diff --git a/apigx/channelpool/outcome.go b/apigx/channelpool/outcome.go
+index 06b89d5..065bcb0 100644
+--- a/apigx/channelpool/outcome.go
++++ b/apigx/channelpool/outcome.go
+@@ -50,7 +50,9 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
+ 		return err
+ 	}
+ 
+-	projection, err := ProjectKeyPool(db, shareChannel.ID)
++	// **只读**构建：统计回填绝不能写底座渠道（早期实现走 ProjectKeyPool，等于每次请求
++	// 结束都重写底座渠道并清空它按下标的状态表与轮询游标）。
++	projection, err := BuildKeyPoolProjection(db, shareChannel.ID)
+ 	if err != nil {
+ 		return err
+ 	}
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index c0fb2eb..b050841 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -61,6 +61,36 @@ type Projection struct {
+ // 只投影**当前可用**的 Key（启用 + 未到期 + 不在冷却）：分享者显式停用或已失效的凭据
+ // 不应继续被发往上游。运行期故障（上游拒绝）仍由底座按索引隔离。
+ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
++	built, err := buildPool(db, shareChannelID)
++	if err != nil {
++		return nil, err
++	}
++	if err := writePoolToBaseChannel(db, built); err != nil {
++		return nil, err
++	}
++	return built.Projection, nil
++}
++
++// BuildKeyPoolProjection **只读**地构建投影：读取池子、解密、算出索引映射，**不写任何东西**。
++//
++// 统计回填必须走这条路径。早期实现里统计直接调 `ProjectKeyPool`，等于**每次请求结束都重写
++// 底座渠道并清空它按下标的状态表**——既慢又错误（会把底座的 Key 健康状态与轮询游标抹掉）。
++func BuildKeyPoolProjection(db *gorm.DB, shareChannelID int64) (*Projection, error) {
++	built, err := buildPool(db, shareChannelID)
++	if err != nil {
++		return nil, err
++	}
++	return built.Projection, nil
++}
++
++// builtPool 是一次构建的中间结果（含仅进程内可用的凭据明文）。
++type builtPool struct {
++	*Projection
++	shareChannel apigxmodel.Channel
++	secrets      []string
++}
++
++func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 	if db == nil {
+ 		return nil, errors.New("channelpool: nil db")
+ 	}
+@@ -99,26 +129,32 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 		return nil, ErrNoUsableKey
+ 	}
+ 
++	return &builtPool{
++		Projection:   &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)},
++		shareChannel: shareChannel,
++		secrets:      secrets,
++	}, nil
++}
++
++// writePoolToBaseChannel 把池子写进底座渠道。**这是唯一会写底座的地方。**
++func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
+ 	var baseChannel basemodel.Channel
+-	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
+-		return nil, err
++	if err := db.Where("id = ?", built.shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
++		return err
+ 	}
+ 
+ 	// 索引即将改变，**必须清空按索引存放的状态**，否则旧状态会套到别的 Key 上。
+-	baseChannel.Key = strings.Join(secrets, "\n")
++	baseChannel.Key = strings.Join(built.secrets, "\n")
+ 	baseChannel.ChannelInfo.IsMultiKey = true
+-	baseChannel.ChannelInfo.MultiKeySize = len(secrets)
+-	baseChannel.ChannelInfo.MultiKeyMode = baseMultiKeyMode(shareChannel.KeyPoolMode)
++	baseChannel.ChannelInfo.MultiKeySize = len(built.secrets)
++	baseChannel.ChannelInfo.MultiKeyMode = baseMultiKeyMode(built.shareChannel.KeyPoolMode)
+ 	baseChannel.ChannelInfo.MultiKeyStatusList = nil
+ 	baseChannel.ChannelInfo.MultiKeyDisabledReason = nil
+ 	baseChannel.ChannelInfo.MultiKeyDisabledTime = nil
+ 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
+ 
+ 	// 复用底座的更新路径：它会重算 MultiKeySize 并按当前 Key 列表裁剪越界的索引状态。
+-	if err := baseChannel.Update(); err != nil {
+-		return nil, err
+-	}
+-	return &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)}, nil
++	return baseChannel.Update()
+ }
+ 
+ // baseMultiKeyMode 把分享渠道的池策略映射为底座的选择方式。
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index d982664..c23b3a6 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -465,3 +465,85 @@ func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
+ 	assert.Equal(t, 1, index, "底座必须跳过已失效的索引 0")
+ 	assert.Equal(t, "sk-low-aaaaaaaaa", key)
+ }
++
++// 成功路径：关闭时空操作；开启后把 LastOKAt 记到**本次实际使用的那把**凭据上。
++func TestRecordSuccessFromContextWritesLastOKAt(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9401
++	const baseChannelID int64 = 8282
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-ok-one-aaaaaa", "sk-ok-two-bbbbbb"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	previous := dbProvider
++	SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
++
++	// 关闭时：一行都不该被写
++	SetKeyStatsEnabled(false)
++	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
++	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
++	RecordSuccessFromContext(ctx, int(baseChannelID))
++	var before apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&before).Error)
++	assert.Zero(t, before.LastOKAt, "关闭时不得写入")
++
++	// 开启后：索引 0 的那把应被记上成功时间
++	SetKeyStatsEnabled(true)
++	RecordSuccessFromContext(ctx, int(baseChannelID))
++	var after apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&after).Error)
++	assert.Positive(t, after.LastOKAt, "成功时间必须记在本次使用的那把凭据上")
++
++	// 另一把不受影响
++	var other apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&other).Error)
++	assert.Zero(t, other.LastOKAt)
++
++	// 非多 Key 渠道：跳过
++	singleCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	RecordSuccessFromContext(singleCtx, int(baseChannelID))
++}
++
++// 统计回填**绝不能**改动底座渠道：早期实现复用 ProjectKeyPool，等于每次记录统计都重写
++// 底座渠道并清空它按下标的状态表与轮询游标——Key 健康状态会被一次次抹掉。
++func TestRecordKeyOutcomeDoesNotTouchBaseChannel(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9501
++	const baseChannelID int64 = 9292
++	require.NoError(t, db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
++		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
++	}).Error)
++
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-stat-one-aaaaa", "sk-stat-two-bbbbb"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	// 人为制造「底座已有运行期状态」：索引 1 被底座禁用、轮询游标停在 1
++	require.NoError(t, db.Model(&basemodel.Channel{}).Where("id = ?", int(baseChannelID)).
++		Updates(map[string]any{
++			"channel_info": basemodel.ChannelInfo{
++				IsMultiKey:           true,
++				MultiKeySize:         2,
++				MultiKeyMode:         constant.MultiKeyModePolling,
++				MultiKeyPollingIndex: 1,
++				MultiKeyStatusList:   map[int]int{1: common.ChannelStatusAutoDisabled},
++			},
++		}).Error)
++
++	// 记统计（成功 + 失败各一次）
++	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{Success: true}))
++	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 0, KeyOutcome{ErrorCode: "500_boom"}))
++
++	var base basemodel.Channel
++	require.NoError(t, db.Where("id = ?", int(baseChannelID)).First(&base).Error)
++	assert.Equal(t, common.ChannelStatusAutoDisabled, base.ChannelInfo.MultiKeyStatusList[1],
++		"统计回填不得抹掉底座的 Key 健康状态")
++	assert.Equal(t, 1, base.ChannelInfo.MultiKeyPollingIndex, "统计回填不得重置轮询游标")
++	assert.Equal(t, 2, base.ChannelInfo.MultiKeySize)
++}
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 33c8658..4dba8dd 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -9,6 +9,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+@@ -199,6 +200,9 @@ func Distribute() func(c *gin.Context) {
+ 		c.Next()
+ 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
+ 			service.RecordChannelAffinity(c, channel.Id)
++			// APIGX 逐 Key 成功统计（T1.5）：底座的运行期上下文仍带着本次使用的 Key 索引，
++			// 此处又天然只覆盖成功响应，因此复用这个位置而不是新增钩子点。默认关闭。
++			channelpool.RecordSuccessFromContext(c, channel.Id)
+ 		}
+ 	}
+ }
+-- 
+2.53.0.windows.1
+
