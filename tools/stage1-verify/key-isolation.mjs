@@ -135,9 +135,23 @@ async function main() {
   info(`第一次（上游 401）→ 客户端 HTTP ${first.status}`);
   check('上游 401 时请求失败', first.status !== 200, `HTTP ${first.status}`);
 
-  // ---- 6) 第二次请求：上游恢复正常 ----
+  // ---- 6) 上游恢复正常；把一把 Key 恢复启用后再请求 ----
+  //
+  // 注意：底座在 401 后会**用另一把 Key 重试**，所以「上游对一切返回 401」会把池子里
+  // 每一把都合法地标记失效，最终整池失效 → 渠道拒绝新请求（这是正确行为）。
+  // 因此这里显式恢复一把 Key，验证「隔离后仍能继续服务」以及成功统计能落上。
   await call(`${STUB}/_control/profile`, { method: 'POST', body: { status: 0 } });
   await call(`${STUB}/_control/reset`, { method: 'POST' });
+
+  const beforeList = await call(`${BASE}/api/apigx/channels/${shareChannelId}/keys`, { auth: root });
+  const keyItems = beforeList.json?.data?.items ?? [];
+  const toRevive = keyItems.find((k) => String(k.stable_key_id).startsWith('iso-b')) ?? keyItems[0];
+  if (!toRevive) throw new Error('找不到可恢复的 Key');
+  const reviveRes = await call(`${BASE}/api/apigx/keys/${toRevive.id}/status`, { method: 'PATCH', auth: root, body: { status: 1 } });
+  if (reviveRes.status !== 200) throw new Error(`恢复 Key 失败：HTTP ${reviveRes.status} ${reviveRes.text.slice(0, 120)}`);
+  await call(`${BASE}/api/apigx/channels/${shareChannelId}/apply`, { method: 'POST', auth: root });
+  dim(`已恢复 Key ${toRevive.stable_key_id} 并重新应用`);
+
   const second = await chat();
   const stubHits = (await call(`${STUB}/_control/requests?limit=10`)).json?.requests?.length ?? 0;
   info(`第二次 → 客户端 HTTP ${second.status}，替身收到 ${stubHits} 次`);
