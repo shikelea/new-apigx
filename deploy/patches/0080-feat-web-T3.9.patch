@@ -1,0 +1,694 @@
+From c3305c43f904152fe9c0d130e90f0a6ba08a5de1 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:33:02 +0800
+Subject: [PATCH 80/80] =?UTF-8?q?feat(web):=20T3.9=20=E6=B8=A0=E9=81=93?=
+ =?UTF-8?q?=E8=AF=A6=E6=83=85=E8=A1=A5=E5=8A=A8=E4=BD=9C=EF=BC=88=E5=90=8C?=
+ =?UTF-8?q?=E6=AD=A5=E6=A8=A1=E5=9E=8B=20/=20=E5=AE=B9=E9=87=8F=E7=AD=96?=
+ =?UTF-8?q?=E7=95=A5=20/=20=E4=BE=9B=E7=BB=99=E6=8F=90=E4=BA=A4=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- ChannelActions: **同步上游模型**(fetch-models {import:true} 一键导入为草稿供给, 确认框复用 confirm-dialog)
+  + **容量策略**(并发/RPM/TPM 四态选择, 仅"明确值"出现数值输入)
+- 供给表: 草稿供给显示**提交审核**(submit); 发布/驳回不在分享者页面(平台侧 requirePlatformReviewer => 属管理后台)
+- lib/capacity.ts: buildCapacityPolicyPayload 纯逻辑 —— **只有"明确值"才带数值**(其它模式带 limit 会误导
+  后端与审计), 数值非法时不带(让后端拒绝而非我们猜 0); +3 条用例
+- 权限边界: 先核对每个接口的鉴权(ownerID vs requirePlatformReviewer)再决定是否放进分享者页面
+
+检查(全过): typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅ / 用例 24/24 ✅
+自查: 首次插入用带 \r\n 的锚点而文件是 LF => 插入静默未生效(typecheck 报"导入未使用"抓出), 已改按行插入
+下一步: 我的用量 -> 我的 API Key -> 任务中心 -> 管理后台
+---
+ .../features/share/__tests__/capacity.test.ts |  58 +++++++
+ web/src/features/share/api.ts                 |  25 +++
+ .../share/components/channel-actions.tsx      | 151 ++++++++++++++++++
+ .../share/components/channel-detail.tsx       |  35 +++-
+ web/src/features/share/lib/capacity.ts        |  62 +++++++
+ web/src/features/share/types.ts               |  16 ++
+ web/src/i18n/locales/en.json                  |  21 ++-
+ web/src/i18n/locales/fr.json                  |  21 ++-
+ web/src/i18n/locales/ja.json                  |  21 ++-
+ web/src/i18n/locales/ru.json                  |  21 ++-
+ web/src/i18n/locales/vi.json                  |  21 ++-
+ web/src/i18n/locales/zh-TW.json               |  21 ++-
+ web/src/i18n/locales/zh.json                  |  21 ++-
+ 13 files changed, 485 insertions(+), 9 deletions(-)
+ create mode 100644 web/src/features/share/__tests__/capacity.test.ts
+ create mode 100644 web/src/features/share/components/channel-actions.tsx
+ create mode 100644 web/src/features/share/lib/capacity.ts
+
+diff --git a/web/src/features/share/__tests__/capacity.test.ts b/web/src/features/share/__tests__/capacity.test.ts
+new file mode 100644
+index 0000000..fa5cbd2
+--- /dev/null
++++ b/web/src/features/share/__tests__/capacity.test.ts
+@@ -0,0 +1,58 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it } from 'vitest'
++
++import { buildCapacityPolicyPayload } from '../lib/capacity'
++
++const unset = { mode: 0 as const, value: '' }
++
++describe('容量策略载荷构造', () => {
++  it('三个维度都带上模式（后端要求至少一个维度）', () => {
++    const payload = buildCapacityPolicyPayload({
++      concurrency: { mode: 4, value: '5' },
++      rpm: unset,
++      tpm: unset,
++    })
++
++    expect(payload.concurrency_mode).toBe(4)
++    expect(payload.rpm_mode).toBe(0)
++    expect(payload.tpm_mode).toBe(0)
++  })
++
++  it('只有"明确值"模式才带数值', () => {
++    const payload = buildCapacityPolicyPayload({
++      concurrency: { mode: 3, value: '100' },
++      rpm: { mode: 4, value: '60' },
++      tpm: unset,
++    })
++
++    expect(payload.concurrency_value).toBeUndefined()
++    expect(payload.rpm_limit).toBe(60)
++  })
++
++  it('明确值但数值非法时不带数值（让后端拒绝，而不是我们猜 0）', () => {
++    const payload = buildCapacityPolicyPayload({
++      concurrency: { mode: 4, value: '' },
++      rpm: { mode: 4, value: 'abc' },
++      tpm: unset,
++    })
++
++    expect(payload.concurrency_value).toBeUndefined()
++    expect(payload.rpm_limit).toBeUndefined()
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 4a45769..1330e8c 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
+ */import { api } from '@/lib/api'
+ 
+ import type {
++  CapacityPolicyPayload,
+   ChannelDetailResponse,
+   OfferingListResponse,
+   ShareChannelListResponse,
+@@ -50,4 +51,28 @@ export async function getChannelKeys(channelId: number): Promise<UpstreamKeyList
+ export async function getChannelOfferings(channelId: number): Promise<OfferingListResponse> {
+   const res = await api.get(`/api/apigx/channels/${channelId}/offerings`)
+   return res.data
++}
++/**
++ * 一键获取该渠道的上游模型；`import` 为 true 时**批量导入为草稿供给**。
++ *
++ * 复用底座的取模型能力（40+ 家适配器），这里只是触发与落库。
++ */
++export async function fetchUpstreamModels(channelId: number, importAsDraft: boolean): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post(`/api/apigx/channels/${channelId}/fetch-models`, { import: importAsDraft })
++  return res.data
++}
++
++/** 设置容量策略（写入四态原始值，解释由后端统一负责）。 */
++export async function setChannelCapacityPolicy(
++  channelId: number,
++  payload: CapacityPolicyPayload
++): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.put(`/api/apigx/channels/${channelId}/capacity-policy`, payload)
++  return res.data
++}
++
++/** 提交供给审核（发布/驳回是平台侧动作，分享者只能提交）。 */
++export async function submitOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post(`/api/apigx/offerings/${offeringId}/submit`)
++  return res.data
+ }
+\ No newline at end of file
+diff --git a/web/src/features/share/components/channel-actions.tsx b/web/src/features/share/components/channel-actions.tsx
+new file mode 100644
+index 0000000..2e1a555
+--- /dev/null
++++ b/web/src/features/share/components/channel-actions.tsx
+@@ -0,0 +1,151 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { useMutation, useQueryClient } from '@tanstack/react-query'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { ConfirmDialog } from '@/components/confirm-dialog'
++import { Button } from '@/components/ui/button'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
++
++import { fetchUpstreamModels, setChannelCapacityPolicy } from '../api'
++import { buildCapacityPolicyPayload, type LimitDimensionInput } from '../lib/capacity'
++import type { LimitMode } from '../types'
++
++const MODE_OPTIONS: { mode: LimitMode; labelKey: string }[] = [
++  { mode: 0, labelKey: 'share.limitMode.unset' },
++  { mode: 1, labelKey: 'share.limitMode.disabled' },
++  { mode: 2, labelKey: 'share.limitMode.inherit' },
++  { mode: 3, labelKey: 'share.limitMode.unlimited' },
++  { mode: 4, labelKey: 'share.limitMode.value' },
++]
++
++/** 分享者对渠道的两个动作：同步上游模型、设置容量策略。 */
++export function ChannelActions(props: { channelId: number }) {
++  const { t } = useTranslation()
++  const queryClient = useQueryClient()
++
++  const [syncOpen, setSyncOpen] = useState(false)
++  const [concurrency, setConcurrency] = useState<LimitDimensionInput>({ mode: 0, value: '' })
++  const [rpm, setRpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
++  const [tpm, setTpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
++
++  const invalidateChannelData = () => {
++    void queryClient.invalidateQueries({ queryKey: ['apigx-channel-offerings', props.channelId] })
++    void queryClient.invalidateQueries({ queryKey: ['apigx-channel', props.channelId] })
++  }
++
++  const syncMutation = useMutation({
++    mutationFn: () => fetchUpstreamModels(props.channelId, true),
++    onSuccess: () => {
++      setSyncOpen(false)
++      invalidateChannelData()
++    },
++  })
++
++  const policyMutation = useMutation({
++    mutationFn: () => setChannelCapacityPolicy(props.channelId, buildCapacityPolicyPayload({ concurrency, rpm, tpm })),
++    onSuccess: invalidateChannelData,
++  })
++
++  return (
++    <Card>
++      <CardHeader>
++        <CardTitle>{t('share.actions')}</CardTitle>
++      </CardHeader>
++      <CardContent className='space-y-6'>
++        <div>
++          <Button variant='outline' onClick={() => setSyncOpen(true)}>
++            {t('share.actions.syncModels')}
++          </Button>
++          <p className='text-muted-foreground mt-2 text-xs'>{t('share.actions.syncModelsHint')}</p>
++        </div>
++
++        <div className='space-y-4'>
++          <div className='text-sm font-medium'>{t('share.actions.capacity')}</div>
++          <LimitRow
++            label={t('share.actions.concurrency')}
++            input={concurrency}
++            onChange={setConcurrency}
++            valueLabel={t('share.actions.concurrencyValue')}
++          />
++          <LimitRow label={t('share.actions.rpm')} input={rpm} onChange={setRpm} valueLabel={t('share.actions.rpmValue')} />
++          <LimitRow label={t('share.actions.tpm')} input={tpm} onChange={setTpm} valueLabel={t('share.actions.tpmValue')} />
++          <Button disabled={policyMutation.isPending} onClick={() => policyMutation.mutate()}>
++            {t('share.actions.saveCapacity')}
++          </Button>
++        </div>
++
++        <ConfirmDialog
++          open={syncOpen}
++          onOpenChange={setSyncOpen}
++          title={t('share.actions.syncModels')}
++          desc={t('share.actions.syncModelsConfirm')}
++          confirmText={t('share.actions.confirm')}
++          isLoading={syncMutation.isPending}
++          handleConfirm={() => syncMutation.mutate()}
++        />
++      </CardContent>
++    </Card>
++  )
++}
++
++/** 单个维度：模式下拉 + （仅"明确值"时）数值输入。 */
++function LimitRow(props: {
++  label: string
++  valueLabel: string
++  input: LimitDimensionInput
++  onChange: (next: LimitDimensionInput) => void
++}) {
++  const { t } = useTranslation()
++  const modeOptions = MODE_OPTIONS.map((option) => (
++    <SelectItem key={option.mode} value={String(option.mode)}>
++      {t(option.labelKey)}
++    </SelectItem>
++  ))
++
++  return (
++    <div className='grid items-end gap-2 sm:grid-cols-3'>
++      <div className='space-y-1'>
++        <Label>{props.label}</Label>
++        <Select
++          value={String(props.input.mode)}
++          onValueChange={(next) => props.onChange({ ...props.input, mode: Number(next) as LimitMode })}
++        >
++          <SelectTrigger>
++            <SelectValue />
++          </SelectTrigger>
++          <SelectContent>{modeOptions}</SelectContent>
++        </Select>
++      </div>
++      {props.input.mode === 4 ? (
++        <div className='space-y-1'>
++          <Label>{props.valueLabel}</Label>
++          <Input
++            value={props.input.value}
++            onChange={(event) => props.onChange({ ...props.input, value: event.target.value })}
++            inputMode='numeric'
++          />
++        </div>
++      ) : null}
++    </div>
++  )
++}
+\ No newline at end of file
+diff --git a/web/src/features/share/components/channel-detail.tsx b/web/src/features/share/components/channel-detail.tsx
+index 4e4cd1f..dfda7a7 100644
+--- a/web/src/features/share/components/channel-detail.tsx
++++ b/web/src/features/share/components/channel-detail.tsx
+@@ -15,7 +15,7 @@ You should have received a copy of the GNU Affero General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+-*/import { useQuery } from '@tanstack/react-query'
++*/import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
+@@ -23,15 +23,25 @@ import { EmptyState } from '@/components/empty-state'
+ import { ErrorState } from '@/components/error-state'
+ import { LoadingState } from '@/components/loading-state'
+ import { Badge } from '@/components/ui/badge'
++import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ 
+-import { getChannel, getChannelKeys, getChannelOfferings } from '../api'
++import { getChannel, getChannelKeys, getChannelOfferings, submitOffering } from '../api'
++import { ChannelActions } from './channel-actions'
+ import { healthLabelKey, keyPoolModeLabelKey, keyStatusLabelKey, offeringStatusLabelKey } from '../lib/labels'
+ import type { Offering, UpstreamKey } from '../types'
+ 
+ /** 渠道详情：Key 池与供给。凭据只显示掩码（后端从不返回明文）。 */
+ export function ChannelDetailView(props: { channelId: number }) {
+   const { t } = useTranslation()
++  const queryClient = useQueryClient()
++
++  const submitMutation = useMutation({
++    mutationFn: (offeringId: number) => submitOffering(offeringId),
++    onSuccess: () => {
++      void queryClient.invalidateQueries({ queryKey: ['apigx-channel-offerings', props.channelId] })
++    },
++  })
+ 
+   const channelQuery = useQuery({ queryKey: ['apigx-channel', props.channelId], queryFn: () => getChannel(props.channelId) })
+   const keysQuery = useQuery({ queryKey: ['apigx-channel-keys', props.channelId], queryFn: () => getChannelKeys(props.channelId) })
+@@ -77,6 +87,13 @@ export function ChannelDetailView(props: { channelId: number }) {
+     { id: 'status', header: t('share.offering.status'), cell: (row) => t(offeringStatusLabelKey(row.status)) },
+     { id: 'capabilities', header: t('share.offering.capabilities'), cell: (row) => (row.capabilities ?? []).join(', ') },
+     { id: 'price_rule', header: t('share.offering.priceRule'), cell: (row) => String(row.price_rule_id) },
++    {
++      id: 'actions',
++      header: '',
++      cell: (row) => (
++        <SubmitOfferingButton offering={row} pending={submitMutation.isPending} onsubmit={submitMutation.mutate} />
++      ),
++    },
+   ]
+ 
+   if (!channel) {
+@@ -105,6 +122,8 @@ export function ChannelDetailView(props: { channelId: number }) {
+         </CardContent>
+       </Card>
+ 
++      <ChannelActions channelId={props.channelId} />
++
+       <Card>
+         <CardHeader>
+           <CardTitle>{t('share.keyPool')}</CardTitle>
+@@ -132,4 +151,16 @@ export function ChannelDetailView(props: { channelId: number }) {
+       </Card>
+     </div>
+   )
++}
++/** 草稿供给的"提交审核"按钮；非草稿不显示动作（发布/驳回属平台侧）。 */
++function SubmitOfferingButton(props: { offering: Offering; pending: boolean; onsubmit: (id: number) => void }) {
++  const { t } = useTranslation()
++  if (props.offering.status !== 0) {
++    return null
++  }
++  return (
++    <Button variant='outline' size='sm' disabled={props.pending} onClick={() => props.onsubmit(props.offering.id)}>
++      {t('share.offering.submit')}
++    </Button>
++  )
+ }
+\ No newline at end of file
+diff --git a/web/src/features/share/lib/capacity.ts b/web/src/features/share/lib/capacity.ts
+new file mode 100644
+index 0000000..1e23fc7
+--- /dev/null
++++ b/web/src/features/share/lib/capacity.ts
+@@ -0,0 +1,62 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import type { CapacityPolicyPayload, LimitMode } from '../types'
++
++/** 某一维度的界面状态：模式 + 数值（仅"明确值"使用数值）。 */
++export interface LimitDimensionInput {
++  mode: LimitMode
++  value: string
++}
++
++/**
++ * 把三个维度的界面输入组装成请求体。
++ *
++ * **只在"明确值"模式带上数值**：其它模式下数值无意义，带上会误导后端与审计
++ * （例如"明确不限"却带一个 limit=100，看起来像设置了一个上限）。
++ * 空串或非数字一律不带 —— 由后端按"明确值但缺数值"拒绝，而不是我们猜一个 0。
++ */
++export function buildCapacityPolicyPayload(input: {
++  concurrency: LimitDimensionInput
++  rpm: LimitDimensionInput
++  tpm: LimitDimensionInput
++}): CapacityPolicyPayload {
++  const payload: CapacityPolicyPayload = {
++    concurrency_mode: input.concurrency.mode,
++    rpm_mode: input.rpm.mode,
++    tpm_mode: input.tpm.mode,
++  }
++  applyValue(payload, 'concurrency_value', input.concurrency)
++  applyValue(payload, 'rpm_limit', input.rpm)
++  applyValue(payload, 'tpm_limit', input.tpm)
++  return payload
++}
++
++function applyValue(
++  payload: CapacityPolicyPayload,
++  field: 'concurrency_value' | 'rpm_limit' | 'tpm_limit',
++  input: LimitDimensionInput
++): void {
++  if (input.mode !== 4) {
++    return
++  }
++  const parsed = Number.parseInt(input.value, 10)
++  if (!Number.isFinite(parsed) || parsed < 0) {
++    return
++  }
++  payload[field] = parsed
++}
+\ No newline at end of file
+diff --git a/web/src/features/share/types.ts b/web/src/features/share/types.ts
+index e29a2b7..36a6562 100644
+--- a/web/src/features/share/types.ts
++++ b/web/src/features/share/types.ts
+@@ -108,4 +108,20 @@ export interface UpstreamKeyListResponse {
+ export interface OfferingListResponse {
+   success: boolean
+   data?: { items: Offering[] }
++}
++/**
++ * 容量策略请求体。
++ *
++ * 各维度都是**四态原始值**（0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值），
++ * 解释由后端统一负责 —— 因此界面只需原样提交用户选择，不在这里做任何语义推断。
++ */
++export type LimitMode = 0 | 1 | 2 | 3 | 4
++
++export interface CapacityPolicyPayload {
++  concurrency_mode?: LimitMode
++  concurrency_value?: number
++  rpm_mode?: LimitMode
++  rpm_limit?: number
++  tpm_mode?: LimitMode
++  tpm_limit?: number
+ }
+\ No newline at end of file
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 07f8bd5..55a901d 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6597,5 +6597,24 @@
+   "share.offeringStatus.published": "Published",
+   "share.offeringStatus.rejected": "Rejected",
+   "share.channel.baseUrl": "Base URL",
+-  "share.detail.missing": "Channel not found"
++  "share.detail.missing": "Channel not found",
++  "share.actions": "Actions",
++  "share.actions.syncModels": "Fetch upstream models",
++  "share.actions.syncModelsHint": "Fetches the model list from the upstream and imports it as draft offerings.",
++  "share.actions.syncModelsConfirm": "Import all fetched models as draft offerings?",
++  "share.actions.confirm": "Confirm",
++  "share.actions.capacity": "Capacity policy",
++  "share.actions.concurrency": "Concurrency",
++  "share.actions.concurrencyValue": "Concurrency limit",
++  "share.actions.rpm": "RPM",
++  "share.actions.rpmValue": "RPM limit",
++  "share.actions.tpm": "TPM",
++  "share.actions.tpmValue": "TPM limit",
++  "share.actions.saveCapacity": "Save capacity policy",
++  "share.limitMode.unset": "Not configured",
++  "share.limitMode.disabled": "Disabled",
++  "share.limitMode.inherit": "Inherit",
++  "share.limitMode.unlimited": "Unlimited",
++  "share.limitMode.value": "Explicit limit",
++  "share.offering.submit": "Submit for review"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 835abf3..152b7fb 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6597,5 +6597,24 @@
+   "share.offeringStatus.published": "Published",
+   "share.offeringStatus.rejected": "Rejected",
+   "share.channel.baseUrl": "Base URL",
+-  "share.detail.missing": "Channel not found"
++  "share.detail.missing": "Channel not found",
++  "share.actions": "Actions",
++  "share.actions.syncModels": "Fetch upstream models",
++  "share.actions.syncModelsHint": "Fetches the model list from the upstream and imports it as draft offerings.",
++  "share.actions.syncModelsConfirm": "Import all fetched models as draft offerings?",
++  "share.actions.confirm": "Confirm",
++  "share.actions.capacity": "Capacity policy",
++  "share.actions.concurrency": "Concurrency",
++  "share.actions.concurrencyValue": "Concurrency limit",
++  "share.actions.rpm": "RPM",
++  "share.actions.rpmValue": "RPM limit",
++  "share.actions.tpm": "TPM",
++  "share.actions.tpmValue": "TPM limit",
++  "share.actions.saveCapacity": "Save capacity policy",
++  "share.limitMode.unset": "Not configured",
++  "share.limitMode.disabled": "Disabled",
++  "share.limitMode.inherit": "Inherit",
++  "share.limitMode.unlimited": "Unlimited",
++  "share.limitMode.value": "Explicit limit",
++  "share.offering.submit": "Submit for review"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 122ffde..0126edb 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6597,5 +6597,24 @@
+   "share.offeringStatus.published": "Published",
+   "share.offeringStatus.rejected": "Rejected",
+   "share.channel.baseUrl": "Base URL",
+-  "share.detail.missing": "Channel not found"
++  "share.detail.missing": "Channel not found",
++  "share.actions": "Actions",
++  "share.actions.syncModels": "Fetch upstream models",
++  "share.actions.syncModelsHint": "Fetches the model list from the upstream and imports it as draft offerings.",
++  "share.actions.syncModelsConfirm": "Import all fetched models as draft offerings?",
++  "share.actions.confirm": "Confirm",
++  "share.actions.capacity": "Capacity policy",
++  "share.actions.concurrency": "Concurrency",
++  "share.actions.concurrencyValue": "Concurrency limit",
++  "share.actions.rpm": "RPM",
++  "share.actions.rpmValue": "RPM limit",
++  "share.actions.tpm": "TPM",
++  "share.actions.tpmValue": "TPM limit",
++  "share.actions.saveCapacity": "Save capacity policy",
++  "share.limitMode.unset": "Not configured",
++  "share.limitMode.disabled": "Disabled",
++  "share.limitMode.inherit": "Inherit",
++  "share.limitMode.unlimited": "Unlimited",
++  "share.limitMode.value": "Explicit limit",
++  "share.offering.submit": "Submit for review"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 6190e8e..035267c 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6597,5 +6597,24 @@
+   "share.offeringStatus.published": "Published",
+   "share.offeringStatus.rejected": "Rejected",
+   "share.channel.baseUrl": "Base URL",
+-  "share.detail.missing": "Channel not found"
++  "share.detail.missing": "Channel not found",
++  "share.actions": "Actions",
++  "share.actions.syncModels": "Fetch upstream models",
++  "share.actions.syncModelsHint": "Fetches the model list from the upstream and imports it as draft offerings.",
++  "share.actions.syncModelsConfirm": "Import all fetched models as draft offerings?",
++  "share.actions.confirm": "Confirm",
++  "share.actions.capacity": "Capacity policy",
++  "share.actions.concurrency": "Concurrency",
++  "share.actions.concurrencyValue": "Concurrency limit",
++  "share.actions.rpm": "RPM",
++  "share.actions.rpmValue": "RPM limit",
++  "share.actions.tpm": "TPM",
++  "share.actions.tpmValue": "TPM limit",
++  "share.actions.saveCapacity": "Save capacity policy",
++  "share.limitMode.unset": "Not configured",
++  "share.limitMode.disabled": "Disabled",
++  "share.limitMode.inherit": "Inherit",
++  "share.limitMode.unlimited": "Unlimited",
++  "share.limitMode.value": "Explicit limit",
++  "share.offering.submit": "Submit for review"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index d977eff..211e88f 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6597,5 +6597,24 @@
+   "share.offeringStatus.published": "Published",
+   "share.offeringStatus.rejected": "Rejected",
+   "share.channel.baseUrl": "Base URL",
+-  "share.detail.missing": "Channel not found"
++  "share.detail.missing": "Channel not found",
++  "share.actions": "Actions",
++  "share.actions.syncModels": "Fetch upstream models",
++  "share.actions.syncModelsHint": "Fetches the model list from the upstream and imports it as draft offerings.",
++  "share.actions.syncModelsConfirm": "Import all fetched models as draft offerings?",
++  "share.actions.confirm": "Confirm",
++  "share.actions.capacity": "Capacity policy",
++  "share.actions.concurrency": "Concurrency",
++  "share.actions.concurrencyValue": "Concurrency limit",
++  "share.actions.rpm": "RPM",
++  "share.actions.rpmValue": "RPM limit",
++  "share.actions.tpm": "TPM",
++  "share.actions.tpmValue": "TPM limit",
++  "share.actions.saveCapacity": "Save capacity policy",
++  "share.limitMode.unset": "Not configured",
++  "share.limitMode.disabled": "Disabled",
++  "share.limitMode.inherit": "Inherit",
++  "share.limitMode.unlimited": "Unlimited",
++  "share.limitMode.value": "Explicit limit",
++  "share.offering.submit": "Submit for review"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index bf2f107..6100f7c 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6597,5 +6597,24 @@
+   "share.offeringStatus.published": "Published",
+   "share.offeringStatus.rejected": "Rejected",
+   "share.channel.baseUrl": "Base URL",
+-  "share.detail.missing": "Channel not found"
++  "share.detail.missing": "Channel not found",
++  "share.actions": "Actions",
++  "share.actions.syncModels": "Fetch upstream models",
++  "share.actions.syncModelsHint": "Fetches the model list from the upstream and imports it as draft offerings.",
++  "share.actions.syncModelsConfirm": "Import all fetched models as draft offerings?",
++  "share.actions.confirm": "Confirm",
++  "share.actions.capacity": "Capacity policy",
++  "share.actions.concurrency": "Concurrency",
++  "share.actions.concurrencyValue": "Concurrency limit",
++  "share.actions.rpm": "RPM",
++  "share.actions.rpmValue": "RPM limit",
++  "share.actions.tpm": "TPM",
++  "share.actions.tpmValue": "TPM limit",
++  "share.actions.saveCapacity": "Save capacity policy",
++  "share.limitMode.unset": "Not configured",
++  "share.limitMode.disabled": "Disabled",
++  "share.limitMode.inherit": "Inherit",
++  "share.limitMode.unlimited": "Unlimited",
++  "share.limitMode.value": "Explicit limit",
++  "share.offering.submit": "Submit for review"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index a81f908..bccb1b5 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6597,5 +6597,24 @@
+   "share.offeringStatus.published": "已发布",
+   "share.offeringStatus.rejected": "已拒绝",
+   "share.channel.baseUrl": "Base URL",
+-  "share.detail.missing": "渠道不存在"
++  "share.detail.missing": "渠道不存在",
++  "share.actions": "操作",
++  "share.actions.syncModels": "同步上游模型",
++  "share.actions.syncModelsHint": "从上游获取模型列表，并导入为草稿供给。",
++  "share.actions.syncModelsConfirm": "把获取到的模型全部导入为草稿供给？",
++  "share.actions.confirm": "确认",
++  "share.actions.capacity": "容量策略",
++  "share.actions.concurrency": "并发",
++  "share.actions.concurrencyValue": "并发上限",
++  "share.actions.rpm": "RPM",
++  "share.actions.rpmValue": "RPM 上限",
++  "share.actions.tpm": "TPM",
++  "share.actions.tpmValue": "TPM 上限",
++  "share.actions.saveCapacity": "保存容量策略",
++  "share.limitMode.unset": "未配置",
++  "share.limitMode.disabled": "禁用",
++  "share.limitMode.inherit": "继承",
++  "share.limitMode.unlimited": "明确不限",
++  "share.limitMode.value": "明确值",
++  "share.offering.submit": "提交审核"
+ }
+-- 
+2.53.0.windows.1
+
