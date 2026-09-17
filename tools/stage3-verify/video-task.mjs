@@ -21,6 +21,9 @@ const BASE = argOf('--base', 'http://127.0.0.1:3000');
 const STUB = argOf('--stub', 'http://127.0.0.1:8100');
 const MODEL = argOf('--model', 'kling-v1');
 const PHASE = argOf('--phase', 'all');
+// `--expect-timeout`：平台以**短超时**运行时（如 TASK_TIMEOUT_MINUTES=1），
+// 继续轮询到任务被判定超时。默认不开，避免在长超时配置下白等。
+const EXPECT_TIMEOUT = argv.includes('--expect-timeout');
 const STUB_KEY = argOf('--stub-key', 'sk-stub-video-key');
 
 const pass = (s) => console.log('  \x1b[32mPASS\x1b[0m  ' + s);
@@ -224,6 +227,22 @@ async function main() {
     await new Promise((r) => setTimeout(r, 1000));
   }
   check('长时间未完成时保持"处理中"（不误报成功）', /process|pending|queue|submit|in_progress/i.test(hangStatus), `status=${hangStatus}`);
+
+  // ---- ⑤b 超时路径：平台把长期未完成的任务判定为失败 ----
+  if (EXPECT_TIMEOUT) {
+    const deadline = Date.now() + 180000;
+    let timedOut = '';
+    let reason = '';
+    while (Date.now() < deadline) {
+      const p = await poll(hangId);
+      timedOut = String(p.json?.status ?? p.json?.data?.task_status ?? '');
+      reason = String(p.json?.fail_reason ?? p.json?.data?.fail_reason ?? p.json?.error ?? '');
+      if (/fail/i.test(timedOut)) break;
+      await new Promise((r) => setTimeout(r, 10000));
+    }
+    check('超时路径：长期未完成的任务被判定为失败', /fail/i.test(timedOut), `status=${timedOut} 原因=${reason.slice(0, 60)}`);
+    info('（该检查要求平台以短超时运行；本次由 TASK_TIMEOUT_MINUTES 控制）');
+  }
 
   // ---- ⑥ 取消能力（计划书：不支持取消的上游必须明确显示能力限制） ----
   const cancel = await call(`${BASE}/v1/videos/${encodeURIComponent(hangId)}/cancel`, { method: 'POST', auth });
