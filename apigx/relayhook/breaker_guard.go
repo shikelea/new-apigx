@@ -149,7 +149,6 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
 	}
 	verdict := routing.EvaluateBreaker(view, nowTs, routing.DefaultBreakerConfig())
 	open := verdict.State == routing.BreakerOpen
-
 	// **缓存分级（这是端到端回扫抓到的真问题）**：
 	//
 	// 早先"打开/未打开"都缓存 30 秒。但"未打开"是**随时可能被下一个请求推翻**的结论——
@@ -259,6 +258,7 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 	// **不会禁用整条渠道**（实测：调用后排除了个寂寞，坏上游照样被选中）。
 	// 因此直接做两件等价的事：置渠道状态 + 关掉它的**能力索引**（后者才是选择逻辑真正看的）。
 	if open {
+		// "选择器忽略了禁用" 还是 "禁用发生得太晚"（定位后删除）。
 		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
 			Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
 			common.SysError("apigx breaker: disable channel status failed: " + err.Error())
