@@ -1,0 +1,123 @@
+From 1dc9b53921dfeb8825ccd9738ce11e6a70b8eb8f Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 07:14:01 +0800
+Subject: [PATCH 93/93] =?UTF-8?q?fix:=20=E5=89=8D=E7=AB=AF=E4=B8=89?=
+ =?UTF-8?q?=E5=A4=84=E8=87=B4=E5=91=BD=E9=97=AE=E9=A2=98=EF=BC=88plaza=205?=
+ =?UTF-8?q?00=20/=20=E6=88=91=E7=9A=84=E5=88=86=E4=BA=AB=E7=A9=BA=E8=BD=AC?=
+ =?UTF-8?q?=20/=20i18n=20=E9=94=AE=E5=90=8D=E7=9B=B4=E6=98=BE=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户看 UI 时报告的问题，逐个定位到真因:
+
+1) 我的分享一直加载 => **后端缺少"列出全部渠道"接口**
+   - 路由表里只有 /share-groups/:id/channels（按分组），没有 /channels（全部）
+   - 前端调 GET /api/apigx/channels 得到 404 => 页面停在加载态
+   - 补: channels.GET("", h.listAllChannels) + 新增 ListChannelsByOwner（与 ListChannelsByGroup
+     仅差"是否按分组过滤"，字段与排序语义保持一致，避免两处行为分叉）
+   - 实测: GET /api/apigx/channels -> 200 items=128
+
+2) plaza 报 500 => **本地 PostgreSQL(5433) 实例已不在**（随上一次进程终止一起没了）
+   - 按仓库脚本 tools/dev/pg.ps1 start 重新拉起（数据目录 .toolchain/pgdata）
+   - 重启后实测: /api/apigx/plaza -> 200 items=5
+   - 说明: 500 是"依赖不可用"的外在表现，不是查询本身错误；页面已正确显示错误态
+
+3) 界面出现 taskCenter.title 这类原始键名 => **i18n 的 keySeparator 不匹配**
+   - src/i18n/config.ts 未设置 keySeparator，i18next 默认按 "." 拆成嵌套路径
+   - 而语言文件是**扁平**的（键即英文原文）=> 带点的键一律查不到，直接把键名显示出来
+   - 修: 显式 keySeparator: false（两种写法都能命中，不改变底座既有文案；比改约 100 处调用点小且安全）
+   - 记录: 仓库约定其实是"英文原文作键"，我的带点键名属偏离，改到那些页面时一并归正
+
+检查: go build ✅ / 前端 typecheck ✅ / oxlint ✅ 0 错 0 警 / build ✅（产物已含 keySeparator）
+实测: plaza 200 / share-groups 200 / channels 200 / capabilities 200 / task-retention 200
+---
+ apigx/api/share.go        | 26 ++++++++++++++++++++++++++
+ apigx/model/repo_share.go | 14 ++++++++++++++
+ web/src/i18n/config.ts    |  4 ++++
+ 3 files changed, 44 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index ef7e2a5..b39bd85 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -48,6 +48,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 
+ 	channels := r.Group("/channels")
+ 	{
++		// 列出登录用户的**全部**渠道（"我的分享"页需要它；此前只有按分组的 /share-groups/:id/channels）。
++		channels.GET("", h.listAllChannels)
+ 		channels.POST("", h.createChannel)
+ 		channels.GET("/:id", h.getChannel)
+ 		channels.DELETE("/:id", h.deleteChannel)
+@@ -1676,3 +1678,27 @@ func (h *handler) getTaskRetention(c *gin.Context) {
+ 	}
+ 	ok(c, gin.H{"days": days, "source": source})
+ }
++
++// listAllChannels 列出当前用户的**全部**分享渠道（不限分组）。
++//
++// 与 listChannels 的差别只有"是否按分组过滤"；字段完全一致，
++// 避免同一个列表在两处各有一套字段定义（前端也只认一套）。
++func (h *handler) listAllChannels(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	channels, err := apigxmodel.ListChannelsByOwner(h.db, owner, 200)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	items := make([]gin.H, 0, len(channels))
++	for _, ch := range channels {
++		items = append(items, gin.H{
++			"id": ch.ID, "public_id": ch.PublicID, "name": ch.Name, "protocol": ch.Protocol,
++			"key_pool_mode": ch.KeyPoolMode, "health_state": ch.HealthState, "base_url": ch.BaseURL,
++		})
++	}
++	ok(c, gin.H{"items": items})
++}
+diff --git a/apigx/model/repo_share.go b/apigx/model/repo_share.go
+index 6fa3fd1..a1c0859 100644
+--- a/apigx/model/repo_share.go
++++ b/apigx/model/repo_share.go
+@@ -191,6 +191,20 @@ func ListChannelsByGroup(db *gorm.DB, ownerUserID, shareGroupID int64, limit int
+ 	return channels, err
+ }
+ 
++// ListChannelsByOwner 列出某用户的**全部**渠道（不限分组）。
++//
++// 与 ListChannelsByGroup 只差"是否按分组过滤"：分组维度需要先校验分组归属，
++// 这里不需要，因此直接按 owner 查；排序与 limit 语义保持一致，避免两处行为分叉。
++func ListChannelsByOwner(db *gorm.DB, ownerUserID int64, limit int) ([]Channel, error) {
++	if limit <= 0 || limit > 200 {
++		limit = 50
++	}
++	var channels []Channel
++	err := db.Where("owner_user_id = ?", ownerUserID).
++		Order("updated_at DESC, id DESC").Limit(limit).Find(&channels).Error
++	return channels, err
++}
++
+ // DeleteChannel 软删除渠道（墓碑语义）。
+ func DeleteChannel(db *gorm.DB, ownerUserID, id int64) error {
+ 	return softDeleteByOwner(db, &Channel{}, ownerUserID, id)
+diff --git a/web/src/i18n/config.ts b/web/src/i18n/config.ts
+index b060375..70e3084 100644
+--- a/web/src/i18n/config.ts
++++ b/web/src/i18n/config.ts
+@@ -48,6 +48,10 @@ i18n
+     supportedLngs: ['en', 'zhCN', 'fr', 'ru', 'ja', 'vi', 'zhTW'],
+     load: 'currentOnly',
+     nsSeparator: false, // Allow literal colons in keys (e.g., URLs, labels)
++    // 语言文件是**扁平**的（键即英文原文）。默认的 keySeparator `.` 会把形如
++    // `plaza.title` 的键拆成嵌套路径而查不到，界面就会直接显示键名本身。
++    // 关掉分层后两种写法都能命中（不带点的英文键照旧直接命中），不改变既有文案。
++    keySeparator: false,
+     debug: import.meta.env.DEV,
+     interpolation: {
+       escapeValue: false, // not needed for react as it escapes by default
+-- 
+2.53.0.windows.1
+
