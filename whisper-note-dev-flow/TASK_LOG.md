@@ -508,7 +508,7 @@
 
 | 脚本 | 必需开关 |
 |---|---|
-| `stage1-verify/capacity-limit.mjs` | `APIGX_CAPACITY_ENABLED` + `APIGX_CHANNEL_CONCURRENCY_LIMIT` |
+| `stage1-verify/capacity-limit.mjs` | `APIGX_CAPACITY_ENABLED` + `APIGX_CHANNEL_CONCURRENCY_LIMIT`；**必须 `--model`**（单条分享渠道） |
 | `stage1-verify/account-pool-limit.mjs` | `APIGX_CAPACITY_ENABLED` + `APIGX_UPSTREAM_ACCOUNT_CONCURRENCY_LIMIT` |
 | `stage1-verify/channel-policy-limit.mjs` | `APIGX_CAPACITY_ENABLED` |
 | `stage1-verify/key-isolation.mjs` | `APIGX_KEY_STATS_ENABLED` |
@@ -518,7 +518,11 @@
 | `stage2-verify/key-weight-distribution.mjs` | 无（投影本身即可） |
 | `stage2-verify/tpm-adjust.mjs` | `APIGX_TPM_ADJUST_ENABLED`（核对反例时关闭） |
 
-📌 **已知脚本缺陷（不是产品问题）**：`capacity-limit.mjs` 默认用共享模型名 `stub/model-x-202609`，而开发库已积累大量同模型渠道 → 请求会落到**平台自建渠道**上，而上限只对分享渠道生效，表现为"完全没限流"。待改成每次唯一模型。
+✅ **原"已知脚本缺陷"已修复（本轮）**：`capacity-limit.mjs` 原先写死共享模型名 `stub/model-x-202609`，其下渠道众多、请求可能落到**平台自建渠道**上，而环境级上限只对我们绑定的**分享渠道**生效 → 表现为"完全没限流"。
+  - **根因是两条被忽略的语义**：① 上限只作用于分享渠道；② 上限是**按渠道**的（同一模型 N 条分享渠道时总放行数 = N × 上限）。
+  - **修法**：改为**必须显式传 `--model`**（不传就直接报错并说明原因，而不是给一个会误导的默认值）；文件头注释写明这两条约束。
+  - **实测**（单条分享渠道的模型）：`200×1 / 429×2`、**429 带 `Retry-After`**、**上游只收到 1 次** → **4/4 通过**。
+  - 反例记录：误用有 **2 条**分享渠道的模型时得到 `200×2 / 429×1` —— 这不是缺陷，而是"按渠道计数"的正确表现（1 × 2 = 2）。
 
 ### 工程教训
 

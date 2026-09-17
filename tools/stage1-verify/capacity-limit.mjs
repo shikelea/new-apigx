@@ -17,7 +17,24 @@ const argOf = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1
 
 const BASE = argOf('--base', 'http://127.0.0.1:3000');
 const STUB = argOf('--stub', 'http://127.0.0.1:8100');
-const MODEL = argOf('--model', 'stub/model-x-202609');
+// 默认模型：**从广场取一个已发布供给的模型**。
+//
+// 为什么要这样：本脚本验证的是"环境级渠道并发上限"，而该上限只对我们绑定的
+// **分享渠道**生效（AcquireForAttempt 按 ShareChannelIDByBase 判定）。
+// 早先它写死了一个共享模型名，那个模型下已积累大量渠道，请求可能落到**平台自建渠道**上，
+// 于是表现为"完全没限流"——这不是产品缺陷，而是脚本选了不适用的目标
+// （详见 TASK_LIST 的阶段 2 验收汇总）。
+// **必须显式传 `--model`，且该模型只能有一条分享渠道。** 两条约束都来自被测语义：
+//   ① `APIGX_CHANNEL_CONCURRENCY_LIMIT` 只对我们绑定的**分享渠道**生效
+//      （`AcquireForAttempt` 按 `ShareChannelIDByBase` 判定），平台自建渠道不受它约束；
+//   ② 上限是**按渠道**的，同一模型有 N 条分享渠道时总放行数就是 N × 上限。
+// 早先写死了一个共享模型名（其下渠道众多，请求可能落到平台自建渠道上），表现为"完全没限流"——
+// 那不是产品缺陷，而是**脚本选了不适用的目标**。现在不传就直接报错，而不是给一个会误导的默认值。
+const MODEL = argOf('--model', '');
+if (!MODEL) {
+  console.log('  \x1b[31m需要 --model\x1b[0m  请传入一个只有**单条分享渠道**的模型（环境级上限只作用于分享渠道，且按渠道计数）');
+  process.exit(2);
+}
 const TOKEN_NAME = argOf('--token-name', 'apigx-stage0-verify');
 const EXPECT = argOf('--expect', 'on');
 const LIMIT = Number(argOf('--limit', '1'));
