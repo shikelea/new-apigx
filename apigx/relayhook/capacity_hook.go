@@ -20,6 +20,7 @@ import (
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/apigx/channelpool"
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
@@ -209,6 +210,14 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
 	return lease, true
 }
 
+// ID 返回租约标识（= 出站尝试的 AttemptUID，对账据此精确定位并释放容量）。
+func (l *Lease) ID() string {
+	if l == nil {
+		return ""
+	}
+	return l.id
+}
+
 // Release 归还租约并停止续租。幂等：重复调用只释放一次。
 func (l *Lease) Release() {
 	if l == nil {
@@ -320,6 +329,20 @@ func AcquireForAttempt(c *gin.Context, channelID int) bool {
 	}
 	if lease != nil {
 		c.Set(leaseContextKey, lease)
+		// **持久记录出站尝试**（计划书 §9.2 要求的执行顺序）：进程若在中途退出，
+		// 事后就能凭这条记录知道"当时确实占用了容量"，进而做对账补偿。
+		// 记录失败不影响请求本身——容量租约仍在，TTL 与对账都会兜住。
+		if db := channelpool.CurrentDB(); db != nil {
+			attempt := &apigxmodel.Attempt{
+				AttemptUID:        lease.ID(),
+				RequestID:         channelpool.RequestIDFromAttemptUID(lease.ID()),
+				SelectedChannelID: int64(channelID),
+				BaseChannelID:     int64(channelID),
+			}
+			if beginErr := apigxmodel.BeginAttempt(db, attempt); beginErr != nil {
+				common.SysError("apigx capacity: begin attempt failed: " + beginErr.Error())
+			}
+		}
 	}
 	return true
 }
@@ -333,7 +356,22 @@ func ReleaseFromContext(c *gin.Context) {
 	if !exists {
 		return
 	}
-	if lease, ok := value.(*Lease); ok {
+	if lease, ok := value.(*Lease); ok && lease != nil {
+		// 先落状态再释放：顺序反过来的话，一旦释放后进程退出，尝试会永远停在「已开始」
+		// 而被对账误判为遗弃（实际上它是正常完成的）。
+		if db := channelpool.CurrentDB(); db != nil && lease.ID() != "" {
+			state := apigxmodel.AttemptStateFailed
+			status := 0
+			if c.Writer != nil {
+				status = c.Writer.Status()
+				if status < http.StatusBadRequest {
+					state = apigxmodel.AttemptStateSucceeded
+				}
+			}
+			if err := apigxmodel.CompleteAttempt(db, lease.ID(), state, status); err != nil {
+				common.SysError("apigx capacity: complete attempt failed: " + err.Error())
+			}
+		}
 		lease.Release()
 	}
 	c.Set(leaseContextKey, (*Lease)(nil))

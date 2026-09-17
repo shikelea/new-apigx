@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
@@ -15,6 +16,7 @@ import (
 	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -699,4 +701,115 @@ func TestBuildKeyCapacityDimensions(t *testing.T) {
 	assert.Empty(t, BuildKeyCapacityDimensions(db, int(baseChannelID), 9, KeyCapacityLimits{UpstreamKeyLimit: 1}))
 	// 非我们的渠道同样不产出
 	assert.Empty(t, BuildKeyCapacityDimensions(db, 999999, 0, KeyCapacityLimits{UpstreamKeyLimit: 1}))
+}
+
+// ---- 对账：补偿进程在步骤之间退出（T1.7） ----
+
+// 对账必须**主动、精确、留痕**：按 AttemptUID 释放陈旧尝试占用的容量，并标记为遗弃。
+func TestReconcileReleasesStaleAttempts(t *testing.T) {
+	db := setupProjectionEnv(t)
+	ResetMappingCacheForTest()
+	t.Cleanup(ResetMappingCacheForTest)
+	const owner int64 = 9901
+	const baseChannelID int64 = 9797
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
+	}).Error)
+
+	// 对账要用真实 Redis：投影相关的用例本身不依赖它，因此这里自建连接
+	// （Lua 的原子性与幂等释放无法用 mock 证明）。
+	addr := os.Getenv("APIGX_TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("未设置 APIGX_TEST_REDIS_ADDR：对账未在真实 Redis 上验证（不允许当作通过）")
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: 15})
+	require.NoError(t, rdb.Ping(t.Context()).Err(), "连接 Redis 失败")
+	t.Cleanup(func() { _ = rdb.Close() })
+	previous := common.RDB
+	common.RDB = rdb
+	t.Cleanup(func() { common.RDB = previous })
+
+	ctrl := capacity.NewWithPrefix(rdb, "apigx:captest:reconcile:")
+	ctx := t.Context()
+	t.Cleanup(func() { _ = ctrl.Drop(ctx, capacity.ChannelConcurrency(baseChannelID)) })
+
+	// 模拟「进程崩溃」：租约被占用 + 尝试已落库为「已开始」，但一直没有结果
+	staleUID := "stale-attempt-uid"
+	require.NoError(t, ctrl.Reserve(ctx, staleUID, []capacity.Dimension{
+		{Key: capacity.ChannelConcurrency(baseChannelID), Limit: 5, Amount: 1},
+	}, time.Minute))
+	require.NoError(t, apigxmodel.BeginAttempt(db, &apigxmodel.Attempt{
+		AttemptUID: staleUID, RequestID: RequestIDFromAttemptUID(staleUID),
+		SelectedChannelID: baseChannelID, BaseChannelID: baseChannelID,
+		StartedAt: common.GetTimestamp() - 3600, // 一小时前开始（远超宽限期）
+	}))
+	usage, err := ctrl.Usage(ctx, capacity.ChannelConcurrency(baseChannelID))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, usage, "崩溃后槽位仍被占用")
+
+	// 对账
+	result, err := ReconcileStaleAttempts(ctx, db, ctrl, common.GetTimestamp()-60, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Scanned)
+	assert.Equal(t, 1, result.Released)
+	assert.Zero(t, result.Failed)
+
+	usage, err = ctrl.Usage(ctx, capacity.ChannelConcurrency(baseChannelID))
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, usage, "对账必须主动释放陈旧尝试占用的容量")
+
+	attempt, err := apigxmodel.GetAttemptByUID(db, staleUID)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.AttemptStateAbandoned, attempt.State, "必须留下被遗弃的痕迹")
+	assert.Positive(t, attempt.CompletedAt)
+
+	// 幂等：再对账一次不应重复处理（状态已不是「已开始」）
+	result, err = ReconcileStaleAttempts(ctx, db, ctrl, common.GetTimestamp()-60, 10)
+	require.NoError(t, err)
+	assert.Zero(t, result.Scanned, "已处理的尝试不应再次被扫出")
+}
+
+// 未超宽限期的尝试**不得**被回收：那会把正在跑的长流误判为遗弃。
+func TestReconcileIgnoresFreshAttempts(t *testing.T) {
+	db := setupProjectionEnv(t)
+	uid := "fresh-attempt-uid"
+	require.NoError(t, apigxmodel.BeginAttempt(db, &apigxmodel.Attempt{
+		AttemptUID: uid, RequestID: RequestIDFromAttemptUID(uid), StartedAt: common.GetTimestamp(),
+	}))
+
+	ctrl := capacity.NewWithPrefix(common.RDB, "apigx:captest:reconcile-fresh:")
+	// 宽限期取「一小时前」，因此刚开始的尝试不在范围内
+	result, err := ReconcileStaleAttempts(t.Context(), db, ctrl, common.GetTimestamp()-3600, 10)
+	require.NoError(t, err)
+	assert.Zero(t, result.Scanned, "未陈旧的尝试不得被对账")
+
+	attempt, err := apigxmodel.GetAttemptByUID(db, uid)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.AttemptStateStarted, attempt.State)
+}
+
+// 完成（成功/失败）是幂等的：重复调用不得覆盖已有结果。
+func TestCompleteAttemptIsIdempotent(t *testing.T) {
+	db := setupProjectionEnv(t)
+	uid := "complete-attempt-uid"
+	require.NoError(t, apigxmodel.BeginAttempt(db, &apigxmodel.Attempt{
+		AttemptUID: uid, RequestID: RequestIDFromAttemptUID(uid), StartedAt: common.GetTimestamp(),
+	}))
+
+	require.NoError(t, apigxmodel.CompleteAttempt(db, uid, apigxmodel.AttemptStateSucceeded, 200))
+	attempt, err := apigxmodel.GetAttemptByUID(db, uid)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.AttemptStateSucceeded, attempt.State)
+	assert.Equal(t, 200, attempt.HttpStatus)
+
+	// 第二次（例如失败路径又触发一次）不得把已成功改成失败
+	require.NoError(t, apigxmodel.CompleteAttempt(db, uid, apigxmodel.AttemptStateFailed, 500))
+	attempt, err = apigxmodel.GetAttemptByUID(db, uid)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.AttemptStateSucceeded, attempt.State, "已完成的结果不得被覆盖")
+	assert.Equal(t, 200, attempt.HttpStatus)
+
+	// 非法状态被拒
+	assert.ErrorIs(t, apigxmodel.CompleteAttempt(db, uid, 99, 0), apigxmodel.ErrInvalidArgument)
 }
