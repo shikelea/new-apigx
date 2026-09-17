@@ -49,6 +49,7 @@ import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authent
 import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
 import { Route as AuthenticatedSecurityIndexRouteImport } from './routes/_authenticated/security/index'
 import { Route as AuthenticatedShareIndexRouteImport } from './routes/_authenticated/share/index'
+import { Route as AuthenticatedShareChannelIdRouteImport } from './routes/_authenticated/share/$channelId'
 import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
 import { Route as AuthenticatedSystemInfoIndexRouteImport } from './routes/_authenticated/system-info/index'
 import { Route as AuthenticatedSystemSettingsIndexRouteImport } from './routes/_authenticated/system-settings/index'
@@ -283,6 +284,12 @@ const AuthenticatedShareIndexRoute = AuthenticatedShareIndexRouteImport.update({
   path: '/share/',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedShareChannelIdRoute =
+  AuthenticatedShareChannelIdRouteImport.update({
+    id: '/share/$channelId',
+    path: '/share/$channelId',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedSubscriptionsIndexRoute =
   AuthenticatedSubscriptionsIndexRouteImport.update({
     id: '/subscriptions/',
@@ -455,6 +462,7 @@ export interface FileRoutesByFullPath {
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/models/$section': typeof AuthenticatedModelsSectionRoute
   '/plaza/$model': typeof AuthenticatedPlazaModelRoute
+  '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/channels/': typeof AuthenticatedChannelsIndexRoute
@@ -518,6 +526,7 @@ export interface FileRoutesByTo {
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/models/$section': typeof AuthenticatedModelsSectionRoute
   '/plaza/$model': typeof AuthenticatedPlazaModelRoute
+  '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/channels': typeof AuthenticatedChannelsIndexRoute
@@ -585,6 +594,7 @@ export interface FileRoutesById {
   '/_authenticated/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/_authenticated/models/$section': typeof AuthenticatedModelsSectionRoute
   '/_authenticated/plaza/$model': typeof AuthenticatedPlazaModelRoute
+  '/_authenticated/share/$channelId': typeof AuthenticatedShareChannelIdRoute
   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
@@ -651,6 +661,7 @@ export interface FileRouteTypes {
     | '/errors/$error'
     | '/models/$section'
     | '/plaza/$model'
+    | '/share/$channelId'
     | '/usage-logs/$section'
     | '/usage-logs/audit'
     | '/channels/'
@@ -714,6 +725,7 @@ export interface FileRouteTypes {
     | '/errors/$error'
     | '/models/$section'
     | '/plaza/$model'
+    | '/share/$channelId'
     | '/usage-logs/$section'
     | '/usage-logs/audit'
     | '/channels'
@@ -780,6 +792,7 @@ export interface FileRouteTypes {
     | '/_authenticated/errors/$error'
     | '/_authenticated/models/$section'
     | '/_authenticated/plaza/$model'
+    | '/_authenticated/share/$channelId'
     | '/_authenticated/usage-logs/$section'
     | '/_authenticated/usage-logs/audit'
     | '/_authenticated/channels/'
@@ -1117,6 +1130,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedShareIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/share/$channelId': {
+      id: '/_authenticated/share/$channelId'
+      path: '/share/$channelId'
+      fullPath: '/share/$channelId'
+      preLoaderRoute: typeof AuthenticatedShareChannelIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/subscriptions/': {
       id: '/_authenticated/subscriptions/'
       path: '/subscriptions'
@@ -1379,6 +1399,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedErrorsErrorRoute: typeof AuthenticatedErrorsErrorRoute
   AuthenticatedModelsSectionRoute: typeof AuthenticatedModelsSectionRoute
   AuthenticatedPlazaModelRoute: typeof AuthenticatedPlazaModelRoute
+  AuthenticatedShareChannelIdRoute: typeof AuthenticatedShareChannelIdRoute
   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
@@ -1408,6 +1429,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedErrorsErrorRoute: AuthenticatedErrorsErrorRoute,
   AuthenticatedModelsSectionRoute: AuthenticatedModelsSectionRoute,
   AuthenticatedPlazaModelRoute: AuthenticatedPlazaModelRoute,
+  AuthenticatedShareChannelIdRoute: AuthenticatedShareChannelIdRoute,
   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,

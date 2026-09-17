@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
 import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
@@ -64,7 +65,15 @@ export function MyShares() {
   ]
 
   const channelColumns: StaticDataTableColumn<ShareChannel>[] = [
-    { id: 'name', header: t('share.channel.name'), cell: (row) => row.name },
+    {
+      id: 'name',
+      header: t('share.channel.name'),
+      cell: (row) => (
+        <Link to='/share/$channelId' params={{ channelId: String(row.id) }} className='hover:underline'>
+          {row.name}
+        </Link>
+      ),
+    },
     { id: 'protocol', header: t('share.channel.protocol'), cell: (row) => row.protocol },
     {
       id: 'key_pool_mode',

@@ -51,3 +51,23 @@ export function healthLabelKey(state: number): string {
   }
   return map[state] ?? `share.health.unknown:${state}`
 }
+/** 上游 Key 状态：0=启用 / 1=停用 / 2=自动禁用（未知回退保留原值）。 */
+export function keyStatusLabelKey(status: number): string {
+  const map: Record<number, string> = {
+    0: 'share.keyStatus.enabled',
+    1: 'share.keyStatus.disabled',
+    2: 'share.keyStatus.autoDisabled',
+  }
+  return map[status] ?? `share.keyStatus.unknown:${status}`
+}
+
+/** 供给状态（未知回退保留原值）。 */
+export function offeringStatusLabelKey(status: number): string {
+  const map: Record<number, string> = {
+    0: 'share.offeringStatus.draft',
+    1: 'share.offeringStatus.submitted',
+    2: 'share.offeringStatus.published',
+    3: 'share.offeringStatus.rejected',
+  }
+  return map[status] ?? `share.offeringStatus.unknown:${status}`
+}

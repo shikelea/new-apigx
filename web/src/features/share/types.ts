@@ -54,3 +54,58 @@ export interface ShareChannelListResponse {
   success: boolean
   data?: { items: ShareChannel[] }
 }
+// 渠道详情相关类型（字段与后端 `getChannel` / `listUpstreamKeys` / `listOfferings` 一致）。
+
+export interface ChannelDetail {
+  id: number
+  public_id: string
+  name: string
+  protocol: string
+  base_url: string
+  key_pool_mode: number
+  health_state: number
+  health_reason: string
+}
+
+/** 上游 Key。注意：**凭据本身永不返回**，`masked` 固定为掩码占位。 */
+export interface UpstreamKey {
+  id: number
+  stable_key_id: string
+  name: string
+  /** 0=启用 / 1=停用 / 2=自动禁用（冷却中） */
+  status: number
+  /** 权重（= 流量占比；同池内归一） */
+  weight: number
+  cooldown_until: number
+  expires_at: number
+  credential_version: number
+  /** 后端判定的"当前是否可用"（含停用、过期、冷却） */
+  usable: boolean
+  masked: string
+}
+
+/** 供给（某渠道发布的某上游模型）。 */
+export interface Offering {
+  id: number
+  public_id: string
+  upstream_model_id: string
+  status: number
+  revision: number
+  capabilities?: string[]
+  price_rule_id: number
+}
+
+export interface ChannelDetailResponse {
+  success: boolean
+  data?: ChannelDetail
+}
+
+export interface UpstreamKeyListResponse {
+  success: boolean
+  data?: { items: UpstreamKey[] }
+}
+
+export interface OfferingListResponse {
+  success: boolean
+  data?: { items: Offering[] }
+}

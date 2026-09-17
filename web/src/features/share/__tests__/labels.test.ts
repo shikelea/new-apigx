@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */import { describe, expect, it } from 'vitest'
 
-import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from '../lib/labels'
+import { healthLabelKey, keyPoolModeLabelKey, keyStatusLabelKey, offeringStatusLabelKey, visibilityLabelKey } from '../lib/labels'
 
 describe('分享枚举文案映射', () => {
   it('轮询与随机分别映射到各自文案键', () => {
@@ -45,5 +45,21 @@ describe('分享枚举文案映射', () => {
     expect(healthLabelKey(1)).toBe('share.health.degraded')
     expect(healthLabelKey(2)).toBe('share.health.unavailable')
     expect(healthLabelKey(5)).toBe('share.health.unknown:5')
+  })
+})
+describe('Key 与供给状态文案映射', () => {
+  it('Key 三态映射，未知回退保留原值', () => {
+    expect(keyStatusLabelKey(0)).toBe('share.keyStatus.enabled')
+    expect(keyStatusLabelKey(1)).toBe('share.keyStatus.disabled')
+    expect(keyStatusLabelKey(2)).toBe('share.keyStatus.autoDisabled')
+    expect(keyStatusLabelKey(9)).toBe('share.keyStatus.unknown:9')
+  })
+
+  it('供给四态映射，未知回退保留原值', () => {
+    expect(offeringStatusLabelKey(0)).toBe('share.offeringStatus.draft')
+    expect(offeringStatusLabelKey(1)).toBe('share.offeringStatus.submitted')
+    expect(offeringStatusLabelKey(2)).toBe('share.offeringStatus.published')
+    expect(offeringStatusLabelKey(3)).toBe('share.offeringStatus.rejected')
+    expect(offeringStatusLabelKey(8)).toBe('share.offeringStatus.unknown:8')
   })
 })
