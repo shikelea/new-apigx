@@ -3,6 +3,7 @@ package relayhook
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -87,54 +88,82 @@ func ResetPreferenceCacheForTest() {
 	prefCacheMu.Unlock()
 }
 
-// CheckSourceAllowed 判断当前请求所选渠道是否被该平台 Key 的「允许来源」允许。
+// CheckSourceAllowed 判断当前请求所选渠道/模型是否被该平台 Key 的偏好允许。
+//
+// 依次判定三件事：
+//  1. **允许模型**：Key 配了允许模型列表时，请求的模型必须在列表内；
+//  2. **固定来源**：范围模式为「固定来源」时，选中的渠道必须正是被固定的那条供给所属渠道；
+//  3. **允许来源**：Key 限定来源时，选中渠道的分享者必须在允许列表内。
 //
 // 返回 nil 表示放行；否则返回应当抛给底座重试/中止流程的错误。
-func CheckSourceAllowed(c *gin.Context, channelID int) *types.NewAPIError {
+// 「可回退」时返回**可重试**错误让底座重选渠道；不可回退时直接写出 403 并中止上下文。
+func CheckSourceAllowed(c *gin.Context, channelID int, modelName string) *types.NewAPIError {
 	if !sourceGuardEnabled || c == nil || channelID <= 0 {
 		return nil
 	}
 	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
 	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
 	if tokenID <= 0 || userID <= 0 {
-		// 没有平台 Key 上下文（例如内部调用）：不施加来源限制
+		// 没有平台 Key 上下文（例如内部调用）：不施加限制
 		return nil
 	}
 
 	db := channelpool.CurrentDB()
 	key, found := loadPreferences(db, int64(userID), int64(tokenID))
-	if !found || key == nil || key.ScopeMode != apigxmodel.ScopeModeAllowedOwners {
+	if !found || key == nil {
 		return nil
 	}
 
-	ownerID, isOurChannel := channelpool.ShareChannelOwnerByBase(db, channelID)
-	if isOurChannel {
-		if allowed, _ := key.AllowsOwner(ownerID); allowed {
-			return nil
+	// ① 允许模型
+	if allowedModels := key.AllowedModels(); len(allowedModels) > 0 && modelName != "" {
+		if !slices.Contains(allowedModels, modelName) {
+			return denyOrRetry(c, key, "model_not_allowed",
+				"this API key is not allowed to use the requested model")
 		}
-	} else {
-		// 不是分享渠道：限制来源的 Key 不得借道管理员自建渠道
-		common.SysLog("apigx source guard: key restricts sources but selected channel is not a share channel")
 	}
 
+	// ② 固定来源
+	if key.ScopeMode == apigxmodel.ScopeModePinned {
+		pinnedChannelID, ok := channelpool.ShareChannelIDByOffering(db, key.PinnedOfferingID)
+		if !ok {
+			common.SysLog("apigx source guard: pinned offering is not available")
+			return denyOrRetry(c, key, "pinned_source_unavailable", "the pinned source is not available")
+		}
+		if selectedID, isOurChannel := channelpool.ShareChannelIDByBase(db, channelID); !isOurChannel || selectedID != pinnedChannelID {
+			return denyOrRetry(c, key, "pinned_source_mismatch", "the selected source is not the pinned one")
+		}
+	}
+
+	// ③ 允许来源
+	if key.ScopeMode == apigxmodel.ScopeModeAllowedOwners {
+		ownerID, isOurChannel := channelpool.ShareChannelOwnerByBase(db, channelID)
+		if isOurChannel {
+			if allowed, _ := key.AllowsOwner(ownerID); allowed {
+				return nil
+			}
+		} else {
+			// 不是分享渠道：限制来源的 Key 不得借道管理员自建渠道
+			common.SysLog("apigx source guard: key restricts sources but selected channel is not a share channel")
+		}
+		return denyOrRetry(c, key, "source_not_allowed",
+			"this API key is not allowed to use the selected source")
+	}
+	return nil
+}
+
+// denyOrRetry 按「是否允许回退」决定拒绝方式。
+//
+// 可回退：返回可重试错误（**不中止上下文**），让底座重新选择渠道；
+// 不可回退：直接写出 403 并中止上下文——因为 `Distribute` 调用
+// `SetupContextForSelectedChannel` 时**忽略返回值**，只返回错误阻止不了请求继续
+// （容量钩子有效正是因为它直接 abort）。
+func denyOrRetry(c *gin.Context, key *apigxmodel.APIKey, code string, message string) *types.NewAPIError {
 	if key.AllowFallback {
-		// 可回退：交给底座重试并重新选择渠道（不设置 SkipRetry、**不中止上下文**，
-		// 否则底座就没有机会重选）。
-		return types.NewErrorWithStatusCode(
-			errors.New("source not allowed for this key, retry with another channel"),
+		return types.NewErrorWithStatusCode(errors.New(message+", retry with another channel"),
 			types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden, types.ErrOptionWithNoRecordErrorLog())
 	}
-	// 不可回退：明确的拒绝。
-	//
-	// **必须在这里直接写出响应并中止上下文**，原因有二：
-	//  1. `Distribute` 调用 `SetupContextForSelectedChannel` 时**忽略了返回值**，
-	//     只返回错误并不会阻止请求继续（容量钩子之所以有效，正是因为它直接 abort）；
-	//  2. 若让错误沿中继链路传播，它会被当成**渠道故障**——实测会把健康渠道自动禁用
-	//     （后续请求变成 `model_not_found 503`），这是把"准入判断"误当成"上游故障"的典型后果。
-	abortJSON(c, http.StatusForbidden, "source_not_allowed",
-		"this API key is not allowed to use the selected source")
-	return types.NewErrorWithStatusCode(
-		errors.New("source not allowed for this key"),
+	abortJSON(c, http.StatusForbidden, code, message)
+	return types.NewErrorWithStatusCode(errors.New(message),
 		types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden,
 		types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 }

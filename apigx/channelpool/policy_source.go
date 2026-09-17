@@ -147,3 +147,15 @@ func ShareChannelPublicInfoByBase(db *gorm.DB, baseChannelID int) (publicID stri
 	}
 	return shareChannel.PublicID, shareChannel.OwnerUserID, true
 }
+
+// ShareChannelIDByOffering 由供给 ID 找出它所属的分享渠道（用于「固定来源」判定）。
+func ShareChannelIDByOffering(db *gorm.DB, offeringID int64) (int64, bool) {
+	if db == nil || offeringID <= 0 {
+		return 0, false
+	}
+	var offering apigxmodel.ModelOffering
+	if err := db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
+		return 0, false
+	}
+	return offering.ChannelID, true
+}

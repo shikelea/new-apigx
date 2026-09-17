@@ -722,7 +722,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	}
 	// APIGX 平台 Key 的「允许来源」准入（T1.10）：不可回退时直接拒绝；可回退时返回可重试错误，
 	// 由底座的重试机制重新选择渠道（复用底座重选，不自己写候选循环）。
-	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id); sourceErr != nil {
+	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
 		return sourceErr
 	}
 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
