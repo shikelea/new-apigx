@@ -109,3 +109,19 @@ export interface OfferingListResponse {
   success: boolean
   data?: { items: Offering[] }
 }
+/**
+ * 容量策略请求体。
+ *
+ * 各维度都是**四态原始值**（0 未配置 / 1 禁用 / 2 继承 / 3 明确不限 / 4 明确值），
+ * 解释由后端统一负责 —— 因此界面只需原样提交用户选择，不在这里做任何语义推断。
+ */
+export type LimitMode = 0 | 1 | 2 | 3 | 4
+
+export interface CapacityPolicyPayload {
+  concurrency_mode?: LimitMode
+  concurrency_value?: number
+  rpm_mode?: LimitMode
+  rpm_limit?: number
+  tpm_mode?: LimitMode
+  tpm_limit?: number
+}

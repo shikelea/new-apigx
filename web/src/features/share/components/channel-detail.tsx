@@ -15,7 +15,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { useQuery } from '@tanstack/react-query'
+*/import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 
 import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
@@ -23,15 +23,25 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
-import { getChannel, getChannelKeys, getChannelOfferings } from '../api'
+import { getChannel, getChannelKeys, getChannelOfferings, submitOffering } from '../api'
+import { ChannelActions } from './channel-actions'
 import { healthLabelKey, keyPoolModeLabelKey, keyStatusLabelKey, offeringStatusLabelKey } from '../lib/labels'
 import type { Offering, UpstreamKey } from '../types'
 
 /** 渠道详情：Key 池与供给。凭据只显示掩码（后端从不返回明文）。 */
 export function ChannelDetailView(props: { channelId: number }) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
+
+  const submitMutation = useMutation({
+    mutationFn: (offeringId: number) => submitOffering(offeringId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['apigx-channel-offerings', props.channelId] })
+    },
+  })
 
   const channelQuery = useQuery({ queryKey: ['apigx-channel', props.channelId], queryFn: () => getChannel(props.channelId) })
   const keysQuery = useQuery({ queryKey: ['apigx-channel-keys', props.channelId], queryFn: () => getChannelKeys(props.channelId) })
@@ -77,6 +87,13 @@ export function ChannelDetailView(props: { channelId: number }) {
     { id: 'status', header: t('share.offering.status'), cell: (row) => t(offeringStatusLabelKey(row.status)) },
     { id: 'capabilities', header: t('share.offering.capabilities'), cell: (row) => (row.capabilities ?? []).join(', ') },
     { id: 'price_rule', header: t('share.offering.priceRule'), cell: (row) => String(row.price_rule_id) },
+    {
+      id: 'actions',
+      header: '',
+      cell: (row) => (
+        <SubmitOfferingButton offering={row} pending={submitMutation.isPending} onsubmit={submitMutation.mutate} />
+      ),
+    },
   ]
 
   if (!channel) {
@@ -105,6 +122,8 @@ export function ChannelDetailView(props: { channelId: number }) {
         </CardContent>
       </Card>
 
+      <ChannelActions channelId={props.channelId} />
+
       <Card>
         <CardHeader>
           <CardTitle>{t('share.keyPool')}</CardTitle>
@@ -131,5 +150,17 @@ export function ChannelDetailView(props: { channelId: number }) {
         </CardContent>
       </Card>
     </div>
+  )
+}
+/** 草稿供给的"提交审核"按钮；非草稿不显示动作（发布/驳回属平台侧）。 */
+function SubmitOfferingButton(props: { offering: Offering; pending: boolean; onsubmit: (id: number) => void }) {
+  const { t } = useTranslation()
+  if (props.offering.status !== 0) {
+    return null
+  }
+  return (
+    <Button variant='outline' size='sm' disabled={props.pending} onClick={() => props.onsubmit(props.offering.id)}>
+      {t('share.offering.submit')}
+    </Button>
   )
 }

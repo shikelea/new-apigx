@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */import { api } from '@/lib/api'
 
 import type {
+  CapacityPolicyPayload,
   ChannelDetailResponse,
   OfferingListResponse,
   ShareChannelListResponse,
@@ -49,5 +50,29 @@ export async function getChannelKeys(channelId: number): Promise<UpstreamKeyList
 
 export async function getChannelOfferings(channelId: number): Promise<OfferingListResponse> {
   const res = await api.get(`/api/apigx/channels/${channelId}/offerings`)
+  return res.data
+}
+/**
+ * 一键获取该渠道的上游模型；`import` 为 true 时**批量导入为草稿供给**。
+ *
+ * 复用底座的取模型能力（40+ 家适配器），这里只是触发与落库。
+ */
+export async function fetchUpstreamModels(channelId: number, importAsDraft: boolean): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/channels/${channelId}/fetch-models`, { import: importAsDraft })
+  return res.data
+}
+
+/** 设置容量策略（写入四态原始值，解释由后端统一负责）。 */
+export async function setChannelCapacityPolicy(
+  channelId: number,
+  payload: CapacityPolicyPayload
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.put(`/api/apigx/channels/${channelId}/capacity-policy`, payload)
+  return res.data
+}
+
+/** 提交供给审核（发布/驳回是平台侧动作，分享者只能提交）。 */
+export async function submitOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/offerings/${offeringId}/submit`)
   return res.data
 }
