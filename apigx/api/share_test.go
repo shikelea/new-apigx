@@ -1039,3 +1039,34 @@ func TestTaskRetentionPolicy(t *testing.T) {
 	rec, _ = env.do(t, http.MethodGet, "/api/task-retention", owner, "")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+// 分组的展示名与简介：计划书 §4 要求"分享名称、介绍"，且说明必须能在列表里读到。
+func TestShareGroupNameAndDescription(t *testing.T) {
+	env := newTestEnv(t, false)
+	const owner int64 = 9201
+
+	rec, body := env.do(t, http.MethodPost, "/api/share-groups", owner, `{"name":"初始分组","default_visibility":2}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	groupID := int64(body["data"].(map[string]any)["id"].(float64))
+
+	// 改名 + 写简介
+	rec, _ = env.do(t, http.MethodPatch, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner,
+		`{"name":"改过的名字","description":"这是一段分享说明"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 列表里必须能读到（否则前端"分享说明"就无从显示）
+	rec, body = env.do(t, http.MethodGet, "/api/share-groups", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	require.NotEmpty(t, items)
+	first, _ := items[0].(map[string]any)
+	assert.Equal(t, "改过的名字", first["name"])
+	assert.Equal(t, "这是一段分享说明", first["description"], "简介必须在列表里返回")
+
+	// 非法名称必须被拒（空名 / 超长），而不是写进去
+	rec, _ = env.do(t, http.MethodPatch, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner, `{"name":"   "}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec, _ = env.do(t, http.MethodPatch, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner,
+		`{"name":"`+strings.Repeat("字", 65)+`"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

@@ -15,7 +15,8 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { useQuery } from '@tanstack/react-query'
+*/import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
@@ -24,15 +25,19 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { SectionPageLayout } from '@/components/layout'
 import { LoadingState } from '@/components/loading-state'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 import { getShareChannels, getShareGroups } from './api'
+import { GroupEditDialog } from './components/group-edit-dialog'
 import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/labels'
 import type { ShareChannel, ShareGroup } from './types'
 
 /** 我的分享：分组与渠道。 */
 export function MyShares() {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
 
   const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
   const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
@@ -62,6 +67,21 @@ export function MyShares() {
       cell: (row) => t(visibilityLabelKey(row.default_visibility)),
     },
     { id: 'public_id', header: t('share.group.publicId'), cell: (row) => row.public_id },
+    {
+      id: 'description',
+      header: t('Description'),
+      // 说明是不可信文本：这里按纯文本渲染（不打 HTML）
+      cell: (row) => <span className='text-muted-foreground line-clamp-2 text-xs'>{row.description}</span>,
+    },
+    {
+      id: 'actions',
+      header: '',
+      cell: (row) => (
+        <Button variant='outline' size='sm' onClick={() => setEditingGroup(row)}>
+          {t('Edit')}
+        </Button>
+      ),
+    },
   ]
 
   const channelColumns: StaticDataTableColumn<ShareChannel>[] = [
@@ -118,6 +138,17 @@ export function MyShares() {
             </CardContent>
           </Card>
         </div>
+        <GroupEditDialog
+          group={editingGroup}
+          open={editingGroup !== null}
+          onOpenChange={(next) => {
+            if (!next) setEditingGroup(null)
+          }}
+          onSaved={() => {
+            setEditingGroup(null)
+            void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
+          }}
+        />
       </SectionPageLayout.Content>
     </SectionPageLayout>
   )

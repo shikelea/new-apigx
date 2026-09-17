@@ -205,6 +205,23 @@ func ListChannelsByOwner(db *gorm.DB, ownerUserID int64, limit int) ([]Channel, 
 	return channels, err
 }
 
+// UpdateShareGroup 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
+//
+// 只动展示字段：更名与改简介**不影响任何授权**（Group 结构体注释已写明这一点），
+// 因此这里不做授权相关处理，只校验归属并写库。
+func UpdateShareGroup(db *gorm.DB, ownerUserID, id int64, name, description string) error {
+	res := db.Model(&ShareGroup{}).
+		Where("id = ? AND owner_user_id = ? AND deleted_at IS NULL", id, ownerUserID).
+		Updates(map[string]any{"name": name, "description": description, "updated_at": common.GetTimestamp()})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // DeleteChannel 软删除渠道（墓碑语义）。
 func DeleteChannel(db *gorm.DB, ownerUserID, id int64) error {
 	return softDeleteByOwner(db, &Channel{}, ownerUserID, id)

@@ -64,3 +64,31 @@ export function filterPlazaCards(cards: PlazaModelCard[], keyword: string): Plaz
   }
   return cards.filter((card) => card.model.toLowerCase().includes(needle))
 }
+
+
+/**
+ * 按**分享分组**把卡片分组（我们的模式：广场按"谁在分享"组织，而不是平铺一堆）。
+ *
+ * 没有分组信息的条目统一归到「未分组」，**不丢数据**；分组内的顺序沿用传入顺序，
+ * 保证同一份数据每次渲染的顺序一致。
+ */
+export interface PlazaGroupBucket {
+  key: string
+  name: string
+  cards: PlazaModelCard[]
+}
+
+export function groupPlazaCards(cards: PlazaModelCard[]): PlazaGroupBucket[] {
+  const buckets = new Map<string, PlazaGroupBucket>()
+  for (const card of cards) {
+    const key = card.offerings[0]?.group_public_id ?? ''
+    const name = card.offerings[0]?.group_name ?? ''
+    const existing = buckets.get(key)
+    if (existing) {
+      existing.cards.push(card)
+      continue
+    }
+    buckets.set(key, { key, name, cards: [card] })
+  }
+  return [...buckets.values()]
+}

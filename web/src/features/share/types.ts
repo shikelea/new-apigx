@@ -23,6 +23,8 @@ export interface ShareGroup {
   id: number
   public_id: string
   name: string
+  /** 简介（不可信文本，按纯文本渲染） */
+  description: string
   /** 默认可见性（0=公开 / 1=邀请 / 2=指定用户 / 3=仅自己） */
   default_visibility: number
   /** 发布状态 */

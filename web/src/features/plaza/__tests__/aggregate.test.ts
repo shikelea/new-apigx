@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { describe, expect, it } from 'vitest'
 
-import { aggregatePlazaItems, filterPlazaCards } from '../lib/aggregate'
+import { aggregatePlazaItems, filterPlazaCards, groupPlazaCards } from '../lib/aggregate'
 import { makeItem } from './fixtures'
 
 describe('广场聚合', () => {
@@ -65,5 +65,29 @@ describe('广场搜索过滤', () => {
 
   it('没有匹配时返回空列表', () => {
     expect(filterPlazaCards(cards, 'gpt')).toEqual([])
+  })
+})
+
+
+describe('广场按分享分组组织', () => {
+  it('按分组对外 ID 分区，并保留组名', () => {
+    const cards = aggregatePlazaItems([
+      makeItem({ model: 'm1', group_public_id: 'g1', group_name: '阿里云分享' }),
+      makeItem({ model: 'm2', group_public_id: 'g1', group_name: '阿里云分享' }),
+      makeItem({ model: 'm3', group_public_id: 'g2', group_name: '自建分享' }),
+    ])
+    const groups = groupPlazaCards(cards)
+
+    expect(groups.map((g) => g.name)).toEqual(['阿里云分享', '自建分享'])
+    expect(groups[0].cards.map((c) => c.model)).toEqual(['m1', 'm2'])
+    expect(groups[1].cards.map((c) => c.model)).toEqual(['m3'])
+  })
+
+  it('没有分组信息的条目归到「未分组」，不丢数据', () => {
+    const groups = groupPlazaCards(aggregatePlazaItems([makeItem({ model: 'm9' })]))
+
+    expect(groups).toHaveLength(1)
+    expect(groups[0].name).toBe('')
+    expect(groups[0].cards).toHaveLength(1)
   })
 })

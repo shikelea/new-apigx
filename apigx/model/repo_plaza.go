@@ -30,6 +30,9 @@ const (
 // 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
 // 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
 type PlazaItem struct {
+	// GroupPublicID/GroupName 用于广场按"分享分组"组织（我们的模式）。
+	GroupPublicID    string
+	GroupName        string
 	OfferingPublicID string
 	UpstreamModelID  string
 	ChannelPublicID  string
@@ -115,6 +118,8 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 	}
 
 	type row struct {
+		GroupPublicID   string
+		GroupName       string
 		PublicID        string
 		UpstreamModelID string
 		ChannelPublicID string
@@ -125,6 +130,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 	var rows []row
 	err := query.Select("o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
+		"g.public_id AS group_public_id, g.name AS group_name, " +
 		"o.capabilities AS capabilities, o.updated_at AS updated_at").
 		Order("o.updated_at DESC, o.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error
 	if err != nil {
@@ -142,6 +148,8 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 			OfferingPublicID:       r.PublicID,
 			UpstreamModelID:        r.UpstreamModelID,
 			ChannelPublicID:        r.ChannelPublicID,
+			GroupPublicID:          r.GroupPublicID,
+			GroupName:              r.GroupName,
 			OwnerUserID:            r.OwnerUserID,
 			Capabilities:           effective,
 			UnverifiedCapabilities: unverified,

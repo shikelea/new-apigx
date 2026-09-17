@@ -30,7 +30,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 
 import { getPlaza } from './api'
-import { aggregatePlazaItems, filterPlazaCards } from './lib/aggregate'
+import { aggregatePlazaItems, filterPlazaCards, groupPlazaCards } from './lib/aggregate'
 
 /** 模型广场：分享者提供的模型，按模型聚合展示可访问来源数与能力。 */
 export function Plaza() {
@@ -46,6 +46,7 @@ export function Plaza() {
     () => filterPlazaCards(aggregatePlazaItems(query.data?.data?.items ?? []), keyword),
     [query.data, keyword]
   )
+  const groups = useMemo(() => groupPlazaCards(cards), [cards])
 
   if (query.isPending) {
     return <LoadingState />
@@ -79,8 +80,12 @@ export function Plaza() {
         {cards.length === 0 ? (
           <EmptyState title={t('plaza.empty')} />
         ) : (
-          <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
-            {cards.map((card) => (
+          <div className='space-y-8'>
+            {groups.map((group) => (
+              <section key={group.key} className='space-y-3'>
+                <h2 className='text-sm font-medium'>{group.name === '' ? t('Ungrouped') : group.name}</h2>
+                <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
+                  {group.cards.map((card) => (
               <Card key={card.model}>
                 <CardHeader>
                   <CardTitle className='break-all text-base'>
@@ -104,6 +109,9 @@ export function Plaza() {
                   ) : null}
                 </CardContent>
               </Card>
+                  ))}
+                </div>
+              </section>
             ))}
           </div>
         )}

@@ -76,3 +76,12 @@ export async function submitOffering(offeringId: number): Promise<{ success: boo
   const res = await api.post(`/api/apigx/offerings/${offeringId}/submit`)
   return res.data
 }
+
+// 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
+export async function updateShareGroup(
+  groupId: number,
+  input: { name: string; description: string }
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.patch(`/api/apigx/share-groups/${groupId}`, input)
+  return res.data
+}

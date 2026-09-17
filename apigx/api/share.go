@@ -41,6 +41,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	{
 		groups.POST("", h.createShareGroup)
 		groups.GET("", h.listShareGroups)
+		// 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）
+		groups.PATCH("/:id", h.updateShareGroup)
 		groups.GET("/:id", h.getShareGroup)
 		groups.DELETE("/:id", h.deleteShareGroup)
 		groups.GET("/:id/channels", h.listChannels)
@@ -220,6 +222,8 @@ func (h *handler) listShareGroups(c *gin.Context) {
 	for _, g := range groups {
 		items = append(items, gin.H{
 			"id": g.ID, "public_id": g.PublicID, "name": g.Name,
+			// 简介（计划书 §4"分享名称、介绍"）：不可信内容，前端渲染时按纯文本处理
+			"description":        g.Description,
 			"default_visibility": g.DefaultVisibility, "publish_status": g.PublishStatus,
 			"updated_at": g.UpdatedAt,
 		})
@@ -1300,6 +1304,8 @@ func (h *handler) getPlazaItem(c *gin.Context) {
 func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 	out := gin.H{
 		"offering_public_id": item.OfferingPublicID,
+		"group_public_id":    item.GroupPublicID,
+		"group_name":         item.GroupName,
 		"model":              item.UpstreamModelID,
 		"channel_public_id":  item.ChannelPublicID,
 		"owner_user_id":      item.OwnerUserID,
@@ -1701,4 +1707,53 @@ func (h *handler) listAllChannels(c *gin.Context) {
 		})
 	}
 	ok(c, gin.H{"items": items})
+}
+
+// updateShareGroup 更新分组的展示名与简介。
+//
+// 只改展示字段（更名与改简介不影响授权，见 model.ShareGroup 的注释）；
+// 名称长度与模型列宽一致（64），简介为不可信文本 —— 前端按纯文本渲染，不做 HTML 解析。
+func (h *handler) updateShareGroup(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req struct {
+		Name        *string `json:"name"`
+		Description *string `json:"description"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	if req.Name == nil && req.Description == nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "name or description is required")
+		return
+	}
+	existing, err := apigxmodel.GetShareGroup(h.db, owner, id)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	name := existing.Name
+	if req.Name != nil {
+		name = strings.TrimSpace(*req.Name)
+	}
+	if name == "" || len([]rune(name)) > 64 {
+		fail(c, http.StatusBadRequest, "invalid_name", "name must be 1..64 characters")
+		return
+	}
+	description := existing.Description
+	if req.Description != nil {
+		description = *req.Description
+	}
+	if err := apigxmodel.UpdateShareGroup(h.db, owner, id, name, description); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "name": name, "description": description})
 }
