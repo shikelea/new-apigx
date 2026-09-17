@@ -1,0 +1,356 @@
+From b7eb714ceab7d65f04942de887df97e880dca13d Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 14:07:26 +0800
+Subject: [PATCH 39/39] =?UTF-8?q?feat(apigx):=20=E6=9D=A5=E6=BA=90?=
+ =?UTF-8?q?=E4=BB=B7=E6=A0=BC=E6=91=84=E5=85=A5=E4=B8=8E"=E5=BE=85?=
+ =?UTF-8?q?=E7=A1=AE=E8=AE=A4"=E5=A4=84=E7=BD=AE=EF=BC=88T2.1=20=E5=AE=8C?=
+ =?UTF-8?q?=E6=88=90=E4=B8=BB=E4=BD=93=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- GetEffectivePriceRule 收紧为**只认已接受版本**: 待校验/拒绝/冲突版本留存但不生效
+  => 同步失败/单位冲突/模型未知时"旧版本继续使用或待确认"(计划书验收条款)
+- IngestSourcePrice: 待确认原因(币种缺失/模型未知/单位冲突/空记录)写入 ValidationNote;
+  ListPriceRuleSnapshots 不过滤状态, 可疑记录可人工看到(不然就是看不见的垃圾数据)
+- 非美元按**保存的汇率**归一(历史快照不随汇率更新改写); 缺汇率时快照生效但分项标记待汇率,
+  取价返回 ok=false —— 原币价已知、USD 未知, 既不当"没有价格"也不误算为 0
+- 币种缺失用 ISO 4217 XXX 占位以保留待确认记录(原因在 ValidationNote)
+- 测试 6/6(新增 2): 可疑数据不顶掉旧价(4 种原因+队列可见+人工锁定挡同步)、汇率归一与缺汇率显式未知
+- 其余告一段落: 下一步是把底座 ratio_sync 输出喂进本层(需倍率->分项单价映射), 属 T2.2 入口
+- apigx + middleware 全量通过; 本层无 schema 变更(沿用阶段 1 已验证的三库结构)
+---
+ apigx/model/repo_price.go      | 144 +++++++++++++++++++++++++++++++++
+ apigx/model/repo_price_test.go | 142 ++++++++++++++++++++++++++++++--
+ 2 files changed, 280 insertions(+), 6 deletions(-)
+
+diff --git a/apigx/model/repo_price.go b/apigx/model/repo_price.go
+index 942c3a0..3b737a5 100644
+--- a/apigx/model/repo_price.go
++++ b/apigx/model/repo_price.go
+@@ -148,6 +148,10 @@ func GetEffectivePriceRule(db *gorm.DB, scopeType int, scopeID int64, at int64)
+ 	var rule PriceRule
+ 	err := db.Where("scope_type = ? AND scope_id = ? AND effective_from <= ?", scopeType, scopeID, at).
+ 		Where("effective_to = 0 OR effective_to > ?", at).
++		// **只有已接受的版本才生效**：待校验/已拒绝/冲突的版本会被留存待确认，
++		// 但不会顶掉正在使用的旧价格——这是计划书「价格同步失败、单位冲突或模型未知 →
++		// 旧版本继续使用或待确认」的实现方式。
++		Where("validation_state = ?", PriceValidationAccepted).
+ 		Order("version DESC").First(&rule).Error
+ 	if errors.Is(err, gorm.ErrRecordNotFound) {
+ 		return nil, nil, ErrNoPriceRule
+@@ -163,6 +167,23 @@ func GetEffectivePriceRule(db *gorm.DB, scopeType int, scopeID int64, at int64)
+ 	return &rule, items, nil
+ }
+ 
++// ListPriceRuleSnapshots 列出某作用域的全部版本（新到旧），供**待确认队列**与审计使用。
++//
++// 与 GetEffectivePriceRule 的区别：这里**不过滤校验状态**——正因如此，
++// 被挡下的可疑版本仍能被人看到并处理（否则它们会变成看不见的垃圾数据）。
++func ListPriceRuleSnapshots(db *gorm.DB, scopeType int, scopeID int64, limit int) ([]PriceRule, error) {
++	if db == nil || scopeID <= 0 {
++		return nil, fmt.Errorf("%w: scope_id is required", ErrInvalidArgument)
++	}
++	if limit <= 0 || limit > 200 {
++		limit = 50
++	}
++	var rules []PriceRule
++	err := db.Where("scope_type = ? AND scope_id = ?", scopeType, scopeID).
++		Order("version DESC").Limit(limit).Find(&rules).Error
++	return rules, err
++}
++
+ // ApplyPriceSync 把一次同步结果写入快照，并守住「人工覆盖不被改写」。
+ //
+ // 返回 ErrPriceLocked 表示当前生效快照是人工覆盖/已锁定，**同步必须放弃**
+@@ -229,3 +250,126 @@ func EffectiveUSDUnitPriceMicro(rule *PriceRule, item *PriceRuleItem) (price int
+ 	}
+ 	return item.UsdUnitPriceMicro, true
+ }
++
++// SourcePriceIngest 是一次「来源价格」的摄入请求（同步任务或人工录入都走这里）。
++type SourcePriceIngest struct {
++	ScopeType   int
++	ScopeID     int64
++	Source      int
++	SourceRef   string
++	Currency    string
++	PricingMode int
++	Items       []PriceRuleItem
++	// RawRecord 原始记录（留存以便人工复核可疑版本）。
++	RawRecord string
++	// ModelKnown 由调用方判定：该价格对应的模型能否映射到我们的目录。
++	ModelKnown bool
++	// FxRateID/FxRateMicro 是**保存的汇率**（非 USD 币种必须有；0 表示尚无可用汇率）。
++	FxRateID    int64
++	FxRateMicro int64
++	// CreatedByUserID 人工录入者（同步任务为 0）。
++	CreatedByUserID int64
++}
++
++// IngestResult 报告摄入结果。
++type IngestResult struct {
++	// Applied 为 true 表示新价格**已生效**；false 表示被留存为待确认（或未写入）。
++	Applied bool
++	RuleID  int64
++	Version int64
++	// Pending 为 true 表示写入了待确认版本（不生效）。
++	Pending bool
++	// Note 是待确认原因（机器可读的短标识），随快照的 ValidationNote 一并保存。
++	Note string
++}
++
++// 待确认原因（写入 `ValidationNote`）。
++const (
++	PricePendingCurrencyMissing = "currency_missing"
++	PricePendingModelUnknown    = "model_unknown"
++	PricePendingUnitConflict    = "unit_conflict"
++	PricePendingEmptyRecord     = "empty_record"
++)
++
++// IngestSourcePrice 摄入一条来源价格，并按计划书的处置规则决定「生效」还是「待确认」。
++//
++// 处置规则：
++//   - 币种缺失 / 模型未知 / 单位冲突 / 记录里没有任何分项 → **待确认**（写入版本但 `ValidationState = 待校验`，
++//     因此 `GetEffectivePriceRule` 不会取到它，**旧价格继续生效**，且该版本可在待确认队列里被人工处理）；
++//   - 非 USD 且尚无可用汇率 → **可以生效**，但每个分项标记 `UsdState = 待汇率`：
++//     原币种价格是可信的，缺的只是 USD 折算；这样"价格已知但 USD 未知"不会被误当成"没有价格"，
++//     也不会被误算成 0（`EffectiveUSDUnitPriceMicro` 会返回 ok=false）。
++//   - 当前生效快照是人工覆盖/已锁定 → `ErrPriceLocked`，同步放弃（人工价不被改写）。
++func IngestSourcePrice(db *gorm.DB, in SourcePriceIngest) (IngestResult, error) {
++	if db == nil || in.ScopeID <= 0 {
++		return IngestResult{}, fmt.Errorf("%w: scope_id is required", ErrInvalidArgument)
++	}
++
++	rule := &PriceRule{
++		ScopeType: in.ScopeType, ScopeID: in.ScopeID, Source: in.Source, SourceRef: in.SourceRef,
++		Currency: in.Currency, PricingMode: in.PricingMode,
++		FxRateID: in.FxRateID, FxRateMicro: in.FxRateMicro,
++		CreatedByUserID: in.CreatedByUserID,
++		RawRecord:       in.RawRecord, RawRecordBytes: len(in.RawRecord),
++		ValidationState: PriceValidationAccepted,
++	}
++
++	// 判定待确认原因（按"越基础的问题越优先"排序，便于人工一眼看到根因）
++	note := ""
++	switch {
++	case len(in.Currency) != 3:
++		note = PricePendingCurrencyMissing
++	case !in.ModelKnown:
++		note = PricePendingModelUnknown
++	case len(in.Items) == 0:
++		note = PricePendingEmptyRecord
++	default:
++		for i := range in.Items {
++			if in.Items[i].Currency != "" && in.Items[i].Currency != in.Currency {
++				note = PricePendingUnitConflict
++				break
++			}
++		}
++	}
++
++	items := make([]PriceRuleItem, len(in.Items))
++	copy(items, in.Items)
++	for i := range items {
++		if items[i].Currency == "" {
++			items[i].Currency = in.Currency
++		}
++		if in.Currency == "USD" {
++			items[i].UsdState = UsdStateNotNeeded
++			items[i].UsdUnitPriceMicro = items[i].UnitPriceMicro
++		} else if in.FxRateMicro > 0 {
++			// 用**保存的汇率**换算（历史快照因此不随汇率更新而改写）
++			items[i].UsdState = UsdStateConverted
++			items[i].UsdUnitPriceMicro = items[i].UnitPriceMicro * 1_000_000 / in.FxRateMicro
++			rule.UsdConverted = true
++		} else {
++			items[i].UsdState = UsdStatePendingFx
++		}
++	}
++
++	if note != "" {
++		rule.ValidationState = PriceValidationPending
++		rule.ValidationNote = note
++		if len(rule.Currency) != 3 {
++			// 币种缺失时仍要能**留存这条待确认记录**（否则人工无从看到"同步拿到了什么"）。
++			// 用 ISO 4217 的 XXX（表示"无币种"）占位，真实原因保留在 ValidationNote 里——
++			// 既不违反「币种必填」的库约束，也不假装它有币种。
++			rule.Currency = "XXX"
++		}
++		// 待确认版本同样只追加：它不生效（GetEffectivePriceRule 过滤校验状态），
++		// 因此**旧价格继续使用**，同时这条记录留给人处理。
++		if err := CreatePriceRuleSnapshot(db, rule, items); err != nil {
++			return IngestResult{}, err
++		}
++		return IngestResult{Applied: false, Pending: true, RuleID: rule.ID, Version: rule.Version, Note: note}, nil
++	}
++
++	if err := ApplyPriceSync(db, rule, items); err != nil {
++		return IngestResult{}, err
++	}
++	return IngestResult{Applied: true, RuleID: rule.ID, Version: rule.Version}, nil
++}
+diff --git a/apigx/model/repo_price_test.go b/apigx/model/repo_price_test.go
+index 9e49bbe..9837535 100644
+--- a/apigx/model/repo_price_test.go
++++ b/apigx/model/repo_price_test.go
+@@ -24,16 +24,19 @@ func TestPriceUnknownIsNotZero(t *testing.T) {
+ 	require.NoError(t, CreatePriceRuleSnapshot(db, pending, []PriceRuleItem{
+ 		{Dimension: 1, UnitPriceMicro: 2500, Currency: "USD", UsdState: UsdStateNotNeeded},
+ 	}))
++	// **未被接受的快照不生效**：取用时根本看不到它（旧价格继续使用 / 视为未知）
++	_, _, err = GetEffectivePriceRule(db, 1, 9501, 0)
++	assert.ErrorIs(t, err, ErrNoPriceRule, "待校验的快照不得生效")
++
++	// 接受之后才可用
++	require.NoError(t, db.Model(&PriceRule{}).Where("scope_type = 1 AND scope_id = 9501").
++		Update("validation_state", PriceValidationAccepted).Error)
+ 	rule, items, err := GetEffectivePriceRule(db, 1, 9501, 0)
+ 	require.NoError(t, err)
+ 	require.Len(t, items, 1)
+-	assert.True(t, IsPriceUnknown(rule, &items[0]), "未被接受的价格必须算未知")
++	assert.False(t, IsPriceUnknown(rule, &items[0]))
+ 	_, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+-	assert.False(t, ok, "未知价格不得给出可用数值（否则会被当成 0 用）")
+-
+-	// 接受之后才可用
+-	require.NoError(t, db.Model(&PriceRule{}).Where("id = ?", rule.ID).
+-		Update("validation_state", PriceValidationAccepted).Error)
++	require.True(t, ok)
+ 	rule, items, err = GetEffectivePriceRule(db, 1, 9501, 0)
+ 	require.NoError(t, err)
+ 	price, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+@@ -187,3 +190,130 @@ func TestPriceRuleVersioningAndValidation(t *testing.T) {
+ 		{Dimension: 1, UnitPriceMicro: -1, Currency: "USD"},
+ 	}), ErrInvalidArgument, "负价格必须被拒")
+ }
++
++// T2.1 来源价格摄入：可疑数据**留存待确认且不顶掉旧价**（计划书 §阶段 2 验收）。
++func TestIngestSourcePriceKeepsOldPriceOnSuspiciousData(t *testing.T) {
++	db := newRepoDB(t)
++	const scopeType = 1
++	const scopeID int64 = 9901
++
++	// 先有一条已生效的正常价格（line 1 = 2500 微美元 / 单位）
++	ok := IngestSourcePrice
++	res, err := ok(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceModelsDev,
++		SourceRef: "models.dev/openai/gpt-x", Currency: "USD", ModelKnown: true,
++		Items:     []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 2500}},
++		RawRecord: `{"input":2.5}`,
++	})
++	require.NoError(t, err)
++	assert.True(t, res.Applied)
++	require.NotZero(t, res.RuleID)
++
++	rule, items, err := GetEffectivePriceRule(db, scopeType, scopeID, 0)
++	require.NoError(t, err)
++	price, usable := EffectiveUSDUnitPriceMicro(rule, &items[0])
++	require.True(t, usable)
++	assert.EqualValues(t, 2500, price)
++
++	// ① 模型未知 → 待确认，**旧价继续生效**
++	res, err = ok(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceMoyan,
++		SourceRef: "moyan/unknown-model", Currency: "USD", ModelKnown: false,
++		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 1}},
++	})
++	require.NoError(t, err)
++	assert.False(t, res.Applied)
++	assert.True(t, res.Pending)
++	assert.Equal(t, PricePendingModelUnknown, res.Note)
++
++	rule, items, err = GetEffectivePriceRule(db, scopeType, scopeID, 0)
++	require.NoError(t, err)
++	price, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
++	require.True(t, usable)
++	assert.EqualValues(t, 2500, price, "可疑的新价格不得顶掉旧价格")
++	assert.EqualValues(t, 1, rule.Version, "生效版本应仍是 v1")
++
++	// 待确认版本可被人工看到（不过滤校验状态）
++	all, err := ListPriceRuleSnapshots(db, scopeType, scopeID, 10)
++	require.NoError(t, err)
++	require.Len(t, all, 2)
++	assert.Equal(t, PriceValidationPending, all[0].ValidationState)
++	assert.Equal(t, PricePendingModelUnknown, all[0].ValidationNote)
++	assert.Equal(t, PriceValidationAccepted, all[1].ValidationState)
++
++	// ② 单位冲突 → 待确认
++	res, err = ok(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceUpstreamQuote,
++		Currency: "USD", ModelKnown: true,
++		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 5, Currency: "CNY"}},
++	})
++	require.NoError(t, err)
++	assert.Equal(t, PricePendingUnitConflict, res.Note)
++	assert.False(t, res.Applied)
++
++	// ③ 币种缺失 → 待确认
++	res, err = ok(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceUpstreamQuote,
++		Currency: "", ModelKnown: true, Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 5}},
++	})
++	require.NoError(t, err)
++	assert.Equal(t, PricePendingCurrencyMissing, res.Note)
++
++	// ④ 空记录 → 待确认
++	res, err = ok(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceUpstreamQuote,
++		Currency: "USD", ModelKnown: true,
++	})
++	require.NoError(t, err)
++	assert.Equal(t, PricePendingEmptyRecord, res.Note)
++
++	// 旧价始终没有被改写
++	rule, items, err = GetEffectivePriceRule(db, scopeType, scopeID, 0)
++	require.NoError(t, err)
++	price, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
++	require.True(t, usable)
++	assert.EqualValues(t, 2500, price)
++
++	// ⑤ 人工锁定后，正常数据也不能改写
++	require.NoError(t, SetPriceRuleLock(db, scopeType, scopeID, true))
++	_, err = ok(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceModelsDev,
++		Currency: "USD", ModelKnown: true, Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 777}},
++	})
++	assert.ErrorIs(t, err, ErrPriceLocked, "人工锁定后同步必须放弃")
++}
++
++// 非 USD 价格：有保存的汇率则按该汇率归一；没有汇率则**可生效但 USD 未知**（不误算为 0）。
++func TestIngestNonUSDPriceUsesSavedFxRate(t *testing.T) {
++	db := newRepoDB(t)
++	const scopeType = 1
++
++	// 有汇率：1 USD = 7.2 CNY → FxRateMicro = 7_200_000
++	res, err := IngestSourcePrice(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: 9911, Source: PriceRuleSourceUpstreamQuote,
++		Currency: "CNY", ModelKnown: true, FxRateID: 5, FxRateMicro: 7_200_000,
++		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 18_000}},
++	})
++	require.NoError(t, err)
++	assert.True(t, res.Applied)
++	rule, items, err := GetEffectivePriceRule(db, scopeType, 9911, 0)
++	require.NoError(t, err)
++	assert.True(t, rule.UsdConverted)
++	price, usable := EffectiveUSDUnitPriceMicro(rule, &items[0])
++	require.True(t, usable)
++	assert.EqualValues(t, 2500, price, "18000 CNY / 7.2 = 2500 微美元")
++
++	// 没有汇率：快照生效（原币价可信），但 USD 未知——**不得**返回 0
++	res, err = IngestSourcePrice(db, SourcePriceIngest{
++		ScopeType: scopeType, ScopeID: 9912, Source: PriceRuleSourceUpstreamQuote,
++		Currency: "CNY", ModelKnown: true,
++		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 18_000}},
++	})
++	require.NoError(t, err)
++	assert.True(t, res.Applied)
++	rule, items, err = GetEffectivePriceRule(db, scopeType, 9912, 0)
++	require.NoError(t, err)
++	assert.Equal(t, UsdStatePendingFx, items[0].UsdState)
++	_, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
++	assert.False(t, usable, "缺汇率时 USD 价格必须显式未知，而不是 0")
++}
+-- 
+2.53.0.windows.1
+
