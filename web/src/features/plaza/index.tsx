@@ -119,6 +119,10 @@ export function Plaza() {
                   <div className='text-muted-foreground text-sm'>
                     {t('plaza.sources', { count: card.offerings.length })}
                   </div>
+                  {/* 对外标准模型 ID（仅映射已确认时才有）*/}
+                  {card.offerings[0]?.canonical_model_id ? (
+                    <div className='text-muted-foreground font-mono text-xs'>{card.offerings[0].canonical_model_id}</div>
+                  ) : null}
                   {/* 质量摘要：取该模型**最好的一条来源**作为卡片上的代表值（样本不足/陈旧会如实显示） */}
                   {card.offerings.length > 0 ? (
                     <div className='text-muted-foreground text-xs'>

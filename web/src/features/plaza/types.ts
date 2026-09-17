@@ -27,6 +27,9 @@ export interface PlazaOfferingItem {
   offering_public_id: string
   /** 对外标准模型 ID */
   model: string
+  /** 对外**标准模型 ID** 与介绍：只有"上游名 → 标准模型"的映射**已确认**时才有值 */
+  canonical_model_id?: string
+  model_description?: string
   /** 分享分组对外 ID 与名称（广场按"分享分组"组织） */
   group_public_id?: string
   group_name?: string

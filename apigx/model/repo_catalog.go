@@ -151,3 +151,76 @@ func ResolveCanonicalModel(db *gorm.DB, externalModelID string) (canonical Canon
 	}
 	return canonical, true, nil
 }
+
+// ResolveCanonicalModels 批量解析（广场一页会涉及多个模型名，逐个查库不合适）。
+//
+// 与单条版本**同一套规则**：只认已确认、命中多个时优先平台全局范围。
+// 返回值以**调用方传入的原名**为键，未命中的名字不出现在结果里 —— 调用方据此显示上游名。
+func ResolveCanonicalModels(db *gorm.DB, externalModelIDs []string) (map[string]CanonicalModel, error) {
+	out := make(map[string]CanonicalModel, len(externalModelIDs))
+	if db == nil {
+		return out, errors.New("apigxmodel: nil db")
+	}
+
+	// 原名 -> 归一化键（保留原名做返回键，避免调用方再去归一化）
+	normalizedToOriginal := make(map[string]string, len(externalModelIDs))
+	normalizedIDs := make([]string, 0, len(externalModelIDs))
+	for _, raw := range externalModelIDs {
+		normalized := NormalizeModelIDForAlias(raw)
+		if normalized == "" {
+			continue
+		}
+		if _, seen := normalizedToOriginal[normalized]; !seen {
+			normalizedToOriginal[normalized] = raw
+			normalizedIDs = append(normalizedIDs, normalized)
+		}
+	}
+	if len(normalizedIDs) == 0 {
+		return out, nil
+	}
+
+	var aliases []ModelAlias
+	if err := db.Model(&ModelAlias{}).
+		Where("normalized_model_id IN ? AND confirmation_state = ? AND target_canonical_model_id > 0 AND deleted_at IS NULL",
+			normalizedIDs, AliasConfirmApproved).
+		Order("scope_type ASC, id ASC").
+		Find(&aliases).Error; err != nil {
+		return out, err
+	}
+	if len(aliases) == 0 {
+		return out, nil
+	}
+
+	// 归一化键 -> 目标标准模型 ID（先到先得：已按 scope_type 升序，平台全局优先）
+	targetByNormalized := make(map[string]int64, len(aliases))
+	targetIDs := make([]int64, 0, len(aliases))
+	for _, alias := range aliases {
+		if _, exists := targetByNormalized[alias.NormalizedModelID]; exists {
+			continue
+		}
+		targetByNormalized[alias.NormalizedModelID] = alias.TargetCanonicalModelID
+		targetIDs = append(targetIDs, alias.TargetCanonicalModelID)
+	}
+
+	var models []CanonicalModel
+	if err := db.Model(&CanonicalModel{}).Where("id IN ?", targetIDs).Find(&models).Error; err != nil {
+		return out, err
+	}
+	byID := make(map[int64]CanonicalModel, len(models))
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+
+	for normalized, original := range normalizedToOriginal {
+		targetID, hit := targetByNormalized[normalized]
+		if !hit {
+			continue
+		}
+		model, found := byID[targetID]
+		if !found {
+			continue
+		}
+		out[original] = model
+	}
+	return out, nil
+}

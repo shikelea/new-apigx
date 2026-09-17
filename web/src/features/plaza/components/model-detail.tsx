@@ -67,7 +67,11 @@ export function ModelDetail(props: { model: string }) {
         <CardHeader>
           <CardTitle className='break-all'>{props.model}</CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className='space-y-3'>
+          {/* 模型介绍：只有映射已确认（拿到标准模型）时才有内容；不可信文本按纯文本渲染 */}
+          {offerings[0]?.model_description ? (
+            <p className='text-muted-foreground text-sm whitespace-pre-wrap'>{offerings[0].model_description}</p>
+          ) : null}
           <div className='flex flex-wrap gap-2'>
             {[...new Set(offerings.flatMap((item) => item.capabilities ?? []))].map((capability) => (
               <Badge key={capability} variant='secondary'>

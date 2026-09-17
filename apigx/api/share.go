@@ -1303,7 +1303,10 @@ func (h *handler) getPlazaItem(c *gin.Context) {
 // 只输出对外可见字段：**不含**渠道内部 ID、上游地址、凭据、成本价或任何内部标识。
 func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 	out := gin.H{
-		"offering_public_id":          item.OfferingPublicID,
+		"offering_public_id": item.OfferingPublicID,
+		// 对外标准模型 ID 与介绍（仅当映射**已确认**时才有值；未命中为空，界面显示上游名）
+		"canonical_model_id":          item.CanonicalAPIModelID,
+		"model_description":           item.ModelDescription,
 		"sample_count":                item.SampleCount,
 		"reliability_lower_bound_ppm": item.ReliabilityLowerBoundPpm,
 		"latency_ms_p50":              item.LatencyMsP50,

@@ -1106,3 +1106,48 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
 	assert.Equal(t, true, first["insufficient"], "没有样本时必须标为样本不足，而不是给出一个看起来可信的数字")
 	assert.Equal(t, float64(0), first["reliability_lower_bound_ppm"])
 }
+
+// 对外标准模型 ID 与介绍：**只有映射已确认时**广场才显示（§8.2）。未确认时显示上游名，
+// 绝不把"候选"当结论 —— 否则客户端会按一个没人确认过的标准 ID 去调用。
+func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 9401
+
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "目录组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
+	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座目录", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
+
+	// 建供给会自动登记"候选"别名（见 repo_offering.go）
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"upstream-name-x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+
+	// 候选阶段：标准 ID 与介绍必须为空
+	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	require.NotEmpty(t, items)
+	first, _ := items[0].(map[string]any)
+	assert.Equal(t, "", first["canonical_model_id"], "未确认的映射不得对外给出标准模型 ID")
+	assert.Equal(t, "", first["model_description"])
+
+	// 确认映射后：标准 ID 与介绍出现
+	canonical := apigxmodel.CanonicalModel{APIModelID: "standard-model-1", Description: "这是标准模型的介绍", ModalityType: 1, Status: 1}
+	require.NoError(t, env.db.Create(&canonical).Error)
+	require.NoError(t, env.db.Model(&apigxmodel.ModelAlias{}).
+		Where("normalized_model_id = ?", "upstream-name-x").
+		Updates(map[string]any{"relation": apigxmodel.AliasRelationConfirmed,
+			"confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": canonical.ID}).Error)
+
+	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	items, _ = body["data"].(map[string]any)["items"].([]any)
+	first, _ = items[0].(map[string]any)
+	assert.Equal(t, "standard-model-1", first["canonical_model_id"])
+	assert.Equal(t, "这是标准模型的介绍", first["model_description"])
+}

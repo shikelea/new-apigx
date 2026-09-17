@@ -30,6 +30,10 @@ const (
 // 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
 // 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
 type PlazaItem struct {
+	// 对外**标准模型 ID** 与介绍：只有在"上游名 -> 标准模型"的映射**已确认**时才有值
+	// （§8.2：客户端从可用目录/调用示例获取标准 ID）。未命中时留空，界面显示上游名。
+	CanonicalAPIModelID string
+	ModelDescription    string
 	// 质量摘要（最近 6 小时窗口）：样本不足时 Insufficient 为 true，界面必须显示"样本不足"而不是编一个数字。
 	SampleCount              int64
 	ReliabilityLowerBoundPpm int64
@@ -144,6 +148,17 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 		return nil, 0, err
 	}
 
+	// 一次性解析本页涉及的所有上游模型名（避免逐个查库）
+	upstreamIDs := make([]string, 0, len(rows))
+	for _, r := range rows {
+		upstreamIDs = append(upstreamIDs, r.UpstreamModelID)
+	}
+	canonicalByUpstream, resolveErr := ResolveCanonicalModels(db, upstreamIDs)
+	if resolveErr != nil {
+		// 目录是辅助能力：解析失败不该让广场整体 500，退化为"只显示上游名"
+		canonicalByUpstream = map[string]CanonicalModel{}
+	}
+
 	items := make([]PlazaItem, 0, len(rows))
 	for _, r := range rows {
 		declared := Capability{}
@@ -164,6 +179,8 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 			Insufficient:             quality.Insufficient,
 			Stale:                    quality.Stale,
 			UpstreamModelID:          r.UpstreamModelID,
+			CanonicalAPIModelID:      canonicalByUpstream[r.UpstreamModelID].APIModelID,
+			ModelDescription:         canonicalByUpstream[r.UpstreamModelID].Description,
 			ChannelPublicID:          r.ChannelPublicID,
 			GroupPublicID:            r.GroupPublicID,
 			GroupName:                r.GroupName,
