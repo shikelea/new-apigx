@@ -1,0 +1,149 @@
+From 66bfb2fc4ad5a0076c4bf6e1efdef6c5d011c7aa Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 19:09:02 +0800
+Subject: [PATCH 68/68] =?UTF-8?q?feat(apigx):=20=E5=9B=BE=E7=89=87?=
+ =?UTF-8?q?=E5=B0=BA=E5=AF=B8=E7=BA=A6=E6=9D=9F=EF=BC=88D-021=EF=BC=89+=20?=
+ =?UTF-8?q?=E7=94=A8=E9=87=8F=E8=A7=86=E5=9B=BE=E6=9A=B4=E9=9C=B2=E9=85=8D?=
+ =?UTF-8?q?=E9=A2=9D=EF=BC=88T3.2=20=E7=9C=9F=E5=AE=9E=E4=B8=8A=E6=B8=B8?=
+ =?UTF-8?q?=204/4=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+实测发现并修复:
+  1. **规格约束缺失**: 真实上游(qwen-image-2.0)对 size=999x999 **默默接受并出图**
+     => 不支持的尺寸要到出图后才发现, 而那时已经计费
+     修法(台账 D-021): 在底座**同一校验点**(GetAndValidOpenAIImageRequest, 数量 n 本就在此校验)
+     加入尺寸**语法与范围**校验(宽x高, 各边 1..4096), 一条路径覆盖 JSON 与 multipart;
+     **空串放行**(用上游默认); **不硬编码任何上游支持档位**(属"支持范围", 应记录展示)
+  2. **用量视图缺配额**: 底座 logs 有 quota(图片 38/张), 我们接口未暴露 => 已补
+
+T3.2 复核(真实上游): 生成 200; 用量记录 model=qwen-image-2.0 quota=38;
+  非法尺寸 400; 尺寸语法错误 400 => **4/4 通过**
+规格支持范围实测: n=2 -> 2 张; 512x512 / 1792x1024 / 999x999 -> 各 1 张(上游对尺寸不挑剔)
+仍待决: 结果鉴权(上游签名直链 24h; 我们无结果代理端点, 404)
+测试: relay/helper 尺寸用例 15 个子情形 + apigx/middleware 全量 10 包通过
+---
+ apigx/api/share.go                        |  3 ++
+ relay/helper/openai_image_request_test.go | 35 ++++++++++++++++++
+ relay/helper/valid_request.go             | 43 +++++++++++++++++++++++
+ 3 files changed, 81 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 1b28075..0692984 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -916,6 +916,9 @@ func (h *handler) listUsage(c *gin.Context) {
+ 			"prompt_tokens":     entry.PromptTokens,
+ 			"completion_tokens": entry.CompletionTokens,
+ 			"total_tokens":      entry.PromptTokens + entry.CompletionTokens,
++			// 配额/费用：底座 logs 里有（阶段 3 实测图片请求 quota=38/张），
++			// 我们的视图此前没暴露，导致"我的用量"看不到花了多少。
++			"quota": entry.Quota,
+ 			// 底座以「quota」为记账单位；这里换算成微美元（1e-6 USD）便于使用者理解。
+ 			// 换算率用底座的 QuotaPerUnit（与计费同一来源，不自己写死）。
+ 			"cost_micro_usd": quotaToMicroUSD(entry.Quota),
+diff --git a/relay/helper/openai_image_request_test.go b/relay/helper/openai_image_request_test.go
+index 812a933..2abeea6 100644
+--- a/relay/helper/openai_image_request_test.go
++++ b/relay/helper/openai_image_request_test.go
+@@ -239,3 +239,38 @@ func TestGetAndValidOpenAIImageRequestNBounds(t *testing.T) {
+ 		require.Contains(t, err.Error(), boundErr)
+ 	})
+ }
++
++// 尺寸约束：语法与范围（阶段 3 用真实上游发现：上游会对非法尺寸**默默出图**，
++// 于是错误要到出图后才发现，而那时已经计费）。
++func TestValidateImageSize(t *testing.T) {
++	cases := []struct {
++		size    string
++		wantErr bool
++	}{
++		{"1024x1024", false},
++		{"512x512", false},
++		{"1792x1024", false},
++		{"1x1", false},
++		{"4096x4096", false},
++		{"", false},         // 空串 = 用上游默认
++		{"999x999", false},  // 合法语法（上游支持与否属"支持范围"，不在这里判定）
++		{"abc", true},       // 缺分隔符
++		{"1024", true},      // 缺高度
++		{"1024x", true},     // 高度为空
++		{"x1024", true},     // 宽度为空
++		{"0x1024", true},    // 下界
++		{"1024x0", true},    // 下界
++		{"5000x5000", true}, // 上界
++		{"1024X1024", true}, // 大写 X 不接受（避免与上游解析差异）
++	}
++	for _, tc := range cases {
++		t.Run(tc.size, func(t *testing.T) {
++			err := validateImageSize(tc.size)
++			if tc.wantErr {
++				require.Error(t, err, "size=%q 应当被拒绝", tc.size)
++			} else {
++				require.NoError(t, err, "size=%q 应当被接受", tc.size)
++			}
++		})
++	}
++}
+diff --git a/relay/helper/valid_request.go b/relay/helper/valid_request.go
+index 19eaf4d..4eca170 100644
+--- a/relay/helper/valid_request.go
++++ b/relay/helper/valid_request.go
+@@ -273,6 +273,19 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
+ 		}
+ 	}
+ 
++	// **尺寸约束**：放在这里而不是各适配器里——数量 `n` 也是在这一处校验的，
++	// 同一类约束散到两处早晚会不一致。
++	//
++	// 为什么需要它（阶段 3 用真实上游发现）：真实的 `qwen-image-2.0` 对
++	// `size=999x999` 会**默默接受**并出图，于是"不支持的尺寸"要到出图后才发现——那时已经计费。
++	// 这里只做**语法与范围**校验（`宽x高`，各边 1..4096），不预先假定某家上游支持哪些档位；
++	// 某家具体支持哪些尺寸属"支持范围"，应当记录与展示，而不是在这里硬编码。
++	if imageRequest.Size != "" {
++		if err := validateImageSize(imageRequest.Size); err != nil {
++			return nil, err
++		}
++	}
++
+ 	// Provider parameters can override the top-level count. Validate before
+ 	// pricing so malformed multipliers return a client error, not a pricing
+ 	// failure after reservation has started.
+@@ -410,3 +423,33 @@ func GetAndValidateGeminiBatchEmbeddingRequest(c *gin.Context) (*dto.GeminiBatch
+ 	}
+ 	return request, nil
+ }
++
++// maxImageSizeEdge 是单边像素的允许上限。取 4096 是**语法与范围**的护栏
++// （防止明显离谱的输入进入计费），不代表任何上游的实际支持档位。
++const maxImageSizeEdge = 4096
++
++// validateImageSize 校验 `宽x高` 形式的尺寸参数。
++//
++// 只接受十进制整数与单个 `x` 分隔符；两侧必须落在 1..maxImageSizeEdge。
++// 空串放行（表示使用上游默认尺寸）。
++func validateImageSize(size string) error {
++	if strings.TrimSpace(size) == "" {
++		return nil // 空串 = 使用上游默认尺寸；调用处也会跳过，这里再兜一次保证函数自洽
++	}
++	parts := strings.Split(size, "x")
++	if len(parts) != 2 {
++		return fmt.Errorf("size must look like WIDTHxHEIGHT, got %q", size)
++	}
++	width, err := strconv.Atoi(strings.TrimSpace(parts[0]))
++	if err != nil {
++		return fmt.Errorf("size width must be an integer, got %q", parts[0])
++	}
++	height, err := strconv.Atoi(strings.TrimSpace(parts[1]))
++	if err != nil {
++		return fmt.Errorf("size height must be an integer, got %q", parts[1])
++	}
++	if width < 1 || width > maxImageSizeEdge || height < 1 || height > maxImageSizeEdge {
++		return fmt.Errorf("size must be between 1 and %d on each side, got %dx%d", maxImageSizeEdge, width, height)
++	}
++	return nil
++}
+-- 
+2.53.0.windows.1
+

@@ -43,7 +43,7 @@ const STATE_DIR = path.join(process.cwd(), '.toolchain', '_state');
 const SESSION_FILE = path.join(STATE_DIR, 'sessions.json');
 const OUT_FILE = path.join(STATE_DIR, 'image-e2e.json');
 const sessions = (() => { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch { return {}; } })();
-function saveSessions() { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(SESSION_DIR ? SESSION_FILE : SESSION_FILE, JSON.stringify(sessions, null, 2)); }
+function saveSessions() { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions, null, 2)); }
 
 async function login(user, password) {
   const cached = sessions[user];
@@ -153,7 +153,7 @@ async function main() {
     { name: 'n=2（数量）', body: { prompt: 'two apples', n: 2, size: '1024x1024' } },
     { name: 'size=512x512', body: { prompt: 'an apple', n: 1, size: '512x512' } },
     { name: 'size=1792x1024（宽幅）', body: { prompt: 'a wide landscape', n: 1, size: '1792x1024' } },
-    { name: 'size=999x999（非法）', body: { prompt: 'x', n: 1, size: '999x999' } },
+    { name: 'size=999x999（语法合法，上游实际接受）', body: { prompt: 'x', n: 1, size: '999x999' } },
   ];
   console.log('\n  规格约束（实测上游接受/拒绝什么，不照抄文档）');
   const specRows = [];
@@ -166,9 +166,12 @@ async function main() {
   }
 
   // ---- 被拒请求不计量 ----
-  // 非法尺寸**并未被上游拒绝**（实测 200），因此"被拒不计量"这条在这里不成立——
-  // 如实记录：规格约束缺失，需要在**我们这层**补校验（计划书要求"规格约束"）。
-  decl('规格约束：非法尺寸 `999x999` 被上游接受（HTTP 200 + 1 张图）——上游不校验，需在我们这层补');
+  // **规格约束（已加固，台账 D-021）**：尺寸的语法与范围在底座同一校验点把关
+  // （`GetAndValidOpenAIImageRequest`，数量 n 也在那里），因此非法尺寸应当在**到达上游之前**被拒。
+  const illegal = await gen({ prompt: 'x', n: 1, size: '999999x999999' });
+  check('非法尺寸在到达上游前被拒（不是默默出图）', illegal.status === 400, `HTTP ${illegal.status}`);
+  const badSyntax = await gen({ prompt: 'x', n: 1, size: 'not-a-size' });
+  check('尺寸语法错误被拒', badSyntax.status === 400, `HTTP ${badSyntax.status}`);
 
   const failed = results.filter((x) => !x.ok);
   console.log(`\n  共 ${results.length} 项，通过 ${results.length - failed.length}，失败 ${failed.length}`);
