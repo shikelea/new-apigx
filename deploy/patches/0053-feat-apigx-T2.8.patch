@@ -1,0 +1,382 @@
+From 91dac8491741c49d7f027b9c98e2f4ebacff48ef Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 15:22:25 +0800
+Subject: [PATCH 53/53] =?UTF-8?q?feat(apigx):=20=E7=86=94=E6=96=AD?=
+ =?UTF-8?q?=E5=88=A4=E5=AE=9A=E4=B8=8E=E9=94=99=E8=AF=AF=E5=BD=92=E5=9B=A0?=
+ =?UTF-8?q?=EF=BC=88T2.8=20=E5=89=8D=E5=8D=8A=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 归因红线: 熔断失败率**只统计上游侧**(完整成功/上游失败/超时);
+  **平台自身拒绝**(准入/容量/配额)与**用户取消**一概不计 —— 它们发生在我们这边或用户侧,
+  拿它们熔断分享者供给会误伤健康渠道。用例: 8 次平台拒绝 + 10 次取消 -> 不熔断, 合格尝试只算 2
+- 推导式熔断(不建状态表): 答案已由分钟桶提供; 再存一份会有两处不一致与重启恢复问题,
+  而推导式随窗口滚动自愈
+- 三段状态: 正常 / 打开(摘出候选) / **半开**(冷却过后放行试探, 不永久封禁); 样本不足不熔断
+- 接线: 装配时按熔断置候选不可用, 解释给出**具体原因 breaker_open**(而非笼统 not_allowed);
+  为此 Candidate 增加可选 ExcludeReason 并由决策层原样传出
+- 新增 QualityView.LatestUpstreamFailureTs 用于判断冷却是否已过
+- 测试 5/5
+- 待做: 中继实时路径的生效(当前影响候选装配与解释; 选择仍由底座完成, 与 T2.7 投影同属
+  "决策已能算、生效路径待接"); 可行做法是在准入钩子把"熔断打开"按不可用处理, 复用底座判定
+- apigx + middleware 全量通过
+---
+ apigx/model/repo_quality.go  |   9 +++
+ apigx/routing/assemble.go    |  10 +++
+ apigx/routing/breaker.go     | 119 +++++++++++++++++++++++++++++++++++
+ apigx/routing/decide.go      |  12 +++-
+ apigx/routing/decide_test.go |  95 ++++++++++++++++++++++++++++
+ apigx/routing/explain.go     |  18 ++++++
+ 6 files changed, 262 insertions(+), 1 deletion(-)
+ create mode 100644 apigx/routing/breaker.go
+
+diff --git a/apigx/model/repo_quality.go b/apigx/model/repo_quality.go
+index c6dc5f6..00108eb 100644
+--- a/apigx/model/repo_quality.go
++++ b/apigx/model/repo_quality.go
+@@ -245,6 +245,12 @@ type QualityView struct {
+ 	LatencyMsP50 int64
+ 	// LatestBucketTs 是窗口内最新的桶时间（0 表示窗口内没有任何样本）。
+ 	LatestBucketTs int64
++	// LatestUpstreamFailureTs 是窗口内**最后一次上游失败/超时**所在桶的时间（0 表示没有）。
++	//
++	// 熔断（T2.8）需要它来算"冷却是否已过"：只关心**上游侧**的失败，
++	// 平台自身的拒绝（准入/配额）与用户取消不参与——它们不是上游的问题，
++	// 拿它们熔断分享者的供给会误伤。
++	LatestUpstreamFailureTs int64
+ 	// Insufficient 样本数不足以给出质量结论。
+ 	Insufficient bool
+ 	// Stale 窗口内数据已陈旧。
+@@ -296,6 +302,9 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
+ 		if bucket.BucketTs > view.LatestBucketTs {
+ 			view.LatestBucketTs = bucket.BucketTs
+ 		}
++		if bucket.UpstreamFailureCount+bucket.TimeoutCount > 0 && bucket.BucketTs > view.LatestUpstreamFailureTs {
++			view.LatestUpstreamFailureTs = bucket.BucketTs
++		}
+ 		if bucket.LatencyMsP50 > 0 {
+ 			weight := bucket.NaturalRequestCount
+ 			if weight <= 0 {
+diff --git a/apigx/routing/assemble.go b/apigx/routing/assemble.go
+index 82642cf..28b1324 100644
+--- a/apigx/routing/assemble.go
++++ b/apigx/routing/assemble.go
+@@ -23,6 +23,8 @@ type AssembleOptions struct {
+ 	WindowKind int
+ 	// Now 注入"当前时间"，便于测试；0 表示取当前。
+ 	Now int64
++	// Breaker 是熔断阈值（T2.8）；零值取 `DefaultBreakerConfig`。
++	Breaker BreakerConfig
+ }
+ 
+ // AssembleCandidates 为某模型装配候选集。
+@@ -81,6 +83,14 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
+ 			candidate.Quality = view
+ 		}
+ 
++		// 熔断（T2.8）：失败率过高且冷却未过 → **从候选中摘除**（原因写清，便于解释）；
++		// 冷却已过则为半开（放行试探），不永久封禁。
++		breaker := EvaluateBreaker(candidate.Quality, opts.Now, opts.Breaker)
++		if breaker.State == BreakerOpen {
++			candidate.Allowed = false
++			candidate.ExcludeReason = ExcludeBreakerOpen
++		}
++
+ 		// 容量：读渠道策略给出的上限与当前占用（未配置上限则不施加约束）
+ 		fillCapacity(candidate.OfferingID, &candidate, shareChannel, ctrl, db)
+ 		candidates = append(candidates, candidate)
+diff --git a/apigx/routing/breaker.go b/apigx/routing/breaker.go
+new file mode 100644
+index 0000000..cdb2de3
+--- /dev/null
++++ b/apigx/routing/breaker.go
+@@ -0,0 +1,119 @@
++package routing
++
++import (
++	"fmt"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++)
++
++// 熔断与错误归因（T2.8）。
++//
++// # 为什么从统计桶推导，而不是再建一张"熔断状态表"
++//
++// 熔断要回答的只是"这条供给最近是不是持续失败"。这个答案**已经**由分钟桶提供了
++// （T2.4）。再存一份状态意味着两处可能不一致，还要处理进程重启后的状态恢复；
++// 而推导式熔断**随窗口滚动自愈**：失败样本过期后自动恢复，不需要任何补偿逻辑
++// （与计划书"恢复并对账后再开放"的精神一致，但更简单）。
++//
++// # 归因红线：**平台自身的拒绝不得参与熔断**
++//
++// 准入拒绝（来源不允许/容量/配额）与用户取消都发生在我们这边或用户侧，
++// 与上游质量无关。拿它们熔断分享者的供给会**误伤健康渠道**——
++// 这正是"错误归因"要避免的典型后果。因此失败率的分母/分子只取
++// **上游失败 + 超时**与**完整成功**，平台拒绝与取消两者都不计入。
++
++// BreakerState 是熔断状态。
++type BreakerState int
++
++const (
++	// BreakerClosed 正常：参与路由。
++	BreakerClosed BreakerState = 0
++	// BreakerOpen 熔断打开：**从候选中摘除**，直到冷却结束。
++	BreakerOpen BreakerState = 1
++	// BreakerHalfOpen 半开：冷却已过，放行少量流量试探是否恢复。
++	BreakerHalfOpen BreakerState = 2
++)
++
++// String 返回状态标识（用于可解释结果）。
++func (s BreakerState) String() string {
++	switch s {
++	case BreakerClosed:
++		return "closed"
++	case BreakerOpen:
++		return "open"
++	case BreakerHalfOpen:
++		return "half_open"
++	default:
++		return "unknown"
++	}
++}
++
++// BreakerConfig 是熔断阈值（可配置，与计划书"数值均可配置"一致）。
++type BreakerConfig struct {
++	// MinAttempts 是触发熔断所需的**最小合格尝试数**。
++	// 少于它时不熔断：一两次失败不足以说明上游坏了（与"样本不足不给结论"同一原则）。
++	MinAttempts int64
++	// FailureRatePpm 是失败率阈值（百万分比）；达到即熔断。
++	FailureRatePpm int64
++	// CooldownSeconds 是熔断后的冷却时长；冷却结束进入半开。
++	CooldownSeconds int64
++}
++
++// DefaultBreakerConfig 是初始阈值（保守起点，不是调优结论）。
++func DefaultBreakerConfig() BreakerConfig {
++	return BreakerConfig{MinAttempts: 5, FailureRatePpm: 500_000, CooldownSeconds: 60}
++}
++
++// BreakerVerdict 是一次熔断判定的结果。
++type BreakerVerdict struct {
++	State BreakerState
++	// Attempts 是参与判定的合格尝试数（上游成功 + 上游失败 + 超时）。
++	Attempts int64
++	// FailureRatePpm 是基于合格尝试的失败率。
++	FailureRatePpm int64
++	// Reason 是简短说明（用于可解释结果）。
++	Reason string
++}
++
++// EvaluateBreaker 依据质量视图与当前时间判定熔断状态。
++//
++// 判定顺序：样本不足 → 正常；失败率不足阈值 → 正常；否则按冷却时间区分
++// "打开"与"半开"。
++func EvaluateBreaker(view apigxmodel.QualityView, now int64, cfg BreakerConfig) BreakerVerdict {
++	if cfg.MinAttempts <= 0 {
++		cfg.MinAttempts = DefaultBreakerConfig().MinAttempts
++	}
++	if cfg.FailureRatePpm <= 0 {
++		cfg.FailureRatePpm = DefaultBreakerConfig().FailureRatePpm
++	}
++	if cfg.CooldownSeconds <= 0 {
++		cfg.CooldownSeconds = DefaultBreakerConfig().CooldownSeconds
++	}
++
++	// **只统计上游侧**：完整成功 + 上游失败 + 超时
++	successes := view.SuccessCount
++	upstreamFailures := view.UpstreamFailures + view.TimeoutCount
++	attempts := successes + upstreamFailures
++	verdict := BreakerVerdict{Attempts: attempts}
++
++	if attempts < cfg.MinAttempts {
++		verdict.State = BreakerClosed
++		verdict.Reason = fmt.Sprintf("insufficient_attempts(%d<%d)", attempts, cfg.MinAttempts)
++		return verdict
++	}
++	verdict.FailureRatePpm = upstreamFailures * 1_000_000 / attempts
++	if verdict.FailureRatePpm < cfg.FailureRatePpm {
++		verdict.State = BreakerClosed
++		verdict.Reason = fmt.Sprintf("failure_rate_ok(%dppm)", verdict.FailureRatePpm)
++		return verdict
++	}
++	if view.LatestUpstreamFailureTs > 0 && now-view.LatestUpstreamFailureTs >= cfg.CooldownSeconds {
++		// 冷却已过：放行试探（半开），**不永久封禁**——上游恢复了也要能被重新用上
++		verdict.State = BreakerHalfOpen
++		verdict.Reason = fmt.Sprintf("cooldown_elapsed(%ds)", now-view.LatestUpstreamFailureTs)
++		return verdict
++	}
++	verdict.State = BreakerOpen
++	verdict.Reason = fmt.Sprintf("failure_rate_high(%dppm>=%dppm)", verdict.FailureRatePpm, cfg.FailureRatePpm)
++	return verdict
++}
+diff --git a/apigx/routing/decide.go b/apigx/routing/decide.go
+index 5f76cc0..0151225 100644
+--- a/apigx/routing/decide.go
++++ b/apigx/routing/decide.go
+@@ -68,6 +68,8 @@ const (
+ 	ExcludeNoMetric     = "no_metric"     // 该策略需要的指标缺失（不强行排名）
+ 	ExcludePriceUnknown = "price_unknown" // 价格未知：不参与需要成本的比较
+ 	ExcludeNotAllowed   = "not_allowed"   // 调用方判定为不在授权范围内
++	// ExcludeBreakerOpen 熔断打开：上游持续失败且冷却未过，**临时**摘出候选。
++	ExcludeBreakerOpen = "breaker_open"
+ )
+ 
+ // Candidate 是一个参与排序的候选供给。
+@@ -96,6 +98,10 @@ type Candidate struct {
+ 	Priority int
+ 	// Allowed 由调用方先把授权/来源限制算完（硬限制先于评分）。
+ 	Allowed bool
++	// ExcludeReason 允许调用方给出**更具体**的排除原因（例如 BreakerOpen / 已下架）。
++	// 留空时 `Decide` 用 ExcludeNotAllowed。具体原因会出现在可解释结果里——
++	// 笼统的"未授权"无法回答用户"为什么我的来源没被用上"。
++	ExcludeReason string
+ }
+ 
+ // RemainingCapacity 返回剩余容量（未配置上限时返回 0，由调用方按"不限"处理）。
+@@ -197,7 +203,11 @@ func Decide(strategy Strategy, candidates []Candidate, opts Options) (Decision,
+ 	eligible := make([]Candidate, 0, len(candidates))
+ 	for _, candidate := range candidates {
+ 		if !candidate.Allowed {
+-			decision.Excluded = append(decision.Excluded, Exclusion{candidate.OfferingID, ExcludeNotAllowed})
++			reason := candidate.ExcludeReason
++			if reason == "" {
++				reason = ExcludeNotAllowed
++			}
++			decision.Excluded = append(decision.Excluded, Exclusion{candidate.OfferingID, reason})
+ 			continue
+ 		}
+ 		if candidate.Saturated() {
+diff --git a/apigx/routing/decide_test.go b/apigx/routing/decide_test.go
+index fe0715e..a903681 100644
+--- a/apigx/routing/decide_test.go
++++ b/apigx/routing/decide_test.go
+@@ -505,3 +505,98 @@ func TestExplainNeverFallsBackToInternalIDs(t *testing.T) {
+ 	require.NoError(t, err)
+ 	assert.NotContains(t, string(raw), "51", "内部供给 ID 不得出现")
+ }
++
++// ---- 熔断与错误归因（T2.8） ----
++
++// 归因红线：**平台自身的拒绝不得参与熔断**。
++// 准入拒绝（容量/来源）与用户取消都发生在我们这边或用户侧，与上游质量无关；
++// 拿它们熔断分享者的供给会误伤健康渠道。
++func TestBreakerIgnoresPlatformRejectionsAndCancellations(t *testing.T) {
++	cfg := DefaultBreakerConfig()
++	now := int64(1_700_000_000)
++
++	// 10 次尝试里：2 次成功、8 次**平台拒绝**（不是上游失败），外加大量用户取消
++	view := apigxmodel.QualityView{
++		SampleCount: 20, SuccessCount: 2,
++		PlatformRejects: 8, CancelledCount: 10,
++		UpstreamFailures: 0, TimeoutCount: 0,
++		ReliabilityLowerBoundPpm: 100_000, LatestUpstreamFailureTs: 0,
++	}
++	verdict := EvaluateBreaker(view, now, cfg)
++	assert.Equal(t, BreakerClosed, verdict.State, "平台拒绝与用户取消不得触发熔断")
++	assert.EqualValues(t, 2, verdict.Attempts, "合格尝试只算上游成功 + 上游失败 + 超时")
++	assert.Zero(t, verdict.FailureRatePpm)
++}
++
++// 上游持续失败 → 打开；冷却结束后 → 半开（放行试探，不永久封禁）。
++func TestBreakerOpensOnUpstreamFailuresAndRecoversAfterCooldown(t *testing.T) {
++	cfg := BreakerConfig{MinAttempts: 5, FailureRatePpm: 500_000, CooldownSeconds: 60}
++	now := int64(1_700_000_000)
++
++	view := apigxmodel.QualityView{
++		SampleCount: 10, SuccessCount: 2, UpstreamFailures: 7, TimeoutCount: 1,
++		LatestUpstreamFailureTs: now - 10, // 刚刚还在失败
++	}
++	verdict := EvaluateBreaker(view, now, cfg)
++	assert.Equal(t, BreakerOpen, verdict.State)
++	assert.EqualValues(t, 800_000, verdict.FailureRatePpm, "失败率 = 8/10")
++	assert.Contains(t, verdict.Reason, "failure_rate_high")
++
++	// 冷却已过 → 半开（给上游恢复的机会）
++	view.LatestUpstreamFailureTs = now - 120
++	verdict = EvaluateBreaker(view, now, cfg)
++	assert.Equal(t, BreakerHalfOpen, verdict.State, "冷却结束后必须放行试探，而不是永久封禁")
++	assert.Contains(t, verdict.Reason, "cooldown_elapsed")
++}
++
++// 样本不足不熔断：一两次失败不足以说明上游坏了（与"样本不足不给结论"同一原则）。
++func TestBreakerRequiresMinimumAttempts(t *testing.T) {
++	cfg := DefaultBreakerConfig()
++	view := apigxmodel.QualityView{
++		SampleCount: 2, SuccessCount: 0, UpstreamFailures: 2,
++		LatestUpstreamFailureTs: 1_700_000_000,
++	}
++	verdict := EvaluateBreaker(view, 1_700_000_000, cfg)
++	assert.Equal(t, BreakerClosed, verdict.State)
++	assert.Contains(t, verdict.Reason, "insufficient_attempts")
++}
++
++// 健康供给保持关闭（失败率低于阈值）。
++func TestBreakerStaysClosedForHealthySource(t *testing.T) {
++	cfg := DefaultBreakerConfig()
++	view := apigxmodel.QualityView{
++		SampleCount: 100, SuccessCount: 98, UpstreamFailures: 2,
++		LatestUpstreamFailureTs: 1_700_000_000,
++	}
++	verdict := EvaluateBreaker(view, 1_700_000_000, cfg)
++	assert.Equal(t, BreakerClosed, verdict.State)
++	assert.EqualValues(t, 20_000, verdict.FailureRatePpm)
++}
++
++// 熔断打开时该候选被摘出，且解释里给出**具体原因**（而不是笼统的"未授权"）。
++func TestBreakerOpenRemovesCandidateWithSpecificReason(t *testing.T) {
++	unhealthy := matureCandidate(61, 100_000, 200, 20)
++	unhealthy.Quality.SuccessCount = 2
++	unhealthy.Quality.UpstreamFailures = 18
++	unhealthy.Quality.LatestUpstreamFailureTs = 1_700_000_000
++	healthy := matureCandidate(62, 900_000, 300, 100)
++
++	public := map[int64]CandidatePublicInfo{
++		61: {OfferingPublicID: "off-61", ChannelPublicID: "ch-61"},
++		62: {OfferingPublicID: "off-62", ChannelPublicID: "ch-62"},
++	}
++	opts := DefaultOptions()
++	explanation, err := ExplainForStrategyWithBreaker(StrategyReliability, []Candidate{unhealthy, healthy}, public,
++		opts, DefaultBreakerConfig(), 1_700_000_000)
++	require.NoError(t, err)
++	require.NotNil(t, explanation.Selected)
++	assert.Equal(t, "off-62", explanation.Selected.OfferingPublicID, "熔断的供给不得被选中")
++
++	reasons := map[string]string{}
++	for _, item := range explanation.Candidates {
++		if item.ExcludedReason != "" {
++			reasons[item.OfferingPublicID] = item.ExcludedReason
++		}
++	}
++	assert.Equal(t, ExcludeBreakerOpen, reasons["off-61"], "解释必须说明是熔断，而不是笼统的未授权")
++}
+diff --git a/apigx/routing/explain.go b/apigx/routing/explain.go
+index 7c70f93..5ae2e5f 100644
+--- a/apigx/routing/explain.go
++++ b/apigx/routing/explain.go
+@@ -173,3 +173,21 @@ func ExplainForStrategy(strategy Strategy, candidates []Candidate, public map[in
+ 	}
+ 	return Explain(ExplainInput{Decision: decision, Candidates: candidates, Public: public}), nil
+ }
++
++// ExplainForStrategyWithBreaker 在决策前先按熔断结果摘除"打开"的候选，再给出解释。
++//
++// 摘除**不改写调用方的候选集**：这里按值建副本（`Candidate` 是值类型），
++// 因此调用方持有的切片不受影响——避免"看一眼解释就把候选状态改了"的隐蔽副作用。
++func ExplainForStrategyWithBreaker(strategy Strategy, candidates []Candidate,
++	public map[int64]CandidatePublicInfo, opts Options, breaker BreakerConfig, now int64) (Explanation, error) {
++	effective := make([]Candidate, len(candidates))
++	copy(effective, candidates)
++	for i := range effective {
++		verdict := EvaluateBreaker(effective[i].Quality, now, breaker)
++		if verdict.State == BreakerOpen {
++			effective[i].Allowed = false
++			effective[i].ExcludeReason = ExcludeBreakerOpen
++		}
++	}
++	return ExplainForStrategy(strategy, effective, public, opts)
++}
+-- 
+2.53.0.windows.1
+
