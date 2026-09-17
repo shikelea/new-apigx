@@ -63,6 +63,20 @@ const (
 	UsdStateNotNeeded int = 2 // 原币种即 USD
 )
 
+// 价格快照的作用域类型（`apigx_price_rules.scope_type`）。
+//
+// ⚠️ 这套取值与**容量策略**的作用域（`CapacityScope*`）**不是同一套**：
+// 价格是 0=供给 / 1=上游 Key / 2=渠道，容量是 0=平台 / 1=渠道 / …。
+// 两者混用会把"渠道价格"写成"上游 Key 价格"这类静默错误，因此各自定义、不要互相借用。
+const (
+	// PriceScopeOffering 供给（`apigx_model_offerings.id`）。
+	PriceScopeOffering int = 0
+	// PriceScopeUpstreamKey 上游 Key（`apigx_upstream_keys.id`）。
+	PriceScopeUpstreamKey int = 1
+	// PriceScopeChannel 分享渠道（`apigx_channels.id`）。
+	PriceScopeChannel int = 2
+)
+
 // ErrNoPriceRule 表示该作用域**没有**可用的价格快照。
 //
 // 调用方必须把它当成「价格未知」处理，**不得**退化成"价格为零"
