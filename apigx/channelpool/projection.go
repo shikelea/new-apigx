@@ -213,7 +213,8 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	// 因此当分享者恢复或新增一把 Key 并 apply 之后，渠道本身也必须跟着恢复——
 	// 否则会出现「池里有可用 Key、渠道却仍然全池停摆」的矛盾状态（端到端验证时即如此）。
 	// 只恢复**自动禁用**的渠道：人工禁用的是管理员的决定，不能被我们悄悄改回来。
-	if baseChannel.Status == common.ChannelStatusAutoDisabled {
+	restoredAutoDisabled := baseChannel.Status == common.ChannelStatusAutoDisabled
+	if restoredAutoDisabled {
 		baseChannel.Status = common.ChannelStatusEnabled
 	}
 
@@ -231,6 +232,18 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	//   - 逐 Key 统计与隔离针对的索引也不是真正被使用的那把凭据。
 	// 这个问题正是由端到端验证发现的（单测里没有缓存，永远暴露不出来）。
 	basemodel.CacheUpdateChannel(&baseChannel)
+
+	// 恢复自动禁用的渠道时，**必须重建底座的「模型→渠道」路由索引**。
+	//
+	// 原因（已核实底座源码）：`CacheUpdateChannelStatus` 在渠道被置为非启用时会把该渠道
+	// 从 `group2model2channels` 里删掉，而**重新启用时并不会加回来**。
+	// 因此只改状态 + `CacheUpdateChannel` 会出现「库里一切正常、请求却报
+	// no available channel for model」的现象（端到端验证时正是如此：库内渠道启用、
+	// 有可用 Key、abilities 也齐全，但请求 503 且不达上游）。
+	// `InitChannelCache` 是底座提供的重建入口，这里复用它而不是自己去维护那张索引表。
+	if restoredAutoDisabled {
+		basemodel.InitChannelCache()
+	}
 	return nil
 }
 
