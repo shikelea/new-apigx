@@ -1,0 +1,361 @@
+From 624de40daab29dfedb98bdd1829689dfc2cb3a26 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 22:35:48 +0800
+Subject: [PATCH 88/88] =?UTF-8?q?feat:=20=E9=98=B6=E6=AE=B5=203=20?=
+ =?UTF-8?q?=E8=A1=A5=E5=AE=8C=E4=BB=BB=E5=8A=A1=E4=B8=AD=E5=BF=83=E3=80=8C?=
+ =?UTF-8?q?=E4=BF=9D=E7=95=99=E6=9C=9F=E9=99=90=E3=80=8D=EF=BC=88=E8=AE=A1?=
+ =?UTF-8?q?=E5=88=92=E4=B9=A6=20=C2=A74=20=E6=9C=80=E5=90=8E=E4=B8=80?=
+ =?UTF-8?q?=E9=A1=B9=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+设计选择: 产物在上游(签名直链), 我们不持有副本 => "保留期限"是本平台承诺期限
+  => 做成**可配置策略**(APIGX_TASK_RETENTION_DAYS, 默认 7 天), 而**不给任务表加字段**
+  => 满足计划书展示要求, 又**不引入表结构变更与三库迁移风险**(任务表是底座核心表)
+
+- 后端: GET /api/apigx/task-retention -> {days, source}; **非法配置报 400** 而非悄悄回退默认值
+- 后端用例(扩展 share_test.go): 默认值 / 被环境变量覆盖 / 非法值报错
+- 前端: getTaskRetention() + 纯逻辑 retentionDeadlineUnix(finishTime, days)
+  (days<=0 或任务未完成 => null, 界面留空, 不显示"立刻过期"); 任务中心新增「保留至」列
+- 前端用例: retention.test.ts 3 条; i18n「保留至/Retained until」
+- 如实说明: 从完成时刻起算; 上游自签直链可能更早失效(上游行为, 本策略不猜测, 已写入注释)
+
+检查(全过): go build ✅ / apigx/api 整包测试 ✅ / typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅ / 用例 7/7 ✅
+=> 计划书 §4 的八项页面及其明细(含"保留期限")全部有实现; 阶段3 仅剩 price-sync 的 UI(不在 §4 清单, 可选)
+---
+ apigx/api/share.go                            | 34 +++++++++++++++++
+ apigx/api/share_test.go                       | 25 ++++++++++++
+ .../task-center/__tests__/retention.test.ts   | 38 +++++++++++++++++++
+ web/src/features/task-center/api.ts           |  5 +++
+ web/src/features/task-center/index.tsx        | 17 ++++++++-
+ web/src/features/task-center/lib/retention.ts | 32 ++++++++++++++++
+ web/src/i18n/locales/en.json                  |  3 +-
+ web/src/i18n/locales/fr.json                  |  3 +-
+ web/src/i18n/locales/ja.json                  |  3 +-
+ web/src/i18n/locales/ru.json                  |  3 +-
+ web/src/i18n/locales/vi.json                  |  3 +-
+ web/src/i18n/locales/zh-TW.json               |  3 +-
+ web/src/i18n/locales/zh.json                  |  3 +-
+ 13 files changed, 164 insertions(+), 8 deletions(-)
+ create mode 100644 web/src/features/task-center/__tests__/retention.test.ts
+ create mode 100644 web/src/features/task-center/lib/retention.ts
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 2a23842..ef7e2a5 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -30,6 +30,7 @@ import (
+ 	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/gin-gonic/gin"
+ 	"gorm.io/gorm"
++	"os"
+ )
+ 
+ // Register 注册全部分享者接口。调用方需已挂好认证中间件（UserAuth）。
+@@ -80,6 +81,11 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	r.PUT("/price-rules", h.setManualPriceRule)
+ 	r.POST("/channels/:id/price-sync", h.syncChannelPrice)
+ 
++	// 任务产物的**保留期限**策略（计划书 §4：任务中心显示保留期限）。
++	// 这里是"策略"而不是逐任务字段：产物本身在上游（签名直链），我们记录的是**自己的保留承诺**，
++	// 因此做成可配置项，不引入任务表结构变更与迁移风险。
++	r.GET("/task-retention", h.getTaskRetention)
++
+ 	// 能力矩阵（T3.7/T3.8）：**支持范围的唯一事实来源**——界面/文档/验收脚本都从这里取，
+ 	// 避免各自发挥而宣称了没做到的能力（计划书：尚未支持的维度不能在界面宣称已生效）。
+ 	r.GET("/capabilities", h.listCapabilities)
+@@ -1642,3 +1648,31 @@ func applyBreakerToCandidates(candidates []routing.Candidate) {
+ 		}
+ 	}
+ }
++
++// taskRetentionDefaultDays 是未配置时的默认保留天数。
++const taskRetentionDefaultDays = 7
++
++// getTaskRetention 返回任务产物的保留策略（天数）。
++//
++// **为什么是策略而不是逐任务字段**：产物在上游（签名直链），我们并不持有副本；
++// "保留期限"表达的是**本平台承诺的可查期限**。做成可配置项可以满足计划书 §4 的展示要求，
++// 又不必改动任务表结构（避免迁移与三库兼容风险）。上游直链自身可能更早失效，
++// 这属上游行为，界面只按本策略展示。
++func (h *handler) getTaskRetention(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid {
++		return
++	}
++	days := taskRetentionDefaultDays
++	source := "default"
++	if raw := strings.TrimSpace(os.Getenv("APIGX_TASK_RETENTION_DAYS")); raw != "" {
++		parsed, err := strconv.Atoi(raw)
++		if err != nil || parsed < 0 {
++			fail(c, http.StatusBadRequest, "invalid_config",
++				"APIGX_TASK_RETENTION_DAYS must be a non-negative integer")
++			return
++		}
++		days = parsed
++		source = "env"
++	}
++	ok(c, gin.H{"days": days, "source": source})
++}
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 66fc43b..e6376c6 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1014,3 +1014,28 @@ func TestCapabilityMatrixIsHonest(t *testing.T) {
+ 	assert.Contains(t, joined, "不支持取消", "视频不支持取消必须写进矩阵，界面据此显示能力限制")
+ 
+ }
++
++// 任务保留策略：默认值与非法配置的行为必须明确（计划书 §4 要求展示保留期限）。
++func TestTaskRetentionPolicy(t *testing.T) {
++	env := newTestEnv(t, false)
++	const owner int64 = 9101
++
++	t.Setenv("APIGX_TASK_RETENTION_DAYS", "")
++	rec, body := env.do(t, http.MethodGet, "/api/task-retention", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ := body["data"].(map[string]any)
++	assert.Equal(t, float64(taskRetentionDefaultDays), data["days"], "未配置时应给出默认值")
++	assert.Equal(t, "default", data["source"])
++
++	t.Setenv("APIGX_TASK_RETENTION_DAYS", "30")
++	rec, body = env.do(t, http.MethodGet, "/api/task-retention", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, _ = body["data"].(map[string]any)
++	assert.Equal(t, float64(30), data["days"])
++	assert.Equal(t, "env", data["source"])
++
++	// 非法配置必须报错，而不是悄悄回退成默认值（否则运维会以为配置生效了）
++	t.Setenv("APIGX_TASK_RETENTION_DAYS", "abc")
++	rec, _ = env.do(t, http.MethodGet, "/api/task-retention", owner, "")
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++}
+diff --git a/web/src/features/task-center/__tests__/retention.test.ts b/web/src/features/task-center/__tests__/retention.test.ts
+new file mode 100644
+index 0000000..5e7d527
+--- /dev/null
++++ b/web/src/features/task-center/__tests__/retention.test.ts
+@@ -0,0 +1,38 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it } from 'vitest'
++
++import { retentionDeadlineUnix } from '../lib/retention'
++
++const DAY = 24 * 60 * 60
++
++describe('保留到期时刻', () => {
++  it('从完成时刻起算，按天数顺延', () => {
++    expect(retentionDeadlineUnix(1_789_000_000, 7)).toBe(1_789_000_000 + 7 * DAY)
++  })
++
++  it('天数为 0 表示不作承诺（返回 null，界面留空而不是显示"立刻过期"）', () => {
++    expect(retentionDeadlineUnix(1_789_000_000, 0)).toBeNull()
++    expect(retentionDeadlineUnix(1_789_000_000, -1)).toBeNull()
++  })
++
++  it('任务尚未完成（没有完成时刻）时返回 null', () => {
++    expect(retentionDeadlineUnix(undefined, 7)).toBeNull()
++    expect(retentionDeadlineUnix(0, 7)).toBeNull()
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/task-center/api.ts b/web/src/features/task-center/api.ts
+index ad764be..5dcdfbd 100644
+--- a/web/src/features/task-center/api.ts
++++ b/web/src/features/task-center/api.ts
+@@ -26,4 +26,9 @@ import type { UserTaskListResponse } from './types'
+ export async function getMyTasks(page = 1, pageSize = 50): Promise<UserTaskListResponse> {
+   const res = await api.get('/api/task/self', { params: { p: page, page_size: pageSize } })
+   return res.data
++}
++// 任务产物的保留策略（计划书 §4：任务中心显示保留期限）。
++export async function getTaskRetention(): Promise<{ success: boolean; data?: { days: number; source: string } }> {
++  const res = await api.get('/api/apigx/task-retention')
++  return res.data
+ }
+\ No newline at end of file
+diff --git a/web/src/features/task-center/index.tsx b/web/src/features/task-center/index.tsx
+index 38557a4..bf93d06 100644
+--- a/web/src/features/task-center/index.tsx
++++ b/web/src/features/task-center/index.tsx
+@@ -27,7 +27,8 @@ import { LoadingState } from '@/components/loading-state'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ import { TaskArtifactsCell } from '@/features/usage-logs/components/task-artifacts'
+ 
+-import { getMyTasks } from './api'
++import { getMyTasks, getTaskRetention } from './api'
++import { retentionDeadlineUnix } from './lib/retention'
+ import { isTaskTerminal, taskStatusLabelKey } from './lib/status'
+ import type { UserTask } from './types'
+ 
+@@ -42,7 +43,10 @@ export function TaskCenter() {
+     queryFn: () => getMyTasks(1, PAGE_SIZE),
+   })
+ 
++  const retentionQuery = useQuery({ queryKey: ['apigx-task-retention'], queryFn: getTaskRetention })
++
+   const tasks = query.data?.data?.items ?? []
++  const retentionDays = retentionQuery.data?.data?.days ?? 0
+ 
+   if (query.isPending) {
+     return <LoadingState />
+@@ -73,6 +77,17 @@ export function TaskCenter() {
+       header: t('taskCenter.failReason'),
+       cell: (row) => (isTaskTerminal(row.status) ? (row.fail_reason ?? '') : ''),
+     },
++    {
++      id: 'retention',
++      header: t('taskCenter.retention'),
++      cell: (row) => {
++        const deadline = retentionDeadlineUnix(row.finish_time, retentionDays)
++        if (deadline === null) {
++          return ''
++        }
++        return dayjs.unix(deadline).format('YYYY-MM-DD HH:mm:ss')
++      },
++    },
+     {
+       id: 'artifacts',
+       header: t('taskCenter.artifacts'),
+diff --git a/web/src/features/task-center/lib/retention.ts b/web/src/features/task-center/lib/retention.ts
+new file mode 100644
+index 0000000..8fe6aaf
+--- /dev/null
++++ b/web/src/features/task-center/lib/retention.ts
+@@ -0,0 +1,32 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/// 保留期限的计算。
++//
++// 语义（与后端策略一致）：保留期限是**本平台的承诺期限**，从任务**完成时刻**起算。
++// 上游自己签发的直链可能更早失效 —— 那是上游行为，不在本函数里猜测。
++
++/** 保留到期的 UTC 秒；`days <= 0` 或没有完成时刻时返回 null（= 不作承诺，界面留空）。 */
++export function retentionDeadlineUnix(finishTime: number | undefined, days: number): number | null {
++  if (!Number.isFinite(days) || days <= 0) {
++    return null
++  }
++  if (finishTime === undefined || !Number.isFinite(finishTime) || finishTime <= 0) {
++    return null
++  }
++  return finishTime + days * 24 * 60 * 60
++}
+\ No newline at end of file
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 83fb538..8b4b699 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6687,5 +6687,6 @@
+   "taskCenter.status.queued": "Queued",
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+-  "taskCenter.status.failure": "Failed"
++  "taskCenter.status.failure": "Failed",
++  "taskCenter.retention": "Retained until"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index d01fed9..fb1f9e9 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6687,5 +6687,6 @@
+   "taskCenter.status.queued": "Queued",
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+-  "taskCenter.status.failure": "Failed"
++  "taskCenter.status.failure": "Failed",
++  "taskCenter.retention": "Retained until"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 0e0e118..a0ce02c 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6687,5 +6687,6 @@
+   "taskCenter.status.queued": "Queued",
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+-  "taskCenter.status.failure": "Failed"
++  "taskCenter.status.failure": "Failed",
++  "taskCenter.retention": "Retained until"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index f409105..9836c70 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6687,5 +6687,6 @@
+   "taskCenter.status.queued": "Queued",
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+-  "taskCenter.status.failure": "Failed"
++  "taskCenter.status.failure": "Failed",
++  "taskCenter.retention": "Retained until"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 8c2c684..03fb8d6 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6687,5 +6687,6 @@
+   "taskCenter.status.queued": "Queued",
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+-  "taskCenter.status.failure": "Failed"
++  "taskCenter.status.failure": "Failed",
++  "taskCenter.retention": "Retained until"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 06aca5d..f5d5722 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6687,5 +6687,6 @@
+   "taskCenter.status.queued": "Queued",
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+-  "taskCenter.status.failure": "Failed"
++  "taskCenter.status.failure": "Failed",
++  "taskCenter.retention": "Retained until"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 365259b..d27b4d8 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6687,5 +6687,6 @@
+   "taskCenter.status.queued": "排队中",
+   "taskCenter.status.inProgress": "进行中",
+   "taskCenter.status.success": "成功",
+-  "taskCenter.status.failure": "失败"
++  "taskCenter.status.failure": "失败",
++  "taskCenter.retention": "保留至"
+ }
+-- 
+2.53.0.windows.1
+
