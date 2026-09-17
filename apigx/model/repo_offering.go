@@ -242,3 +242,22 @@ func ImportModelOfferings(db *gorm.DB, ownerUserID, channelID int64, upstreamMod
 	}
 	return created, skipped, nil
 }
+
+// FindOfferingByUpstreamModel 按「渠道 + 上游模型名」定位存活供给。
+//
+// 质量统计要按供给归档样本，而供给的身份就是这一对——用列表接口再筛会多一次全量查询。
+func FindOfferingByUpstreamModel(db *gorm.DB, channelID int64, upstreamModelID string) (int64, bool, error) {
+	if db == nil || channelID <= 0 || upstreamModelID == "" {
+		return 0, false, nil
+	}
+	var offering ModelOffering
+	err := db.Where("channel_id = ? AND upstream_model_id = ? AND alive_flag = ?",
+		channelID, upstreamModelID, AliveFlagAlive).First(&offering).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return offering.ID, true, nil
+}
