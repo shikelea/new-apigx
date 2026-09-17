@@ -226,7 +226,11 @@ func Decide(strategy Strategy, candidates []Candidate, opts Options) (Decision, 
 	cold := make([]Candidate, 0, len(eligible))
 	for _, candidate := range eligible {
 		if candidate.Quality.SampleCount == 0 {
-			decision.Excluded = append(decision.Excluded, Exclusion{candidate.OfferingID, ExcludeNoQuality})
+			// **零样本不等于被排除**：计划书要求"没有成熟候选时按剩余容量分配，
+			// 不会因没有历史数据永久饿死新渠道"，因此它们进入冷启动候选池。
+			// 早期实现同时把它们记进 `Excluded`，导致**同一条供给在解释里出现两次**
+			// （一次 selected、一次 excluded，自相矛盾）。样本不足由 `QualityView.Insufficient`
+			// 与冷启动标记如实表达，不需要再当成"排除"。
 			cold = append(cold, candidate)
 			continue
 		}
@@ -528,11 +532,18 @@ func rankColdByCapacity(cold []Candidate) []Ranked {
 		if candidate.CapacityLimit <= 0 {
 			remaining = 1 << 40 // 未配置上限：视为远大于任何有限余量
 		}
+		// 理由文本必须与打分口径**自洽**：未配置上限时分数按"最充裕"处理，
+		// 理由里就不能写 0（那会让人以为它没有余量）。对外说明的自洽性也是可解释性的一部分。
+		reason := fmt.Sprintf("cold_start_remaining_capacity=%d samples=%d",
+			candidate.RemainingCapacity(), candidate.Quality.SampleCount)
+		if candidate.CapacityLimit <= 0 {
+			reason = fmt.Sprintf("cold_start_remaining_capacity=unlimited samples=%d",
+				candidate.Quality.SampleCount)
+		}
 		ranked = append(ranked, Ranked{
 			Candidate: candidate,
 			Score:     float64(remaining),
-			Reasons: []string{fmt.Sprintf("cold_start_remaining_capacity=%d samples=%d",
-				candidate.RemainingCapacity(), candidate.Quality.SampleCount)},
+			Reasons:   []string{reason},
 		})
 	}
 	if len(ranked) == 0 {
