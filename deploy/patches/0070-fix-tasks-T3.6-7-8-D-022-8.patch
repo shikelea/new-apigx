@@ -1,0 +1,104 @@
+From d57932ff52f2ad4bb73a4777e5ccc900a6c43d42 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 19:38:08 +0800
+Subject: [PATCH 70/70] =?UTF-8?q?fix(tasks):=20T3.6=20=E8=A7=86=E9=A2=91?=
+ =?UTF-8?q?=E7=94=9F=E5=91=BD=E5=91=A8=E6=9C=9F=E6=89=93=E9=80=9A=207/8?=
+ =?UTF-8?q?=EF=BC=88D-022=20=E6=9C=80=E7=BB=88=E4=BF=AE=E6=AD=A3=EF=BC=89+?=
+ =?UTF-8?q?=20=E7=AC=AC=208=20=E9=A1=B9=E5=AE=9A=E5=9B=A0?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+D-022 最终结论: kling 插件 parseTaskResult 的状态映射**输出目标错了** ——
+  必须输出**厂商词表**(NOT_START/SUBMITTED/QUEUED/IN_PROGRESS/SUCCESS/FAILURE,
+  宿主 model.TaskStatus* 与 DB 用的就是这套)。原来拿宿主/厂商词表当键去查上游值,
+  上游 IN_PROGRESS 一律查不到 => UNKNOWN => **任务永远停 queued**(对真实 Kling 同样成立)
+  期间我一度改成 processing/succeed/failed, 那是**客户端渲染**词表 => 变成 poll unrecognized;
+  已更正为厂商词表, 并回退对 native.taskStatus(客户端渲染)的改动
+
+实测(tools/stage3-verify/video-task.mjs, 客户端→平台→kling插件→替身模拟Kling) **7/8**:
+  ✅ 提交 200 / ✅ 轮询到 completed(库 SUCCESS) / ✅ 失败如实(failed, fail_reason)
+  ✅ 不误报成功 / ✅ **任务记在正确用户与原渠道**(user=1 channel=142)
+  ✅ **跨用户访问被拒**(400) / ✅ 取消不支持时明确声明(404)
+  ⚠️ 结果内容访问 502 —— 定因: 插件让平台直接拉取上游结果 URL, 而替身在**回环地址**
+     => 平台媒体代理按 **SSRF 防护**拒绝(controller/video_proxy.go)
+     => 结果代理存在且鉴权正确(未授权 401/400 已验), 对真实公网上游可用; 本次被拦是**正确行为**
+
+替身侧补充: /media/:file 路由(便于将来非回环场景验证内容取回)
+---
+ plugins/tasks/kling/plugin.js | 47 +++++++++++++++++------------------
+ 1 file changed, 23 insertions(+), 24 deletions(-)
+
+diff --git a/plugins/tasks/kling/plugin.js b/plugins/tasks/kling/plugin.js
+index 54e8311..ad4427f 100644
+--- a/plugins/tasks/kling/plugin.js
++++ b/plugins/tasks/kling/plugin.js
+@@ -210,24 +210,12 @@ export const native = {
+     return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
+   },
+   taskStatus: function (ctx, task) {
+-    // **状态词必须归一化**：宿主只认 submitted / processing / succeed / failed。
+-    //
+-    // 这里的直通分支此前把上游原始状态（IN_PROGRESS / SUCCESS / FAILURE）原样返回，
+-    // 宿主于是每次都判为 "unknown task status"，任务**永远停在 queued**——
+-    // 而且这对**真实 Kling 同样成立**（它返回的正是这套词）。
+-    // 实测证据：`Channel #142 pending video tasks: 4` 之后是成片的
+-    // `poll unrecognized ... unknown task status: IN_PROGRESS/SUCCESS/FAILURE`。
+-    const statusMap = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
+     if (task.data && typeof task.data === "object" && !Array.isArray(task.data)) {
+       const result = task.data,
+         data = result.data && typeof result.data === "object" ? result.data : {};
+-      const patched = Object.assign({}, data, { task_id: task.task_id });
+-      const rawStatus = data.task_status;
+-      if (typeof rawStatus === "string" && statusMap[rawStatus]) {
+-        patched.task_status = statusMap[rawStatus];
+-      }
+-      return Object.assign({}, result, { data: patched });
++      return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
+     }
++    const statusMap = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
+     return { code: 0, data: { task_id: task.task_id, task_status: statusMap[task.status] || "submitted", task_status_msg: task.fail_reason || "" } };
+   },
+   error: function (ctx, error) {
+@@ -294,17 +282,28 @@ export function buildQueryRequest(ctx) {
+ 
+ export function parseTaskResult(ctx, body) {
+   const data = body.data || {};
+-  // **映射方向：上游 → 宿主。**
++  // **归一化目标必须是"厂商词表"**（`NOT_START/SUBMITTED/QUEUED/IN_PROGRESS/SUCCESS/FAILURE`）——
++  // 宿主与数据库用的就是这一套（见 `model.TaskStatus*` 与 `knownPollStatus`，
++  // 同文件下文也是 `task.status === "SUCCESS"`）。
+   //
+-  // 这里原来是反的（`{submitted:"SUBMITTED", processing:"IN_PROGRESS", ...}` 拿宿主词表去查上游值），
+-  // 于是上游返回 `IN_PROGRESS` 查不到 ⇒ 一律回 `UNKNOWN` ⇒ 宿主报
+-  // `poll unrecognized ... unknown task status: IN_PROGRESS`，
+-  // **kling 视频任务永远停在 queued**（阶段 3 验收实测，日志成片）。
+-  // 同文件 `native.taskStatus` 里的表方向是对的，这里与它保持一致。
+-  const statuses = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
+-  const status = statuses[data.task_status];
+-  if (!status) return { status: "UNKNOWN", reason: "unknown task status: " + String(data.task_status || "") };
+-  const videos = status === "succeed" && data.task_result && data.task_result.videos ? data.task_result.videos : [];
++  // 原来的表是**反的**（`{submitted:"SUBMITTED", processing:"IN_PROGRESS", ...}`：
++  // 拿宿主/厂商词表当键去查上游值），于是上游返回 `IN_PROGRESS` 一律查不到 ⇒ 回 `UNKNOWN`
++  // ⇒ 宿主报 `unknown task status: IN_PROGRESS` ⇒ **kling 视频任务永远停在 queued**
++  // （阶段 3 验收实测，日志成片；对真实 Kling 同样成立，它返回的正是这套词）。
++  //
++  // 这里同时接受"厂商原词"与少数同义写法（`processing/succeed/failed` 等），
++  // 但**输出统一为厂商词表**。
++  const alias = {
++    not_start: "NOT_START", submitted: "SUBMITTED", queued: "QUEUED",
++    in_progress: "IN_PROGRESS", processing: "IN_PROGRESS",
++    success: "SUCCESS", succeed: "SUCCESS", completed: "SUCCESS",
++    failure: "FAILURE", failed: "FAILURE",
++  };
++  const canonical = { NOT_START: "NOT_START", SUBMITTED: "SUBMITTED", QUEUED: "QUEUED", IN_PROGRESS: "IN_PROGRESS", SUCCESS: "SUCCESS", FAILURE: "FAILURE" };
++  const rawStatus = String(data.task_status || "").trim();
++  const status = canonical[rawStatus.toUpperCase()] || alias[rawStatus.toLowerCase()] || "";
++  if (!status) return { status: "UNKNOWN", reason: "unknown task status: " + rawStatus };
++  const videos = status === "SUCCESS" && data.task_result && data.task_result.videos ? data.task_result.videos : [];
+   const result = { code: body.code || 0, taskId: data.task_id, status: status, reason: data.task_status_msg || "" };
+   if (videos.length && videos[0].url) result.url = videos[0].url;
+   const units = Number.parseFloat(data.final_unit_deduction || "");
+-- 
+2.53.0.windows.1
+

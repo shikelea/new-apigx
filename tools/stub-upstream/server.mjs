@@ -305,6 +305,14 @@ const server = http.createServer(async (req, res) => {
   // 异步任务（视频等）最小形态，阶段 3 再补细节
   // 同时接受带与不带 `/kling` 前缀（kling 插件在"中继型"密钥下会加 `/kling` 前缀，
   // 实测它就是这样出站的）。两种都收，避免因密钥形态不同而"看起来没接上"。
+  // 视频结果媒体：签名直链指向这里，替身要真的能取到字节，
+  // 否则平台的"结果访问"会被上游 404 带成 502（第一版就踩了）。
+  if (/^\/media\/[^/]+$/.test(url.pathname) && req.method === 'GET') {
+    const payload = Buffer.from('stub-media-bytes-for-' + url.pathname);
+    res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': payload.length });
+    res.end(payload);
+    return true;
+  }
   const videoSubmit = (url.pathname === '/v1/videos/text2video' || url.pathname === '/kling/v1/videos/text2video') && req.method === 'POST';
   const videoQuery = /^(?:\/kling)?\/v1\/videos\/(text2video|image2video)\/([^/]+)$/.exec(url.pathname);
   if (videoSubmit || videoQuery) {
