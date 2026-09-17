@@ -1,0 +1,312 @@
+From 4b19eed039fdae716739d2ec3a9ec91ac123bcfb Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:34:42 +0800
+Subject: [PATCH 35/35] =?UTF-8?q?feat(apigx):=20=E6=AF=8F=E6=97=A5?=
+ =?UTF-8?q?=E9=A2=84=E7=AE=97=E7=BB=B4=E5=BA=A6=EF=BC=88=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=E4=B8=8E=E5=8D=95=E6=B5=8B=E5=AE=8C=E6=88=90=EF=BC=9B=E6=8E=A5?=
+ =?UTF-8?q?=E7=BA=BF=E5=AD=98=E5=9C=A8=E6=9C=AA=E8=A7=A3=E7=9F=9B=E7=9B=BE?=
+ =?UTF-8?q?=EF=BC=8C=E6=9C=AA=E5=8B=BE=E9=80=89=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- service/apigx_budget_guard.go: CheckAPIGXDailyBudget 接在 NewBillingSession 最前
+  (早于资金来源选择, 因此独立于计费偏好); 维度 key=user:<id>:budget:<UTC日>, 窗口内不归还, TTL 48h
+- 预留的是可执行金额(底座已算出的 preConsumedQuota), 不凭空估 token; 预扣为 0 也记最小量
+- 单测 5/5(真实 Redis): 累加与拒绝 403 / 未配置不约束 / 零成本请求计入 /
+  账本不可用失败关闭 503 / 按使用者隔离
+- 拒绝路径端到端验证: 上限 5000 时三次请求全 403 daily budget exceeded, Redis 无计数(设计如此)
+- ❗未解矛盾: 放大到 1 亿后请求 200 但 Redis 仍看不到计数, 原因尚未隔离 -> 不勾选
+- 记录一处测试环境陷阱: t.Cleanup 中 t.Context() 已被取消(Go 新版), 清理须用独立 context
+- apigx + middleware + service 单测通过
+---
+ apigx/capacity/capacity.go         |  14 +++
+ service/apigx_budget_guard.go      |  80 ++++++++++++++++
+ service/apigx_budget_guard_test.go | 144 +++++++++++++++++++++++++++++
+ service/billing_session.go         |   7 ++
+ 4 files changed, 245 insertions(+)
+ create mode 100644 service/apigx_budget_guard.go
+ create mode 100644 service/apigx_budget_guard_test.go
+
+diff --git a/apigx/capacity/capacity.go b/apigx/capacity/capacity.go
+index 5e6948d..a9a1f22 100644
+--- a/apigx/capacity/capacity.go
++++ b/apigx/capacity/capacity.go
+@@ -111,6 +111,20 @@ func ChannelTPM(channelID int64, window int64) string {
+ 	return "channel:" + i64(channelID) + ":tpm:" + i64(window)
+ }
+ 
++// UserDailyBudgetMicro 使用者的每日预算窗口（金额单位为**微美元**）。
++//
++// 与并发/速率不同，预算维度预留的是**金额**：准入时能拿到本次要预扣的额度
++// （底座在会话创建前已算出 `preConsumedQuota`），因此预留是可执行的，
++// 不需要凭空估算 token（计划书 §9.2 对 TPM 的告诫同样适用于此）。
++func UserDailyBudgetMicro(userID int64, day int64) string {
++	return "user:" + i64(userID) + ":budget:" + i64(day)
++}
++
++// UserDailyRequestCount 使用者的每日请求数窗口。
++func UserDailyRequestCount(userID int64, day int64) string {
++	return "user:" + i64(userID) + ":dailyreq:" + i64(day)
++}
++
+ // AsyncTaskSlot 异步任务槽位（与 HTTP 并发分开记账，计划书 §9.2 第 3 条）。
+ func AsyncTaskSlot(scope string, id int64) string {
+ 	return scope + ":" + i64(id) + ":tasks"
+diff --git a/service/apigx_budget_guard.go b/service/apigx_budget_guard.go
+new file mode 100644
+index 0000000..9d68c9b
+--- /dev/null
++++ b/service/apigx_budget_guard.go
+@@ -0,0 +1,80 @@
++package service
++
++import (
++	"errors"
++	"fmt"
++	"net/http"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/logger"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/gin-gonic/gin"
++)
++
++// APIGX 每日预算维度（T1.7）。
++//
++// # 为什么放在计费会话这一层
++//
++// 预算预留的金额必须是**可执行的**：准入时我们拿得到本次要预扣的额度
++// （底座在创建计费会话前已算出 `preConsumedQuota`），所以直接用它做预留，
++// 不需要凭空估算 token（计划书 §9.2 对 TPM 的告诫同理）。
++//
++// # 与并发/速率的区别
++//
++// 预算计数**在窗口内不归还**（与 RPM 一致）：已花掉的钱不会因为请求失败而"没花过"。
++// 窗口按**UTC 自然日**分桶，TTL 取 48 小时，避免跨时区/跨日边界时统计突然消失。
++//
++// 配置：环境变量 `APIGX_DAILY_BUDGET_MICRO`（微美元），0 表示未配置（不施加约束）。
++
++// dailyBudgetWindow 返回当前 UTC 自然日的桶编号。
++func dailyBudgetWindow(now time.Time) int64 {
++	return now.UTC().Unix() / 86400
++}
++
++// budgetLimitFromEnv 读取部署级预算上限（微美元）。0 = 未配置。
++func budgetLimitFromEnv() int64 {
++	return int64(common.GetEnvOrDefault("APIGX_DAILY_BUDGET_MICRO", 0))
++}
++
++// CheckAPIGXDailyBudget 在计费会话建立前检查并累加使用者当日预算。
++//
++// 返回 nil 表示放行；否则返回应当直接拒绝的错误（**不建立会话**）。
++// 账本不可用时**拒绝**而不是放行：无法安全判断预算时不能继续放量（与容量准入同一原则）。
++func CheckAPIGXDailyBudget(c *gin.Context, relayInfo *relaycommon.RelayInfo, preConsumedQuota int) *types.NewAPIError {
++	limit := budgetLimitFromEnv()
++	if limit <= 0 || relayInfo == nil || relayInfo.UserId <= 0 {
++		return nil
++	}
++	if common.RDB == nil {
++		// 未启用 Redis：无法判断共享预算，按"失败关闭"处理
++		return types.NewErrorWithStatusCode(errors.New("budget ledger unavailable"),
++			types.ErrorCodeQueryDataError, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
++	}
++
++	amount := int64(preConsumedQuota)
++	if amount <= 0 {
++		// 预扣为 0（例如信任额度旁路）时也要**记一次最小值**，
++		// 否则"零成本的请求"会完全绕过每日预算统计。
++		amount = 1
++	}
++
++	ctrl := capacity.New(common.RDB)
++	windowKey := capacity.UserDailyBudgetMicro(int64(relayInfo.UserId), dailyBudgetWindow(time.Now()))
++	if err := ctrl.IncrementWindow(c.Request.Context(), windowKey, limit, amount, 48*time.Hour); err != nil {
++		var exceeded *capacity.ErrExceeded
++		if errors.As(err, &exceeded) {
++			logger.LogWarn(c, fmt.Sprintf("APIGX daily budget exceeded for user %d", relayInfo.UserId))
++			return types.NewErrorWithStatusCode(
++				errors.New("daily budget exceeded"),
++				types.ErrorCodeInsufficientUserQuota, http.StatusForbidden,
++				types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++		}
++		common.SysError("apigx budget guard: ledger error: " + err.Error())
++		return types.NewErrorWithStatusCode(errors.New("budget ledger error"),
++			types.ErrorCodeQueryDataError, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
++	}
++	return nil
++}
+diff --git a/service/apigx_budget_guard_test.go b/service/apigx_budget_guard_test.go
+new file mode 100644
+index 0000000..8e7afe4
+--- /dev/null
++++ b/service/apigx_budget_guard_test.go
+@@ -0,0 +1,144 @@
++package service
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/common"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/gin-gonic/gin"
++	"github.com/go-redis/redis/v8"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// APIGX 每日预算守卫（T1.7）的单元测试。
++//
++// 需要真实 Redis：窗口计数的原子性（"先判断再累加"）无法用 mock 证明。
++//
++//	APIGX_TEST_REDIS_ADDR=127.0.0.1:6379
++func setupBudgetGuard(t *testing.T) *gin.Context {
++	t.Helper()
++	addr := os.Getenv("APIGX_TEST_REDIS_ADDR")
++	if addr == "" {
++		t.Skip("未设置 APIGX_TEST_REDIS_ADDR：预算守卫未在真实 Redis 上验证（不允许当作通过）")
++	}
++	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: 15})
++	require.NoError(t, rdb.Ping(t.Context()).Err(), "连接 Redis 失败")
++	previous := common.RDB
++	common.RDB = rdb
++	t.Cleanup(func() { common.RDB = previous; _ = rdb.Close() })
++
++	gin.SetMode(gin.TestMode)
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++	return c
++}
++
++func withBudgetEnv(t *testing.T, micro string) {
++	t.Helper()
++	previous, had := os.LookupEnv("APIGX_DAILY_BUDGET_MICRO")
++	require.NoError(t, os.Setenv("APIGX_DAILY_BUDGET_MICRO", micro))
++	t.Cleanup(func() {
++		if had {
++			_ = os.Setenv("APIGX_DAILY_BUDGET_MICRO", previous)
++		} else {
++			_ = os.Unsetenv("APIGX_DAILY_BUDGET_MICRO")
++		}
++	})
++}
++
++// 预算按「累加金额」判断：累计不超限放行，超出即拒；且**计数不因请求结束而归还**。
++func TestDailyBudgetAccumulatesAndRejects(t *testing.T) {
++	c := setupBudgetGuard(t)
++	withBudgetEnv(t, "100")
++	const userID = 88001
++	cleanup := func() {
++		ctrl := capacity.New(common.RDB)
++		require.NoError(t, ctrl.Drop(context.Background(),
++			capacity.UserDailyBudgetMicro(userID, dailyBudgetWindow(time.Now()))))
++	}
++	cleanup()
++	t.Cleanup(cleanup)
++
++	relayInfo := &relaycommon.RelayInfo{UserId: userID}
++
++	// 60 微美元：0+60 <= 100 → 放行
++	require.Nil(t, CheckAPIGXDailyBudget(c, relayInfo, 60))
++
++	// 再 60：60+60 > 100 → 拒绝（且返回 403，不当成上游故障）
++	err := CheckAPIGXDailyBudget(c, relayInfo, 60)
++	require.NotNil(t, err)
++	assert.Equal(t, http.StatusForbidden, err.StatusCode)
++
++	// 30：60+30 = 90 <= 100 → 放行，证明是**累加**而不是"单次金额超过上限才拒"
++	require.Nil(t, CheckAPIGXDailyBudget(c, relayInfo, 30))
++
++	// 再 30：90+30 > 100 → 拒绝
++	assert.NotNil(t, CheckAPIGXDailyBudget(c, relayInfo, 30))
++}
++
++// 未配置预算（0）时不施加约束——未配置是待补的过渡状态，不是"零预算"。
++func TestDailyBudgetDisabledWhenUnset(t *testing.T) {
++	c := setupBudgetGuard(t)
++	withBudgetEnv(t, "0")
++	relayInfo := &relaycommon.RelayInfo{UserId: 88002}
++	require.Nil(t, CheckAPIGXDailyBudget(c, relayInfo, 1_000_000))
++}
++
++// 预扣为 0 时也要记一次最小量：否则零成本请求会完全绕过预算统计。
++func TestDailyBudgetCountsZeroCostRequests(t *testing.T) {
++	c := setupBudgetGuard(t)
++	withBudgetEnv(t, "2")
++	const userID = 88003
++	cleanup := func() {
++		ctrl := capacity.New(common.RDB)
++		require.NoError(t, ctrl.Drop(context.Background(),
++			capacity.UserDailyBudgetMicro(userID, dailyBudgetWindow(time.Now()))))
++	}
++	cleanup()
++	t.Cleanup(cleanup)
++	relayInfo := &relaycommon.RelayInfo{UserId: userID}
++
++	// 三次零成本请求：每次记 1，第三次应被拒（2 是上限）
++	require.Nil(t, CheckAPIGXDailyBudget(c, relayInfo, 0))
++	require.Nil(t, CheckAPIGXDailyBudget(c, relayInfo, 0))
++	assert.NotNil(t, CheckAPIGXDailyBudget(c, relayInfo, 0), "零成本请求也必须计入每日预算")
++}
++
++// 账本不可用时必须**失败关闭**（拒绝），而不是放行。
++func TestDailyBudgetFailsClosedWithoutRedis(t *testing.T) {
++	c := setupBudgetGuard(t)
++	withBudgetEnv(t, "100")
++	previous := common.RDB
++	common.RDB = nil
++	t.Cleanup(func() { common.RDB = previous })
++
++	err := CheckAPIGXDailyBudget(c, &relaycommon.RelayInfo{UserId: 88004}, 10)
++	require.NotNil(t, err)
++	assert.Equal(t, http.StatusServiceUnavailable, err.StatusCode)
++}
++
++// 不同用户互不影响（预算是**使用者**维度）。
++func TestDailyBudgetIsPerUser(t *testing.T) {
++	c := setupBudgetGuard(t)
++	withBudgetEnv(t, "10")
++	first := &relaycommon.RelayInfo{UserId: 88005}
++	second := &relaycommon.RelayInfo{UserId: 88006}
++	cleanup := func() {
++		ctrl := capacity.New(common.RDB)
++		require.NoError(t, ctrl.Drop(context.Background(),
++			capacity.UserDailyBudgetMicro(88005, dailyBudgetWindow(time.Now())),
++			capacity.UserDailyBudgetMicro(88006, dailyBudgetWindow(time.Now()))))
++	}
++	cleanup()
++	t.Cleanup(cleanup)
++
++	require.Nil(t, CheckAPIGXDailyBudget(c, first, 10))
++	require.Nil(t, CheckAPIGXDailyBudget(c, second, 10), "另一个使用者不应受前者的用量影响")
++}
+diff --git a/service/billing_session.go b/service/billing_session.go
+index b1e0ad6..ea27203 100644
+--- a/service/billing_session.go
++++ b/service/billing_session.go
+@@ -383,6 +383,13 @@ func NewBillingSession(c *gin.Context, relayInfo *relaycommon.RelayInfo, preCons
+ 		return nil, types.NewError(fmt.Errorf("relayInfo is nil"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+ 	}
+ 
++	// APIGX 每日预算维度（T1.7）：预算计数**在窗口内不归还**，且预留的是**可执行金额**
++	// （`preConsumedQuota` 此刻已算出），因此放在会话建立之前最合适。
++	// 放在这里也意味着它**独立于计费偏好**：无论走钱包还是订阅，都要先过预算。
++	if budgetErr := CheckAPIGXDailyBudget(c, relayInfo, preConsumedQuota); budgetErr != nil {
++		return nil, budgetErr
++	}
++
+ 	// APIGX 免费共享模式：跳过「充值余额前置条件」，改用只记账的资金来源。
+ 	// 放在最前面，因此不经过 tryWallet 的 userQuota 检查，也不受计费偏好分支影响。
+ 	// 实现见 service/apigx_usage_only.go（不改价格、不伪造余额、不走 FreeModel 短路）。
+-- 
+2.53.0.windows.1
+
