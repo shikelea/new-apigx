@@ -210,12 +210,24 @@ export const native = {
     return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
   },
   taskStatus: function (ctx, task) {
+    // **状态词必须归一化**：宿主只认 submitted / processing / succeed / failed。
+    //
+    // 这里的直通分支此前把上游原始状态（IN_PROGRESS / SUCCESS / FAILURE）原样返回，
+    // 宿主于是每次都判为 "unknown task status"，任务**永远停在 queued**——
+    // 而且这对**真实 Kling 同样成立**（它返回的正是这套词）。
+    // 实测证据：`Channel #142 pending video tasks: 4` 之后是成片的
+    // `poll unrecognized ... unknown task status: IN_PROGRESS/SUCCESS/FAILURE`。
+    const statusMap = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
     if (task.data && typeof task.data === "object" && !Array.isArray(task.data)) {
       const result = task.data,
         data = result.data && typeof result.data === "object" ? result.data : {};
-      return Object.assign({}, result, { data: Object.assign({}, data, { task_id: task.task_id }) });
+      const patched = Object.assign({}, data, { task_id: task.task_id });
+      const rawStatus = data.task_status;
+      if (typeof rawStatus === "string" && statusMap[rawStatus]) {
+        patched.task_status = statusMap[rawStatus];
+      }
+      return Object.assign({}, result, { data: patched });
     }
-    const statusMap = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
     return { code: 0, data: { task_id: task.task_id, task_status: statusMap[task.status] || "submitted", task_status_msg: task.fail_reason || "" } };
   },
   error: function (ctx, error) {
@@ -282,10 +294,17 @@ export function buildQueryRequest(ctx) {
 
 export function parseTaskResult(ctx, body) {
   const data = body.data || {};
-  const statuses = { submitted: "SUBMITTED", processing: "IN_PROGRESS", succeed: "SUCCESS", failed: "FAILURE" };
+  // **映射方向：上游 → 宿主。**
+  //
+  // 这里原来是反的（`{submitted:"SUBMITTED", processing:"IN_PROGRESS", ...}` 拿宿主词表去查上游值），
+  // 于是上游返回 `IN_PROGRESS` 查不到 ⇒ 一律回 `UNKNOWN` ⇒ 宿主报
+  // `poll unrecognized ... unknown task status: IN_PROGRESS`，
+  // **kling 视频任务永远停在 queued**（阶段 3 验收实测，日志成片）。
+  // 同文件 `native.taskStatus` 里的表方向是对的，这里与它保持一致。
+  const statuses = { NOT_START: "submitted", SUBMITTED: "submitted", QUEUED: "submitted", IN_PROGRESS: "processing", SUCCESS: "succeed", FAILURE: "failed" };
   const status = statuses[data.task_status];
   if (!status) return { status: "UNKNOWN", reason: "unknown task status: " + String(data.task_status || "") };
-  const videos = status === "SUCCESS" && data.task_result && data.task_result.videos ? data.task_result.videos : [];
+  const videos = status === "succeed" && data.task_result && data.task_result.videos ? data.task_result.videos : [];
   const result = { code: body.code || 0, taskId: data.task_id, status: status, reason: data.task_status_msg || "" };
   if (videos.length && videos[0].url) result.url = videos[0].url;
   const units = Number.parseFloat(data.final_unit_deduction || "");
