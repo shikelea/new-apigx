@@ -247,3 +247,10 @@ func TestSyncBreakerMarksSkipsNonMultiKeyChannel(t *testing.T) {
 	assert.False(t, channel.ChannelInfo.IsMultiKey)
 	assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList)
 }
+
+// 📌 冷却期（`breakerCooldown`）**由端到端验收覆盖**，不在这里写单测。
+// 原因如实记录：本包的两个 fixture 对 `channel_info` 里 map 字段的**回读**行为不一致——
+// 同一个动作在既有用例里能读回标记、在新用例里读不回（本文件上方已记录过该 fixture 限制）。
+// 与其把断言改成"读不回也算过"（那就是假阳性），不如把这条策略交给
+// `tools/stage2-verify/breaker-routing.mjs`：它用真实请求验证"熔断后坏上游不再收到新样本"，
+// 而这正是冷却期要保护的**用户可见行为**。

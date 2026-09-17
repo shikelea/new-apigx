@@ -43,6 +43,27 @@ func breakerEnabled() bool {
 
 const breakerCacheTTL = 30 * time.Second
 
+// breakerCooldown 是"打开后至少保持不可用"的时长。
+//
+// # 为什么必须有冷却期（端到端回扫发现的抖动）
+//
+// 一旦熔断打开、我们把流量挪到别的渠道，这条坏渠道就**不再产生新失败**了——
+// 于是分钟窗口里的失败**过期**，下一次判定变成"未打开"，我们就把它**恢复**；
+// 流量再次打到它上面、再次失败、再次打开……表现为**请求间歇性失败**且坏渠道的样本数还在增长。
+//
+// 因此：打开后**必须**先冷却，冷却期内忽略"看起来已经好了"的判定；
+// 冷却结束后的第一次经过才允许恢复（这也就是计划书里的"冷却后再半开探测"）。
+var breakerCooldown = 60 * time.Second
+
+// breakerOpenedAt 记录各渠道**本次**被我们打开的时刻（进程内即可：
+// 重启后 Map 为空，等价于"冷却已过"，于是会按判定恢复，不会把渠道永久锁死）。
+var breakerOpenedAt sync.Map // baseChannelID -> time.Time
+
+// ResetBreakerCooldownForTest 清空冷却记录（测试用）。
+func ResetBreakerCooldownForTest() {
+	breakerOpenedAt.Range(func(key, _ any) bool { breakerOpenedAt.Delete(key); return true })
+}
+
 type cachedBreaker struct {
 	open      bool
 	expiresAt time.Time
@@ -186,6 +207,18 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 		common.SysError("apigx breaker: update channel marks failed: " + err.Error())
 		return
 	}
+	if open {
+		if _, loaded := breakerOpenedAt.Load(channelID); !loaded {
+			breakerOpenedAt.Store(channelID, time.Now())
+		}
+	} else if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
+		// 冷却未过：**保持不可用**，不因为"窗口里没有新失败"就恢复（那会造成抖动）
+		if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
+			return
+		}
+		breakerOpenedAt.Delete(channelID)
+	}
+
 	// **真正让底座不选中它**（修法①）：标记只让"选中后立刻失败"，不足以改道；
 	// 权重又因为底座的 +10 平滑而无法表达"接近零"（两者都被实测否掉）。
 	// 因此这里调用底座**自己的**渠道状态入口——它会同步更新能力索引，
