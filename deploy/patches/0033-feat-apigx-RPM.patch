@@ -1,0 +1,370 @@
+From 71c5783fc16665cc3cbd7410d30470546c30674f Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 13:16:34 +0800
+Subject: [PATCH 33/33] =?UTF-8?q?feat(apigx):=20RPM=20=E7=AA=97=E5=8F=A3?=
+ =?UTF-8?q?=E8=AE=A1=E6=95=B0=E5=8E=9F=E8=AF=AD=E4=B8=8E=E6=8E=A5=E7=BA=BF?=
+ =?UTF-8?q?=EF=BC=88=E8=BF=90=E8=A1=8C=E6=97=B6=E9=AA=8C=E6=94=B6=E6=9C=AA?=
+ =?UTF-8?q?=E9=80=9A=E8=BF=87=EF=BC=8C=E6=9C=AA=E5=8B=BE=E9=80=89=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- apigx/capacity/window.go: 只增不减的窗口计数 IncrementWindow(Lua 先判断再累加, 超限不写入)
+  + WindowTTL; 单测 4/4(真实 Redis)
+  不能沿用租约模型: 并发槽位要归还, 速率计数必须在窗口内保留
+- 接线: APIGX_CHANNEL_RPM_LIMIT + 渠道策略(RpmMode/RpmLimit) 策略链;
+  先取并发租约再计 RPM, RPM 超限则归还刚拿到的租约
+- 未通过: channel-rpm.mjs 三次串行全部 500, 日志为 base_url 为空的
+  'unsupported protocol scheme'; 已核实库内 base_url 正确, 原因尚未隔离
+- 另记: 该开关目前是进程级(全局), 会同时限流其它脚本 -> 后续应改为按渠道配置
+- apigx + middleware 单测全量通过
+---
+ apigx/capacity/capacity.go         |  3 ++
+ apigx/capacity/capacity_test.go    | 59 +++++++++++++++++++++
+ apigx/capacity/window.go           | 85 ++++++++++++++++++++++++++++++
+ apigx/channelpool/policy_source.go | 48 +++++++++++++++--
+ apigx/relayhook/capacity_hook.go   | 42 ++++++++++++++-
+ 5 files changed, 233 insertions(+), 4 deletions(-)
+ create mode 100644 apigx/capacity/window.go
+
+diff --git a/apigx/capacity/capacity.go b/apigx/capacity/capacity.go
+index 34e51c9..5e6948d 100644
+--- a/apigx/capacity/capacity.go
++++ b/apigx/capacity/capacity.go
+@@ -197,6 +197,8 @@ type Controller struct {
+ 	reserve *redis.Script
+ 	release *redis.Script
+ 	renew   *redis.Script
++	// window 是只增不减的窗口计数脚本（RPM/TPM 用），与租约模型分开
++	window *redis.Script
+ }
+ 
+ // New 用底座既有的 Redis 客户端（common.RDB）构造容量控制器。
+@@ -210,6 +212,7 @@ func NewWithPrefix(rdb *redis.Client, prefix string) *Controller {
+ 		reserve: redis.NewScript(reserveScript),
+ 		release: redis.NewScript(releaseScript),
+ 		renew:   redis.NewScript(renewScript),
++		window:  redis.NewScript(windowScript),
+ 	}
+ }
+ 
+diff --git a/apigx/capacity/capacity_test.go b/apigx/capacity/capacity_test.go
+index b70efd9..a171e32 100644
+--- a/apigx/capacity/capacity_test.go
++++ b/apigx/capacity/capacity_test.go
+@@ -197,3 +197,62 @@ func TestReserveFailsClosedWithoutRedis(t *testing.T) {
+ 	require.Error(t, err)
+ 	assert.True(t, errors.Is(err, ErrRedisUnavailable), "错误必须是 ErrRedisUnavailable 以便上层停止准入")
+ }
++
++// ---- 窗口计数（RPM/TPM） ----
++
++// 窗口计数只增不减：**请求结束不归还**，否则 RPM 永远数不到 2、限速形同虚设。
++func TestIncrementWindowCountsUpToLimit(t *testing.T) {
++	c := newTestController(t)
++	ctx := context.Background()
++	key := ChannelRPM(4242, MinuteWindow(time.Now()))
++
++	require.NoError(t, c.IncrementWindow(ctx, key, 2, 1, WindowTTL(time.Minute)))
++	require.NoError(t, c.IncrementWindow(ctx, key, 2, 1, WindowTTL(time.Minute)))
++
++	// 第三次超限：必须返回 *ErrExceeded **且不写入**
++	err := c.IncrementWindow(ctx, key, 2, 1, WindowTTL(time.Minute))
++	var exceeded *ErrExceeded
++	require.ErrorAs(t, err, &exceeded)
++	assert.Contains(t, exceeded.Dimension, "rpm")
++
++	count, err := c.WindowCount(ctx, key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2, count, "超限的那次不得计入")
++}
++
++// 计数随窗口 TTL 自动过期：这是"窗口"语义的实现方式（不需要额外清理任务）。
++func TestWindowCountExpires(t *testing.T) {
++	c := newTestController(t)
++	ctx := context.Background()
++	key := ChannelRPM(4243, MinuteWindow(time.Now()))
++
++	require.NoError(t, c.IncrementWindow(ctx, key, 5, 1, 1*time.Second))
++	count, err := c.WindowCount(ctx, key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, count)
++
++	time.Sleep(1200 * time.Millisecond)
++	count, err = c.WindowCount(ctx, key)
++	require.NoError(t, err)
++	assert.EqualValues(t, 0, count, "窗口结束后计数必须自动消失")
++}
++
++// 参数校验：非法入参不得静默通过（否则限速会被配置错值悄悄关掉）。
++func TestIncrementWindowRejectsInvalidInput(t *testing.T) {
++	c := newTestController(t)
++	ctx := context.Background()
++	key := ChannelRPM(4244, MinuteWindow(time.Now()))
++
++	require.Error(t, c.IncrementWindow(ctx, "", 1, 1, time.Minute))
++	require.Error(t, c.IncrementWindow(ctx, key, 1, 0, time.Minute), "累加量必须为正")
++	require.Error(t, c.IncrementWindow(ctx, key, -1, 1, time.Minute), "上限不得为负")
++	require.Error(t, c.IncrementWindow(ctx, key, 1, 1, 0), "TTL 必须为正")
++}
++
++// 不同窗口使用不同的 key，因此跨窗口互不影响（按分钟分桶）。
++func TestWindowKeysAreBucketedByMinute(t *testing.T) {
++	now := time.Now()
++	first := ChannelRPM(4245, MinuteWindow(now))
++	second := ChannelRPM(4245, MinuteWindow(now.Add(2*time.Minute)))
++	assert.NotEqual(t, first, second, "不同分钟必须落在不同的计数 key 上")
++}
+diff --git a/apigx/capacity/window.go b/apigx/capacity/window.go
+new file mode 100644
+index 0000000..c2a755c
+--- /dev/null
++++ b/apigx/capacity/window.go
+@@ -0,0 +1,85 @@
++package capacity
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++)
++
++// 窗口计数（RPM/TPM 用）。
++//
++// # 为什么不能沿用「租约」模型
++//
++// 并发槽位是**请求结束就归还**的（`Reserve` / `Release` 成对出现）；
++// 而速率计数必须在**整个窗口内保留**——如果请求结束时把它减回去，RPM 就永远数不到 2，
++// 限速形同虚设。因此这里提供一个只增不减的原语：计数随窗口 TTL 自动过期。
++//
++// 代价是：**准入之后才失败的请求也会占用额度**。这对限速而言是正确的语义
++// （它确实向上游发出过请求），因此不需要补偿。
++
++// windowScript 原子地「先判断再累加」：计数不超过上限才累加，并刷新窗口 TTL。
++//
++// KEYS[1] = 窗口计数 key
++// ARGV[1] = 上限，ARGV[2] = 本次累加量，ARGV[3] = TTL（秒）
++// 返回 1 表示已计入；0 表示会超限、未计入（**不做任何写入**）。
++const windowScript = `
++local key = KEYS[1]
++local limit = tonumber(ARGV[1])
++local amount = tonumber(ARGV[2])
++local ttl = tonumber(ARGV[3])
++local current = tonumber(redis.call('GET', key) or '0')
++if current + amount > limit then
++  return 0
++end
++redis.call('INCRBY', key, amount)
++redis.call('EXPIRE', key, ttl)
++return 1
++`
++
++// IncrementWindow 在给定窗口内累加计数；超限时返回 *ErrExceeded 且**不做任何写入**。
++//
++// key 应由 `ChannelRPM` / `ChannelTPM` 之类的构造器生成（其中包含窗口编号），
++// ttl 应当略大于窗口长度，保证窗口结束后计数自动消失。
++func (c *Controller) IncrementWindow(ctx context.Context, key string, limit, amount int64, ttl time.Duration) error {
++	if err := c.available(); err != nil {
++		return err
++	}
++	if key == "" {
++		return errors.New("capacity: window key is required")
++	}
++	if amount <= 0 {
++		return fmt.Errorf("capacity: window amount must be positive (got %d)", amount)
++	}
++	if limit < 0 {
++		return fmt.Errorf("capacity: window limit must not be negative (got %d)", limit)
++	}
++	if ttl <= 0 {
++		return fmt.Errorf("capacity: window ttl must be positive (got %s)", ttl)
++	}
++
++	res, err := c.window.Run(ctx, c.rdb, []string{c.counterKey(key)},
++		limit, amount, int64(ttl/time.Second)).Result()
++	if err != nil {
++		return err
++	}
++	if code, _ := res.(int64); code != 1 {
++		return &ErrExceeded{Dimension: key}
++	}
++	return nil
++}
++
++// WindowTTL 返回给定窗口长度对应的计数存活时长（窗口长度 + 一倍余量）。
++//
++// 留余量是为了避免边界抖动：窗口刚切换时旧 key 立即消失会让"上一分钟"的统计不可查。
++func WindowTTL(window time.Duration) time.Duration {
++	if window <= 0 {
++		window = time.Minute
++	}
++	return window * 2
++}
++
++// WindowCount 读取某窗口计数当前的累加值（运维与验收脚本用；不存在即 0）。
++func (c *Controller) WindowCount(ctx context.Context, key string) (int64, error) {
++	return c.Usage(ctx, key)
++}
+diff --git a/apigx/channelpool/policy_source.go b/apigx/channelpool/policy_source.go
+index 6cf0d7f..750d10d 100644
+--- a/apigx/channelpool/policy_source.go
++++ b/apigx/channelpool/policy_source.go
+@@ -22,8 +22,9 @@ import (
+ const policyCacheTTL = 30 * time.Second
+ 
+ type cachedPolicies struct {
+-	// concurrency 是并发维度的策略链（最具体在最前）。
++	// concurrency / rpm 是两个维度的策略链（最具体在最前）。
+ 	concurrency []capacity.Policy
++	rpm         []capacity.Policy
+ 	expiresAt   time.Time
+ }
+ 
+@@ -72,7 +73,7 @@ func loadChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int
+ }
+ 
+ // ChannelConcurrencyChain 返回渠道并发维度的策略链（带缓存）。
+-func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64, envRPMLimit int64) []capacity.Policy {
+ 	now := time.Now()
+ 	policyCacheMu.RLock()
+ 	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
+@@ -82,13 +83,54 @@ func ChannelConcurrencyChain(db *gorm.DB, shareChannelID int64, envLimit int64)
+ 	policyCacheMu.RUnlock()
+ 
+ 	chain := loadChannelConcurrencyChain(db, shareChannelID, envLimit)
++	rpmChain := loadChannelRPMChain(db, shareChannelID, envRPMLimit)
+ 
+ 	policyCacheMu.Lock()
+-	policyCache[shareChannelID] = cachedPolicies{concurrency: chain, expiresAt: now.Add(policyCacheTTL)}
++	policyCache[shareChannelID] = cachedPolicies{concurrency: chain, rpm: rpmChain, expiresAt: now.Add(policyCacheTTL)}
+ 	policyCacheMu.Unlock()
+ 	return chain
+ }
+ 
++// ChannelRPMChain 返回渠道 RPM 维度的策略链（与并发共用同一份缓存，不额外查库）。
++func ChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++	now := time.Now()
++	policyCacheMu.RLock()
++	if cached, ok := policyCache[shareChannelID]; ok && now.Before(cached.expiresAt) {
++		policyCacheMu.RUnlock()
++		return cached.rpm
++	}
++	policyCacheMu.RUnlock()
++
++	// 缓存未命中：整体重建（并发链与 RPM 链一起），避免两次查库
++	_ = ChannelConcurrencyChain(db, shareChannelID, 0, envLimit)
++	policyCacheMu.RLock()
++	defer policyCacheMu.RUnlock()
++	if cached, ok := policyCache[shareChannelID]; ok {
++		return cached.rpm
++	}
++	return loadChannelRPMChain(db, shareChannelID, envLimit)
++}
++
++// loadChannelRPMChain 组装 RPM 维度的策略链：渠道策略 → 环境变量兜底。
++func loadChannelRPMChain(db *gorm.DB, shareChannelID int64, envLimit int64) []capacity.Policy {
++	chain := make([]capacity.Policy, 0, 2)
++	if db != nil {
++		var shareChannel apigxmodel.Channel
++		if err := db.Where("id = ?", shareChannelID).First(&shareChannel).Error; err == nil && shareChannel.CapacityPolicyID > 0 {
++			if policy, err := apigxmodel.GetCapacityPolicy(db, shareChannel.CapacityPolicyID); err == nil {
++				mode, value := policy.RPM()
++				chain = append(chain, policyFromRaw(mode, value))
++			}
++		}
++	}
++	if envLimit > 0 {
++		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeValue, Value: envLimit})
++	} else {
++		chain = append(chain, capacity.Policy{Mode: capacity.LimitModeUnset})
++	}
++	return chain
++}
++
+ // InvalidatePolicyCache 丢弃某渠道的策略缓存（策略变更、渠道变更后调用）。
+ func InvalidatePolicyCache(shareChannelID int64) {
+ 	policyCacheMu.Lock()
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index 2d702c2..d16a60e 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -39,6 +39,8 @@ type Config struct {
+ 	// 账户池这一维是关键：不能因为切换模型或 Key 就叠加容量（计划书 §9.2）。
+ 	UpstreamKeyLimit     int64
+ 	UpstreamAccountLimit int64
++	// ChannelRPMLimit 是渠道的每分钟请求数上限。与并发不同，速率计数在窗口内**不归还**。
++	ChannelRPMLimit int64
+ }
+ 
+ var (
+@@ -58,6 +60,7 @@ func init() {
+ 		UserLimit:            int64(common.GetEnvOrDefault("APIGX_USER_CONCURRENCY_LIMIT", 0)),
+ 		UpstreamKeyLimit:     int64(common.GetEnvOrDefault("APIGX_UPSTREAM_KEY_CONCURRENCY_LIMIT", 0)),
+ 		UpstreamAccountLimit: int64(common.GetEnvOrDefault("APIGX_UPSTREAM_ACCOUNT_CONCURRENCY_LIMIT", 0)),
++		ChannelRPMLimit:      int64(common.GetEnvOrDefault("APIGX_CHANNEL_RPM_LIMIT", 0)),
+ 	})
+ }
+ 
+@@ -109,7 +112,7 @@ func buildDimensions(c *gin.Context, channelID int) ([]capacity.Dimension, error
+ 	// 渠道维度：策略链 = 渠道自身的容量策略（apigx_capacity_policies） → 环境变量兜底。
+ 	// 策略存在数据库里，因此走 channelpool 的短 TTL 缓存；改上限最长一个 TTL 后生效。
+ 	if shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID); ok {
+-		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit)
++		chain := channelpool.ChannelConcurrencyChain(channelpool.CurrentDB(), shareChannelID, cfg.ChannelLimit, cfg.ChannelRPMLimit)
+ 		res, err := capacity.Resolve(chain...)
+ 		if err != nil {
+ 			return nil, err
+@@ -205,11 +208,48 @@ func Acquire(c *gin.Context, channelID int) (*Lease, bool) {
+ 		return nil, false
+ 	}
+ 
++	// 速率维度（RPM）：**在拿到并发租约之后**再计数。
++	// 顺序理由：并发不足时请求根本不会发出去，不该消耗速率额度；反过来则要对已拿到的
++	// 租约做补偿（下面就是）。
++	if cfg.ChannelRPMLimit > 0 {
++		if rpmLimit, ok := resolveChannelRPMLimit(c, channelID, cfg.ChannelRPMLimit); ok {
++			windowKey := capacity.ChannelRPM(int64(channelID), capacity.MinuteWindow(time.Now()))
++			if rpmErr := ctrl.IncrementWindow(ctx, windowKey, rpmLimit, 1, capacity.WindowTTL(time.Minute)); rpmErr != nil {
++				// 速率超限：把刚拿到的并发租约**还回去**，避免"没发出去的请求"白占一个槽位
++				if releaseErr := ctrl.Release(ctx, id); releaseErr != nil {
++					common.SysLog("apigx capacity: release after rpm rejection failed: " + releaseErr.Error())
++				}
++				abortForError(c, rpmErr)
++				return nil, false
++			}
++		}
++	}
++
+ 	lease := &Lease{ctrl: ctrl, id: id, ttl: leaseTTL, stop: make(chan struct{})}
+ 	lease.startRenew()
+ 	return lease, true
+ }
+ 
++// resolveChannelRPMLimit 解析渠道的 RPM 上限（策略链：渠道策略 → 环境变量兜底）。
++//
++// 返回 false 表示「未配置/明确不限」——两种情形都不施加约束（未配置是待补的过渡状态）。
++func resolveChannelRPMLimit(c *gin.Context, channelID int, envLimit int64) (int64, bool) {
++	shareChannelID, ok := channelpool.ShareChannelIDByBase(channelpool.CurrentDB(), channelID)
++	if !ok {
++		return envLimit, envLimit > 0
++	}
++	chain := channelpool.ChannelRPMChain(channelpool.CurrentDB(), shareChannelID, envLimit)
++	res, err := capacity.Resolve(chain...)
++	if err != nil {
++		common.SysError("apigx capacity: resolve rpm limit failed: " + err.Error())
++		return 0, false
++	}
++	if res.Decision == capacity.DecisionLimited {
++		return res.Value, true
++	}
++	return 0, false
++}
++
+ // ID 返回租约标识（= 出站尝试的 AttemptUID，对账据此精确定位并释放容量）。
+ func (l *Lease) ID() string {
+ 	if l == nil {
+-- 
+2.53.0.windows.1
+
