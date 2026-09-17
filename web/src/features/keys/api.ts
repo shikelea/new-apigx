@@ -26,6 +26,8 @@ import type {
   SearchApiKeysParams,
   ApiKeyFormData,
   TokenAutoGroupsConfig,
+  PlatformKeyPreferencesPayload,
+  PlatformKeyPreferencesResponse,
 } from './types'
 
 // ============================================================================
@@ -123,5 +125,19 @@ export async function fetchTokenKeysBatch(ids: number[]): Promise<{
   data?: { keys: Record<number, string> }
 }> {
   const res = await api.post('/api/token/batch/keys', { ids })
+  return res.data
+}
+
+// APIGX：平台 Key 的来源限制与路由策略偏好（读 / 写）。
+export async function getPlatformKeyPreferences(tokenId: number): Promise<PlatformKeyPreferencesResponse> {
+  const res = await api.get(`/api/apigx/platform-keys/${tokenId}/preferences`)
+  return res.data
+}
+
+export async function setPlatformKeyPreferences(
+  tokenId: number,
+  payload: PlatformKeyPreferencesPayload
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.put(`/api/apigx/platform-keys/${tokenId}/preferences`, payload)
   return res.data
 }

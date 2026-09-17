@@ -111,3 +111,37 @@ export type ApiKeysDialogType =
   | 'delete'
   | 'batch-delete'
   | 'cc-switch'
+  | 'apigx-scope'
+
+// ============================================================================
+// APIGX：平台 Key 的来源限制与路由策略（计划书 §9.1：偏好保存到平台 Key）
+// ============================================================================
+
+/** 平台 Key 偏好（字段与后端 `getPlatformKeyPreferences` 一致）。 */
+export interface PlatformKeyPreferences {
+  token_id: number
+  /** 是否已配置过（false 时其余字段是后端默认值） */
+  configured: boolean
+  scope_mode: number
+  pinned_offering_id: number
+  allowed_model_ids: string[]
+  allowed_owner_user_ids: number[]
+  allow_fallback: boolean
+  /** 空串与 `auto` 都表示自动（不加限定） */
+  default_route_mode: string
+}
+
+export interface PlatformKeyPreferencesResponse {
+  success: boolean
+  data?: PlatformKeyPreferences
+}
+
+/** 偏好更新请求。后端按**非空指针字段**做局部更新。 */
+export interface PlatformKeyPreferencesPayload {
+  scope_mode?: number
+  pinned_offering_id?: number
+  allowed_model_ids?: string[]
+  allowed_owner_user_ids?: number[]
+  allow_fallback?: boolean
+  default_route_mode?: string
+}
