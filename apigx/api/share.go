@@ -673,10 +673,18 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 	case err == nil:
 		updateErr := h.db.Model(&apigxmodel.CapacityPolicy{}).Where("id = ?", existing.ID).
 			Updates(map[string]any{
-				"max_concurrency_mode": policy.Mode,
+				"max_concurrency_mode": concurrencyMode,
 				"max_concurrency":      policy.Value,
-				"policy_version":       existing.PolicyVersion + 1,
-				"updated_at":           common.GetTimestamp(),
+				// **每个维度都必须出现在更新映射里**：早期只写了并发与版本号，
+				// 导致"改 RPM/TPM"静默不生效（内存对象改了、库里没改）。
+				// 表现极具迷惑性：新建策略（走创建分支）时一切正常，
+				// 只有更新已有策略时才失效——由 TPM 端到端验证发现。
+				"rpm_mode":       rpmMode,
+				"rpm_limit":      rpmValue,
+				"tpm_mode":       tpmMode,
+				"tpm_limit":      tpmValue,
+				"policy_version": existing.PolicyVersion + 1,
+				"updated_at":     common.GetTimestamp(),
 			}).Error
 		if updateErr != nil {
 			failFromRepo(c, updateErr)

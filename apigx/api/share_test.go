@@ -706,3 +706,40 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	rec, _ = env.do(t, http.MethodGet, "/api/plaza", 0, "")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
+
+// **回归测试**：更新已有策略时，**每个维度都必须落库**。
+//
+// 早期实现的更新分支只写了并发与版本号，导致"改 RPM/TPM 静默不生效"：
+// 内存对象改了、库里没改。表现很迷惑——新建策略（走创建分支）时一切正常，
+// 只有更新已有策略才失效，因此必须专门测更新路径。
+func TestCapacityPolicyUpdatePersistsAllDimensions(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8601
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "策略更新组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	// 首次：创建（三个维度都给值）
+	rec, body := env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+		`{"concurrency_mode":4,"concurrency_value":5,"rpm_mode":4,"rpm_limit":60,"tpm_mode":4,"tpm_limit":9000}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	policyID := int64(body["data"].(map[string]any)["id"].(float64))
+
+	// 再次：**更新**为完全不同的值（含"明确不限"）
+	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+		`{"concurrency_mode":3,"rpm_mode":4,"rpm_limit":7,"tpm_mode":4,"tpm_limit":12345}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var stored apigxmodel.CapacityPolicy
+	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
+	assert.EqualValues(t, 3, stored.MaxConcurrencyMode, "并发维度应更新为「明确不限」")
+	// 下面两条是本回归测试的核心：更新分支漏列会让它们保持旧值
+	assert.EqualValues(t, 7, stored.RpmLimit, "RPM 上限必须随更新落库")
+	assert.EqualValues(t, 4, stored.RpmMode)
+	assert.EqualValues(t, 12345, stored.TpmLimit, "TPM 上限必须随更新落库")
+	assert.EqualValues(t, 4, stored.TpmMode)
+	assert.EqualValues(t, 2, stored.PolicyVersion, "版本号应递增")
+}
