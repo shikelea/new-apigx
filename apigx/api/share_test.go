@@ -8,10 +8,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
+	"github.com/QuantumNous/new-api/common"
+	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +32,11 @@ const (
 	plainSecret = "sk-upstream-PLAINTEXT-must-never-leak"
 )
 
+// baseChannelSeq 为每个用例分配唯一的底座渠道 ID（base_channel_id 上有唯一索引）。
+var baseChannelSeq atomic.Int64
+
+func nextBaseChannelID() int64 { return 100000 + baseChannelSeq.Add(1) }
+
 type testEnv struct {
 	db     *gorm.DB
 	engine *gin.Engine
@@ -45,6 +53,12 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	require.NoError(t, apigxmodel.Migrate(db))
+	// 投影会调用底座的 channel.Update()（并同步 abilities），因此接口层测试也要有底座表，
+	// 且底座的全局 DB 必须指向同一个库（生产由启动路径设置）。
+	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
+	previousDB := basemodel.DB
+	basemodel.DB = db
+	t.Cleanup(func() { basemodel.DB = previousDB })
 
 	// 主密钥
 	previous, had := os.LookupEnv(secretbox.KeyEnvVar)
@@ -329,4 +343,83 @@ func TestDeleteUpstreamKeyTwice(t *testing.T) {
 	// 第二次删除：墓碑已存在 → 404（而不是静默成功）
 	rec, _ = env.do(t, http.MethodDelete, "/api/keys/"+strconv.FormatInt(keyID, 10), owner, "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// ---- 应用 Key 池（投影触发接口） ----
+
+func TestApplyChannelPoolProjectsKeysIntoBaseChannel(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8101
+
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座影子渠道", Key: "placeholder", Status: common.ChannelStatusEnabled,
+	}).Error)
+
+	groupID := env.createGroup(t, owner, "应用测试组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	for _, spec := range []struct{ stable, secret string }{
+		{"s1", "sk-apply-one-aaaaa"},
+		{"s2", "sk-apply-two-bbbbb"},
+	} {
+		rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
+			`{"stable_key_id":"`+spec.stable+`","name":"`+spec.stable+`","key":"`+spec.secret+`"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/apply", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ := body["data"].(map[string]any)
+	assert.Equal(t, float64(2), data["applied_keys"])
+	// 响应绝不能带出任何凭据信息
+	assert.NotContains(t, rec.Body.String(), "sk-apply")
+	assert.NotContains(t, rec.Body.String(), "enc:v1:")
+
+	var base basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", int(baseChannelID)).First(&base).Error)
+	assert.True(t, base.ChannelInfo.IsMultiKey)
+	assert.Equal(t, 2, base.ChannelInfo.MultiKeySize)
+	keys := base.GetKeys()
+	require.Len(t, keys, 2)
+	assert.NotContains(t, keys, "placeholder", "底座原有的占位 Key 必须被投影结果替换")
+}
+
+// 池内没有可用凭据时必须明确拒绝（409）：这会让渠道不再接收新请求，分享者必须知道。
+func TestApplyChannelPoolRejectsWhenNoUsableKey(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 8102
+
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+
+	groupID := env.createGroup(t, owner, "空池组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/apply", owner, "")
+	assert.Equal(t, http.StatusConflict, rec.Code, "空池必须返回 409 而不是静默成功")
+	assert.Contains(t, rec.Body.String(), "no_usable_key")
+}
+
+// 越权应用别人的渠道必须 404（与不存在等价）。
+func TestApplyChannelPoolIsOwnerScoped(t *testing.T) {
+	env := newTestEnv(t, true)
+	const ownerA, ownerB int64 = 8103, 8104
+
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+
+	groupA := env.createGroup(t, ownerA, "A 的组")
+	channelA := env.createChannel(t, ownerA, groupA, baseChannelID)
+
+	rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelA, 10)+"/apply", ownerB, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// 未登录同样被拒
+	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelA, 10)+"/apply", 0, "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }

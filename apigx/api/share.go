@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
@@ -44,6 +45,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.DELETE("/:id", h.deleteChannel)
 		channels.POST("/:id/keys", h.createUpstreamKey)
 		channels.GET("/:id/keys", h.listUpstreamKeys)
+		channels.POST("/:id/apply", h.applyChannelPool)
 	}
 
 	keys := r.Group("/keys")
@@ -490,4 +492,47 @@ func (h *handler) deleteUpstreamKey(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"deleted": id})
+}
+
+// ---------------------------------------------------------------------------
+// 应用 Key 池（投影到底座渠道）
+// ---------------------------------------------------------------------------
+
+// applyChannelPool 把当前 Key 池投影到底座渠道，使分享者的改动生效。
+//
+// 为什么需要这个显式动作：投影会**重写底座渠道的 Key 列表并清空它按索引存放的状态**
+// （索引会变，旧状态套到别的凭据上就是隐性故障）。因此它不应该在每次加/删 Key 时自动发生，
+// 而应由分享者确认后触发——也便于把「改了但没生效」这件事说清楚。
+//
+// 返回 409 表示池内没有可用凭据：这不是参数错误，而是**渠道将不会接收新请求**
+// （计划书 §9.2），必须让分享者看到。
+func (h *handler) applyChannelPool(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	// 归属校验：不属于自己的渠道一律 404（与不存在等价）
+	shareChannel, err := apigxmodel.GetChannel(h.db, owner, id)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+
+	projection, err := channelpool.ProjectKeyPool(h.db, shareChannel.ID)
+	if err != nil {
+		if errors.Is(err, channelpool.ErrNoUsableKey) {
+			fail(c, http.StatusConflict, "no_usable_key",
+				"no usable upstream key in this channel; the channel will not accept new requests")
+			return
+		}
+		failFromRepo(c, err)
+		return
+	}
+
+	// 只回数量，不回任何凭据信息
+	ok(c, gin.H{"channel_id": shareChannel.ID, "applied_keys": projection.KeyCount})
 }
