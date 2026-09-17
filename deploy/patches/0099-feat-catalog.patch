@@ -1,0 +1,315 @@
+From fed119205ada73991c33137eb4de4af0b6236495 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 07:52:08 +0800
+Subject: [PATCH 99/99] =?UTF-8?q?feat(catalog):=20=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?=E7=9B=AE=E5=BD=95=E5=9C=B0=E5=9F=BA=20=E2=80=94=E2=80=94=20?=
+ =?UTF-8?q?=E5=88=AB=E5=90=8D=E5=80=99=E9=80=89=E7=99=BB=E8=AE=B0=20+=20?=
+ =?UTF-8?q?=E5=8F=AA=E8=AE=A4=E5=B7=B2=E7=A1=AE=E8=AE=A4=E7=9A=84=E8=A7=A3?=
+ =?UTF-8?q?=E6=9E=90=E5=99=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**发现**: 为让模型详情显示"模型介绍", 去查 CanonicalModel.Description 的数据源, 结果核查发现
+  - 全仓搜 NormalizeModelID / 别名写入点 => **零命中**
+  - 数据库实测 canonical_models=0, model_aliases=0; 唯一引用是 migrate.go 建表
+  => 计划书 §4「模型目录: 标准模型/别名/版本/能力说明」与 §5.2「模型映射」**只有 schema、没有实现**
+
+本轮补地基:
+- apigx/model/repo_catalog.go(新): RecordAliasCandidate(幂等, 唯一索引保证; **不覆盖已有行**,
+  否则每次同步上游都会把已确认映射打回待确认) + ResolveCanonicalModel
+- **只认已确认**: 解析只接受 ConfirmationState=已确认(模型注释: 候选"仅提示, 不自动路由"),
+  候选/已拒绝一律不返回; 未命中返回 ok=false, 调用方退回显示上游名
+- 归一化: 大小写+空白归一, **不做版本号剥离**(§8.2: 强行归并会把 gpt-4o 与 gpt-4o-mini 混成一个 => 算错钱)
+- 入口: 在仓储层 CreateModelOffering 登记候选(一处覆盖所有调用方含批量导入); 失败不影响供给创建
+- 用例 3 条: 候选永不解析成结论 / 幂等且不打回待确认 / 未命中 false
+
+**用例当场抓到真错误**: 我给标准模型表加了 deleted_at IS NULL => SQLite 报 no such column
+  => 该表没有软删除列(用 Status/MergedIntoID 表达弃用与合并); 已修并写入注释
+
+下一步(同项其余部分): 候选确认工作流 + 广场/详情显示标准模型 ID + 模型介绍
+---
+ apigx/model/repo_catalog.go      | 153 +++++++++++++++++++++++++++++++
+ apigx/model/repo_catalog_test.go |  87 ++++++++++++++++++
+ apigx/model/repo_offering.go     |  11 ++-
+ 3 files changed, 250 insertions(+), 1 deletion(-)
+ create mode 100644 apigx/model/repo_catalog.go
+ create mode 100644 apigx/model/repo_catalog_test.go
+
+diff --git a/apigx/model/repo_catalog.go b/apigx/model/repo_catalog.go
+new file mode 100644
+index 0000000..e8c5974
+--- /dev/null
++++ b/apigx/model/repo_catalog.go
+@@ -0,0 +1,153 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++package apigxmodel
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"strconv"
++	"strings"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 模型目录（标准模型 + 别名映射）。
++//
++// # 为什么单独一个文件
++//
++// 计划书 §4 要求「模型目录：标准模型、别名、版本、能力说明」，§5.2 要求复用底座价格能力并补「模型映射」；
++// 而在此之前，`apigx_canonical_models` / `apigx_model_aliases` 两张表**只有 schema、没有任何写入方**
++// —— 也就是说这项能力实际上没实现。这里补上最基础的两件事：
++//
++//  1. **候选登记**：把上游模型名登记为「候选」别名（`Relation=2` / `ConfirmationState=0`）；
++//  2. **解析**：按归一化键把上游名解析到标准模型 —— **只认已确认的映射**。
++//
++// 第 2 条是关键：模型注释写明「候选（仅提示，不自动路由）」，因此候选**绝不**能拿来当结论
++// （否则广场会显示一个没人确认过的"标准模型"）。候选到确认之间的工作流（管理员/分享者确认）
++// 属后续步骤，接口层再补。
++
++// 别名关系与确认状态（与 models_identity.go 的列注释一致，这里给常量避免散落魔法数字）。
++const (
++	AliasRelationExact     = 0 // 完全匹配
++	AliasRelationConfirmed = 1 // 已确认别名
++	AliasRelationCandidate = 2 // 候选（仅提示，不自动路由）
++
++	AliasConfirmPending  = 0 // 待确认
++	AliasConfirmApproved = 1 // 已确认
++	AliasConfirmRejected = 2 // 已拒绝
++
++	AliasScopePlatform = 0 // 平台全局
++)
++
++// NormalizeModelIDForAlias 归一化模型名用于匹配。
++//
++// 与模型列注释一致：**大小写与空白归一，不做版本号/日期剥离**（§8.2 —— 强行归并会把
++// `gpt-4o` 与 `gpt-4o-mini` 这类不同模型混成一个，属于会算错钱的错误）。
++func NormalizeModelIDForAlias(raw string) string {
++	return strings.ToLower(strings.Join(strings.Fields(raw), " "))
++}
++
++// aliasKeyHash 复刻列注释里的定义：SHA-256(scope_type|scope_id|source|normalized_model_id)。
++func aliasKeyHash(scopeType int, scopeID int64, source int, normalized string) string {
++	sum := sha256.Sum256([]byte(strconv.Itoa(scopeType) + "|" + strconv.FormatInt(scopeID, 10) + "|" +
++		strconv.Itoa(source) + "|" + normalized))
++	return hex.EncodeToString(sum[:])
++}
++
++// RecordAliasCandidate 把上游模型名登记为**候选**别名（幂等）。
++//
++// 幂等由 `AliasKeyHash` 唯一索引保证：同一个 (范围, 来源, 归一化名) 只会有一行。
++// 已存在的行**不覆盖** —— 否则每次同步上游都会把别人已确认的映射打回"待确认"。
++func RecordAliasCandidate(db *gorm.DB, scopeType int, scopeID int64, source int, externalModelID string) error {
++	if db == nil {
++		return errors.New("apigxmodel: nil db")
++	}
++	normalized := NormalizeModelIDForAlias(externalModelID)
++	if normalized == "" {
++		return fmt.Errorf("%w: external model id is empty", ErrInvalidArgument)
++	}
++	hash := aliasKeyHash(scopeType, scopeID, source, normalized)
++
++	var existing int64
++	if err := db.Model(&ModelAlias{}).Where("alias_key_hash = ? AND deleted_at IS NULL", hash).Count(&existing).Error; err != nil {
++		return err
++	}
++	if existing > 0 {
++		return nil
++	}
++
++	now := common.GetTimestamp()
++	row := ModelAlias{
++		ScopeType:         scopeType,
++		ScopeID:           scopeID,
++		Source:            0, // 上游目录
++		ExternalModelID:   externalModelID,
++		NormalizedModelID: normalized,
++		AliasKeyHash:      hash,
++		Relation:          AliasRelationCandidate,
++		ConfirmationState: AliasConfirmPending,
++		CreatedAt:         now,
++		UpdatedAt:         now,
++	}
++	return db.Create(&row).Error
++}
++
++// ResolveCanonicalModel 按上游/外部模型名解析标准模型。
++//
++// **只认已确认的映射**（`ConfirmationState = 已确认`）：候选与已拒绝一律不返回，
++// 未命中时 `ok=false` —— 调用方据此退回"显示上游名"，而不是编一个标准模型出来。
++// 命中多条时优先**平台全局**范围（scope_type=0），与"平台维护的映射优先于局部建议"一致。
++func ResolveCanonicalModel(db *gorm.DB, externalModelID string) (canonical CanonicalModel, ok bool, err error) {
++	if db == nil {
++		return CanonicalModel{}, false, errors.New("apigxmodel: nil db")
++	}
++	normalized := NormalizeModelIDForAlias(externalModelID)
++	if normalized == "" {
++		return CanonicalModel{}, false, nil
++	}
++
++	var alias ModelAlias
++	findErr := db.Model(&ModelAlias{}).
++		Where("normalized_model_id = ? AND confirmation_state = ? AND target_canonical_model_id > 0 AND deleted_at IS NULL",
++			normalized, AliasConfirmApproved).
++		Order("scope_type ASC, id ASC").
++		First(&alias).Error
++	if findErr != nil {
++		if errors.Is(findErr, gorm.ErrRecordNotFound) {
++			return CanonicalModel{}, false, nil
++		}
++		return CanonicalModel{}, false, findErr
++	}
++
++	// 注意：标准模型表**没有** deleted_at（它用 Status / MergedIntoID 表达弃用与合并，
++	// 不做软删除），因此这里不能按 deleted_at 过滤 —— 写错会直接报 "no such column"。
++	if err := db.Model(&CanonicalModel{}).
++		Where("id = ?", alias.TargetCanonicalModelID).
++		First(&canonical).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return CanonicalModel{}, false, nil
++		}
++		return CanonicalModel{}, false, err
++	}
++	return canonical, true, nil
++}
+diff --git a/apigx/model/repo_catalog_test.go b/apigx/model/repo_catalog_test.go
+new file mode 100644
+index 0000000..1591266
+--- /dev/null
++++ b/apigx/model/repo_catalog_test.go
+@@ -0,0 +1,87 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++package apigxmodel
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++// 模型目录：候选登记 + 解析。
++//
++// 最关键的一条：**候选不得当结论**（模型注释写明"候选仅提示，不自动路由"），
++// 否则广场会显示一个没人确认过的"标准模型"。
++func TestAliasCandidateNeverResolves(t *testing.T) {
++	db := newRepoDB(t)
++
++	require.NoError(t, RecordAliasCandidate(db, AliasScopePlatform, 0, 0, "  GLM-5.3-Flash "))
++
++	// 归一化：大小写与空白归一，但**不做版本号剥离**
++	var row ModelAlias
++	require.NoError(t, db.Where("normalized_model_id = ?", "glm-5.3-flash").First(&row).Error)
++	assert.Equal(t, AliasRelationCandidate, row.Relation)
++	assert.Equal(t, AliasConfirmPending, row.ConfirmationState)
++
++	// 候选阶段：解析必须**失败**（ok=false），而不是给出一个未确认的标准模型
++	_, ok, err := ResolveCanonicalModel(db, "glm-5.3-flash")
++	require.NoError(t, err)
++	assert.False(t, ok, "候选映射不得当作结论")
++
++	// 确认之后才解析得出来
++	canonical := CanonicalModel{APIModelID: "glm-5.3-flash", ModalityType: 1, Status: 1}
++	require.NoError(t, db.Create(&canonical).Error)
++	require.NoError(t, db.Model(&ModelAlias{}).Where("id = ?", row.ID).
++		Updates(map[string]any{"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
++			"target_canonical_model_id": canonical.ID}).Error)
++
++	got, ok, err := ResolveCanonicalModel(db, "GLM-5.3-Flash")
++	require.NoError(t, err)
++	require.True(t, ok)
++	assert.Equal(t, "glm-5.3-flash", got.APIModelID)
++}
++
++// 同一 (范围, 来源, 归一化名) 只登记一次，且**不覆盖**已有行（否则每次同步都会把确认打回待确认）。
++func TestAliasCandidateIsIdempotent(t *testing.T) {
++	db := newRepoDB(t)
++
++	require.NoError(t, RecordAliasCandidate(db, AliasScopePlatform, 0, 0, "m-1"))
++	require.NoError(t, RecordAliasCandidate(db, AliasScopePlatform, 0, 0, "M-1  "))
++
++	var count int64
++	require.NoError(t, db.Model(&ModelAlias{}).Count(&count).Error)
++	assert.Equal(t, int64(1), count, "归一化后同名只应有一行")
++
++	// 已确认的映射不会被后续登记覆盖
++	require.NoError(t, db.Model(&ModelAlias{}).Where("1 = 1").Update("confirmation_state", AliasConfirmApproved).Error)
++	require.NoError(t, RecordAliasCandidate(db, AliasScopePlatform, 0, 0, "m-1"))
++	var row ModelAlias
++	require.NoError(t, db.First(&row).Error)
++	assert.Equal(t, AliasConfirmApproved, row.ConfirmationState, "REGISTER 不得把已确认打回待确认")
++}
++
++// 没有映射时返回 ok=false，而不是编一个标准模型。
++func TestResolveCanonicalModelMissReturnsFalse(t *testing.T) {
++	db := newRepoDB(t)
++	_, ok, err := ResolveCanonicalModel(db, "never-registered")
++	require.NoError(t, err)
++	assert.False(t, ok)
++}
+diff --git a/apigx/model/repo_offering.go b/apigx/model/repo_offering.go
+index e2003bc..ca17722 100644
+--- a/apigx/model/repo_offering.go
++++ b/apigx/model/repo_offering.go
+@@ -78,7 +78,16 @@ func CreateModelOffering(db *gorm.DB, ownerUserID int64, offering *ModelOffering
+ 	offering.Revision = 1
+ 	offering.AliveFlag = AliveFlagAlive
+ 	touchTimestamps(true, &offering.CreatedAt, &offering.UpdatedAt)
+-	return db.Create(offering).Error
++	if err := db.Create(offering).Error; err != nil {
++		return err
++	}
++	// 顺手把上游模型名登记为**候选**别名（幂等；候选不会当结论用，见 repo_catalog.go）。
++	// 放在仓储层是为了让所有调用方（含"一键导入"的批量路径）都覆盖到；
++	// 失败**不影响供给创建**（目录是辅助能力，不该挡住主流程），因此只记录不返回错误。
++	if err := RecordAliasCandidate(db, AliasScopePlatform, 0, 0, offering.UpstreamModelID); err != nil {
++		common.SysError("apigx: record alias candidate failed: " + err.Error())
++	}
++	return nil
+ }
+ 
+ // GetModelOffering 按所有者读取供给。
+-- 
+2.53.0.windows.1
+
