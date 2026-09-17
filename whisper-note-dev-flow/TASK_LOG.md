@@ -1233,3 +1233,22 @@ video     declared    限制 3 （**不支持取消**、/v1/tasks 未启用、�
 **📌 又一自查（lint 抓到真问题）**：`const entries = query.data?.data?.items ?? []` 每次渲染都是**新数组** ⇒ 下游 `useMemo([entries])` **每渲染都重算**（缓存形同虚设 ✗）。已改为 `useMemo(..., [query.data])` 让 `entries` 稳定 ✓ —— 这条是 `react-hooks/exhaustive-deps` 报出来的，属于真实的性能缺陷，不是风格问题 ✓。
 
 **下一步（T3.9 续）**：「我的 API Key」（允许模型 / 来源限制 / **路由策略** ✓）、「任务中心」、「管理后台」（含价格同步与供给审核 ✓）。
+### T3.9 前端：「我的 API Key」——来源限制与路由策略（数据层 + 纯逻辑，UI 下一步）
+
+计划书 §4 该页要「创建、撤销、到期、**允许模型**、**来源限制**与**路由策略**」✓。前四项**底座 `/keys` 页面已有** ✓（§5.2 的策略正是"保留可用表单与后台组件" ✓），因此我们**只补**后两项 ✓。
+
+**本轮交付（数据层与纯逻辑，可独立验证 ✓）**
+
+| 文件 | 作用 |
+|---|---|
+| `src/features/keys/api.ts`（扩） | `getPlatformKeyPreferences(tokenId)` / `setPlatformKeyPreferences(tokenId, payload)` ✓ |
+| `src/features/keys/types.ts`（扩） | `PlatformKeyPreferences` 与 payload 类型（字段与后端 `getPlatformKeyPreferences` **逐一对照** ✓）；`ApiKeysDialogType` 增加 `'apigx-scope'` ✓ |
+| `src/features/keys/lib/apigx-scope.ts` | **纯逻辑**：ID 列表解析（逗号/空格 ✓、空串=不限制 ✓、数字列表**丢弃非数字与 0/负数** ✓）+ 表单→请求体（**整体提交**，因为表单用 `GET` 当前值预填 ⇒ 幂等往返 ✓；绑定来源非法时提交 `0` 而不是猜一个 ID ✓） |
+| `__tests__/apigx-scope.test.ts` | 6 条用例 ✓ |
+
+**先核对语义再写**（不猜 ✓）：后端该接口的字段都是**指针 ⇒ 局部更新** ✓；`default_route_mode` 空串与 `auto` 同义 ✓，`latency/throughput/reliability` 是**请求级候选限定** ✓；`allowed_*` 传空列表即**清空该限制** ✓。
+
+**按规范的检查**：`typecheck` ✅ 0 错；**我的文件** `oxlint` ✅ **0 错 0 警**；新用例 ✅ **6/6**。
+**📌 发现既有问题（未越界修）**：`src/features/keys` 下有 **3 处既有 lint error**（`constants.ts`、`data-table-bulk-actions.tsx` 的 `no-import-type-side-effects` ✓）—— 与本次改动无关 ✓，按规范"只修所涉及文件"**未动它们** ✓，仅在此记录 ✓。
+
+**下一步**：照同目录既有范例 `components/dialogs/cc-switch-dialog.tsx` 写我们的对话框 ✓（复用 `@/components/dialog` ✓ 与项目选择器/输入 ✓），再挂到行操作菜单（`data-table-row-actions.tsx` 已有下拉，插在 CC Switch 之后 ✓）与 `api-keys-dialogs.tsx` 聚合处 ✓，并补 i18n 与 UI 回归用例 ✓。

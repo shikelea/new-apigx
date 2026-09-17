@@ -1,0 +1,273 @@
+From 6279a7908a4430005ffc6e5923088d4a635780fe Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Thu, 17 Sep 2026 21:45:27 +0800
+Subject: [PATCH 82/82] =?UTF-8?q?feat(web):=20T3.9=E3=80=8C=E6=88=91?=
+ =?UTF-8?q?=E7=9A=84=20API=20Key=E3=80=8D=E6=9D=A5=E6=BA=90=E9=99=90?=
+ =?UTF-8?q?=E5=88=B6=E4=B8=8E=E8=B7=AF=E7=94=B1=E7=AD=96=E7=95=A5=EF=BC=88?=
+ =?UTF-8?q?=E6=95=B0=E6=8D=AE=E5=B1=82=20+=20=E7=BA=AF=E9=80=BB=E8=BE=91?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+计划书 §4 该页要"创建/撤销/到期/允许模型/来源限制/路由策略"; 前四项底座 /keys 页已有
+  (§5.2 策略=保留可用表单与后台组件) => 只补后两项
+
+- api.ts(扩): get/setPlatformKeyPreferences
+- types.ts(扩): PlatformKeyPreferences 与 payload(字段与后端逐一对照); ApiKeysDialogType += 'apigx-scope'
+- lib/apigx-scope.ts: ID 列表解析(逗号/空格; 空串=不限制; 数字列表丢弃非数字与 0/负数)
+  + 表单->请求体(整体提交: 表单用 GET 当前值预填 => 幂等往返; 绑定来源非法时提交 0 而非猜 ID)
+- __tests__/apigx-scope.test.ts: 6 条用例
+- 先核对语义再写: 后端字段都是指针 => 局部更新; default_route_mode 空串与 auto 同义;
+  latency/throughput/reliability 是请求级候选限定; allowed_* 传空列表即清空该限制
+
+检查: typecheck ✅ 0 错 / 我的文件 oxlint 0 错 0 警 ✅ / 新用例 6/6 ✅
+发现既有问题(未越界修): features/keys 下有 3 处既有 lint error(constants.ts, data-table-bulk-actions.tsx),
+  与本轮无关, 按规范只修所涉及文件 => 仅记录
+下一步: 照 cc-switch-dialog.tsx 写对话框 + 挂到行操作菜单与 api-keys-dialogs 聚合处 + i18n + UI 用例
+---
+ .../keys/__tests__/apigx-scope.test.ts        | 71 ++++++++++++++++++
+ web/src/features/keys/api.ts                  | 16 ++++
+ web/src/features/keys/lib/apigx-scope.ts      | 74 +++++++++++++++++++
+ web/src/features/keys/types.ts                | 34 +++++++++
+ 4 files changed, 195 insertions(+)
+ create mode 100644 web/src/features/keys/__tests__/apigx-scope.test.ts
+ create mode 100644 web/src/features/keys/lib/apigx-scope.ts
+
+diff --git a/web/src/features/keys/__tests__/apigx-scope.test.ts b/web/src/features/keys/__tests__/apigx-scope.test.ts
+new file mode 100644
+index 0000000..ded7b01
+--- /dev/null
++++ b/web/src/features/keys/__tests__/apigx-scope.test.ts
+@@ -0,0 +1,71 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import { describe, expect, it } from 'vitest'
++
++import { buildScopePayload, parseIdList, parseNumberIdList } from '../lib/apigx-scope'
++
++describe('ID 列表解析', () => {
++  it('逗号与空格都能分隔', () => {
++    expect(parseIdList('glm-5.3-flash, qwen3.8-max  deepseek-v3')).toEqual([
++      'glm-5.3-flash',
++      'qwen3.8-max',
++      'deepseek-v3',
++    ])
++  })
++
++  it('空串得到空列表（= 不限制），且忽略多余分隔符', () => {
++    expect(parseIdList('  ,, ')).toEqual([])
++  })
++
++  it('数字列表丢弃非数字与零/负数（不猜、不补 0）', () => {
++    expect(parseNumberIdList('1, abc, 0, -2, 7')).toEqual([1, 7])
++  })
++})
++
++describe('偏好请求体构造', () => {
++  const base = {
++    scopeMode: '0',
++    pinnedOfferingId: '',
++    allowedModelIds: '',
++    allowedOwnerUserIds: '',
++    allowFallback: true,
++    defaultRouteMode: 'auto',
++  }
++
++  it('整体提交全部字段（表单已预填当前值，因此是幂等往返）', () => {
++    const payload = buildScopePayload(base)
++
++    expect(payload.scope_mode).toBe(0)
++    expect(payload.pinned_offering_id).toBe(0)
++    expect(payload.allowed_model_ids).toEqual([])
++    expect(payload.allowed_owner_user_ids).toEqual([])
++    expect(payload.allow_fallback).toBe(true)
++    expect(payload.default_route_mode).toBe('auto')
++  })
++
++  it('绑定来源为非法输入时提交 0（= 未绑定），而不是猜一个 ID', () => {
++    expect(buildScopePayload({ ...base, pinnedOfferingId: 'abc' }).pinned_offering_id).toBe(0)
++  })
++
++  it('填写的模型与分享者被解析进请求体', () => {
++    const payload = buildScopePayload({ ...base, allowedModelIds: 'a,b', allowedOwnerUserIds: '3 4' })
++
++    expect(payload.allowed_model_ids).toEqual(['a', 'b'])
++    expect(payload.allowed_owner_user_ids).toEqual([3, 4])
++  })
++})
+\ No newline at end of file
+diff --git a/web/src/features/keys/api.ts b/web/src/features/keys/api.ts
+index 0f90490..dca1d43 100644
+--- a/web/src/features/keys/api.ts
++++ b/web/src/features/keys/api.ts
+@@ -26,6 +26,8 @@ import type {
+   SearchApiKeysParams,
+   ApiKeyFormData,
+   TokenAutoGroupsConfig,
++  PlatformKeyPreferencesPayload,
++  PlatformKeyPreferencesResponse,
+ } from './types'
+ 
+ // ============================================================================
+@@ -125,3 +127,17 @@ export async function fetchTokenKeysBatch(ids: number[]): Promise<{
+   const res = await api.post('/api/token/batch/keys', { ids })
+   return res.data
+ }
++
++// APIGX：平台 Key 的来源限制与路由策略偏好（读 / 写）。
++export async function getPlatformKeyPreferences(tokenId: number): Promise<PlatformKeyPreferencesResponse> {
++  const res = await api.get(`/api/apigx/platform-keys/${tokenId}/preferences`)
++  return res.data
++}
++
++export async function setPlatformKeyPreferences(
++  tokenId: number,
++  payload: PlatformKeyPreferencesPayload
++): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.put(`/api/apigx/platform-keys/${tokenId}/preferences`, payload)
++  return res.data
++}
+\ No newline at end of file
+diff --git a/web/src/features/keys/lib/apigx-scope.ts b/web/src/features/keys/lib/apigx-scope.ts
+new file mode 100644
+index 0000000..9120ee3
+--- /dev/null
++++ b/web/src/features/keys/lib/apigx-scope.ts
+@@ -0,0 +1,74 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/import type { PlatformKeyPreferencesPayload } from '../types'
++
++/** 路由策略选项（空串与 auto 同义：不加限定，由后端统一解释）。 */
++export const ROUTE_MODE_OPTIONS: { value: string; labelKey: string }[] = [
++  { value: 'auto', labelKey: 'apigxKey.routeMode.auto' },
++  { value: 'latency', labelKey: 'apigxKey.routeMode.latency' },
++  { value: 'throughput', labelKey: 'apigxKey.routeMode.throughput' },
++  { value: 'reliability', labelKey: 'apigxKey.routeMode.reliability' },
++]
++
++/** 解析逗号/空格分隔的 ID 列表；空串得到**空列表**（= 不限制）。 */
++export function parseIdList(text: string): string[] {
++  return text
++    .split(/[\s,]+/)
++    .map((part) => part.trim())
++    .filter((part) => part !== '')
++}
++
++/** 解析数字 ID 列表；非数字项被丢弃（不猜、不补 0）。 */
++export function parseNumberIdList(text: string): number[] {
++  const parsed: number[] = []
++  for (const part of parseIdList(text)) {
++    const value = Number.parseInt(part, 10)
++    if (Number.isFinite(value) && value > 0) {
++      parsed.push(value)
++    }
++  }
++  return parsed
++}
++
++/** 表单状态（都是字符串，便于受控输入）。 */
++export interface ScopeFormState {
++  scopeMode: string
++  pinnedOfferingId: string
++  allowedModelIds: string
++  allowedOwnerUserIds: string
++  allowFallback: boolean
++  defaultRouteMode: string
++}
++
++/**
++ * 表单 → 请求体。
++ *
++ * 提交**全部**字段：表单已用 `GET` 的当前值预填，因此整体提交是**幂等的往返**
++ * （不会误清空用户没动过的字段 ✓）。后端只接受非空指针字段，所以这里给出全部字段是安全的。
++ */
++export function buildScopePayload(form: ScopeFormState): PlatformKeyPreferencesPayload {
++  const pinned = Number.parseInt(form.pinnedOfferingId.trim(), 10)
++  return {
++    scope_mode: Number.parseInt(form.scopeMode, 10) || 0,
++    pinned_offering_id: Number.isFinite(pinned) && pinned > 0 ? pinned : 0,
++    allowed_model_ids: parseIdList(form.allowedModelIds),
++    allowed_owner_user_ids: parseNumberIdList(form.allowedOwnerUserIds),
++    allow_fallback: form.allowFallback,
++    default_route_mode: form.defaultRouteMode,
++  }
++}
+\ No newline at end of file
+diff --git a/web/src/features/keys/types.ts b/web/src/features/keys/types.ts
+index 78bc16d..4c980cd 100644
+--- a/web/src/features/keys/types.ts
++++ b/web/src/features/keys/types.ts
+@@ -111,3 +111,37 @@ export type ApiKeysDialogType =
+   | 'delete'
+   | 'batch-delete'
+   | 'cc-switch'
++  | 'apigx-scope'
++
++// ============================================================================
++// APIGX：平台 Key 的来源限制与路由策略（计划书 §9.1：偏好保存到平台 Key）
++// ============================================================================
++
++/** 平台 Key 偏好（字段与后端 `getPlatformKeyPreferences` 一致）。 */
++export interface PlatformKeyPreferences {
++  token_id: number
++  /** 是否已配置过（false 时其余字段是后端默认值） */
++  configured: boolean
++  scope_mode: number
++  pinned_offering_id: number
++  allowed_model_ids: string[]
++  allowed_owner_user_ids: number[]
++  allow_fallback: boolean
++  /** 空串与 `auto` 都表示自动（不加限定） */
++  default_route_mode: string
++}
++
++export interface PlatformKeyPreferencesResponse {
++  success: boolean
++  data?: PlatformKeyPreferences
++}
++
++/** 偏好更新请求。后端按**非空指针字段**做局部更新。 */
++export interface PlatformKeyPreferencesPayload {
++  scope_mode?: number
++  pinned_offering_id?: number
++  allowed_model_ids?: string[]
++  allowed_owner_user_ids?: number[]
++  allow_fallback?: boolean
++  default_route_mode?: string
++}
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+
