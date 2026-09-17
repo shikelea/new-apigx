@@ -189,13 +189,9 @@ func Distribute() func(c *gin.Context) {
 		// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
 		// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
 		if channel != nil {
-			lease, ok := relayhook.Acquire(c, channel.Id)
-			if !ok {
-				return
-			}
-			if lease != nil {
-				defer lease.Release()
-			}
+			// 容量租约由 SetupContextForSelectedChannel **按每次尝试**获取（底座的失败重试
+			// 会重新选渠道并再次经过那里），这里只负责在请求全部结束后释放最后一次的租约。
+			defer relayhook.ReleaseFromContext(c)
 		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
@@ -716,6 +712,13 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	} else {
 		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
+	}
+	// APIGX 共享容量控制（T1.7）：**每次尝试**都按当次选中的渠道与凭据预留容量。
+	// 放在这个函数里而不是 Distributor 里，是因为底座的失败重试会**重新选择渠道**并再次
+	// 经过这里——只有在这里预留，才能保证「本次真正使用的渠道与凭据」都被容量约束到，
+	// 也才能借用底座既有的重选机制（无需自己写一套候选循环）。
+	if !relayhook.AcquireForAttempt(c, channel.Id) {
+		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)

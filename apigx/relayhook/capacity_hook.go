@@ -290,3 +290,51 @@ func abortJSON(c *gin.Context, status int, code, message string) {
 		"error": gin.H{"message": message, "type": "new_api_error", "code": code},
 	})
 }
+
+// ---------------------------------------------------------------------------
+// 每次尝试的租约（与底座的「重试会重新选渠道」对齐）
+// ---------------------------------------------------------------------------
+
+// leaseContextKey 是存放在 gin 上下文里的租约键。
+const leaseContextKey = "apigx_capacity_lease"
+
+// AcquireForAttempt 为**本次尝试**获取容量租约。
+//
+// 必须由「每一次尝试都会经过」的位置调用（底座的 `SetupContextForSelectedChannel`）：
+// 底座的失败重试会**重新选择渠道**并再次经过该函数，因此：
+//   - 每次尝试都按**当次选中的渠道与凭据**重新预留，不会出现「换了渠道却仍用旧渠道的租约」；
+//   - 进入新尝试前会先释放上一次的租约，避免重试链上累积占用；
+//   - 请求结束由调用方（Distributor 的 defer）统一释放最后一次租约。
+//
+// 返回 false 表示**容量不足或账本不可用，且已经写出错误响应**，调用方必须停止本次尝试。
+func AcquireForAttempt(c *gin.Context, channelID int) bool {
+	if c == nil {
+		return true
+	}
+	// 上一次尝试的租约先归还：否则重试会同时占用两个渠道的容量
+	ReleaseFromContext(c)
+
+	lease, ok := Acquire(c, channelID)
+	if !ok {
+		return false
+	}
+	if lease != nil {
+		c.Set(leaseContextKey, lease)
+	}
+	return true
+}
+
+// ReleaseFromContext 释放上下文里持有的租约（幂等；无租约时为空操作）。
+func ReleaseFromContext(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	value, exists := c.Get(leaseContextKey)
+	if !exists {
+		return
+	}
+	if lease, ok := value.(*Lease); ok {
+		lease.Release()
+	}
+	c.Set(leaseContextKey, (*Lease)(nil))
+}
