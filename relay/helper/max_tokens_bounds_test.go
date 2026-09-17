@@ -2,6 +2,7 @@ package helper
 
 import (
 	"bytes"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -152,6 +153,40 @@ func TestCountBounds(t *testing.T) {
 		body, err := common.Marshal(map[string]any{"model": "m", "query": "q", "documents": docs})
 		require.NoError(t, err)
 		_, err = GetAndValidateRerankRequest(newJSONContext(t, string(body)))
+		require.NoError(t, err)
+	})
+}
+
+// 音频上传大小上限：缺上限时一个超大文件会先吃掉内存与磁盘。
+func TestAudioUploadSizeBound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newMultipartContext := func(t *testing.T, size int) *gin.Context {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		part, err := writer.CreateFormFile("file", "sample.mp3")
+		require.NoError(t, err)
+		_, err = part.Write(bytes.Repeat([]byte("a"), size))
+		require.NoError(t, err)
+		require.NoError(t, writer.WriteField("model", "whisper-1"))
+		require.NoError(t, writer.Close())
+
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", body)
+		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+		return c
+	}
+
+	t.Run("audio upload over the limit is rejected", func(t *testing.T) {
+		c := newMultipartContext(t, MaxAudioFileSizeBytes+1)
+		_, err := GetAndValidAudioRequest(c, relayconstant.RelayModeAudioTranscription)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "too large")
+	})
+
+	t.Run("audio upload at the limit is accepted", func(t *testing.T) {
+		c := newMultipartContext(t, MaxAudioFileSizeBytes)
+		_, err := GetAndValidAudioRequest(c, relayconstant.RelayModeAudioTranscription)
 		require.NoError(t, err)
 	})
 }

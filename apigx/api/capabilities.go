@@ -88,11 +88,12 @@ var capabilityMatrix = []capabilityEntry{
 		Evidence: "复用底座适配器；已验转写往返与计量；缺文件返回 4xx（台账 D-024）",
 		Verified: []string{
 			"转写协议往返与计量落库",
+			"语音合成（speech）返回音频与计量落库",
 			"缺少音频文件被拒（4xx，台账 D-024）",
+			"上传大小上限 25 MiB（超限 400，台账 D-026）",
 		},
 		NotVerified: []string{
-			"语音合成（speech）",
-			"上传大小/时长限制",
+			"上传音频的**时长**限制（由上游判定，平台不做音频解码）",
 		},
 	},
 	{

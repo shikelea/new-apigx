@@ -59,6 +59,9 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 	return request, err
 }
 
+// MaxAudioFileSizeBytes 是音频上传的大小上限（25 MiB）。
+const MaxAudioFileSizeBytes = 25 << 20
+
 func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, error) {
 	audioRequest := &dto.AudioRequest{}
 	err := common.UnmarshalBodyReusable(c, audioRequest)
@@ -77,8 +80,17 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 		// **缺少音频文件属客户端错误，必须在校验点拦下并给出 4xx**（阶段 3 实测发现）：
 		// 此前它一路走到适配器的打开文件处，报的是通用错误 ⇒ 最终 **500**，
 		// 调用方会误判成"平台故障"并重试 —— 而事实是它自己的请求不合法。
-		if _, fileErr := c.FormFile("file"); fileErr != nil {
+		fileHeader, fileErr := c.FormFile("file")
+		if fileErr != nil {
 			return nil, types.NewError(fmt.Errorf("file is required"),
+				types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		// 上传大小必须有界（计划书阶段 3：语音的"上传大小/时长限制"）。
+		// 没有上限时，一个超大文件会先把内存/磁盘吃掉；取 25 MiB 与主流转写实现一致。
+		// 时长由上游判定（我们不做音频解码），平台只对**大小**设界。
+		if fileHeader.Size > MaxAudioFileSizeBytes {
+			return nil, types.NewError(
+				fmt.Errorf("file is too large: limit is %d bytes", MaxAudioFileSizeBytes),
 				types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 		}
 		if audioRequest.ResponseFormat == "" {
