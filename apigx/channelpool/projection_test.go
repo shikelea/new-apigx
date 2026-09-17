@@ -590,3 +590,63 @@ func TestRecordKeyOutcomeAfterIsolationStillMapsCorrectly(t *testing.T) {
 	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&a).Error)
 	assert.Zero(t, a.LastOKAt, "不得记到已隔离的那把上")
 }
+
+// ---- 索引映射缓存 ----
+
+// 缓存必须能命中（避免每次统计都解密全部凭据），且**在池子变化后失效**。
+func TestMappingCacheHitsAndInvalidates(t *testing.T) {
+	db := setupProjectionEnv(t)
+	ResetMappingCacheForTest()
+	t.Cleanup(ResetMappingCacheForTest)
+	const owner int64 = 9701
+	const baseChannelID int64 = 9494
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
+	}).Error)
+
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-cache-one-aaaa", "sk-cache-two-bbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID) // apply 内部会失效缓存
+	require.NoError(t, err)
+
+	first, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
+	require.NoError(t, err)
+	require.Equal(t, 2, first.KeyCount)
+
+	// 命中同一份对象（不是重建）
+	second, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
+	require.NoError(t, err)
+	assert.Same(t, first, second, "TTL 内应命中缓存而不是重新解密构建")
+
+	// 显式失效后必须重建（拿到的是新对象）
+	InvalidateMappingCache(shareChannel.ID)
+	third, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
+	require.NoError(t, err)
+	assert.NotSame(t, first, third, "失效后必须重新构建")
+	assert.Equal(t, 2, third.KeyCount)
+}
+
+// 统计走缓存路径时，索引翻译结果必须与不带缓存时一致。
+func TestCachedMappingStillTranslatesCorrectly(t *testing.T) {
+	db := setupProjectionEnv(t)
+	ResetMappingCacheForTest()
+	t.Cleanup(ResetMappingCacheForTest)
+	const owner int64 = 9702
+	const baseChannelID int64 = 9495
+	require.NoError(t, db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeyMode: constant.MultiKeyModePolling},
+	}).Error)
+
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-ct-one-aaaaaa", "sk-ct-two-bbbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, RecordKeyOutcome(db, int(baseChannelID), 1, KeyOutcome{Success: true}))
+
+	var b apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-b").First(&b).Error)
+	assert.Positive(t, b.LastOKAt, "缓存路径下索引 1 仍应翻译到 stable-b")
+}

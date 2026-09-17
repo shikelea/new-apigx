@@ -244,6 +244,9 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	if restoredAutoDisabled {
 		basemodel.InitChannelCache()
 	}
+
+	// 池子与渠道状态都变了：映射缓存必须失效，否则后续统计会把索引翻译到变化前的凭据上。
+	InvalidateMappingCache(built.shareChannel.ID)
 	return nil
 }
 

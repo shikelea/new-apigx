@@ -52,7 +52,7 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
 
 	// 索引映射**以底座渠道实际的 Key 列表为准**（见 MapBaseKeyIndexes 的注释）：
 	// 按「当前可用 Key」重算会在隔离/删除之后让两套索引分歧，导致统计落空或记错凭据。
-	projection, err := MapBaseKeyIndexes(db, shareChannel.ID)
+	projection, err := MapBaseKeyIndexesCached(db, shareChannel.ID)
 	if err != nil {
 		return err
 	}
