@@ -25,6 +25,7 @@ import {
   FlaskConical,
   Store,
   Coins,
+  Settings2,
   Share2,
   Key,
   LayoutDashboard,
@@ -79,6 +80,11 @@ export function useSidebarData(): SidebarData {
             title: t('usage.title'),
             url: '/usage',
             icon: Coins,
+          },
+          {
+            title: t('apigxPlatform.nav'),
+            url: '/apigx-platform',
+            icon: Settings2,
           },
           {
             title: t('Chat'),
