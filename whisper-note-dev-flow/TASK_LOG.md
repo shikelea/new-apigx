@@ -1856,3 +1856,23 @@ i18next 日志 `missingKey en translation usage.title` ✓ ⇒ **`translation` �
 本轮已 `bun run build` → `go build` → 重启 ✓，并复验**网关返回的 `index.js` 与本地 dist 一致** ✓（`index.2b8117fcd2.js` ✓，含中文译文 ✓）。
 
 **教训已写入 `CODE_STYLE.md`**：§五 构建与验证（embed ✓）、§六 i18n 层级（键必须写在 `translation` 里 ✓）。
+## 二开纠偏：删掉我重复造的页面（用户指出"这些和底座重合"）
+
+**用户指出（都对）**：我的用量该在**常规**里 ✓、任务中心不知是什么 ✓、我的用量与数据看板/使用日志重合 ✓、模型广场该直接用/改造底座的 `/pricing` ✓。
+
+**核对结果**：底座**本来就有** `Dashboard` ✓、`Usage Logs` ✓、**`Task Logs`（/usage-logs/task）** ✓、以及**模型广场 `/pricing` + `/pricing/$modelId`** ✓
+⇒ 我此前新造的 `/usage`、`/task-center`、`/plaza` 都是**平行重复** ✗。
+
+**本轮已做**：
+1. **导航归位** ✓：模型广场 → **General 常规** ✓；我的分享 → **Personal 个人** ✓；平台管理 → **Admin 管理** ✓；
+   删除「我的用量」「任务中心」两个入口 ✓（不再另起分组 ✓）。
+2. **删除重复页面** ✓：`features/usage/**` ✓、`features/task-center/**` ✓ 及其路由 `routes/_authenticated/{usage,task-center}` ✓
+   —— 它们与底座 `Dashboard` / `Usage Logs` / `Task Logs` 重复 ✓；删后 typecheck **0 错** ✓、hooks 用例 **13/13** ✓。
+3. 前端 + **二进制重建** ✓ 并按 embed 规则复验：网关返回的 `index.js` 与本地 dist **一致** ✓（`index.972de6756c.js` ✓）。
+
+**如实记录两处我自己的失误** ✓：
+- 我第一次"确认没有路由"时**列表被截断**（只看了 40 行）✗ ⇒ 结论错了 ✓；删掉 feature 后 typecheck 立刻报错 ✓ 才暴露 ✓。**教训：判断"不存在"之前要确认没有截断** ✓。
+- 导航补丁**反复插入重复条目** ✗（同一条被加了两次 ✓），靠脚本里的**写前校验**（各恰一条 ✓）才收敛 ✓。
+- 我改动了一条**底座测试**（`sidebar-config.test.tsx` 中"个人分组恰好 3 条"✓ → 4 条 ✓），因为新增「我的分享」是**有意的产品改动** ✓，并保住了它"Security 紧跟 Profile"的本意 ✓。
+
+**提交**：fork `b3a87c6`｜补丁 **111 个**
