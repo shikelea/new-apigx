@@ -10,9 +10,32 @@
 
 ## 当前任务
 [进行中] 阶段 3 收口 → 阶段 4 交付（计划见 `TASK_LOG.md` **顶部**，含验收标准与任务清单 T3.9 / U-1 / U-2 / U-3 / T4.1–T4.6）。
-- 进度：**1/10 项完成**（T3.9 已收口，见 [012]）；首轮完成 **§3 规划入档** 与 **T3.9 盘点**（结论：我们**没有**阶段 3 的能力矩阵/验收报告，只有 `docs/stage0/protocol-matrix.md`；下一步新建 `docs/stage3/acceptance-report.md` 逐行给结论）
+- 进度：**2/10 项完成**（T3.9 见 [012]；**U-1 已完成**，见 [013]）；首轮完成 **§3 规划入档** 与 **T3.9 盘点**（结论：我们**没有**阶段 3 的能力矩阵/验收报告，只有 `docs/stage0/protocol-matrix.md`；下一步新建 `docs/stage3/acceptance-report.md` 逐行给结论）
 - 用户提出的 3 条问题（U-1 渠道流程 / U-2 邀请界面合并 / U-3 分享者消耗视图）**已记录**，并已进入本轮计划；其中 U-1/U-2 的待澄清点由我拍板（决定已写入 TASK_LOG）
 - 如实保留的未验证项：语音**上传时长**（平台不解码音频）
+### [013] 2026-09-18 分享渠道/分组的「发布」语义真正生效 + 前端向导（U-1）
+
+**做了什么**：用户反馈"新建渠道之后直接就确定、直接就轮询、也不选择模型"。查清根因后分三步收口：
+① 修正被写错的发布状态语义；② 平台侧发布/暂停端点；③ **闸门真正生效**（广场可见性 + 路由候选）+ 前端向导与状态展示。
+
+**涉及模块**：apigx/model、apigx/api、前端 share、验收脚本、流程文档
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `apigx/model/repo_share.go` | 仓储 | 新增 `ShareGroupPublish{Draft,Pending,Published,Suspended,Retired}` 常量与 `SetShareGroupPublishStatus` |
+| `apigx/api/share.go` | 接口 | 新建分组初始状态 = 公开⇒待审核 / 非公开⇒已发布；可见性未指定按公开处理（保守默认）；新增 `POST /api/apigx/share-groups/:id/publish-status` |
+| `apigx/model/repo_plaza.go` | 闸门 | `plazaVisibilityPredicate` 追加 `AND g.publish_status = 已发布` ⇒ 草稿/待审核/已暂停一律不可见 |
+| `apigx/model/repo_offering.go` | 闸门 | `ListPublishedOfferingsByModel` 追加"分组必须已发布"子查询 ⇒ 不进入路由候选 |
+| `web/src/features/share/index.tsx` | 前端 | 新建渠道后**自动跳转渠道详情**（选模型）；分组表显示**发布状态** |
+| `web/src/features/share/components/*` | 前端 | `ChannelCreateDialog.onSaved` 带上新渠道 id |
+| 验收脚本 ×4、`chat-matrix` | 工具 | 建组后补平台审核调用；setup 按**模型去重**（修上一轮记录的异常根因） |
+
+**验证**：`go build` ✅；`apigx/api`+`apigx/model`+`apigx/routing` 用例全过；`capability-gates` **12/12**；
+对话矩阵 setup **clean exit 0** + verify **5/5**；前端 typecheck 0 错 / oxlint 0 错 / 相关用例 13/13 / build ✅；
+网关产物哈希随改动变化（`index.902c144b90.js` → `index.5722693234.js`）⇒ 改动确实上线
+**剩余风险**：① 渠道**尚未**单独建发布状态（当前随分组生效），若日后要按渠道粒度暂停需扩展；
+② 渠道列表只显示**分组**发布状态，未显示渠道自身健康/暂停意图；③ MySQL 未在本机验证（改动只加列等值条件，方言无关，但按规范如实标注未跑 MySQL）
 ### [012] 2026-09-18 阶段 3 验收报告：六类能力支持范围逐项结论（T3.9）
 
 **做了什么**：按计划书 §11 阶段 3 的验收要求，把六类能力**逐行给出结论**（`已验证` / `明确不支持` / `未验证+补齐条件`），

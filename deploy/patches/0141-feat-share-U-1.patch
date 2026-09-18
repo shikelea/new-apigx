@@ -1,0 +1,172 @@
+From 510860d09203a5a08ea84eb2dce3b980231dbf47 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 15:45:29 +0800
+Subject: [PATCH 141/141] =?UTF-8?q?feat(share):=20U-1=20=E6=94=B6=E5=8F=A3?=
+ =?UTF-8?q?=20=E2=80=94=E2=80=94=20=E5=88=86=E7=BB=84=E5=8F=91=E5=B8=83?=
+ =?UTF-8?q?=E7=8A=B6=E6=80=81=E5=9C=A8=E7=95=8C=E9=9D=A2=E5=8F=AF=E8=A7=81?=
+ =?UTF-8?q?=EF=BC=88=E5=88=86=E7=BB=84=E8=A1=A8=E6=96=B0=E5=A2=9E=E3=80=8C?=
+ =?UTF-8?q?=E5=8F=91=E5=B8=83=E7=8A=B6=E6=80=81=E3=80=8D=E5=88=97=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+补上 U-1 的最后一块：分享者能**在界面上看到**自己的分组处于「草稿/待审核/已发布/已暂停」，
+而不是"建完以为已经就绪"（未发布时既不可见于广场，也不会进入路由候选）。
+- share/index.tsx：分组表新增「发布状态」列；状态→文案用**查表函数**（遵守 web/AGENTS.md §3.2，避免嵌套三元）
+- i18n：7 个语言文件各补 4 条（Pending review / Suspended / Retired / Draft），写入 translation 命名空间
+- 文档：TASK_LOG 勾掉 U-1；PROJECT_STATUS 新增 [013]（含改动明细与三条如实标注的剩余风险）
+检查: typecheck 0 错 / oxlint 0 错 / share+i18n 用例 13/13 / build ✅ / 网关产物哈希随改动变化 ✅
+---
+ web/src/features/share/index.tsx | 10 ++++++++++
+ web/src/i18n/locales/en.json     |  6 +++++-
+ web/src/i18n/locales/fr.json     |  6 +++++-
+ web/src/i18n/locales/ja.json     |  6 +++++-
+ web/src/i18n/locales/ru.json     |  6 +++++-
+ web/src/i18n/locales/vi.json     |  6 +++++-
+ web/src/i18n/locales/zh-TW.json  |  6 +++++-
+ web/src/i18n/locales/zh.json     |  6 +++++-
+ 8 files changed, 45 insertions(+), 7 deletions(-)
+
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index a64aeb5..2fb8c3e 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -38,6 +38,15 @@ import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/l
+ import type { ShareChannel, ShareGroup } from './types'
+ 
+ /** 我的分享：分组与渠道。 */
++/** 分组发布状态 → i18n 键（查表代替嵌套三元，遵守 web/AGENTS.md §3.2）。 */
++function groupPublishStatusLabelKey(status: number): string {
++  if (status === 0) return 'Draft'
++  if (status === 1) return 'Pending review'
++  if (status === 2) return 'Published'
++  if (status === 3) return 'Suspended'
++  return 'Retired'
++}
++
+ export function MyShares() {
+   const { t } = useTranslation()
+   const queryClient = useQueryClient()
+@@ -86,6 +95,7 @@ export function MyShares() {
+   })
+ 
+   const groupColumns: StaticDataTableColumn<ShareGroup>[] = [
++    { id: 'publish_status', header: t('Status'), cell: (row) => t(groupPublishStatusLabelKey(row.publish_status)) },
+     { id: 'name', header: t('share.group.name'), cell: (row) => row.name },
+     {
+       id: 'visibility',
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index acc3f83..1a3dabe 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6762,6 +6762,10 @@
+     "Choose models": "Choose models",
+     "Import selected": "Import selected",
+     "These models were reported by the upstream. Import the ones you want to share.": "These models were reported by the upstream. Import the ones you want to share.",
+-    "No model reported by the upstream": "No model reported by the upstream"
++    "No model reported by the upstream": "No model reported by the upstream",
++    "Pending review": "Pending review",
++    "Suspended": "Suspended",
++    "Retired": "Retired",
++    "Draft": "Draft"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index c58f4b3..4bf46a4 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6762,6 +6762,10 @@
+     "Choose models": "Choisir des modèles",
+     "Import selected": "Importer la sélection",
+     "These models were reported by the upstream. Import the ones you want to share.": "Ces modèles proviennent de l'amont. Importez seulement ceux à partager.",
+-    "No model reported by the upstream": "L'amont n'a signalé aucun modèle"
++    "No model reported by the upstream": "L'amont n'a signalé aucun modèle",
++    "Pending review": "En attente de validation",
++    "Suspended": "Suspendu",
++    "Retired": "Retiré",
++    "Draft": "Brouillon"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index ee28c1b..b9599c8 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6762,6 +6762,10 @@
+     "Choose models": "モデルを選択",
+     "Import selected": "選択をインポート",
+     "These models were reported by the upstream. Import the ones you want to share.": "上流が返したモデル一覧です。共有したいものだけインポートしてください。",
+-    "No model reported by the upstream": "上流からモデルが返されませんでした"
++    "No model reported by the upstream": "上流からモデルが返されませんでした",
++    "Pending review": "審査待ち",
++    "Suspended": "停止中",
++    "Retired": "廃止",
++    "Draft": "下書き"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 7dfa141..105566d 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6762,6 +6762,10 @@
+     "Choose models": "Выбор моделей",
+     "Import selected": "Импортировать выбранные",
+     "These models were reported by the upstream. Import the ones you want to share.": "Это модели, о которых сообщил вышестоящий сервис. Импортируйте только нужные.",
+-    "No model reported by the upstream": "Вышестоящий сервис не сообщил моделей"
++    "No model reported by the upstream": "Вышестоящий сервис не сообщил моделей",
++    "Pending review": "На проверке",
++    "Suspended": "Приостановлено",
++    "Retired": "Выведено",
++    "Draft": "Черновик"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index a0e1de3..6d36007 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6762,6 +6762,10 @@
+     "Choose models": "Chọn mô hình",
+     "Import selected": "Nhập mục đã chọn",
+     "These models were reported by the upstream. Import the ones you want to share.": "Đây là danh sách mô hình do thượng nguồn trả về. Chỉ nhập những mô hình bạn muốn chia sẻ.",
+-    "No model reported by the upstream": "Thượng nguồn không trả về mô hình nào"
++    "No model reported by the upstream": "Thượng nguồn không trả về mô hình nào",
++    "Pending review": "Chờ duyệt",
++    "Suspended": "Tạm dừng",
++    "Retired": "Ngừng sử dụng",
++    "Draft": "Bản nháp"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 2d93735..8d15b66 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6762,6 +6762,10 @@
+     "Choose models": "選擇模型",
+     "Import selected": "匯入所選",
+     "These models were reported by the upstream. Import the ones you want to share.": "這些是上游回傳的模型清單。只匯入你想分享的那些。",
+-    "No model reported by the upstream": "上游沒有回傳任何模型"
++    "No model reported by the upstream": "上游沒有回傳任何模型",
++    "Pending review": "待審核",
++    "Suspended": "已暫停",
++    "Retired": "已退役",
++    "Draft": "草稿"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index c5a38b7..e7dea5b 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6762,6 +6762,10 @@
+     "Choose models": "选择模型",
+     "Import selected": "导入所选",
+     "These models were reported by the upstream. Import the ones you want to share.": "这些是上游返回的模型清单。只导入你想分享的那些。",
+-    "No model reported by the upstream": "上游没有返回任何模型"
++    "No model reported by the upstream": "上游没有返回任何模型",
++    "Pending review": "待审核",
++    "Suspended": "已暂停",
++    "Retired": "已退役",
++    "Draft": "草稿"
+   }
+ }
+-- 
+2.53.0.windows.1
+
