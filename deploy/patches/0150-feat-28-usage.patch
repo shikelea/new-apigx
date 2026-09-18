@@ -1,0 +1,140 @@
+From 3be663f58282dffab15385cead4173250e28f1c0 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 16:45:16 +0800
+Subject: [PATCH 150/150] =?UTF-8?q?feat(#28):=20usage=20=E7=9A=84=E3=80=8C?=
+ =?UTF-8?q?=E9=87=8D=E5=A4=8D=E3=80=8D=E4=B8=8E=E3=80=8C=E4=BF=AE=E8=AE=A2?=
+ =?UTF-8?q?=E3=80=8D=E5=81=9A=E5=AE=9E=20=E2=80=94=E2=80=94=20=E8=BF=BD?=
+ =?UTF-8?q?=E5=8A=A0=E6=A0=A1=E6=AD=A3=E4=BA=8B=E4=BB=B6=EF=BC=8C=E7=BB=9D?=
+ =?UTF-8?q?=E4=B8=8D=E5=9B=9E=E5=86=99=E5=8E=9F=E8=A1=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- `apigx/model/usage_event.go`：新增 `AppendUsageCorrection(db, originalEventID, corrected)`
+  —— 追加 `kind=2` 校正事件 + `correction_of_event_id` 指向原行；只写新行、**不触碰原行**（§5.21 不可变快照）；
+  原事件不存在则拒绝（不留断裂轨迹）。另补 `UsageEventKindCorrection = 2` 常量。
+- `apigx/model/repo_test.go`：新增 `TestUsageCorrectionAppendsWithoutOverwriting`。
+
+**实测（三条用例 PASS）**：
+- 同 `event_uid` 重复写入 ⇒ 被唯一约束拦下（**不重复计数**）；
+- 校正 ⇒ 追加且指向原行；**原行用量 100000 与类型均未被改写**；修订不存在的原事件 ⇒ 拒绝；
+- 1 token = 1000 的换算口径（含 0/负数按 0）。
+
+**仍缺（如实）**：`CycleKey`（跨日结算回到"原预留周期"）—— 该周期属**预算预留**，本层只有 **TPM 分钟窗**
+（`tpmReservation.windowKey`，语义不同）⇒ **不用它冒充**，暂留空；补齐需先让本层持有预算预留的周期标识。
+---
+ apigx/model/repo_test.go   | 45 ++++++++++++++++++++++++++++++++++++++
+ apigx/model/usage_event.go | 33 ++++++++++++++++++++++++++++
+ 2 files changed, 78 insertions(+)
+
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index be315c8..9f93cda 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -647,3 +647,48 @@ func TestUsageQuantityMilliFromTokens(t *testing.T) {
+ 	assert.EqualValues(t, 1000, UsageQuantityMilliFromTokens(1))
+ 	assert.EqualValues(t, 16000, UsageQuantityMilliFromTokens(16))
+ }
++
++// TestUsageCorrectionAppendsWithoutOverwriting 覆盖阶段 4 验收表第 28 行的一半：
++// usage 的**重复与修订**口径 —— 重复事件被唯一约束拦下；修订靠**追加校正事件**，
++// 原行的估算与价格证据**原样保留**（§5.21 不可变快照）。
++func TestUsageCorrectionAppendsWithoutOverwriting(t *testing.T) {
++	db := newRepoDB(t)
++
++	original := &UsageEvent{
++		EventUID:      "corr-original",
++		Kind:          UsageEventKindUsage,
++		Dimension:     UsageDimensionInputTokens,
++		QuantityMilli: UsageQuantityMilliFromTokens(100),
++		CostState:     UsageCostStateUnpriced, // 首次是估算：未定价
++	}
++	require.NoError(t, RecordUsageEvent(db, original))
++
++	// 重复事件：同一 event_uid 再写必须被拦下（不会重复计数）
++	require.Error(t, RecordUsageEvent(db, original), "重复事件必须被唯一约束拦下")
++
++	// 修订：追加校正事件（补到准确用量后重新估算）
++	corrected := &UsageEvent{
++		EventUID:      "corr-fix-1",
++		Dimension:     UsageDimensionInputTokens,
++		QuantityMilli: UsageQuantityMilliFromTokens(120),
++		CostState:     UsageCostStateUnpriced,
++	}
++	require.NoError(t, AppendUsageCorrection(db, original.ID, corrected))
++
++	// 原行不得被改写（不可变快照）
++	var reloaded UsageEvent
++	require.NoError(t, db.Where("id = ?", original.ID).First(&reloaded).Error)
++	assert.EqualValues(t, 100000, reloaded.QuantityMilli, "原行用量不得被覆盖")
++	assert.Equal(t, UsageEventKindUsage, reloaded.Kind, "原行类型不得被改写")
++	assert.EqualValues(t, 0, reloaded.CorrectionOfEventID)
++
++	// 校正行存在，且指向原行（修订轨迹可查）
++	var fix UsageEvent
++	require.NoError(t, db.Where("event_uid = ?", "corr-fix-1").First(&fix).Error)
++	assert.Equal(t, UsageEventKindCorrection, fix.Kind)
++	assert.EqualValues(t, original.ID, fix.CorrectionOfEventID, "校正必须指向原事件，形成轨迹")
++
++	// 修订不存在的原事件必须被拒绝（不留断裂轨迹）
++	bad := &UsageEvent{EventUID: "corr-orphan", Dimension: UsageDimensionInputTokens, CostState: UsageCostStateUnpriced}
++	require.Error(t, AppendUsageCorrection(db, 999999, bad), "修订不存在的原事件必须被拒绝")
++}
+diff --git a/apigx/model/usage_event.go b/apigx/model/usage_event.go
+index d5e76ec..585fdd6 100644
+--- a/apigx/model/usage_event.go
++++ b/apigx/model/usage_event.go
+@@ -1,6 +1,7 @@
+ package apigxmodel
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 
+ 	"gorm.io/gorm"
+@@ -13,6 +14,8 @@ import (
+ const (
+ 	// UsageEventKindUsage 用量事件（0=用量 / 1=调整 / 2=校正）。
+ 	UsageEventKindUsage int = 0
++	// UsageEventKindCorrection 校正事件：追加新行修订原事件，不覆盖历史证据。
++	UsageEventKindCorrection int = 2
+ 
+ 	// UsageDimensionInputTokens 计量维度：输入 token。
+ 	UsageDimensionInputTokens int = 0
+@@ -175,3 +178,33 @@ func ResolveUsageCost(db *gorm.DB, keyID, offeringID, channelID int64, dimension
+ 	snap.CostState = UsageCostStateReferenceEstimated
+ 	return snap
+ }
++
++// AppendUsageCorrection 追加一条**校正事件**（kind=2 + correction_of_event_id），用于"补到准确 usage"之后修订估算。
++//
++// 为什么是追加而不是更新（§5.21）：本表是**不可变快照**，校正靠新增行形成修订轨迹，
++// 原行的估算与价格证据必须原样保留；因此这里只写新行，**不触碰原行**。
++//
++// 唯一约束仍是 event_uid：重复补正不会产生第二条校正；
++// "未定价 ⇒ cost_usd_micro 必须为 0"的硬约束由 RecordUsageEvent 统一把关。
++func AppendUsageCorrection(db *gorm.DB, originalEventID int64, corrected *UsageEvent) error {
++	if db == nil {
++		return fmt.Errorf("%w: nil db", ErrInvalidArgument)
++	}
++	if originalEventID <= 0 {
++		return fmt.Errorf("%w: original event id is required", ErrInvalidArgument)
++	}
++	if corrected == nil {
++		return fmt.Errorf("%w: nil corrected event", ErrInvalidArgument)
++	}
++	// 原事件必须存在（否则"修订了一条不存在的记录"会让轨迹断裂）
++	var original UsageEvent
++	if err := db.Where("id = ?", originalEventID).First(&original).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return ErrNotFound
++		}
++		return err
++	}
++	corrected.Kind = UsageEventKindCorrection
++	corrected.CorrectionOfEventID = originalEventID
++	return RecordUsageEvent(db, corrected)
++}
+-- 
+2.53.0.windows.1
+

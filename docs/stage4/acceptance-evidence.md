@@ -64,7 +64,7 @@
 | 25 | 分享者暂停与撤销授权 ⇒ 新请求及时停止，已有任务按定义处理 | ✅ 已有测试证据 | **新增** `TestSuspendedGroupStopsServing`（分组置为已暂停 ⇒ `AssembleCandidates` 返回空，实测 PASS）；另有 `TestSetChannelCapacityPolicy`、`TestUpstreamKeyStatusAndValidation` |
 | 26 | 普通撤权、账户封禁、Key 紧急吊销 ⇒ 按生命周期表区分历史访问与新增调用，不泄露其他用户对象 | ✅ 已有测试证据 | **新增回归测试** `TestUserAuthRejectsDisabledUser`（停用用户 ⇒ **401 `AUTH_USER_DISABLED`**，实测 PASS）；另有 `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestDeleteUpstreamKeyTwice`；代码位置 `middleware/auth.go` L56–L57 |
 | 27 | Worker 重试、服务重启 ⇒ 统计不重复，待处理事件和任务可恢复 | ✅ 已有测试证据 | `TestCompleteAttemptIsIdempotent`、`TestReconcileReleasesStaleAttempts`、`TestReleaseIsIdempotentAndNeverNegative` |
-| 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ 部分覆盖（**本环境无法验**） | 窗口/分桶类断言已有（`TestAdjustWindowFloorsAtZero` 等）；但 `apigx_usage_events` **0 行、无写入方**（见 [015]）⇒ 事件级"重复/修订"路径**当前没有数据可验**，需先补写入方 |
+| 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ **大部分已实现（跨日归属周期仍缺一环）** | **重复**：同 `event_uid` 再写被唯一约束拦下 —— `TestRecordUsageEventRejectsUnpricedWithCost`（含幂等断言）实测 PASS。**修订**：新增 `AppendUsageCorrection`（追加 `kind=2` + `correction_of_event_id`，**绝不回写原行**；修订不存在的原事件被拒）—— `TestUsageCorrectionAppendsWithoutOverwriting` 实测 PASS（原行用量 100000 与类型均未被改写 ✓ 校正行指向原行 ✓）。**窗口/分桶口径**：`TestAdjustWindowFloorsAtZero` 等既有用例覆盖。**仍缺**：`CycleKey`（"跨日结算回到**原预留周期**"）—— 该周期属于**预算预留**，而我们的 `relayhook` 只有 TPM 预留（`tpmReservation.windowKey` 是**分钟窗**，语义不同）⇒ **不拿它冒充**，故 `CycleKey` 暂留空；要补需先让本层持有预算预留的周期标识 |
 | 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ✅ 已有测试证据 | **新增** `TestAttemptIdempotencyKeyRejectsDuplicate`（同 `(request_id, attempt_index)` 重发被唯一约束拦下，只有一条记录；实测 PASS，日志可见 constraint failed）；另有 `TestCompleteAttemptIsIdempotent` |
 | 30 | 恶意地址或外部媒体链接 ⇒ 不能访问未允许的内部网络和元数据服务 | ✅ 已有测试证据（**边界已写明**） | **重定向**与**受保护抓取**都过校验：`service/http_client.go` L44–L53 `checkRedirect` → `common.ValidateURLWithFetchSetting`；`ValidateSSRFProtectedFetchURL`（L71）用于媒体/结果抓取；用例 `TestSSRFProtectionRejectsLiteralPrivateAndReservedIPs`、`TestSSRFProtectionRejectsResolvedPrivateIP`、`TestSSRFProtectionAllowsPrivateIPWhenExplicitlyEnabled`（`common/ssrf_protection_test.go`）。开关 `EnableSSRFProtection` **默认 true**、`AllowPrivateIp` **默认 false**。**明示边界**：**首跳直连**上游 BaseURL **不校验** ⇒ 私网/回环上游被允许（本环境验收替身 `127.0.0.1:8100` 正依赖这一点）。取舍：自建/内网上游是合法场景；风险是"借平台网络位置探测内网"；如需收紧，用 `DomainList/IpList/AllowedPorts` 白名单或改走不依赖回环的验收替身 |
 | 31 | 数据库备份恢复和升级回滚 ⇒ 凭据、权限、价格版本和历史消耗可正确恢复 | ✅ 已有测试证据 | **T4.3 演练**（第 9 节）：`pg_dump -Fc` → 恢复到新库 → **12 项指纹逐项一致**（含凭据密文与指纹的 md5、权限、价格版本、历史消耗）；恢复库上**连续启动两次**均无错误、行数不变（**迁移幂等**）；配置改→重启生效→回滚→重启恢复原值。**升级回滚（回退旧二进制）未演练**，见第 9 节说明 |
@@ -403,3 +403,22 @@ event_uid = u:<请求ID>:<维度>   ⇒ 幂等
 实测发现**给 Key 配价并不会回填该列**（又一处"没有维护者"的联动）⇒ 改为**直接按 Key 作用域查询**，
 语义更可靠。此外验证过程中三次遇到"轮询到了别的 Key 导致看不到 Key 价格"，这是我的验证覆盖面问题，
 不是实现问题（已在最终验证中给该渠道下全部 Key 配价解决）。
+---
+
+## 18. #28 记录（重复 / 修订 已做实；跨日归属周期仍缺一环）
+
+**新增能力**：`apigx/model/usage_event.go` 的 `AppendUsageCorrection(db, originalEventID, corrected)` ——
+追加 `kind=2` 校正事件 + `correction_of_event_id` 指向原行；**只写新行、不触碰原行**（§5.21 不可变快照）；
+原事件不存在则拒绝（不留断裂轨迹）。另补 `UsageEventKindCorrection = 2` 常量。
+
+**实测（三条用例全部 PASS）**：
+| 用例 | 断言 |
+|---|---|
+| `TestRecordUsageEventRejectsUnpricedWithCost` | 未定价却带成本 ⇒ **拒写**；同 `event_uid` 重复写入 ⇒ **被唯一约束拦下**（不重复计数） |
+| `TestUsageCorrectionAppendsWithoutOverwriting` | 校正行被追加且 `kind=2`、指向原行；**原行用量 100000 与类型未被改写**；修订不存在的原事件 ⇒ **拒绝** |
+| `TestUsageQuantityMilliFromTokens` | 1 token = 1000 口径（含 0 与负数按 0） |
+
+**仍缺（如实）**：`CycleKey`（"跨日结算回到**原预留周期**"）。该周期属于**预算预留**，
+而本层 `relayhook` 目前只持有 **TPM 预留**（`tpmReservation.windowKey` 是**分钟窗**，语义不同）
+⇒ 我**不用它冒充**周期，`CycleKey` 暂留空。要补齐需先让本层持有预算预留的周期标识
+（与 #19 的"预留链路"是同一族问题）。
