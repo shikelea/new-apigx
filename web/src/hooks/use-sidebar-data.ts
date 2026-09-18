@@ -24,7 +24,6 @@ import {
   FileText,
   FlaskConical,
   Store,
-  Coins,
   Settings2,
   Share2,
   Key,
@@ -65,31 +64,6 @@ export function useSidebarData(): SidebarData {
             title: t('Playground'),
             url: '/playground',
             icon: FlaskConical,
-          },
-          {
-            title: t('plaza.title'),
-            url: '/plaza',
-            icon: Store,
-          },
-          {
-            title: t('share.title'),
-            url: '/share',
-            icon: Share2,
-          },
-          {
-            title: t('usage.title'),
-            url: '/usage',
-            icon: Coins,
-          },
-          {
-            title: t('apigxPlatform.nav'),
-            url: '/apigx-platform',
-            icon: Settings2,
-          },
-          {
-            title: t('taskCenter.title'),
-            url: '/task-center',
-            icon: ListTodo,
           },
           {
             title: t('Chat'),
@@ -134,6 +108,12 @@ export function useSidebarData(): SidebarData {
             configUrls: ['/usage-logs/drawing', '/usage-logs/task'],
             icon: ListTodo,
           },
+          {
+            title: t('plaza.title'),
+            url: '/plaza',
+            icon: Store,
+          },
+
         ],
       },
       {
@@ -155,6 +135,12 @@ export function useSidebarData(): SidebarData {
             url: '/security',
             icon: ShieldCheck,
           },
+          {
+            title: t('share.title'),
+            url: '/share',
+            icon: Share2,
+          },
+
         ],
       },
       {
@@ -198,6 +184,12 @@ export function useSidebarData(): SidebarData {
             icon: PlugZap,
             requiredRole: ROLE.SUPER_ADMIN,
           },
+          {
+            title: t('apigxPlatform.nav'),
+            url: '/apigx-platform',
+            icon: Settings2,
+          },
+
           {
             title: t('System Settings'),
             url: '/system-settings/site',
