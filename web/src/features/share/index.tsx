@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 import { getShareChannels, getShareGroups } from './api'
+import { ChannelCreateDialog } from './components/channel-create-dialog'
 import { GroupCreateDialog } from './components/group-create-dialog'
 import { GroupEditDialog } from './components/group-edit-dialog'
 import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/labels'
@@ -40,6 +41,7 @@ export function MyShares() {
   const queryClient = useQueryClient()
   const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
   const [creatingGroup, setCreatingGroup] = useState(false)
+  const [creatingChannel, setCreatingChannel] = useState(false)
 
   const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
   const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
@@ -134,7 +136,12 @@ export function MyShares() {
 
           <Card>
             <CardHeader>
-              <CardTitle>{t('share.channels')}</CardTitle>
+              <div className='flex items-center justify-between gap-3'>
+          <CardTitle>{t('share.channels')}</CardTitle>
+            <Button size='sm' onClick={() => setCreatingChannel(true)}>
+              {t('New share channel')}
+            </Button>
+          </div>
             </CardHeader>
             <CardContent>
               {channels.length === 0 ? (
@@ -145,6 +152,16 @@ export function MyShares() {
             </CardContent>
           </Card>
         </div>
+        <ChannelCreateDialog
+          groups={groups}
+          open={creatingChannel}
+          onOpenChange={setCreatingChannel}
+          onSaved={() => {
+            // 新建渠道会同时影响渠道列表（以及分组下的渠道数）
+            void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
+            void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
+          }}
+        />
         <GroupCreateDialog
           open={creatingGroup}
           onOpenChange={setCreatingGroup}

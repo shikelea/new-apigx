@@ -6736,6 +6736,12 @@
     "Expand all": "Tout développer",
     "Length": "Longueur",
     "Select preset": "Choisir un préréglage",
-    "APIGX Platform": "Plateforme APIGX"
+    "APIGX Platform": "Plateforme APIGX",
+    "New share channel": "Nouveau canal de partage",
+    "Protocol": "Protocole",
+    "Upstream address": "Adresse de l'amont",
+    "Your upstream key": "Votre clé amont",
+    "It is stored encrypted and never shown again.": "Elle est stockée chiffrée et ne sera plus affichée.",
+    "Select a share group": "Choisir un groupe de partage"
   }
 }

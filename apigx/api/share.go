@@ -322,6 +322,9 @@ func (h *handler) createChannel(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
+	// 自建渠道时随附的上游 Key：**渠道创建成功后**才登记（CreateUpstreamKey 要求 channel_id>0）
+	var selfServeKey string
+
 	channel := &apigxmodel.Channel{
 		OwnerUserID:  owner,
 		ShareGroupID: req.ShareGroupID,
@@ -339,7 +342,8 @@ func (h *handler) createChannel(c *gin.Context) {
 	}
 	// 「分享者自建渠道」：未指定 base_channel_id 时，平台按配方代建一条底座渠道并绑定。
 	if channel.BaseChannelID <= 0 {
-		if recipeErr := h.provisionBaseChannelForShareChannel(channel, strings.TrimSpace(req.UpstreamKey)); recipeErr != nil {
+		selfServeKey = strings.TrimSpace(req.UpstreamKey)
+		if recipeErr := h.provisionBaseChannelForShareChannel(channel, selfServeKey); recipeErr != nil {
 			failFromRepo(c, recipeErr)
 			return
 		}
@@ -348,6 +352,12 @@ func (h *handler) createChannel(c *gin.Context) {
 	if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
 		failFromRepo(c, err)
 		return
+	}
+	if selfServeKey != "" {
+		if keyErr := h.registerSelfServeUpstreamKey(owner, channel.ID, selfServeKey); keyErr != nil {
+			failFromRepo(c, keyErr)
+			return
+		}
 	}
 	ok(c, gin.H{"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name, "key_pool_mode": channel.KeyPoolMode})
 }
@@ -1985,9 +1995,15 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
 	}
 	channel.BaseChannelID = int64(base.Id)
 
-	// 同时把 Key 登记进我们的 Key 池（分享者之后可管理权重/冷却）。
-	// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
-	// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
+	return nil
+}
+
+// registerSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 登记进 Key 池。
+//
+// **必须在分享渠道创建之后调用** —— CreateUpstreamKey 要求 channel_id > 0；
+// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
+// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
+func (h *handler) registerSelfServeUpstreamKey(ownerUserID, shareChannelID int64, upstreamKey string) error {
 	envelope, encErr := secretbox.Encrypt(upstreamKey)
 	if encErr != nil {
 		common.SysError("apigx api: refuse to store upstream key: " + encErr.Error())
@@ -1998,8 +2014,8 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
 		common.SysError("apigx api: fingerprint failed: " + fpErr.Error())
 		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
 	}
-	return apigxmodel.CreateUpstreamKey(h.db, channel.OwnerUserID, &apigxmodel.UpstreamKey{
-		ChannelID:         channel.ID,
+	return apigxmodel.CreateUpstreamKey(h.db, ownerUserID, &apigxmodel.UpstreamKey{
+		ChannelID:         shareChannelID,
 		StableKeyID:       upstreamKeyStableID(upstreamKey),
 		Name:              "default",
 		SecretRef:         envelope,

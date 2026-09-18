@@ -6736,6 +6736,12 @@
     "Expand all": "Развернуть всё",
     "Length": "Длина",
     "Select preset": "Выбрать шаблон",
-    "APIGX Platform": "Платформа APIGX"
+    "APIGX Platform": "Платформа APIGX",
+    "New share channel": "Новый общий канал",
+    "Protocol": "Протокол",
+    "Upstream address": "Адрес вышестоящего сервиса",
+    "Your upstream key": "Ваш ключ вышестоящего сервиса",
+    "It is stored encrypted and never shown again.": "Хранится в зашифрованном виде и больше не отображается.",
+    "Select a share group": "Выберите группу общих ресурсов"
   }
 }

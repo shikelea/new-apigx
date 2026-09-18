@@ -6736,6 +6736,12 @@
     "Expand all": "展开全部",
     "Length": "长度",
     "Select preset": "选择预设",
-    "APIGX Platform": "平台管理"
+    "APIGX Platform": "平台管理",
+    "New share channel": "新建分享渠道",
+    "Protocol": "协议",
+    "Upstream address": "上游地址",
+    "Your upstream key": "你的上游 Key",
+    "It is stored encrypted and never shown again.": "将以密文存储，之后不再显示。",
+    "Select a share group": "选择分享分组"
   }
 }

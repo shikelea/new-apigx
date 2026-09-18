@@ -6736,6 +6736,12 @@
     "Expand all": "Mở rộng tất cả",
     "Length": "Độ dài",
     "Select preset": "Chọn mẫu đặt trước",
-    "APIGX Platform": "Nền tảng APIGX"
+    "APIGX Platform": "Nền tảng APIGX",
+    "New share channel": "Kênh chia sẻ mới",
+    "Protocol": "Giao thức",
+    "Upstream address": "Địa chỉ thượng nguồn",
+    "Your upstream key": "Khóa thượng nguồn của bạn",
+    "It is stored encrypted and never shown again.": "Được lưu mã hóa và không hiển thị lại.",
+    "Select a share group": "Chọn nhóm chia sẻ"
   }
 }

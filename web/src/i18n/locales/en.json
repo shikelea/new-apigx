@@ -6736,6 +6736,12 @@
     "Expand all": "Expand all",
     "Length": "Length",
     "Select preset": "Select preset",
-    "APIGX Platform": "APIGX Platform"
+    "APIGX Platform": "APIGX Platform",
+    "New share channel": "New share channel",
+    "Protocol": "Protocol",
+    "Upstream address": "Upstream address",
+    "Your upstream key": "Your upstream key",
+    "It is stored encrypted and never shown again.": "It is stored encrypted and never shown again.",
+    "Select a share group": "Select a share group"
   }
 }

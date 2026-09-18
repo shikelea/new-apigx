@@ -6736,6 +6736,12 @@
     "Expand all": "すべて展開",
     "Length": "長さ",
     "Select preset": "プリセットを選択",
-    "APIGX Platform": "APIGX プラットフォーム"
+    "APIGX Platform": "APIGX プラットフォーム",
+    "New share channel": "共有チャネルを作成",
+    "Protocol": "プロトコル",
+    "Upstream address": "上流アドレス",
+    "Your upstream key": "上流キー",
+    "It is stored encrypted and never shown again.": "暗号化して保存され、再表示されません。",
+    "Select a share group": "共有グループを選択"
   }
 }
