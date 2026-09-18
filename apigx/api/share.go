@@ -12,8 +12,11 @@
 package apigxapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/QuantumNous/new-api/constant"
 	"net/http"
 	"strconv"
 	"strings"
@@ -298,6 +301,9 @@ func (h *handler) deleteShareGroup(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 type createChannelRequest struct {
+	// 以下两项用于"分享者自建渠道"（§4「渠道 CRUD」）：不给 base_channel_id 时，
+	// 平台按这些信息**代建底座渠道**并绑定 —— 分享者不必知道管理员侧的渠道 ID。
+	UpstreamKey   string `json:"upstream_key"`
 	ShareGroupID  int64  `json:"share_group_id"`
 	BaseChannelID int64  `json:"base_channel_id"`
 	Name          string `json:"name"`
@@ -331,6 +337,14 @@ func (h *handler) createChannel(c *gin.Context) {
 	if req.KeyPoolMode != nil {
 		channel.KeyPoolMode = *req.KeyPoolMode
 	}
+	// 「分享者自建渠道」：未指定 base_channel_id 时，平台按配方代建一条底座渠道并绑定。
+	if channel.BaseChannelID <= 0 {
+		if recipeErr := h.provisionBaseChannelForShareChannel(channel, strings.TrimSpace(req.UpstreamKey)); recipeErr != nil {
+			failFromRepo(c, recipeErr)
+			return
+		}
+	}
+
 	if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
 		failFromRepo(c, err)
 		return
@@ -1933,4 +1947,84 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"confirmed": affected, "target_canonical_model_id": target})
+}
+
+// provisionBaseChannelForShareChannel 为"分享者自建渠道"代建一条**底座渠道**并绑定。
+//
+// 设计取舍（§4「渠道 CRUD」+ §7 权限边界）：
+//   - 分享者只填 名称/协议/上游地址/自己的 Key ⇒ **不需要知道管理员侧的渠道 ID**；
+//   - 上游 Key 用**分享者自己的**，平台不代垫 ⇒ 消耗归分享者；
+//   - 底座渠道的模型列表留空，由「同步模型」按上游实际能力填充（不做猜测）。
+func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channel, upstreamKey string) error {
+	if channel.Name == "" {
+		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
+	}
+	if channel.BaseURL == "" {
+		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
+	}
+	if upstreamKey == "" {
+		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
+	}
+	channelType, ok := baseChannelTypeForProtocol(channel.Protocol)
+	if !ok {
+		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
+	}
+
+	base := basemodel.Channel{
+		Name:        "APIGX-" + channel.Name,
+		Type:        channelType,
+		Key:         upstreamKey,
+		BaseURL:     &channel.BaseURL,
+		Group:       "default",
+		Models:      "",
+		Status:      common.ChannelStatusEnabled,
+		CreatedTime: common.GetTimestamp(),
+	}
+	if err := h.db.Create(&base).Error; err != nil {
+		return err
+	}
+	channel.BaseChannelID = int64(base.Id)
+
+	// 同时把 Key 登记进我们的 Key 池（分享者之后可管理权重/冷却）。
+	// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
+	// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
+	envelope, encErr := secretbox.Encrypt(upstreamKey)
+	if encErr != nil {
+		common.SysError("apigx api: refuse to store upstream key: " + encErr.Error())
+		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
+	}
+	fingerprint, fpErr := secretbox.Fingerprint(upstreamKey)
+	if fpErr != nil {
+		common.SysError("apigx api: fingerprint failed: " + fpErr.Error())
+		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
+	}
+	return apigxmodel.CreateUpstreamKey(h.db, channel.OwnerUserID, &apigxmodel.UpstreamKey{
+		ChannelID:         channel.ID,
+		StableKeyID:       upstreamKeyStableID(upstreamKey),
+		Name:              "default",
+		SecretRef:         envelope,
+		SecretFingerprint: fingerprint,
+		Weight:            1,
+		Status:            apigxmodel.UpstreamKeyStatusEnabled,
+	})
+}
+
+// baseChannelTypeForProtocol 把我们的协议标识映射到底座渠道类型（用底座常量，不写死数字）。
+func baseChannelTypeForProtocol(protocol string) (int, bool) {
+	switch protocol {
+	case "openai":
+		return constant.ChannelTypeOpenAI, true
+	case "anthropic":
+		return constant.ChannelTypeAnthropic, true
+	case "gemini":
+		return constant.ChannelTypeGemini, true
+	default:
+		return 0, false
+	}
+}
+
+// upstreamKeyStableID 生成稳定的 Key 标识（同一把 Key 重复登记时保持幂等）。
+func upstreamKeyStableID(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "apigx-" + hex.EncodeToString(sum[:8])
 }
