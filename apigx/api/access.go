@@ -37,8 +37,11 @@ import (
 //   - **越权防护**：发邀请/授权/撤销/查授权列表都要求调用者是**资源所有者**，
 //     非所有者一律 404（不确认"资源存在但不属于你"）。
 
-// createAccessInviteRequest 发放资源访问邀请。
+// createAccessInviteRequest 发放邀请（资源访问邀请，或注册邀请）。
 type createAccessInviteRequest struct {
+	// InviteType 0=注册邀请（§5「邀请准入」）/ 1=资源访问邀请（默认）。
+	// 两类邀请**校验逻辑独立**（§10.1），因此走同一个入口但分支处理。
+	InviteType      int   `json:"invite_type"`
 	TargetScopeType int   `json:"target_scope_type"` // 1=分享分组 / 2=模型供给
 	TargetScopeID   int64 `json:"target_scope_id"`
 	MaxUses         int64 `json:"max_uses"`   // 0=不限次数
@@ -61,6 +64,29 @@ func (h *handler) createAccessInvite(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "max_uses and expires_at must not be negative")
 		return
 	}
+	// 注册邀请（§5）：**只由平台侧发放**，且与资源邀请的校验逻辑完全分开。
+	// 它不绑定任何资源、也不携带任何角色信息 ⇒ 不可能借邀请码提权（§10.1）。
+	if req.InviteType == apigxmodel.InviteTypeRegistration {
+		if !requirePlatformReviewer(c) {
+			return
+		}
+		token, invite, err := apigxmodel.CreateRegistrationInvite(h.db, owner, req.MaxUses, req.ExpiresAt)
+		if err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		ok(c, gin.H{
+			"token":        token, // 明文**仅此一次**
+			"token_prefix": invite.TokenPrefix,
+			"id":           invite.ID,
+			"invite_type":  invite.InviteType,
+			"max_uses":     invite.MaxUses,
+			"expires_at":   invite.ExpiresAt,
+			"status":       invite.Status,
+		})
+		return
+	}
+
 	// 注意两套枚举**不同**：邀请范围 1=分组/2=供给，授权资源 0=分组/1=供给。
 	// 混用会把"分组"当成"供给"去查，结果永远是"资源不存在"（这个坑已被用例抓到过一次）。
 	if req.TargetScopeType != apigxmodel.InviteTargetGroup && req.TargetScopeType != apigxmodel.InviteTargetOffering {

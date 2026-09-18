@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
@@ -269,6 +270,19 @@ func Register(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgUserExists)
 		return
 	}
+	// 注册邀请准入（§5「邀请准入」）：开关打开时**必须**提交有效注册邀请码。
+	//
+	// 核销是**原子**的（并发注册不会双花），失败不区分原因（不存在/已撤销/已过期/已用尽 ⇒ 同一响应，防枚举）。
+	// 邀请码只决定"能否注册"，**不携带任何角色信息** —— 下面 cleanUser 依旧强制普通用户角色（§10.1）。
+	var claimedRegistrationInvite *apigxmodel.Invite
+	if common.RegisterInviteRequired {
+		claimed, redeemErr := apigxmodel.RedeemRegistrationInvite(model.DB, user.RegisterInviteCode, common.GetTimestamp())
+		if redeemErr != nil {
+			common.ApiErrorI18n(c, i18n.MsgUserRegisterDisabled)
+			return
+		}
+		claimedRegistrationInvite = claimed
+	}
 	affCode := user.AffCode // this code is the inviter's code, not the user's own code
 	inviterId, _ := model.GetUserIdByAffCode(affCode)
 	cleanUser := model.User{
@@ -282,6 +296,12 @@ func Register(c *gin.Context) {
 		cleanUser.Email = user.Email
 	}
 	if err := cleanUser.Insert(inviterId); err != nil {
+		// 建用户失败 ⇒ 把刚才核销掉的注册邀请码名额**还回去**（失败不应消耗邀请码）
+		if claimedRegistrationInvite != nil {
+			if refundErr := apigxmodel.RefundRegistrationInvite(model.DB, claimedRegistrationInvite.ID, common.GetTimestamp()); refundErr != nil {
+				common.SysError("apigx: refund registration invite failed: " + refundErr.Error())
+			}
+		}
 		if errors.Is(err, model.ErrEmailAlreadyTaken) {
 			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
 			return
