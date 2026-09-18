@@ -19,9 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 
 import { describe, expect, it } from 'vitest'
 
-import { aggregatePlazaItems, capabilityOptions, filterPlazaCardsByCapability } from '../lib/aggregate'
 import { buildInvocationSnippets } from '../lib/invocation'
-import { makeItem } from './fixtures'
 
 describe('调用配置片段', () => {
   it('地址末尾的斜杠不会产生双斜杠的 /v1', () => {
@@ -38,25 +36,5 @@ describe('调用配置片段', () => {
   it('片段使用 /v1 前缀（OpenAI 兼容路径）', () => {
     const s = buildInvocationSnippets('https://api.example.com', 'm')
     expect(s.curl).toContain('https://api.example.com/v1/chat/completions')
-  })
-})
-
-describe('广场类型筛选', () => {
-  const cards = aggregatePlazaItems([
-    makeItem({ model: 'm1', capabilities: ['chat', 'tools'] }),
-    makeItem({ model: 'm2', capabilities: ['chat'] }),
-    makeItem({ model: 'm3', capabilities: ['embedding'] }),
-  ])
-
-  it('筛选项来自数据里实际出现过的能力（去重且排序）', () => {
-    expect(capabilityOptions(cards)).toEqual(['chat', 'embedding', 'tools'])
-  })
-
-  it('按指定能力筛选', () => {
-    expect(filterPlazaCardsByCapability(cards, 'chat').map((c) => c.model)).toEqual(['m1', 'm2'])
-  })
-
-  it('空值表示不筛', () => {
-    expect(filterPlazaCardsByCapability(cards, '')).toHaveLength(3)
   })
 })

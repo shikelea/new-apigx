@@ -110,7 +110,7 @@ export function useSidebarData(): SidebarData {
           },
           {
             title: t('plaza.title'),
-            url: '/plaza',
+            url: '/pricing',
             icon: Store,
           },
 
