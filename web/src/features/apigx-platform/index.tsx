@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */import { useMutation, useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -141,6 +142,9 @@ export function ApigxPlatform() {
           <Card>
             <CardHeader>
               <CardTitle>{t('apigxPlatform.priceRules')}</CardTitle>
+            <CardContent className='pt-0'>
+              <PriceEditingHint />
+            </CardContent>
             </CardHeader>
             <CardContent className='space-y-4'>
               <div className='grid gap-3 sm:grid-cols-3'>
@@ -258,5 +262,26 @@ export function ApigxPlatform() {
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>
+  )
+}
+/**
+ * 价格配置指引。
+ *
+ * **复用 New API 自带的定价能力**：模型价格的配置与同步在底座的「系统设置 → 模型与定价」里，
+ * 这里只给出直达入口，不另造一套价格源（渠道价格读数走平台的 price-sync，人工覆盖走本页的输入框）。
+ */
+function PriceEditingHint() {
+  const { t } = useTranslation()
+  return (
+    <p className='text-muted-foreground text-xs'>
+      {t('Prices are configured and synced in New API model pricing.')} 
+      <Link to='/system-settings/models' className='underline'>
+        {t('Open model pricing')}
+      </Link>
+      {' · '}
+      <Link to='/pricing' className='underline'>
+        {t('Price list')}
+      </Link>
+    </p>
   )
 }

@@ -6715,5 +6715,8 @@
   "Normalized name Hint": "Normalized name",
   "Visible resources": "Visible resources",
   "No visible resource in this group": "No visible resource in this group",
-  "Provider": "Provider"
+  "Provider": "Provider",
+  "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
+  "Open model pricing": "Open model pricing",
+  "Price list": "Price list"
 }

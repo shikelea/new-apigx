@@ -6715,5 +6715,8 @@
   "Normalized name Hint": "归一化名",
   "Visible resources": "可见资源",
   "No visible resource in this group": "该分组下没有你可访问的资源",
-  "Provider": "分享者"
+  "Provider": "分享者",
+  "Prices are configured and synced in New API model pricing.": "模型价格在底座的「模型与定价」里配置与同步：",
+  "Open model pricing": "打开模型定价",
+  "Price list": "价格列表"
 }
