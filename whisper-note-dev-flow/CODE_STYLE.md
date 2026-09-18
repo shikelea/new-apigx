@@ -51,3 +51,12 @@
 - 用脚本批量加键时，务必 **`json.translation[key] = value`** ✗ 而不是 `json[key] = value`；
   写完**校验**：`Object.keys(json)` 应当**只有** `translation`。
 - 回归用例：`web/src/i18n/__tests__/dotted-keys.test.ts`（守住"顶层只有 translation"与"带点键能解析"两条）。
+## 七、验收脚本的使用次序（踩过的坑）
+
+- `tools/stage3-verify/*.mjs` 是**两阶段**脚本：`--phase setup` 自建夹具 → **等约 60 秒**（底座同步能力索引）→ `--phase verify`。
+- **不能跳过 setup 直接 verify** ✗：会得到大量 503 `No available channel for model ...`，
+  看起来像回归，其实是缺夹具。
+- **清理测试数据之后必须重跑 setup** ✓，否则验收会出现同样假象。
+- 对话矩阵 setup 需要 `APIGX_REAL_UPSTREAM_KEY`（真实上游 key **只从环境变量读** ✓，不写进仓库 ✓）。
+- 视频脚本依赖 `.toolchain/_state/video-task.json`（由 setup 生成 ✓）。
+- 报"回归"之前先读**具体报错**：本例 503 直接指出缺渠道 ✓，不必先怀疑代码 ✓。
