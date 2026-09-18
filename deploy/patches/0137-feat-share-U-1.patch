@@ -1,0 +1,182 @@
+From 0e13f56ffb2283c9d0cb38e8d6e20835a2e98297 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 15:19:17 +0800
+Subject: [PATCH 137/137] =?UTF-8?q?feat(share):=20U-1=20=E7=AC=AC=E4=B8=80?=
+ =?UTF-8?q?=E7=89=87=20=E2=80=94=E2=80=94=20=E4=BF=AE=E6=AD=A3=E5=88=86?=
+ =?UTF-8?q?=E7=BB=84=E5=8F=91=E5=B8=83=E7=8A=B6=E6=80=81=E8=AF=AD=E4=B9=89?=
+ =?UTF-8?q?=20+=20=E5=B9=B3=E5=8F=B0=E4=BE=A7=E5=8F=91=E5=B8=83/=E6=9A=82?=
+ =?UTF-8?q?=E5=81=9C=E7=AB=AF=E7=82=B9?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**根因**：`PublishStatus` 字段注释为 0=草稿/1=待审核/2=已发布/3=已暂停，但新建分组写 0 且注释误写「待审核」；
+且该字段**只被回显、从未被校验** —— 这正是用户说的「新建渠道之后直接就确定」。
+补充事实：**供给层面的「未发布不可用」本就已生效**（广场 `o.status=Published`、路由查询同样要求 `Published`），
+缺的是**分组**这一层的发布语义与闸门。
+
+**本片改动**：
+- `apigx/model/repo_share.go`：新增 ShareGroupPublish{Draft,Pending,Published,Suspended,Retired} 常量 +
+  SetShareGroupPublishStatus（只改状态一个字段）
+- `apigx/api/share.go`：新建分组初始状态 = initialGroupPublishStatus(可见性)：公开⇒待审核（计划书 §12）、非公开⇒已发布；
+  可见性未指定时按公开处理（保守默认，不静默公开）
+- 新增平台侧 `POST /api/apigx/share-groups/:id/publish-status`（发布/暂停，requirePlatformReviewer 校验）
+- `apigx/api/share_test.go`：TestShareGroupLifecycle 断言 0→1。该用例提示语本就写「新建分组默认待审核」，
+  此前断言值与枚举不符 ⇒ 属**代码与用例一起写错**，已按语义修正（不是为了让测试变绿）
+- 过程记录：期间两次编译错（`*int` 漏解引用、多写 `&`）与一次 PowerShell 引号解析失败（整条命令未执行）均已修正
+
+**未完成（U-1 未收口）**：① 闸门尚未接入广场可见性与路由候选；② 前端向导与状态展示未做。
+检查: go build ✅ / apigx/api + apigx/model 用例 ✅
+---
+ apigx/api/share.go        | 60 ++++++++++++++++++++++++++++++++++++++-
+ apigx/api/share_test.go   |  4 ++-
+ apigx/model/repo_share.go | 33 +++++++++++++++++++++
+ 3 files changed, 95 insertions(+), 2 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index a8a5a2f..cbce399 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -49,6 +49,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		groups.PATCH("/:id", h.updateShareGroup)
+ 		groups.GET("/:id", h.getShareGroup)
+ 		groups.DELETE("/:id", h.deleteShareGroup)
++		// 平台侧审核：发布 / 暂停（分享者不能自行把草稿对外放出）
++		groups.POST("/:id/publish-status", h.setShareGroupPublishStatus)
+ 		groups.GET("/:id/channels", h.listChannels)
+ 	}
+ 
+@@ -227,7 +229,10 @@ func (h *handler) createShareGroup(c *gin.Context) {
+ 		Name:              strings.TrimSpace(req.Name),
+ 		Description:       req.Description,
+ 		DefaultVisibility: 0,
+-		PublishStatus:     0, // 待审核（计划书 §12：新公开资源先审核）
++		// 发布状态（字段注释为准：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停 / 4=已退役）。
++		// 规则：**公开**分组先审核（计划书 §12「新公开资源先审核」）；非公开（受限/私有）不对外暴露，
++		// 无需审核即视为已发布 —— 否则分享者每次自用都要等一次人工审核，体验不合理。
++		PublishStatus: initialGroupPublishStatus(groupVisibilityOrDefault(req.DefaultVisibility)),
+ 	}
+ 	if req.DefaultVisibility != nil {
+ 		group.DefaultVisibility = *req.DefaultVisibility
+@@ -283,6 +288,59 @@ func (h *handler) getShareGroup(c *gin.Context) {
+ 	})
+ }
+ 
++// initialGroupPublishStatus 返回新建分组时的初始发布状态。
++//
++// **公开**分组必须先审核（返回待审核），**非公开**分组不对外暴露，直接视为已发布。
++// groupVisibilityOrDefault 取分组的可见性，未指定时按**公开**处理。
++//
++// 保守默认：未指定可见性时宁可按「公开 ⇒ 先审核」，也不要静默变成一个对人可见的分组。
++func groupVisibilityOrDefault(input *int) int {
++	if input == nil {
++		return apigxmodel.ShareGroupVisibilityPublic
++	}
++	return *input
++}
++
++func initialGroupPublishStatus(visibility int) int {
++	if visibility == apigxmodel.ShareGroupVisibilityPublic {
++		return apigxmodel.ShareGroupPublishPending
++	}
++	return apigxmodel.ShareGroupPublishPublished
++}
++
++// setGroupPublishStatusRequest 平台的审核动作（发布 / 暂停）。
++type setGroupPublishStatusRequest struct {
++	Status int `json:"status" binding:"required"`
++}
++
++// setShareGroupPublishStatus 平台侧：把分享分组置为「已发布」或「已暂停」。
++//
++// 为什么由平台做：这属于「资源审核」（§4 管理后台），分享者不能自己把草稿/待审核的分组对外放出。
++// 已在用（已发布）的分组被暂停后，新请求应停止 —— 生效点见广场可见性与路由候选的判据。
++func (h *handler) setShareGroupPublishStatus(c *gin.Context) {
++	if !requirePlatformReviewer(c) {
++		return
++	}
++	groupID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req setGroupPublishStatusRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	if req.Status != apigxmodel.ShareGroupPublishPublished && req.Status != apigxmodel.ShareGroupPublishSuspended {
++		fail(c, http.StatusBadRequest, "invalid_status", "status must be 2 (published) or 3 (suspended)")
++		return
++	}
++	if err := apigxmodel.SetShareGroupPublishStatus(h.db, groupID, req.Status); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": groupID, "publish_status": req.Status})
++}
++
+ func (h *handler) deleteShareGroup(c *gin.Context) {
+ 	owner, valid := h.ownerID(c)
+ 	if !valid {
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index f080dba..49915e9 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -171,7 +171,9 @@ func TestShareGroupLifecycle(t *testing.T) {
+ 	require.Equal(t, http.StatusOK, rec.Code)
+ 	detail, _ := body["data"].(map[string]any)
+ 	assert.Equal(t, "小林公益站", detail["name"])
+-	assert.Equal(t, float64(0), detail["publish_status"], "新建分组默认待审核")
++	// 发布状态枚举：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停。公开分组新建后进入**待审核**（计划书 §12），
++	// 而不是草稿 —— 本用例的提示语一直是「默认待审核」，此前断言值 0 与枚举不符，属代码与用例一起写错，已按语义修正为 1。
++	assert.Equal(t, float64(1), detail["publish_status"], "公开分组新建后默认待审核")
+ 
+ 	// 删除后读不到
+ 	rec, _ = env.do(t, http.MethodDelete, "/api/share-groups/"+strconv.FormatInt(id, 10), user, "")
+diff --git a/apigx/model/repo_share.go b/apigx/model/repo_share.go
+index 351d92f..d482b00 100644
+--- a/apigx/model/repo_share.go
++++ b/apigx/model/repo_share.go
+@@ -121,6 +121,39 @@ func ListShareGroups(db *gorm.DB, ownerUserID int64, limit int) ([]ShareGroup, e
+ }
+ 
+ // DeleteShareGroup 软删除分组（墓碑语义）。
++// ShareGroup 发布状态（字段注释为准：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停 / 4=已退役）。
++const (
++	// ShareGroupPublishDraft 草稿：分享者还在准备，不对外可见。
++	ShareGroupPublishDraft int = 0
++	// ShareGroupPublishPending 待审核：已提交，等待平台审核（公开分组的新建初始状态）。
++	ShareGroupPublishPending int = 1
++	// ShareGroupPublishPublished 已发布：对外可见、可被路由。
++	ShareGroupPublishPublished int = 2
++	// ShareGroupPublishSuspended 已暂停：曾发布，现停止对外服务。
++	ShareGroupPublishSuspended int = 3
++	// ShareGroupPublishRetired 已退役：不再使用。
++	ShareGroupPublishRetired int = 4
++)
++
++// SetShareGroupPublishStatus 设置分组的发布状态（平台审核动作）。
++//
++// 只改状态一个字段：不触碰分组名、可见性、成员等其他信息，避免审核动作顺带改写分享者的内容。
++func SetShareGroupPublishStatus(db *gorm.DB, groupID int64, status int) error {
++	if groupID <= 0 {
++		return fmt.Errorf("%w: group_id is required", ErrInvalidArgument)
++	}
++	res := db.Model(&ShareGroup{}).
++		Where("id = ? AND deleted_at IS NULL", groupID).
++		Update("publish_status", status)
++	if res.Error != nil {
++		return res.Error
++	}
++	if res.RowsAffected == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
+ func DeleteShareGroup(db *gorm.DB, ownerUserID, id int64) error {
+ 	return softDeleteByOwner(db, &ShareGroup{}, ownerUserID, id)
+ }
+-- 
+2.53.0.windows.1
+
