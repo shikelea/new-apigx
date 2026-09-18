@@ -6722,6 +6722,9 @@
     "Invite code": "Invite code",
     "Invite redeemed. The shared resources are now visible.": "Invite redeemed. The shared resources are now visible.",
     "Open the model plaza": "Open the model plaza",
-    "Invalid or already used invite code": "Invalid or already used invite code"
+    "Invalid or already used invite code": "Invalid or already used invite code",
+    "Sources": "Sources",
+    "Not enough samples": "Not enough samples",
+    "Share sources": "Share sources"
   }
 }

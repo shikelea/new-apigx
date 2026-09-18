@@ -6722,6 +6722,9 @@
     "Invite code": "Code d'invitation",
     "Invite redeemed. The shared resources are now visible.": "Invitation utilisée. Les ressources partagées sont désormais visibles.",
     "Open the model plaza": "Ouvrir la place de marché",
-    "Invalid or already used invite code": "Code invalide ou déjà utilisé"
+    "Invalid or already used invite code": "Code invalide ou déjà utilisé",
+    "Sources": "Sources",
+    "Not enough samples": "Échantillons insuffisants",
+    "Share sources": "Sources partagées"
   }
 }

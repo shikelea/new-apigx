@@ -6722,6 +6722,9 @@
     "Invite code": "招待コード",
     "Invite redeemed. The shared resources are now visible.": "引き換えが完了しました。共有リソースが表示されます。",
     "Open the model plaza": "モデル広場を開く",
-    "Invalid or already used invite code": "招待コードが無効か、既に使用されています"
+    "Invalid or already used invite code": "招待コードが無効か、既に使用されています",
+    "Sources": "提供元数",
+    "Not enough samples": "サンプル不足",
+    "Share sources": "共有元"
   }
 }

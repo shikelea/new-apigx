@@ -103,6 +103,7 @@ import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelDetailsApi } from './model-details-api'
 import { ModelDetailsPerformance } from './model-details-performance'
+import { ModelDetailsSources } from './model-details-sources'
 
 // ----------------------------------------------------------------------------
 // Local UI helpers
@@ -1555,6 +1556,9 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
               showRechargePrice={showRechargePrice}
             />
           </section>
+
+          {/* 分享来源表（§4 第 2 条）：谁来提供这个模型、属于哪些分享分组、质量是否可判定 */}
+          <ModelDetailsSources model={props.model} />
 
           <ModelBackendDetailsSection model={props.model} />
         </TabsContent>

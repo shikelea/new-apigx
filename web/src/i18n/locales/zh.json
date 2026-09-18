@@ -6722,6 +6722,9 @@
     "Invite code": "邀请码",
     "Invite redeemed. The shared resources are now visible.": "兑换成功，对应的分享资源现在可见了。",
     "Open the model plaza": "打开模型广场",
-    "Invalid or already used invite code": "邀请码无效或已被使用"
+    "Invalid or already used invite code": "邀请码无效或已被使用",
+    "Sources": "来源数",
+    "Not enough samples": "样本不足",
+    "Share sources": "分享来源"
   }
 }

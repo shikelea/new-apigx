@@ -6722,6 +6722,9 @@
     "Invite code": "Код приглашения",
     "Invite redeemed. The shared resources are now visible.": "Приглашение активировано. Общие ресурсы теперь доступны.",
     "Open the model plaza": "Открыть каталог моделей",
-    "Invalid or already used invite code": "Код недействителен или уже использован"
+    "Invalid or already used invite code": "Код недействителен или уже использован",
+    "Sources": "Источники",
+    "Not enough samples": "Недостаточно данных",
+    "Share sources": "Общие источники"
   }
 }

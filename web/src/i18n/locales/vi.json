@@ -6722,6 +6722,9 @@
     "Invite code": "Mã mời",
     "Invite redeemed. The shared resources are now visible.": "Đổi thành công. Tài nguyên chia sẻ đã hiển thị.",
     "Open the model plaza": "Mở chợ mô hình",
-    "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng"
+    "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng",
+    "Sources": "Số nguồn",
+    "Not enough samples": "Chưa đủ mẫu",
+    "Share sources": "Nguồn chia sẻ"
   }
 }
