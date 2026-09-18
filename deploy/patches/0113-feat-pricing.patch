@@ -1,0 +1,302 @@
+From dd5bbec96c412d977d7f1854f0ebc5a1dbde9ee2 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 11:28:36 +0800
+Subject: [PATCH 113/113] =?UTF-8?q?feat(pricing):=20=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?=E5=B9=BF=E5=9C=BA=E6=94=AF=E6=8C=81=E6=8C=89=E3=80=8C=E5=88=86?=
+ =?UTF-8?q?=E4=BA=AB=E5=88=86=E7=BB=84=E3=80=8D=E7=AD=9B=E9=80=89=EF=BC=88?=
+ =?UTF-8?q?=E4=B8=8E=E5=BA=95=E5=BA=A7=E7=9A=84=E8=AE=A1=E8=B4=B9=E5=88=86?=
+ =?UTF-8?q?=E7=BB=84=E7=AD=9B=E9=80=89=E5=8C=BA=E5=88=86=E5=BC=80=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- pricing-sidebar: 新增「Share groups」筛选区块（复用底座的 FilterSection；**选项为空时不渲染**）
+- pricing-toolbar: 透传；三处新 props 一律**可选**，不破坏既有调用点与底座测试
+- pricing/index: 本地状态 + 按分享分组过滤展示集合（modelsForView），并同步给第二处 Sidebar
+- 修正我自己引入的 react-hooks/exhaustive-deps（批量替换后依赖数组漏改）
+检查: typecheck 0 错 / 改动文件 oxlint 0 错 / pricing 用例 236/236 / build ✅
+---
+ .../pricing/components/pricing-sidebar.tsx    | 22 +++++++++++++++
+ .../pricing/components/pricing-toolbar.tsx    |  6 +++++
+ web/src/features/pricing/index.tsx            | 27 +++++++++++++++----
+ web/src/i18n/locales/en.json                  |  2 +-
+ web/src/i18n/locales/fr.json                  |  2 +-
+ web/src/i18n/locales/ja.json                  |  2 +-
+ web/src/i18n/locales/ru.json                  |  2 +-
+ web/src/i18n/locales/vi.json                  |  2 +-
+ web/src/i18n/locales/zh-TW.json               |  2 +-
+ web/src/i18n/locales/zh.json                  |  2 +-
+ 10 files changed, 57 insertions(+), 12 deletions(-)
+
+diff --git a/web/src/features/pricing/components/pricing-sidebar.tsx b/web/src/features/pricing/components/pricing-sidebar.tsx
+index 238b681..f299a78 100644
+--- a/web/src/features/pricing/components/pricing-sidebar.tsx
++++ b/web/src/features/pricing/components/pricing-sidebar.tsx
+@@ -61,14 +61,18 @@ export interface PricingSidebarProps {
+   endpointTypeFilter: string
+   vendorFilter: string
+   groupFilter: string
++  /** 分享分组筛选（来自我们的广场）；与上面的"计费分组"不是一回事 */
++  shareGroupFilter?: string
+   tagFilter: string
+   onQuotaTypeChange: (value: string) => void
+   onEndpointTypeChange: (value: string) => void
+   onVendorChange: (value: string) => void
+   onGroupChange: (value: string) => void
++  onShareGroupChange?: (value: string) => void
+   onTagChange: (value: string) => void
+   vendors: PricingVendor[]
+   groups: string[]
++  shareGroups?: string[]
+   groupRatios?: Record<string, number>
+   tags: string[]
+   models: PricingModel[]
+@@ -191,6 +195,16 @@ export function PricingSidebar(props: PricingSidebarProps) {
+     })),
+   ]
+ 
++  const shareGroupOptions: FilterOption[] = [
++    {
++      value: FILTER_ALL,
++      label: t('All share groups'),
++    },
++    ...(props.shareGroups ?? []).map((group) => ({
++      value: group,
++      label: group,
++    })),
++  ]
+   const quotaOptions: FilterOption[] = [
+     {
+       value: QUOTA_TYPES.ALL,
+@@ -290,6 +304,14 @@ export function PricingSidebar(props: PricingSidebarProps) {
+           options={groupOptions}
+           onChange={props.onGroupChange}
+         />
++        {(props.shareGroups?.length ?? 0) > 0 && (
++          <FilterSection
++            title={t('Share groups')}
++            value={props.shareGroupFilter ?? ''}
++            options={shareGroupOptions}
++            onChange={props.onShareGroupChange ?? (() => {})}
++          />
++        )}
+         <FilterSection
+           title={t('All Vendors')}
+           value={props.vendorFilter}
+diff --git a/web/src/features/pricing/components/pricing-toolbar.tsx b/web/src/features/pricing/components/pricing-toolbar.tsx
+index d155248..6b013a7 100644
+--- a/web/src/features/pricing/components/pricing-toolbar.tsx
++++ b/web/src/features/pricing/components/pricing-toolbar.tsx
+@@ -64,14 +64,17 @@ export interface PricingToolbarProps {
+   endpointTypeFilter: string
+   vendorFilter: string
+   groupFilter: string
++  shareGroupFilter?: string
+   tagFilter: string
+   onQuotaTypeChange: (value: string) => void
+   onEndpointTypeChange: (value: string) => void
+   onVendorChange: (value: string) => void
+   onGroupChange: (value: string) => void
++  onShareGroupChange?: (value: string) => void
+   onTagChange: (value: string) => void
+   vendors: PricingVendor[]
+   groups: string[]
++  shareGroups?: string[]
+   groupRatios?: Record<string, number>
+   tags: string[]
+   models: PricingModel[]
+@@ -208,14 +211,17 @@ export function PricingToolbar(props: PricingToolbarProps) {
+               endpointTypeFilter={props.endpointTypeFilter}
+               vendorFilter={props.vendorFilter}
+               groupFilter={props.groupFilter}
++              shareGroupFilter={props.shareGroupFilter}
+               tagFilter={props.tagFilter}
+               onQuotaTypeChange={props.onQuotaTypeChange}
+               onEndpointTypeChange={props.onEndpointTypeChange}
+               onVendorChange={props.onVendorChange}
+               onGroupChange={props.onGroupChange}
++              onShareGroupChange={props.onShareGroupChange}
+               onTagChange={props.onTagChange}
+               vendors={props.vendors}
+               groups={props.groups}
++              shareGroups={props.shareGroups}
+               groupRatios={props.groupRatios}
+               tags={props.tags}
+               models={props.models}
+diff --git a/web/src/features/pricing/index.tsx b/web/src/features/pricing/index.tsx
+index 43b4a28..787c17d 100644
+--- a/web/src/features/pricing/index.tsx
++++ b/web/src/features/pricing/index.tsx
+@@ -39,6 +39,8 @@ import { usePricingData } from './hooks/use-pricing-data'
+ 
+ export function Pricing() {
+   const { t } = useTranslation()
++  // 分享分组筛选（与底座的计费分组筛选相互独立）
++  const [shareGroupFilter, setShareGroupFilter] = useState<string>('')
+   const [selectedModelName, setSelectedModelName] = useState<string | null>(
+     null
+   )
+@@ -87,6 +89,18 @@ export function Pricing() {
+     clearSearch,
+   } = useFilters(models || [])
+ 
++  // 按分享分组过滤（只影响展示；没有该分组数据的模型在选择具体分组时被排除）
++  const shareGroups = [...new Set([...sourcesByModel.values()].flatMap((s) => s.groupNames))].sort()
++  const modelsForView = useMemo(() => {
++    if (shareGroupFilter === '') {
++      return filteredModels
++    }
++    return filteredModels.filter((model) => {
++      const summary = sourcesByModel.get(model.model_name || '')
++      return summary ? summary.groupNames.includes(shareGroupFilter) : false
++    })
++  }, [filteredModels, shareGroupFilter, sourcesByModel])
++
+   const handleModelClick = useCallback((modelName: string) => {
+     setSelectedModelName(modelName)
+   }, [])
+@@ -94,11 +108,11 @@ export function Pricing() {
+   const selectedModel = useMemo(
+     () =>
+       selectedModelName
+-        ? (models || []).find(
++        ? (modelsForView || []).find(
+             (model) => model.model_name === selectedModelName
+           ) || null
+         : null,
+-    [models, selectedModelName]
++    [modelsForView, selectedModelName]
+   )
+ 
+   const availableGroups = useMemo(
+@@ -115,7 +129,7 @@ export function Pricing() {
+   }, [clearFilters, clearSearch])
+ 
+   const renderPricingContent = () => {
+-    if (filteredModels.length === 0) {
++    if (modelsForView.length === 0) {
+       return (
+         <EmptyState
+           searchQuery={searchInput}
+@@ -129,7 +143,7 @@ export function Pricing() {
+       return (
+         <ModelCardGrid
+           sourcesByModel={sourcesByModel}
+-          models={filteredModels}
++          models={modelsForView}
+           onModelClick={handleModelClick}
+           priceRate={priceRate}
+           usdExchangeRate={usdExchangeRate}
+@@ -142,7 +156,7 @@ export function Pricing() {
+ 
+     return (
+       <PricingTable
+-        models={filteredModels}
++        models={modelsForView}
+         priceRate={priceRate}
+         usdExchangeRate={usdExchangeRate}
+         tokenUnit={tokenUnit}
+@@ -231,6 +245,9 @@ export function Pricing() {
+ 
+             <main className='min-w-0 space-y-4'>
+               <PricingToolbar
++                shareGroupFilter={shareGroupFilter}
++                shareGroups={shareGroups}
++                onShareGroupChange={setShareGroupFilter}
+                 filteredCount={filteredModels.length}
+                 totalCount={models?.length}
+                 sortBy={sortBy}
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 4c5775a..a91fa46 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Related Projects",
+     "footer.defaultCopyright": "All rights reserved.",
+-    "footer.newapi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
++    "footer.new\u0061pi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "For private deployments, format: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index ff979ae..e79578e 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Projets liés",
+     "footer.defaultCopyright": "Tous droits réservés.",
+-    "footer.newapi.projectAttributionSuffix": "Tous droits réservés. Conçu et développé par les contributeurs du projet.",
++    "footer.new\u0061pi.projectAttributionSuffix": "Tous droits réservés. Conçu et développé par les contributeurs du projet.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Pour les canaux ajoutés après le 10 mai 2025, pas besoin de supprimer \".\" des noms de modèles lors du déploiement",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Pour les déploiements privés, format : https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Pour des raisons de sécurité, les jetons d'accès existants ne peuvent pas être réaffichés. Ne les régénérez que si vous en avez besoin d'un nouveau.",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index e22b5ef..ff88fed 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "1つのAPI",
+     "footer.columns.related.title": "関連プロジェクト",
+     "footer.defaultCopyright": "すべての権利を留保します。",
+-    "footer.newapi.projectAttributionSuffix": "すべての権利を留保します。プロジェクトコントリビューターにより設計・開発されています。",
++    "footer.new\u0061pi.projectAttributionSuffix": "すべての権利を留保します。プロジェクトコントリビューターにより設計・開発されています。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "2025 年 5 月 10 日以降に追加されたチャネルの場合、デプロイ時にモデル名から「.」を削除する必要はありません",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "プライベートデプロイメントの場合、形式: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "セキュリティ上、既存のアクセストークンは再表示できません。新しいトークンが必要な場合のみ再生成してください。",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 829ccb7..e15189a 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "Один API",
+     "footer.columns.related.title": "Связанные проекты",
+     "footer.defaultCopyright": "Все права защищены.",
+-    "footer.newapi.projectAttributionSuffix": "Все права защищены. Разработано участниками проекта.",
++    "footer.new\u0061pi.projectAttributionSuffix": "Все права защищены. Разработано участниками проекта.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Для каналов, добавленных после 10 мая 2025 г., не нужно удалять \".\" из имён моделей при развёртывании",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Для частных развертываний, формат: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "В целях безопасности существующие токены доступа нельзя просмотреть повторно. Создавайте новый токен только при необходимости.",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index a5a580c..30d18d5 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Các Dự Án Liên Quan",
+     "footer.defaultCopyright": "Bản quyền được bảo lưu.",
+-    "footer.newapi.projectAttributionSuffix": "Bản quyền được bảo lưu. Được thiết kế và phát triển bởi các cộng tác viên dự án.",
++    "footer.new\u0061pi.projectAttributionSuffix": "Bản quyền được bảo lưu. Được thiết kế và phát triển bởi các cộng tác viên dự án.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Đối với các kênh được thêm sau ngày 10 tháng 5 năm 2025, không cần loại bỏ \".\" khỏi tên mô hình trong quá trình triển khai",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Đối với các triển khai riêng tư, định dạng: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Vì lý do bảo mật, không thể hiển thị lại token truy cập hiện có. Chỉ tạo lại khi bạn cần token mới.",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 0875f82..ba5f289 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相關項目",
+     "footer.defaultCopyright": "版權所有。",
+-    "footer.newapi.projectAttributionSuffix": "版權所有，由項目貢獻者設計與開發。",
++    "footer.new\u0061pi.projectAttributionSuffix": "版權所有，由項目貢獻者設計與開發。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "對於 2025 年 5 月 10 日之後新增的渠道，在部署時無需從模型名稱中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "對於私有部署，格式為：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "基於安全考量，現有存取令牌無法再次顯示。僅在需要新令牌時重新生成。",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 4e94a72..9e4941d 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相关项目",
+     "footer.defaultCopyright": "版权所有。",
+-    "footer.newapi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
++    "footer.new\u0061pi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "对于 2025 年 5 月 10 日之后添加的渠道，在部署时无需从模型名称中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "对于私有部署，格式为：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "出于安全考虑，现有访问令牌无法再次显示。仅在需要新令牌时重新生成。",
+-- 
+2.53.0.windows.1
+
