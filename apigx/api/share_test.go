@@ -1380,21 +1380,32 @@ func TestAccessInviteAndGrantAPIContract(t *testing.T) {
 //
 // 断言的是**可观察事实**：同一模型在广场上出现两条来源，且两条的分享分组名不同、分属两位分享者。
 func TestPlazaAggregatesSameModelFromTwoSharers(t *testing.T) {
-	// T4.5：**尚未闭合**（台账 #1）。既有用例 TestPlazaOnlyExposesPublishedAndPublic 能过，
-	// 但本用例按同样方式造的两个分享者供给在广场上取不到（返回 0 项，且换成第三方浏览者仍为 0）。
-	// 差异点未查明 —— 不把红测试留在仓库，故显式 Skip 并保留代码供下次继续排查。
-	t.Skip("T4.5 #1 未闭合：广场未返回本夹具的供给，差异未查明；见 docs/stage4/acceptance-evidence.md")
+
 	env := newTestEnv(t, true)
 	const sharerA, sharerB int64 = 7701, 7702
 	const sharedModel = "glm-5.3-flash"
 
-	groupA := env.createGroup(t, sharerA, "A 的公益站")
-	channelA := env.createChannel(t, sharerA, groupA, 70001)
-	publishTestOffering(t, env, sharerA, channelA, sharedModel)
-
-	groupB := env.createGroup(t, sharerB, "B 的公益站")
-	channelB := env.createChannel(t, sharerB, groupB, 70002)
-	publishTestOffering(t, env, sharerB, channelB, sharedModel)
+	// 造数方式**逐行对齐**既有的可过用例（TestPlazaOnlyExposesPublishedAndPublic）：
+	// 分组用仓储直建（公开 + 已发布）、底座渠道用 nextBaseChannelID()，
+	// 因为 API 夹具走的路径与它不一致，曾导致广场取不到数据。
+	mk := func(owner int64, name string) (int64, int64) {
+		group := &apigxmodel.ShareGroup{
+			OwnerUserID:       owner,
+			Name:              name,
+			DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic,
+			PublishStatus:     apigxmodel.ShareGroupPublishPublished,
+		}
+		require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+		baseID := nextBaseChannelID()
+		require.NoError(t, env.db.Create(&basemodel.Channel{
+			Id: int(baseID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled,
+		}).Error)
+		chID := env.createChannel(t, owner, group.ID, baseID)
+		publishTestOffering(t, env, owner, chID, sharedModel)
+		return group.ID, chID
+	}
+	mk(sharerA, "A 的公益站")
+	mk(sharerB, "B 的公益站")
 
 	// 用**第三方**浏览者：广场判据刻意不含"本人所有"（分享者看自己的东西走「我的分享」）
 	const bystander int64 = 7799
@@ -1449,7 +1460,7 @@ func TestSuspendedGroupStopsServing(t *testing.T) {
 func publishTestOffering(t *testing.T, env *testEnv, owner, channelID int64, model string) {
 	t.Helper()
 	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
-		`{"upstream_model_id":"`+model+`"}`)
+		`{"upstream_model_id":"`+model+`","capabilities":{"streaming":true,"vision":true,"tools":true}}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	id, ok := body["data"].(map[string]any)["id"].(float64)
 	require.True(t, ok, "建供给应返回 id：%s", rec.Body.String())
