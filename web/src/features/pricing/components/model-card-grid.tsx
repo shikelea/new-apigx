@@ -27,6 +27,7 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { DEFAULT_PRICING_PAGE_SIZE, DEFAULT_TOKEN_UNIT } from '../constants'
 import type { PricingModel, TokenUnit } from '../types'
+import type { ModelSourcesSummary } from '../lib/apigx-sources'
 import { ModelCard } from './model-card'
 import type { ModelPerfBadgeData } from './model-perf-badge'
 
@@ -38,6 +39,8 @@ export interface ModelCardGridProps {
   tokenUnit?: TokenUnit
   showRechargePrice?: boolean
   selectedGroup?: string
+  /** 模型名 -> 分享来源汇总 */
+  sourcesByModel?: Map<string, ModelSourcesSummary>
 }
 
 export function ModelCardGrid(props: ModelCardGridProps) {
@@ -85,6 +88,7 @@ export function ModelCardGrid(props: ModelCardGridProps) {
             showRechargePrice={props.showRechargePrice}
             selectedGroup={props.selectedGroup}
             perf={perfMap.get(model.model_name || '')}
+            sources={props.sourcesByModel?.get(model.model_name || '')}
             onClick={() => props.onModelClick(model.model_name || '')}
           />
         ))}

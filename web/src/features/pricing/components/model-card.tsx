@@ -40,6 +40,7 @@ import { parseTags } from '../lib/filters'
 import { isTokenBasedModel } from '../lib/model-helpers'
 import { formatPrice, formatRequestPrice } from '../lib/price'
 import { taskPriceLabel, taskUsageUnitLabel } from '../lib/task-price-display'
+import type { ModelSourcesSummary } from '../lib/apigx-sources'
 import type { PricingModel, PriceType, TokenUnit } from '../types'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
 import { ModelPerfBadge, type ModelPerfBadgeData } from './model-perf-badge'
@@ -52,6 +53,8 @@ export interface ModelCardProps {
   tokenUnit?: TokenUnit
   showRechargePrice?: boolean
   selectedGroup?: string
+  /** 分享来源汇总（来自我们的广场）；没有数据时不渲染任何东西 */
+  sources?: ModelSourcesSummary
   perf?: ModelPerfBadgeData
 }
 
@@ -70,6 +73,14 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
   const modelIcon = modelIconKey ? getLobeIcon(modelIconKey, 28) : null
   const initial = props.model.model_name?.charAt(0).toUpperCase() || '?'
   const isUnconfiguredTaskUsage = isUnconfiguredTaskUsageModel(props.model)
+  // 分享来源文案（有数据才算；避免嵌套三元，见 web/AGENTS.md §3.2）
+  let sourcesLabel = ''
+  if (props.sources) {
+    sourcesLabel = t('Share sources') + ': ' + props.sources.sourceCount
+    if (props.sources.groupNames.length > 0) {
+      sourcesLabel = sourcesLabel + ' · ' + props.sources.groupNames.join(', ')
+    }
+  }
   const billingTime = useBillingTime(props.model.billing_expr)
   const currency = useSystemConfigStore((state) => state.config.currency)
   const dynamicPriceOptions = useMemo(
@@ -386,6 +397,9 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           perf={props.perf}
           className='border-border/60 border-t pt-2'
         >
+          {sourcesLabel ? (
+            <span className='text-muted-foreground truncate text-xs'>{sourcesLabel}</span>
+          ) : null}
           <Button variant='ghost' size='sm' onClick={props.onClick}>
             {t('Details')}
             <ChevronRight aria-hidden className='size-3.5' />

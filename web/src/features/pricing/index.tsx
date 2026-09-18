@@ -34,6 +34,7 @@ import {
 } from './components'
 import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
 import { useFilters } from './hooks/use-filters'
+import { useApigxModelSources } from './hooks/use-apigx-model-sources'
 import { usePricingData } from './hooks/use-pricing-data'
 
 export function Pricing() {
@@ -53,6 +54,9 @@ export function Pricing() {
     priceRate,
     usdExchangeRate,
   } = usePricingData()
+
+  // 我们的分享来源（公开页访客拿不到时静默为空，界面照常工作）
+  const { byModel: sourcesByModel } = useApigxModelSources()
 
   const {
     searchInput,
@@ -124,6 +128,7 @@ export function Pricing() {
     if (viewMode === VIEW_MODES.CARD) {
       return (
         <ModelCardGrid
+          sourcesByModel={sourcesByModel}
           models={filteredModels}
           onModelClick={handleModelClick}
           priceRate={priceRate}
