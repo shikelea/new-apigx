@@ -54,12 +54,10 @@ import { Route as AuthenticatedShareChannelIdRouteImport } from './routes/_authe
 import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
 import { Route as AuthenticatedSystemInfoIndexRouteImport } from './routes/_authenticated/system-info/index'
 import { Route as AuthenticatedSystemSettingsIndexRouteImport } from './routes/_authenticated/system-settings/index'
-import { Route as AuthenticatedTaskCenterIndexRouteImport } from './routes/_authenticated/task-center/index'
 import { Route as AuthenticatedTaskPluginsIndexRouteImport } from './routes/_authenticated/task-plugins/index'
 import { Route as AuthenticatedUsageLogsIndexRouteImport } from './routes/_authenticated/usage-logs/index'
 import { Route as AuthenticatedUsageLogsSectionRouteImport } from './routes/_authenticated/usage-logs/$section'
 import { Route as AuthenticatedUsageLogsAuditRouteImport } from './routes/_authenticated/usage-logs/audit'
-import { Route as AuthenticatedUsageIndexRouteImport } from './routes/_authenticated/usage/index'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
 import { Route as AuthenticatedWalletIndexRouteImport } from './routes/_authenticated/wallet/index'
 import { Route as PricingModelIdIndexRouteImport } from './routes/pricing/$modelId/index'
@@ -318,12 +316,6 @@ const AuthenticatedSystemSettingsIndexRoute =
     path: '/',
     getParentRoute: () => AuthenticatedSystemSettingsRouteRoute,
   } as any)
-const AuthenticatedTaskCenterIndexRoute =
-  AuthenticatedTaskCenterIndexRouteImport.update({
-    id: '/task-center/',
-    path: '/task-center/',
-    getParentRoute: () => AuthenticatedRouteRoute,
-  } as any)
 const AuthenticatedTaskPluginsIndexRoute =
   AuthenticatedTaskPluginsIndexRouteImport.update({
     id: '/task-plugins/',
@@ -348,11 +340,6 @@ const AuthenticatedUsageLogsAuditRoute =
     path: '/usage-logs/audit',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
-const AuthenticatedUsageIndexRoute = AuthenticatedUsageIndexRouteImport.update({
-  id: '/usage/',
-  path: '/usage/',
-  getParentRoute: () => AuthenticatedRouteRoute,
-} as any)
 const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
   id: '/users/',
   path: '/users/',
@@ -506,10 +493,8 @@ export interface FileRoutesByFullPath {
   '/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
   '/system-info/': typeof AuthenticatedSystemInfoIndexRoute
   '/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
-  '/task-center/': typeof AuthenticatedTaskCenterIndexRoute
   '/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
   '/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
-  '/usage/': typeof AuthenticatedUsageIndexRoute
   '/users/': typeof AuthenticatedUsersIndexRoute
   '/wallet/': typeof AuthenticatedWalletIndexRoute
   '/pricing/$modelId/': typeof PricingModelIdIndexRoute
@@ -574,10 +559,8 @@ export interface FileRoutesByTo {
   '/subscriptions': typeof AuthenticatedSubscriptionsIndexRoute
   '/system-info': typeof AuthenticatedSystemInfoIndexRoute
   '/system-settings': typeof AuthenticatedSystemSettingsIndexRoute
-  '/task-center': typeof AuthenticatedTaskCenterIndexRoute
   '/task-plugins': typeof AuthenticatedTaskPluginsIndexRoute
   '/usage-logs': typeof AuthenticatedUsageLogsIndexRoute
-  '/usage': typeof AuthenticatedUsageIndexRoute
   '/users': typeof AuthenticatedUsersIndexRoute
   '/wallet': typeof AuthenticatedWalletIndexRoute
   '/pricing/$modelId': typeof PricingModelIdIndexRoute
@@ -646,10 +629,8 @@ export interface FileRoutesById {
   '/_authenticated/subscriptions/': typeof AuthenticatedSubscriptionsIndexRoute
   '/_authenticated/system-info/': typeof AuthenticatedSystemInfoIndexRoute
   '/_authenticated/system-settings/': typeof AuthenticatedSystemSettingsIndexRoute
-  '/_authenticated/task-center/': typeof AuthenticatedTaskCenterIndexRoute
   '/_authenticated/task-plugins/': typeof AuthenticatedTaskPluginsIndexRoute
   '/_authenticated/usage-logs/': typeof AuthenticatedUsageLogsIndexRoute
-  '/_authenticated/usage/': typeof AuthenticatedUsageIndexRoute
   '/_authenticated/users/': typeof AuthenticatedUsersIndexRoute
   '/_authenticated/wallet/': typeof AuthenticatedWalletIndexRoute
   '/pricing/$modelId/': typeof PricingModelIdIndexRoute
@@ -717,10 +698,8 @@ export interface FileRouteTypes {
     | '/subscriptions/'
     | '/system-info/'
     | '/system-settings/'
-    | '/task-center/'
     | '/task-plugins/'
     | '/usage-logs/'
-    | '/usage/'
     | '/users/'
     | '/wallet/'
     | '/pricing/$modelId/'
@@ -785,10 +764,8 @@ export interface FileRouteTypes {
     | '/subscriptions'
     | '/system-info'
     | '/system-settings'
-    | '/task-center'
     | '/task-plugins'
     | '/usage-logs'
-    | '/usage'
     | '/users'
     | '/wallet'
     | '/pricing/$modelId'
@@ -856,10 +833,8 @@ export interface FileRouteTypes {
     | '/_authenticated/subscriptions/'
     | '/_authenticated/system-info/'
     | '/_authenticated/system-settings/'
-    | '/_authenticated/task-center/'
     | '/_authenticated/task-plugins/'
     | '/_authenticated/usage-logs/'
-    | '/_authenticated/usage/'
     | '/_authenticated/users/'
     | '/_authenticated/wallet/'
     | '/pricing/$modelId/'
@@ -1216,13 +1191,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSystemSettingsIndexRouteImport
       parentRoute: typeof AuthenticatedSystemSettingsRouteRoute
     }
-    '/_authenticated/task-center/': {
-      id: '/_authenticated/task-center/'
-      path: '/task-center'
-      fullPath: '/task-center/'
-      preLoaderRoute: typeof AuthenticatedTaskCenterIndexRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
     '/_authenticated/task-plugins/': {
       id: '/_authenticated/task-plugins/'
       path: '/task-plugins'
@@ -1249,13 +1217,6 @@ declare module '@tanstack/react-router' {
       path: '/usage-logs/audit'
       fullPath: '/usage-logs/audit'
       preLoaderRoute: typeof AuthenticatedUsageLogsAuditRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/usage/': {
-      id: '/_authenticated/usage/'
-      path: '/usage'
-      fullPath: '/usage/'
-      preLoaderRoute: typeof AuthenticatedUsageIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/users/': {
@@ -1494,10 +1455,8 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedShareIndexRoute: typeof AuthenticatedShareIndexRoute
   AuthenticatedSubscriptionsIndexRoute: typeof AuthenticatedSubscriptionsIndexRoute
   AuthenticatedSystemInfoIndexRoute: typeof AuthenticatedSystemInfoIndexRoute
-  AuthenticatedTaskCenterIndexRoute: typeof AuthenticatedTaskCenterIndexRoute
   AuthenticatedTaskPluginsIndexRoute: typeof AuthenticatedTaskPluginsIndexRoute
   AuthenticatedUsageLogsIndexRoute: typeof AuthenticatedUsageLogsIndexRoute
-  AuthenticatedUsageIndexRoute: typeof AuthenticatedUsageIndexRoute
   AuthenticatedUsersIndexRoute: typeof AuthenticatedUsersIndexRoute
   AuthenticatedWalletIndexRoute: typeof AuthenticatedWalletIndexRoute
   AuthenticatedPlazaGroupGroupPublicIdRoute: typeof AuthenticatedPlazaGroupGroupPublicIdRoute
@@ -1529,10 +1488,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedShareIndexRoute: AuthenticatedShareIndexRoute,
   AuthenticatedSubscriptionsIndexRoute: AuthenticatedSubscriptionsIndexRoute,
   AuthenticatedSystemInfoIndexRoute: AuthenticatedSystemInfoIndexRoute,
-  AuthenticatedTaskCenterIndexRoute: AuthenticatedTaskCenterIndexRoute,
   AuthenticatedTaskPluginsIndexRoute: AuthenticatedTaskPluginsIndexRoute,
   AuthenticatedUsageLogsIndexRoute: AuthenticatedUsageLogsIndexRoute,
-  AuthenticatedUsageIndexRoute: AuthenticatedUsageIndexRoute,
   AuthenticatedUsersIndexRoute: AuthenticatedUsersIndexRoute,
   AuthenticatedWalletIndexRoute: AuthenticatedWalletIndexRoute,
   AuthenticatedPlazaGroupGroupPublicIdRoute:
