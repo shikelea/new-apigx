@@ -104,11 +104,10 @@ func CreateAccessInvite(db *gorm.DB, createdByUserID int64, targetScopeType int,
 		return "", nil, fmt.Errorf("%w: target scope id is required", ErrInvalidArgument)
 	}
 
-	raw := make([]byte, accessInviteTokenBytes)
-	if _, err := rand.Read(raw); err != nil {
+	token, err := randomInviteToken()
+	if err != nil {
 		return "", nil, err
 	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
 
 	now := common.GetTimestamp()
 	invite := &Invite{
@@ -306,4 +305,16 @@ func GrantExistsForResource(db *gorm.DB, subjectType int, subjectID int64, resou
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// randomInviteToken 生成一次性邀请码明文（base64url，无填充）。
+//
+// 两个调用方：资源访问邀请（CreateAccessInvite）与注册邀请（CreateRegistrationInvite）——
+// 属于稳定的领域概念，而不是"为缩短调用点"抽出来的机械步骤。
+func randomInviteToken() (string, error) {
+	raw := make([]byte, accessInviteTokenBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }

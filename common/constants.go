@@ -70,6 +70,10 @@ var TelegramOAuthEnabled = false
 var TurnstileCheckEnabled = false
 var RegisterEnabled = true
 
+// RegisterInviteRequired 是否**必须**使用注册邀请码才能注册（§5「邀请准入」）。
+// 默认 false：不改变底座既有行为；开启后由 apigx 侧的注册邀请码把关。
+var RegisterInviteRequired = false
+
 var EmailDomainRestrictionEnabled = false // 是否启用邮箱域名限制
 var EmailAliasRestrictionEnabled = false  // 是否启用邮箱别名限制
 var EmailDomainWhitelist = []string{
