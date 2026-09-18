@@ -647,3 +647,48 @@ func TestUsageQuantityMilliFromTokens(t *testing.T) {
 	assert.EqualValues(t, 1000, UsageQuantityMilliFromTokens(1))
 	assert.EqualValues(t, 16000, UsageQuantityMilliFromTokens(16))
 }
+
+// TestUsageCorrectionAppendsWithoutOverwriting 覆盖阶段 4 验收表第 28 行的一半：
+// usage 的**重复与修订**口径 —— 重复事件被唯一约束拦下；修订靠**追加校正事件**，
+// 原行的估算与价格证据**原样保留**（§5.21 不可变快照）。
+func TestUsageCorrectionAppendsWithoutOverwriting(t *testing.T) {
+	db := newRepoDB(t)
+
+	original := &UsageEvent{
+		EventUID:      "corr-original",
+		Kind:          UsageEventKindUsage,
+		Dimension:     UsageDimensionInputTokens,
+		QuantityMilli: UsageQuantityMilliFromTokens(100),
+		CostState:     UsageCostStateUnpriced, // 首次是估算：未定价
+	}
+	require.NoError(t, RecordUsageEvent(db, original))
+
+	// 重复事件：同一 event_uid 再写必须被拦下（不会重复计数）
+	require.Error(t, RecordUsageEvent(db, original), "重复事件必须被唯一约束拦下")
+
+	// 修订：追加校正事件（补到准确用量后重新估算）
+	corrected := &UsageEvent{
+		EventUID:      "corr-fix-1",
+		Dimension:     UsageDimensionInputTokens,
+		QuantityMilli: UsageQuantityMilliFromTokens(120),
+		CostState:     UsageCostStateUnpriced,
+	}
+	require.NoError(t, AppendUsageCorrection(db, original.ID, corrected))
+
+	// 原行不得被改写（不可变快照）
+	var reloaded UsageEvent
+	require.NoError(t, db.Where("id = ?", original.ID).First(&reloaded).Error)
+	assert.EqualValues(t, 100000, reloaded.QuantityMilli, "原行用量不得被覆盖")
+	assert.Equal(t, UsageEventKindUsage, reloaded.Kind, "原行类型不得被改写")
+	assert.EqualValues(t, 0, reloaded.CorrectionOfEventID)
+
+	// 校正行存在，且指向原行（修订轨迹可查）
+	var fix UsageEvent
+	require.NoError(t, db.Where("event_uid = ?", "corr-fix-1").First(&fix).Error)
+	assert.Equal(t, UsageEventKindCorrection, fix.Kind)
+	assert.EqualValues(t, original.ID, fix.CorrectionOfEventID, "校正必须指向原事件，形成轨迹")
+
+	// 修订不存在的原事件必须被拒绝（不留断裂轨迹）
+	bad := &UsageEvent{EventUID: "corr-orphan", Dimension: UsageDimensionInputTokens, CostState: UsageCostStateUnpriced}
+	require.Error(t, AppendUsageCorrection(db, 999999, bad), "修订不存在的原事件必须被拒绝")
+}

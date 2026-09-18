@@ -1,6 +1,7 @@
 package apigxmodel
 
 import (
+	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
@@ -13,6 +14,8 @@ import (
 const (
 	// UsageEventKindUsage 用量事件（0=用量 / 1=调整 / 2=校正）。
 	UsageEventKindUsage int = 0
+	// UsageEventKindCorrection 校正事件：追加新行修订原事件，不覆盖历史证据。
+	UsageEventKindCorrection int = 2
 
 	// UsageDimensionInputTokens 计量维度：输入 token。
 	UsageDimensionInputTokens int = 0
@@ -174,4 +177,34 @@ func ResolveUsageCost(db *gorm.DB, keyID, offeringID, channelID int64, dimension
 	snap.CostMicro = snap.CostUsdMicro
 	snap.CostState = UsageCostStateReferenceEstimated
 	return snap
+}
+
+// AppendUsageCorrection 追加一条**校正事件**（kind=2 + correction_of_event_id），用于"补到准确 usage"之后修订估算。
+//
+// 为什么是追加而不是更新（§5.21）：本表是**不可变快照**，校正靠新增行形成修订轨迹，
+// 原行的估算与价格证据必须原样保留；因此这里只写新行，**不触碰原行**。
+//
+// 唯一约束仍是 event_uid：重复补正不会产生第二条校正；
+// "未定价 ⇒ cost_usd_micro 必须为 0"的硬约束由 RecordUsageEvent 统一把关。
+func AppendUsageCorrection(db *gorm.DB, originalEventID int64, corrected *UsageEvent) error {
+	if db == nil {
+		return fmt.Errorf("%w: nil db", ErrInvalidArgument)
+	}
+	if originalEventID <= 0 {
+		return fmt.Errorf("%w: original event id is required", ErrInvalidArgument)
+	}
+	if corrected == nil {
+		return fmt.Errorf("%w: nil corrected event", ErrInvalidArgument)
+	}
+	// 原事件必须存在（否则"修订了一条不存在的记录"会让轨迹断裂）
+	var original UsageEvent
+	if err := db.Where("id = ?", originalEventID).First(&original).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	corrected.Kind = UsageEventKindCorrection
+	corrected.CorrectionOfEventID = originalEventID
+	return RecordUsageEvent(db, corrected)
 }
