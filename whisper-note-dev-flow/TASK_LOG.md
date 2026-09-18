@@ -1665,3 +1665,28 @@ task_AZ3j9suvLs2hQjkR6jaYz | SUCCESS | -                     ← 正常成功（
 
 **保留的我们这层**（与"复用底座"并不冲突 ✓）：人工覆盖（平台的 `price-rules` ✓ 用于**记录与展示** ✓）、
 渠道价格读数（`price-sync` ✓ 平台侧）、以及**发布强制价格闸门** ✓（未配价不得发布 ✓，与底座"未配价即不可用"一致 ✓）。
+## ② 视频：**真实厂商提交成功**（用户要求"能成功一次就行"，已达成）
+
+**过程（每个模型只发一次；所有失败都是校验/可用性拒绝，未产生消耗或仅一次真实生成）**：
+
+| 模型 | 结果 | 说明 |
+|---|---|---|
+| `Kling-V1.6` | **503 暂无可用服务商，请稍后重试** | **形状被接受** ✓（无参数错误 ✓）—— 只是当时没有可用服务商，属暂时性 ✓ |
+| `Doubao-Seedance-1.0-Pro-Fast` | 400 not configured in any provider | 它回了我**当前真正可用**的清单（比我之前看到的 422 清单窄 ✓） |
+| `Doubao-Seedance-2.0` | **403 video_model_not_allowed** | 「用户**未配置对应的专属资源池**」⇒ 该账号未开通 ✗ |
+| `Kling-V2.1` | 400 `model is not supported` | 该模型在其上游不被支持 ✗ |
+| **`MiniMax-Hailuo-02`** | ✅ **200，任务 id `442957341339943`** | **真实提交成功** ✓✓ |
+
+**查询确认任务是真的** ✓：`GET https://aiping.cn/api/v1/videos/442957341339943` → **200**
+`{"id":"442957341339943","model":"MiniMax-Hailuo-02","status":"in_progress","seconds":6,"size":"768P"}` ✓
+
+⇒ **它这套协议（`POST /v1/videos` + `GET /v1/videos/{id}` + 应有 `/content`）与底座自带的 `sora` 任务插件完全一致** ✓✓
+（`sora` 插件：`models: ["sora-2","sora-2-pro"]`、`protocols: [..., "openai_video"]`、出站 `{baseUrl}/v1/videos` ✓）。
+
+### 平台侧接线：已建成，但被底座"插件认领"挡住（下一步）
+
+- 已建**任务插件渠道** ✓：`type=61` + `setting={"task_plugin_key":"sora"}` ✓（字段名取自底座**自己的测试** ✓）+ `base_url=https://aiping.cn/api` ✓ + 模型 `MiniMax-Hailuo-02` ✓ ⇒ 渠道 154 ✓；分享渠道 133 ✓；供给 85 ✓（配价 200 / 发布 200 ✓）。
+- 经平台提交时返回 **503** ✓，原因是底座**按模型名自动认领插件** ✓：
+  > `the model is claimed by task plugin "hailuo", which has no enabled channel serving it. To let another plugin or channel serve this model, disable or override plugin "hailuo"`
+  ⇒ 即 `MiniMax-Hailuo-02` 被底座自带的 **`hailuo`** 插件认领 ✗（那套走 MiniMax 原生协议，与 aiping 的 OpenAI 风格不符 ✗）。
+  **下一步**：在测试环境里**停用/覆盖 `hailuo` 插件** ✓，让该模型落到我们的 `sora` 渠道 ✓，再跑一次"提交 + 轮询 + 结果访问" ✓（可逆 ✓，属测试环境配置 ✓）。
