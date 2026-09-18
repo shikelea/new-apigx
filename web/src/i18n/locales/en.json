@@ -6742,6 +6742,10 @@
     "Upstream address": "Upstream address",
     "Your upstream key": "Your upstream key",
     "It is stored encrypted and never shown again.": "It is stored encrypted and never shown again.",
-    "Select a share group": "Select a share group"
+    "Select a share group": "Select a share group",
+    "Delete share group": "Delete share group",
+    "Delete share channel": "Delete share channel",
+    "The group disappears from your lists. Channels under it are not deleted.": "The group disappears from your lists. Channels under it are not deleted.",
+    "The channel disappears from your lists and stops serving requests.": "The channel disappears from your lists and stops serving requests."
   }
 }

@@ -15,11 +15,12 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { useQuery, useQueryClient } from '@tanstack/react-query'
+*/import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
@@ -28,7 +29,7 @@ import { LoadingState } from '@/components/loading-state'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
-import { getShareChannels, getShareGroups } from './api'
+import { deleteShareChannel, deleteShareGroup, getShareChannels, getShareGroups } from './api'
 import { ChannelCreateDialog } from './components/channel-create-dialog'
 import { GroupCreateDialog } from './components/group-create-dialog'
 import { GroupEditDialog } from './components/group-edit-dialog'
@@ -42,6 +43,8 @@ export function MyShares() {
   const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
   const [creatingGroup, setCreatingGroup] = useState(false)
   const [creatingChannel, setCreatingChannel] = useState(false)
+  const [deletingGroup, setDeletingGroup] = useState<ShareGroup | null>(null)
+  const [deletingChannel, setDeletingChannel] = useState<ShareChannel | null>(null)
 
   const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
   const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
@@ -63,6 +66,23 @@ export function MyShares() {
   const groups = groupsQuery.data?.data?.items ?? []
   const channels = channelsQuery.data?.data?.items ?? []
 
+  // 删除（§4/§5 的 CRUD 含 Delete）：软删除，删完刷新列表
+  const deleteGroupMutation = useMutation({
+    mutationFn: (id: number) => deleteShareGroup(id),
+    onSuccess: () => {
+      setDeletingGroup(null)
+      void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
+      void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
+    },
+  })
+  const deleteChannelMutation = useMutation({
+    mutationFn: (id: number) => deleteShareChannel(id),
+    onSuccess: () => {
+      setDeletingChannel(null)
+      void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
+    },
+  })
+
   const groupColumns: StaticDataTableColumn<ShareGroup>[] = [
     { id: 'name', header: t('share.group.name'), cell: (row) => row.name },
     {
@@ -81,9 +101,14 @@ export function MyShares() {
       id: 'actions',
       header: '',
       cell: (row) => (
-        <Button variant='outline' size='sm' onClick={() => setEditingGroup(row)}>
-          {t('Edit')}
-        </Button>
+        <div className='flex gap-2'>
+          <Button variant='outline' size='sm' onClick={() => setEditingGroup(row)}>
+            {t('Edit')}
+          </Button>
+          <Button variant='outline' size='sm' onClick={() => setDeletingGroup(row)}>
+            {t('Delete')}
+          </Button>
+        </div>
       ),
     },
   ]
@@ -108,6 +133,15 @@ export function MyShares() {
       id: 'health_state',
       header: t('share.channel.health'),
       cell: (row) => t(healthLabelKey(row.health_state)),
+    },
+    {
+      id: 'actions',
+      header: '',
+      cell: (row) => (
+        <Button variant='outline' size='sm' onClick={() => setDeletingChannel(row)}>
+          {t('Delete')}
+        </Button>
+      ),
     },
   ]
 
@@ -152,7 +186,35 @@ export function MyShares() {
             </CardContent>
           </Card>
         </div>
-        <ChannelCreateDialog
+        <ConfirmDialog
+        open={deletingGroup !== null}
+        onOpenChange={(next) => {
+          if (!next) setDeletingGroup(null)
+        }}
+        title={t('Delete share group')}
+        desc={t('The group disappears from your lists. Channels under it are not deleted.')}
+        destructive
+        confirmText={t('Delete')}
+        isLoading={deleteGroupMutation.isPending}
+        handleConfirm={() => {
+          if (deletingGroup) deleteGroupMutation.mutate(deletingGroup.id)
+        }}
+      />
+      <ConfirmDialog
+        open={deletingChannel !== null}
+        onOpenChange={(next) => {
+          if (!next) setDeletingChannel(null)
+        }}
+        title={t('Delete share channel')}
+        desc={t('The channel disappears from your lists and stops serving requests.')}
+        destructive
+        confirmText={t('Delete')}
+        isLoading={deleteChannelMutation.isPending}
+        handleConfirm={() => {
+          if (deletingChannel) deleteChannelMutation.mutate(deletingChannel.id)
+        }}
+      />
+      <ChannelCreateDialog
           groups={groups}
           open={creatingChannel}
           onOpenChange={setCreatingChannel}

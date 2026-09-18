@@ -6742,6 +6742,10 @@
     "Upstream address": "上游地址",
     "Your upstream key": "你的上游 Key",
     "It is stored encrypted and never shown again.": "将以密文存储，之后不再显示。",
-    "Select a share group": "选择分享分组"
+    "Select a share group": "选择分享分组",
+    "Delete share group": "删除分享分组",
+    "Delete share channel": "删除分享渠道",
+    "The group disappears from your lists. Channels under it are not deleted.": "该分组将从你的列表中消失；其下的渠道不会被删除。",
+    "The channel disappears from your lists and stops serving requests.": "该渠道将从你的列表中消失，并停止对外提供服务。"
   }
 }

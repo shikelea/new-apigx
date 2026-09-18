@@ -6742,6 +6742,10 @@
     "Upstream address": "Адрес вышестоящего сервиса",
     "Your upstream key": "Ваш ключ вышестоящего сервиса",
     "It is stored encrypted and never shown again.": "Хранится в зашифрованном виде и больше не отображается.",
-    "Select a share group": "Выберите группу общих ресурсов"
+    "Select a share group": "Выберите группу общих ресурсов",
+    "Delete share group": "Удалить группу общих ресурсов",
+    "Delete share channel": "Удалить общий канал",
+    "The group disappears from your lists. Channels under it are not deleted.": "Группа исчезнет из ваших списков. Каналы внутри неё не удаляются.",
+    "The channel disappears from your lists and stops serving requests.": "Канал исчезнет из ваших списков и перестанет обслуживать запросы."
   }
 }

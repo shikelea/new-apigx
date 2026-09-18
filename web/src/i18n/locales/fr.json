@@ -6742,6 +6742,10 @@
     "Upstream address": "Adresse de l'amont",
     "Your upstream key": "Votre clé amont",
     "It is stored encrypted and never shown again.": "Elle est stockée chiffrée et ne sera plus affichée.",
-    "Select a share group": "Choisir un groupe de partage"
+    "Select a share group": "Choisir un groupe de partage",
+    "Delete share group": "Supprimer le groupe de partage",
+    "Delete share channel": "Supprimer le canal de partage",
+    "The group disappears from your lists. Channels under it are not deleted.": "Le groupe disparaît de vos listes. Les canaux associés ne sont pas supprimés.",
+    "The channel disappears from your lists and stops serving requests.": "Le canal disparaît de vos listes et cesse de servir les requêtes."
   }
 }

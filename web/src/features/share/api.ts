@@ -105,3 +105,25 @@ export async function updateShareGroup(
   const res = await api.patch(`/api/apigx/share-groups/${groupId}`, input)
   return res.data
 }
+
+// ── 删除（§4/§5 的 CRUD 含 Delete；后端接口早已提供，此前界面没有入口）────────────────
+
+export async function deleteShareGroup(groupId: number): Promise<{ success: boolean }> {
+  const res = await api.delete('/api/apigx/share-groups/' + groupId)
+  return res.data
+}
+
+export async function deleteShareChannel(channelId: number): Promise<{ success: boolean }> {
+  const res = await api.delete('/api/apigx/channels/' + channelId)
+  return res.data
+}
+
+export async function deleteOffering(offeringId: number): Promise<{ success: boolean }> {
+  const res = await api.delete('/api/apigx/offerings/' + offeringId)
+  return res.data
+}
+
+export async function deleteUpstreamKey(keyId: number): Promise<{ success: boolean }> {
+  const res = await api.delete('/api/apigx/upstream-keys/' + keyId)
+  return res.data
+}
