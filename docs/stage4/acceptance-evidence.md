@@ -57,7 +57,7 @@
 
 | # | 计划书验收场景 | 现状 | 现有证据 / 缺口 |
 |---|---|---|---|
-| 21 | 异步任务后续查询、凭据轮换或移除 ⇒ 不随机换 Key，不跨用户/账户读取任务，历史消耗归属保留 | ⚠️ 部分覆盖 | `TestTaskRetentionPolicy`（保留期）；**缺**"凭据轮换后查询旧任务仍用原 Key"的断言 |
+| 21 | 异步任务后续查询、凭据轮换或移除 ⇒ 不随机换 Key，不跨用户/账户读取任务，历史消耗归属保留 | ⚠️ **"不跨用户读任务"已实测通过**；另两半缺写入方 | **不跨用户读任务 ✅ 实测**：用第 89 轮提交的**真实**视频任务（root 名下），owner 用自己的平台 Key 查 ⇒ **200 可读**；换另一个账号（`apigxuserb`，3 把平台 Key）用**自己的** Key 查**同一个 task id** ⇒ **400 `task_not_exist`**（不可读，且**不泄露"是否存在"**）。代码位置：`model/task.go` 的任务查询全部带 `user_id` 限定（L273/319/427/442/459/598）。**不随机换 Key**：承载字段已建模（`AsyncTask.UpstreamKeyCredentialVersion` 注释即"本次任务由哪个凭据版本服务"），但全仓**无写入方**；底座轮询是否复用提交时的 Key **我未确认，故不下结论**。**历史消耗归属**：`usage_events` 现已带 `upstream_key_id`（[016]），但**任务路径未记录**（按"拿不到用量就不写"有意为之）；本层 `apigx_async_tasks` 实测 0 行 ⇒ 属"schema 已建模、写入方未接"的同一族问题 |
 | 22 | 长流、进程崩溃和异步任务持续运行 ⇒ 槽位正常续租/归还/恢复，不泄漏也不提前重复分配 | ⚠️ 部分覆盖 | `TestLeaseExpiryRecoversCapacity`、`TestRenewExtendsLease`、`TestReconcileReleasesStaleAttempts`、`TestReconcileIgnoresFreshAttempts`；**缺**真实"进程被杀"的演练 |
 | 23 | 预留之后转发器进入原生 Key 选择路径 ⇒ 仍使用已确定的 Key，计量/价格/预留对象一致 | ⚠️ 部分覆盖 | `TestApplyChannelPoolProjectsKeysIntoBaseChannel`（投影）、`TestRecordKeyOutcomeDoesNotTouchBaseChannel`；**缺**"原生路径下仍用已定 Key"的断言 |
 | 24 | Redis 丢失或持久写入失败 ⇒ 停止新准入，恢复对账后开放；未知上游任务不因租约到期被判定已停止 | ✅ 已有测试证据 | `TestReserveFailsClosedWithoutRedis`（**失败关闭**）、`TestLeaseExpiryRecoversCapacity`、`TestReconcileReleasesStaleAttempts` |
@@ -422,3 +422,14 @@ event_uid = u:<请求ID>:<维度>   ⇒ 幂等
 而本层 `relayhook` 目前只持有 **TPM 预留**（`tpmReservation.windowKey` 是**分钟窗**，语义不同）
 ⇒ 我**不用它冒充**周期，`CycleKey` 暂留空。要补齐需先让本层持有预算预留的周期标识
 （与 #19 的"预留链路"是同一族问题）。
+---
+
+## 19. #21 记录（跨用户隔离已实测；另两半缺写入方）
+
+| 子项 | 结论 | 依据 |
+|---|---|---|
+| **不跨用户/账户读取任务** | ✅ **实测通过** | 用**真实**任务（第 89 轮 root 提交的 `task_cgApa…`）：owner 读 ⇒ **200**；另一账号用自己的平台 Key 读**同一 task id** ⇒ **400 `task_not_exist`**（不泄露存在性）。代码侧 `model/task.go` 全部按 `user_id` 限定（L273/319/427/442/459/598） |
+| **凭据轮换/移除后不随机换 Key** | ⚠️ 未确认 | `AsyncTask.UpstreamKeyCredentialVersion` 已建模（注释即"本次任务由哪个凭据版本服务"），但**全仓无写入方**；底座任务轮询是否复用提交时的 Key，**我未查实 ⇒ 不宣称** |
+| **历史消耗归属保留** | ⚠️ 任务路径未记录 | `usage_events` 已带 `upstream_key_id`（#19）；但任务路径**按"拿不到用量就不写"有意不记**；本层 `apigx_async_tasks` 实测 **0 行** ⇒ 与 #19 同族：schema 已建模、写入方未接 |
+
+**说明**：本行**不是**"没做"，而是"**其中一半已实测通过，另一半卡在同一处未接通的写入链路**"。
