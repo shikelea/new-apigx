@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
@@ -43,6 +44,7 @@ export function MyShares() {
   const queryClient = useQueryClient()
   const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
   const [creatingGroup, setCreatingGroup] = useState(false)
+  const navigate = useNavigate()
   const [creatingChannel, setCreatingChannel] = useState(false)
   const [deletingGroup, setDeletingGroup] = useState<ShareGroup | null>(null)
   const [deletingChannel, setDeletingChannel] = useState<ShareChannel | null>(null)
@@ -220,10 +222,15 @@ export function MyShares() {
           groups={groups}
           open={creatingChannel}
           onOpenChange={setCreatingChannel}
-          onSaved={() => {
+          onSaved={(createdId) => {
             // 新建渠道会同时影响渠道列表（以及分组下的渠道数）
             void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
             void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
+            // U-1 向导：渠道建好只是第一步 —— 直接把人带到渠道详情页的「选择模型」，
+            // 免得"建完就以为已经就绪"（模型没导入 = 供给是草稿，不会对外服务）。
+            if (createdId) {
+              void navigate({ to: '/share/$channelId', params: { channelId: String(createdId) } })
+            }
           }}
         />
         <GroupCreateDialog

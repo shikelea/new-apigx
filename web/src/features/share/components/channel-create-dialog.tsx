@@ -38,7 +38,7 @@ export function ChannelCreateDialog(props: {
   groups: ShareGroup[]
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSaved: () => void
+  onSaved: (createdId?: number) => void
 }) {
   const { t } = useTranslation()
   const [groupId, setGroupId] = useState('')
@@ -56,12 +56,12 @@ export function ChannelCreateDialog(props: {
         base_url: baseUrl.trim(),
         upstream_key: upstreamKey.trim(),
       }),
-    onSuccess: () => {
+    onSuccess: (res) => {
       setName('')
       setBaseUrl('')
       setUpstreamKey('')
       props.onOpenChange(false)
-      props.onSaved()
+      props.onSaved(res.data?.id)
     },
   })
 
