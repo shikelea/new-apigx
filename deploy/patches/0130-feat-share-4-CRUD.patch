@@ -1,0 +1,161 @@
+From 1f73a6249a343bef95acc4caafec9998b13905b4 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 13:02:23 +0800
+Subject: [PATCH 130/130] =?UTF-8?q?feat(share):=20=E5=90=8E=E7=AB=AF?=
+ =?UTF-8?q?=E6=94=AF=E6=8C=81=E3=80=8C=E5=88=86=E4=BA=AB=E8=80=85=E8=87=AA?=
+ =?UTF-8?q?=E5=BB=BA=E6=B8=A0=E9=81=93=E3=80=8D=E2=80=94=E2=80=94=E5=B9=B3?=
+ =?UTF-8?q?=E5=8F=B0=E4=BB=A3=E5=BB=BA=E5=BA=95=E5=BA=A7=E6=B8=A0=E9=81=93?=
+ =?UTF-8?q?=E5=B9=B6=E7=BB=91=E5=AE=9A=EF=BC=88=C2=A74=20=E6=B8=A0?=
+ =?UTF-8?q?=E9=81=93=20CRUD=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**背景**：用户指出"渠道啥的也不能加"。卡点是建分享渠道必须给 base_channel_id，
+而底座渠道列表只有管理员能看 ⇒ 分享者无从选择。采用推荐方案：
+分享者只填 名称/协议/上游地址/**自己的 Key**，平台代建底座渠道并绑定。
+
+**实现**（POST /api/apigx/channels 扩展）：
+- 请求体新增 upstream_key；未给 base_channel_id 时走"自建"分支
+- provisionBaseChannelForShareChannel：
+  · 校验 name / base_url / upstream_key；协议用**底座类型常量**映射（openai/anthropic/gemini，不写死数字）
+  · 建底座渠道（Group=default、Models 留空由"同步模型"填充、Status=enabled），BaseURL 取归一化后的值
+  · 把 Key 登记进我们的 Key 池：**复用既有加密口径** —— secretbox 密文信封 + 查重指纹，
+    主密钥未配置时**失败关闭**（绝不退化成明文存储）
+**过程如实记录**：第一版补丁的守卫条件写得太宽（文件里早有 "UpstreamKey" 字样）导致**整脚本未生效**；
+第二版按真实结构体修正了三处类型错误（底座 BaseURL 是 *string；CreateUpstreamKey 收指针且字段是
+SecretRef/SecretFingerprint，而不是明文 Key）。
+**❗本轮未完成**：端到端实测与前端「新建渠道」弹窗尚未做 —— 后端仅通过编译与 go vet，
+不宣称该功能可用。
+---
+ apigx/api/share.go | 94 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 94 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index de99905..01bf22f 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -12,8 +12,11 @@
+ package apigxapi
+ 
+ import (
++	"crypto/sha256"
++	"encoding/hex"
+ 	"errors"
+ 	"fmt"
++	"github.com/QuantumNous/new-api/constant"
+ 	"net/http"
+ 	"strconv"
+ 	"strings"
+@@ -298,6 +301,9 @@ func (h *handler) deleteShareGroup(c *gin.Context) {
+ // ---------------------------------------------------------------------------
+ 
+ type createChannelRequest struct {
++	// 以下两项用于"分享者自建渠道"（§4「渠道 CRUD」）：不给 base_channel_id 时，
++	// 平台按这些信息**代建底座渠道**并绑定 —— 分享者不必知道管理员侧的渠道 ID。
++	UpstreamKey   string `json:"upstream_key"`
+ 	ShareGroupID  int64  `json:"share_group_id"`
+ 	BaseChannelID int64  `json:"base_channel_id"`
+ 	Name          string `json:"name"`
+@@ -331,6 +337,14 @@ func (h *handler) createChannel(c *gin.Context) {
+ 	if req.KeyPoolMode != nil {
+ 		channel.KeyPoolMode = *req.KeyPoolMode
+ 	}
++	// 「分享者自建渠道」：未指定 base_channel_id 时，平台按配方代建一条底座渠道并绑定。
++	if channel.BaseChannelID <= 0 {
++		if recipeErr := h.provisionBaseChannelForShareChannel(channel, strings.TrimSpace(req.UpstreamKey)); recipeErr != nil {
++			failFromRepo(c, recipeErr)
++			return
++		}
++	}
++
+ 	if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
+ 		failFromRepo(c, err)
+ 		return
+@@ -1934,3 +1948,83 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
+ 	}
+ 	ok(c, gin.H{"confirmed": affected, "target_canonical_model_id": target})
+ }
++
++// provisionBaseChannelForShareChannel 为"分享者自建渠道"代建一条**底座渠道**并绑定。
++//
++// 设计取舍（§4「渠道 CRUD」+ §7 权限边界）：
++//   - 分享者只填 名称/协议/上游地址/自己的 Key ⇒ **不需要知道管理员侧的渠道 ID**；
++//   - 上游 Key 用**分享者自己的**，平台不代垫 ⇒ 消耗归分享者；
++//   - 底座渠道的模型列表留空，由「同步模型」按上游实际能力填充（不做猜测）。
++func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channel, upstreamKey string) error {
++	if channel.Name == "" {
++		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
++	}
++	if channel.BaseURL == "" {
++		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
++	}
++	if upstreamKey == "" {
++		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
++	}
++	channelType, ok := baseChannelTypeForProtocol(channel.Protocol)
++	if !ok {
++		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
++	}
++
++	base := basemodel.Channel{
++		Name:        "APIGX-" + channel.Name,
++		Type:        channelType,
++		Key:         upstreamKey,
++		BaseURL:     &channel.BaseURL,
++		Group:       "default",
++		Models:      "",
++		Status:      common.ChannelStatusEnabled,
++		CreatedTime: common.GetTimestamp(),
++	}
++	if err := h.db.Create(&base).Error; err != nil {
++		return err
++	}
++	channel.BaseChannelID = int64(base.Id)
++
++	// 同时把 Key 登记进我们的 Key 池（分享者之后可管理权重/冷却）。
++	// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
++	// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
++	envelope, encErr := secretbox.Encrypt(upstreamKey)
++	if encErr != nil {
++		common.SysError("apigx api: refuse to store upstream key: " + encErr.Error())
++		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
++	}
++	fingerprint, fpErr := secretbox.Fingerprint(upstreamKey)
++	if fpErr != nil {
++		common.SysError("apigx api: fingerprint failed: " + fpErr.Error())
++		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
++	}
++	return apigxmodel.CreateUpstreamKey(h.db, channel.OwnerUserID, &apigxmodel.UpstreamKey{
++		ChannelID:         channel.ID,
++		StableKeyID:       upstreamKeyStableID(upstreamKey),
++		Name:              "default",
++		SecretRef:         envelope,
++		SecretFingerprint: fingerprint,
++		Weight:            1,
++		Status:            apigxmodel.UpstreamKeyStatusEnabled,
++	})
++}
++
++// baseChannelTypeForProtocol 把我们的协议标识映射到底座渠道类型（用底座常量，不写死数字）。
++func baseChannelTypeForProtocol(protocol string) (int, bool) {
++	switch protocol {
++	case "openai":
++		return constant.ChannelTypeOpenAI, true
++	case "anthropic":
++		return constant.ChannelTypeAnthropic, true
++	case "gemini":
++		return constant.ChannelTypeGemini, true
++	default:
++		return 0, false
++	}
++}
++
++// upstreamKeyStableID 生成稳定的 Key 标识（同一把 Key 重复登记时保持幂等）。
++func upstreamKeyStableID(key string) string {
++	sum := sha256.Sum256([]byte(key))
++	return "apigx-" + hex.EncodeToString(sum[:8])
++}
+-- 
+2.53.0.windows.1
+
