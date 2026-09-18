@@ -6746,6 +6746,22 @@
     "Delete share group": "Delete share group",
     "Delete share channel": "Delete share channel",
     "The group disappears from your lists. Channels under it are not deleted.": "The group disappears from your lists. Channels under it are not deleted.",
-    "The channel disappears from your lists and stops serving requests.": "The channel disappears from your lists and stops serving requests."
+    "The channel disappears from your lists and stops serving requests.": "The channel disappears from your lists and stops serving requests.",
+    "Access invites": "Access invites",
+    "Issue an invite so others can see the resources of a share group.": "Issue an invite so others can see the resources of a share group.",
+    "Max uses": "Max uses",
+    "Valid days": "Valid days",
+    "Issue invite": "Issue invite",
+    "Copy the invite code now — it is shown only once.": "Copy the invite code now — it is shown only once.",
+    "No invite yet": "No invite yet",
+    "Uses": "Uses",
+    "Revoked": "Revoked",
+    "Used up": "Used up",
+    "Revoke invite": "Revoke invite",
+    "The code stops working and grants created by it are revoked.": "The code stops working and grants created by it are revoked.",
+    "Choose models": "Choose models",
+    "Import selected": "Import selected",
+    "These models were reported by the upstream. Import the ones you want to share.": "These models were reported by the upstream. Import the ones you want to share.",
+    "No model reported by the upstream": "No model reported by the upstream"
   }
 }

@@ -67,6 +67,12 @@ export async function getChannelOfferings(channelId: number): Promise<OfferingLi
  *
  * 复用底座的取模型能力（40+ 家适配器），这里只是触发与落库。
  */
+/** 为**指定上游模型**建一条供给（草稿）—— 用于"勾选导入"，而不是一次性全量导入。 */
+export async function createOffering(channelId: number, upstreamModelID: string): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post('/api/apigx/channels/' + channelId + '/offerings', { upstream_model_id: upstreamModelID })
+  return res.data
+}
+
 export async function fetchUpstreamModels(channelId: number, importAsDraft: boolean): Promise<{ success: boolean; data?: unknown }> {
   const res = await api.post(`/api/apigx/channels/${channelId}/fetch-models`, { import: importAsDraft })
   return res.data

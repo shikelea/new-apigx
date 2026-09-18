@@ -6746,6 +6746,22 @@
     "Delete share group": "Supprimer le groupe de partage",
     "Delete share channel": "Supprimer le canal de partage",
     "The group disappears from your lists. Channels under it are not deleted.": "Le groupe disparaît de vos listes. Les canaux associés ne sont pas supprimés.",
-    "The channel disappears from your lists and stops serving requests.": "Le canal disparaît de vos listes et cesse de servir les requêtes."
+    "The channel disappears from your lists and stops serving requests.": "Le canal disparaît de vos listes et cesse de servir les requêtes.",
+    "Access invites": "Invitations d'accès",
+    "Issue an invite so others can see the resources of a share group.": "Émettez une invitation pour que d'autres voient les ressources d'un groupe de partage.",
+    "Max uses": "Utilisations max",
+    "Valid days": "Validité (jours)",
+    "Issue invite": "Émettre",
+    "Copy the invite code now — it is shown only once.": "Copiez le code maintenant — il n'est affiché qu'une fois.",
+    "No invite yet": "Aucune invitation",
+    "Uses": "Utilisations",
+    "Revoked": "Révoqué",
+    "Used up": "Épuisé",
+    "Revoke invite": "Révoquer l'invitation",
+    "The code stops working and grants created by it are revoked.": "Le code cesse de fonctionner et les autorisations qu’il a créées sont révoquées.",
+    "Choose models": "Choisir des modèles",
+    "Import selected": "Importer la sélection",
+    "These models were reported by the upstream. Import the ones you want to share.": "Ces modèles proviennent de l'amont. Importez seulement ceux à partager.",
+    "No model reported by the upstream": "L'amont n'a signalé aucun modèle"
   }
 }

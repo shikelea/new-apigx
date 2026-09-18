@@ -6746,6 +6746,22 @@
     "Delete share group": "刪除分享分組",
     "Delete share channel": "刪除分享管道",
     "The group disappears from your lists. Channels under it are not deleted.": "該分組將從你的清單中消失；其下的管道不會被刪除。",
-    "The channel disappears from your lists and stops serving requests.": "該管道將從你的清單中消失，並停止對外提供服務。"
+    "The channel disappears from your lists and stops serving requests.": "該管道將從你的清單中消失，並停止對外提供服務。",
+    "Access invites": "存取授權（邀請碼）",
+    "Issue an invite so others can see the resources of a share group.": "發放邀請碼後，對方就能看見該分享分組的資源。",
+    "Max uses": "可用次數",
+    "Valid days": "有效期（天）",
+    "Issue invite": "發放邀請碼",
+    "Copy the invite code now — it is shown only once.": "請立即複製邀請碼 —— 它只顯示這一次。",
+    "No invite yet": "還沒有邀請碼",
+    "Uses": "已用/上限",
+    "Revoked": "已撤銷",
+    "Used up": "已用盡",
+    "Revoke invite": "撤銷邀請碼",
+    "The code stops working and grants created by it are revoked.": "該邀請碼立即失效，且由它產生的授權會一併撤銷。",
+    "Choose models": "選擇模型",
+    "Import selected": "匯入所選",
+    "These models were reported by the upstream. Import the ones you want to share.": "這些是上游回傳的模型清單。只匯入你想分享的那些。",
+    "No model reported by the upstream": "上游沒有回傳任何模型"
   }
 }

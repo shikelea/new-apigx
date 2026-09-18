@@ -6746,6 +6746,22 @@
     "Delete share group": "Удалить группу общих ресурсов",
     "Delete share channel": "Удалить общий канал",
     "The group disappears from your lists. Channels under it are not deleted.": "Группа исчезнет из ваших списков. Каналы внутри неё не удаляются.",
-    "The channel disappears from your lists and stops serving requests.": "Канал исчезнет из ваших списков и перестанет обслуживать запросы."
+    "The channel disappears from your lists and stops serving requests.": "Канал исчезнет из ваших списков и перестанет обслуживать запросы.",
+    "Access invites": "Приглашения доступа",
+    "Issue an invite so others can see the resources of a share group.": "Выдайте приглашение, чтобы другие увидели ресурсы группы общих ресурсов.",
+    "Max uses": "Макс. использований",
+    "Valid days": "Срок действия (дней)",
+    "Issue invite": "Выдать",
+    "Copy the invite code now — it is shown only once.": "Скопируйте код сейчас — он показывается только один раз.",
+    "No invite yet": "Приглашений нет",
+    "Uses": "Использования",
+    "Revoked": "Отозвано",
+    "Used up": "Использовано",
+    "Revoke invite": "Отозвать приглашение",
+    "The code stops working and grants created by it are revoked.": "Код перестанет работать, а выданные им доступы будут отозваны.",
+    "Choose models": "Выбор моделей",
+    "Import selected": "Импортировать выбранные",
+    "These models were reported by the upstream. Import the ones you want to share.": "Это модели, о которых сообщил вышестоящий сервис. Импортируйте только нужные.",
+    "No model reported by the upstream": "Вышестоящий сервис не сообщил моделей"
   }
 }

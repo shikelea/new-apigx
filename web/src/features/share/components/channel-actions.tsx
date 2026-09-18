@@ -27,6 +27,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 import { fetchUpstreamModels, setChannelCapacityPolicy } from '../api'
+import { ModelImportDialog } from './model-import-dialog'
 import { buildCapacityPolicyPayload, type LimitDimensionInput } from '../lib/capacity'
 import type { LimitMode } from '../types'
 
@@ -44,6 +45,7 @@ export function ChannelActions(props: { channelId: number }) {
   const queryClient = useQueryClient()
 
   const [syncOpen, setSyncOpen] = useState(false)
+  const [chooseOpen, setChooseOpen] = useState(false)
   const [concurrency, setConcurrency] = useState<LimitDimensionInput>({ mode: 0, value: '' })
   const [rpm, setRpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
   const [tpm, setTpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
@@ -76,6 +78,10 @@ export function ChannelActions(props: { channelId: number }) {
           <Button variant='outline' onClick={() => setSyncOpen(true)}>
             {t('share.actions.syncModels')}
           </Button>
+          {/* 「同步模型」是一次性全导；这里让分享者先看清单再挑（避免导出一堆没用的草稿供给） */}
+          <Button variant='outline' onClick={() => setChooseOpen(true)}>
+            {t('Choose models')}
+          </Button>
           <p className='text-muted-foreground mt-2 text-xs'>{t('share.actions.syncModelsHint')}</p>
         </div>
 
@@ -94,7 +100,15 @@ export function ChannelActions(props: { channelId: number }) {
           </Button>
         </div>
 
-        <ConfirmDialog
+        <ModelImportDialog
+        channelId={props.channelId}
+        open={chooseOpen}
+        onOpenChange={setChooseOpen}
+        onSaved={() => {
+          void queryClient.invalidateQueries({ queryKey: ['apigx-channel-offerings', props.channelId] })
+        }}
+      />
+      <ConfirmDialog
           open={syncOpen}
           onOpenChange={setSyncOpen}
           title={t('share.actions.syncModels')}

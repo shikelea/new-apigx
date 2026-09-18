@@ -6746,6 +6746,22 @@
     "Delete share group": "Xóa nhóm chia sẻ",
     "Delete share channel": "Xóa kênh chia sẻ",
     "The group disappears from your lists. Channels under it are not deleted.": "Nhóm sẽ biến mất khỏi danh sách. Các kênh bên trong không bị xóa.",
-    "The channel disappears from your lists and stops serving requests.": "Kênh sẽ biến mất khỏi danh sách và ngừng phục vụ yêu cầu."
+    "The channel disappears from your lists and stops serving requests.": "Kênh sẽ biến mất khỏi danh sách và ngừng phục vụ yêu cầu.",
+    "Access invites": "Lời mời truy cập",
+    "Issue an invite so others can see the resources of a share group.": "Phát lời mời để người khác thấy tài nguyên của nhóm chia sẻ.",
+    "Max uses": "Số lần tối đa",
+    "Valid days": "Số ngày hiệu lực",
+    "Issue invite": "Phát",
+    "Copy the invite code now — it is shown only once.": "Hãy sao chép mã ngay — mã chỉ hiển thị một lần.",
+    "No invite yet": "Chưa có lời mời",
+    "Uses": "Lượt dùng",
+    "Revoked": "Đã thu hồi",
+    "Used up": "Đã dùng hết",
+    "Revoke invite": "Thu hồi lời mời",
+    "The code stops working and grants created by it are revoked.": "Mã sẽ hết hiệu lực và các quyền do nó tạo ra cũng bị thu hồi.",
+    "Choose models": "Chọn mô hình",
+    "Import selected": "Nhập mục đã chọn",
+    "These models were reported by the upstream. Import the ones you want to share.": "Đây là danh sách mô hình do thượng nguồn trả về. Chỉ nhập những mô hình bạn muốn chia sẻ.",
+    "No model reported by the upstream": "Thượng nguồn không trả về mô hình nào"
   }
 }

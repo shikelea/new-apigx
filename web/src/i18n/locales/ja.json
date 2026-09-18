@@ -6746,6 +6746,22 @@
     "Delete share group": "共有グループを削除",
     "Delete share channel": "共有チャネルを削除",
     "The group disappears from your lists. Channels under it are not deleted.": "グループは一覧から消えます。配下のチャネルは削除されません。",
-    "The channel disappears from your lists and stops serving requests.": "チャネルは一覧から消え、リクエストの処理を停止します。"
+    "The channel disappears from your lists and stops serving requests.": "チャネルは一覧から消え、リクエストの処理を停止します。",
+    "Access invites": "アクセス招待",
+    "Issue an invite so others can see the resources of a share group.": "招待を発行すると、相手がその共有グループのリソースを閲覧できます。",
+    "Max uses": "最大利用回数",
+    "Valid days": "有効日数",
+    "Issue invite": "発行",
+    "Copy the invite code now — it is shown only once.": "今すぐ招待コードをコピーしてください — 表示は一度きりです。",
+    "No invite yet": "招待はまだありません",
+    "Uses": "利用回数",
+    "Revoked": "取消済み",
+    "Used up": "使い切り",
+    "Revoke invite": "招待を取消",
+    "The code stops working and grants created by it are revoked.": "コードは無効になり、それによって付与された権限も取り消されます。",
+    "Choose models": "モデルを選択",
+    "Import selected": "選択をインポート",
+    "These models were reported by the upstream. Import the ones you want to share.": "上流が返したモデル一覧です。共有したいものだけインポートしてください。",
+    "No model reported by the upstream": "上流からモデルが返されませんでした"
   }
 }
