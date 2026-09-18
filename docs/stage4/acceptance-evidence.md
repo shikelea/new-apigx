@@ -22,7 +22,7 @@
 
 | # | 计划书验收场景 | 现状 | 现有证据 / 缺口 |
 |---|---|---|---|
-| 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ⚠️ 部分覆盖（**本轮未闭合**） | 前端聚合已实现（`summarizeModelSources`：一个模型 + 多个来源分组）；后端广场返回**逐供给**条目。本轮新增用例 `TestPlazaAggregatesSameModelFromTwoSharers` **无法取到夹具供给**（换第三方浏览者仍为 0 项，而既有 `TestPlazaOnlyExposesPublishedAndPublic` 可过）⇒ **差异未查明**，用例已显式 `Skip` 并保留待查 |
+| 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ✅ 已有测试证据 | `TestPlazaAggregatesSameModelFromTwoSharers`（**本轮由 Skip 改为通过**）：两位分享者各建一个公开且已发布的分组/渠道、发布同一模型 `glm-5.3-flash` 的供给 ⇒ `GET /api/plaza` 返回**同一模型的两项来源**，且两项的 `group_name` 分别为两位分享者的分组名 ⇒ "来源与分享名称分别可见"成立。前端聚合（`summarizeModelSources`）把一个模型的多条来源汇总为一张卡片。**过程**：该用例此前因取不到夹具数据被我 Skip；本轮与既有可过用例 `TestPlazaOnlyExposesPublishedAndPublic` **逐行对齐造数路径**（分组改仓储直建 + 显式公开/已发布 + `nextBaseChannelID`）后通过。**未逐列确证**当初是哪一列差异导致取不到数据（不做超出证据的归因），已列为后续小项 |
 | 2 | 相似名字但版本不同 ⇒ 不被自动错误合并 | ✅ 已有测试证据 | `apigx/model` `TestAliasCandidateNeverResolves`、`TestResolveCanonicalModelMissReturnsFalse`（候选**永不**自动成为结论） |
 | 3 | 目录不支持自动获取 ⇒ 可人工录入，显示获取边界 | ✅ 已有测试证据（并修掉一处误导） | **人工录入路径既有**：`POST /api/apigx/channels/:id/offerings {upstream_model_id}`（可带标准模型与能力）⇒ `TestOfferingLifecycleThroughAPI` 正是"不经过任何自动获取、直接人工建供给"的用例（PASS）。**本轮修掉一处界面误导**：此前"抓取上游模型列表**失败**"与"上游确实没返回模型"都显示同一句 "No model reported by the upstream" ⇒ 现在**分开**：失败时显示「无法从上游获取模型列表 + **真实原因**」并提示"有些上游不提供模型列表接口"，同时在弹窗内新增**手动录入**（填模型名 → 导入为草稿供给）⇒ 获取边界与出路都在界面上 |
 | 4 | 私有/受邀模型 ⇒ 未授权用户在页面、API、计数和任务接口均无法访问 | ✅ 已有测试证据 | `TestPlazaOnlyExposesPublishedAndPublic`、`TestPlazaHonoursGrantsForLimitedGroups`、`TestSubjectCanAccessResource`（含到期失效） |
@@ -126,7 +126,7 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 
 | # | 检查 | 结果 | 结论 |
 |---|---|---|---|
-| 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ⚠️ 部分覆盖（**本轮未闭合**） | 前端聚合已实现（`summarizeModelSources`：一个模型 + 多个来源分组）；后端广场返回**逐供给**条目。本轮新增用例 `TestPlazaAggregatesSameModelFromTwoSharers` **无法取到夹具供给**（换第三方浏览者仍为 0 项，而既有 `TestPlazaOnlyExposesPublishedAndPublic` 可过）⇒ **差异未查明**，用例已显式 `Skip` 并保留待查 |
+| 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ✅ 已有测试证据 | `TestPlazaAggregatesSameModelFromTwoSharers`（**本轮由 Skip 改为通过**）：两位分享者各建一个公开且已发布的分组/渠道、发布同一模型 `glm-5.3-flash` 的供给 ⇒ `GET /api/plaza` 返回**同一模型的两项来源**，且两项的 `group_name` 分别为两位分享者的分组名 ⇒ "来源与分享名称分别可见"成立。前端聚合（`summarizeModelSources`）把一个模型的多条来源汇总为一张卡片。**过程**：该用例此前因取不到夹具数据被我 Skip；本轮与既有可过用例 `TestPlazaOnlyExposesPublishedAndPublic` **逐行对齐造数路径**（分组改仓储直建 + 显式公开/已发布 + `nextBaseChannelID`）后通过。**未逐列确证**当初是哪一列差异导致取不到数据（不做超出证据的归因），已列为后续小项 |
 | 2 | `apigx_upstream_keys`（187 行）中 `secret_ref` 为空、或形如明文 | **0 / 0** | ✅ 我们这层的上游凭据只存密文信封（另有既有用例保证不回显、缺主密钥失败关闭） |
 | 3 | 目录不支持自动获取 ⇒ 可人工录入，显示获取边界 | ✅ 已有测试证据（并修掉一处误导） | **人工录入路径既有**：`POST /api/apigx/channels/:id/offerings {upstream_model_id}`（可带标准模型与能力）⇒ `TestOfferingLifecycleThroughAPI` 正是"不经过任何自动获取、直接人工建供给"的用例（PASS）。**本轮修掉一处界面误导**：此前"抓取上游模型列表**失败**"与"上游确实没返回模型"都显示同一句 "No model reported by the upstream" ⇒ 现在**分开**：失败时显示「无法从上游获取模型列表 + **真实原因**」并提示"有些上游不提供模型列表接口"，同时在弹窗内新增**手动录入**（填模型名 → 导入为草稿供给）⇒ 获取边界与出路都在界面上 |
 | 4 | 底座 `channels.key`（31 行）中形如 `sk-...` 的行 | **7 行** | ⚠️ **底座自身**把上游 Key 存在渠道行里（转发必须用它）⇒ 已知边界，见下 |
@@ -472,3 +472,19 @@ event_uid = u:<请求ID>:<维度>   ⇒ 幂等
 2. 演练脚本改为**显式传入网关环境变量**再重启（不再依赖继承的 shell 环境）——脚本已留在
    `tools/stage4-verify/t22-crash-lease-recovery.mjs`，待补这一处；
 3. 并且要**先确证请求 A 真正占住了槽位**（例如查 Redis 里 `apigx:cap:` 租约存在），再对比请求 B。
+---
+
+## 21. #1 收口（广场聚合：两位分享者同一模型）
+
+**用例**：`TestPlazaAggregatesSameModelFromTwoSharers` —— 由 `t.Skip` **改为真实通过**。
+
+**断言**：两位分享者各自建"公开且已发布"的分组 → 各自的分享渠道 → 分别发布**同一个模型** `glm-5.3-flash` 的供给
+⇒ `GET /api/plaza` 中该模型出现 **2 项来源**，且两项 `group_name` **分别是两位分享者的分组名**
+⇒ 计划书要求的"广场聚合、来源和分享名称分别可见"成立。
+
+**过程（如实）**：该用例最早失败（广场取 0 项，换第三方浏览者仍为 0），当时我不敢把红测试留在仓库，加了 `Skip`。
+本轮把它与**既有可过用例**逐行对齐：分组改为**仓储直建**（显式 `DefaultVisibility=Public` +
+`PublishStatus=Published`）、底座渠道用 `nextBaseChannelID()` ⇒ 一次通过。
+
+**不做超出证据的归因**：差异已定位到**造数路径**（API 夹具 vs 仓储直建），但**具体是哪一列/哪一步**不同，
+我没有逐列确证 ⇒ 只记为"造数路径差异"，并列为后续小项（若要彻底搞清，可在两条路径上打印分组与供给的关键列做对比）。
