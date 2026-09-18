@@ -1,0 +1,192 @@
+From 15b4e452c7fa633b94147495715ed316ca748b0c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:55:17 +0800
+Subject: [PATCH 128/128] =?UTF-8?q?fix(i18n):=20=E8=A1=A5=E9=BD=90?=
+ =?UTF-8?q?=E4=BB=A3=E7=A0=81=E5=9C=A8=E7=94=A8=E4=BD=86=E8=AF=AD=E8=A8=80?=
+ =?UTF-8?q?=E6=96=87=E4=BB=B6=E7=BC=BA=E5=A4=B1=E7=9A=84=2010=20=E4=B8=AA?=
+ =?UTF-8?q?=E9=94=AE=EF=BC=88=E7=95=8C=E9=9D=A2=E4=B8=8D=E5=86=8D=E6=98=BE?=
+ =?UTF-8?q?=E7=A4=BA=E8=8B=B1=E6=96=87/=E5=8E=9F=E5=A7=8B=E9=94=AE?=
+ =?UTF-8?q?=E5=90=8D=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**做法**：写了一次**全量审计**（扫描代码里所有 t('...') 字面量键，与 zh/en 逐一比对），
+结果：共 4663 个在用键，**缺失 10 个**，全部补齐（7 个语言文件 × 10 条）后**缺失归零**。
+
+缺失清单：New share group（"新建分组"按钮显示英文的原因）、Visibility、Public、
+Limited (invite or assigned users)、Only me、Share groups、All share groups（以上 7 条是我新加的），
+以及 Expand all、Length、Select preset（这 3 条**不是我加的**，属既有缺失，一并补上）。
+
+**根因（重要）**：我早先为这些新增文案写过 i18n，但随后执行 `bun run i18n:sync` 时被清理掉 ——
+同步工具会移除"它扫不到的键"；而我的键是通过组件里的 t('...') 使用的，
+扫描规则与实际用法不一致就会误删。⇒ 以后**先加键、再跑 sync、再审计**，并以审计归零为准。
+
+检查: 审计 0 缺失 / build ✅（typecheck 与用例此前已通过）
+---
+ web/src/i18n/locales/en.json    | 12 +++++++++++-
+ web/src/i18n/locales/fr.json    | 12 +++++++++++-
+ web/src/i18n/locales/ja.json    | 12 +++++++++++-
+ web/src/i18n/locales/ru.json    | 12 +++++++++++-
+ web/src/i18n/locales/vi.json    | 12 +++++++++++-
+ web/src/i18n/locales/zh-TW.json | 12 +++++++++++-
+ web/src/i18n/locales/zh.json    | 12 +++++++++++-
+ 7 files changed, 77 insertions(+), 7 deletions(-)
+
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 4c16a33..0ac2e72 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6725,6 +6725,16 @@
+     "Invalid or already used invite code": "Invalid or already used invite code",
+     "Sources": "Sources",
+     "Not enough samples": "Not enough samples",
+-    "Share sources": "Share sources"
++    "Share sources": "Share sources",
++    "New share group": "New share group",
++    "Visibility": "Visibility",
++    "Public": "Public",
++    "Limited (invite or assigned users)": "Limited (invite or assigned users)",
++    "Only me": "Only me",
++    "Share groups": "Share groups",
++    "All share groups": "All share groups",
++    "Expand all": "Expand all",
++    "Length": "Length",
++    "Select preset": "Select preset"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 6f6c529..7319260 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6725,6 +6725,16 @@
+     "Invalid or already used invite code": "Code invalide ou déjà utilisé",
+     "Sources": "Sources",
+     "Not enough samples": "Échantillons insuffisants",
+-    "Share sources": "Sources partagées"
++    "Share sources": "Sources partagées",
++    "New share group": "Nouveau groupe de partage",
++    "Visibility": "Visibilité",
++    "Public": "Public",
++    "Limited (invite or assigned users)": "Limité (invitation ou utilisateurs désignés)",
++    "Only me": "Moi uniquement",
++    "Share groups": "Groupes de partage",
++    "All share groups": "Tous les groupes de partage",
++    "Expand all": "Tout développer",
++    "Length": "Longueur",
++    "Select preset": "Choisir un préréglage"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index a99f8ef..c2a1b2e 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6725,6 +6725,16 @@
+     "Invalid or already used invite code": "招待コードが無効か、既に使用されています",
+     "Sources": "提供元数",
+     "Not enough samples": "サンプル不足",
+-    "Share sources": "共有元"
++    "Share sources": "共有元",
++    "New share group": "共有グループを作成",
++    "Visibility": "公開範囲",
++    "Public": "公開",
++    "Limited (invite or assigned users)": "限定（招待または指定ユーザー）",
++    "Only me": "自分のみ",
++    "Share groups": "共有グループ",
++    "All share groups": "すべての共有グループ",
++    "Expand all": "すべて展開",
++    "Length": "長さ",
++    "Select preset": "プリセットを選択"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 4fe42e4..68f02b8 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6725,6 +6725,16 @@
+     "Invalid or already used invite code": "Код недействителен или уже использован",
+     "Sources": "Источники",
+     "Not enough samples": "Недостаточно данных",
+-    "Share sources": "Общие источники"
++    "Share sources": "Общие источники",
++    "New share group": "Новая группа общих ресурсов",
++    "Visibility": "Видимость",
++    "Public": "Публичный",
++    "Limited (invite or assigned users)": "Ограниченный (по приглашению или назначению)",
++    "Only me": "Только я",
++    "Share groups": "Группы общих ресурсов",
++    "All share groups": "Все группы общих ресурсов",
++    "Expand all": "Развернуть всё",
++    "Length": "Длина",
++    "Select preset": "Выбрать шаблон"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index a0dfcd2..1eeff3a 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6725,6 +6725,16 @@
+     "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng",
+     "Sources": "Số nguồn",
+     "Not enough samples": "Chưa đủ mẫu",
+-    "Share sources": "Nguồn chia sẻ"
++    "Share sources": "Nguồn chia sẻ",
++    "New share group": "Nhóm chia sẻ mới",
++    "Visibility": "Phạm vi hiển thị",
++    "Public": "Công khai",
++    "Limited (invite or assigned users)": "Giới hạn (theo lời mời hoặc người được chỉ định)",
++    "Only me": "Chỉ mình tôi",
++    "Share groups": "Nhóm chia sẻ",
++    "All share groups": "Tất cả nhóm chia sẻ",
++    "Expand all": "Mở rộng tất cả",
++    "Length": "Độ dài",
++    "Select preset": "Chọn mẫu đặt trước"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index eefb96f..c186305 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6725,6 +6725,16 @@
+     "Invalid or already used invite code": "邀請碼無效或已被使用",
+     "Sources": "來源數",
+     "Not enough samples": "樣本不足",
+-    "Share sources": "分享來源"
++    "Share sources": "分享來源",
++    "New share group": "新增分享分組",
++    "Visibility": "可見性",
++    "Public": "公開",
++    "Limited (invite or assigned users)": "受限（憑邀請或指定使用者）",
++    "Only me": "僅自己",
++    "Share groups": "分享分組",
++    "All share groups": "全部分享分組",
++    "Expand all": "展開全部",
++    "Length": "長度",
++    "Select preset": "選擇預設"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 6b6a18e..93e5919 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6725,6 +6725,16 @@
+     "Invalid or already used invite code": "邀请码无效或已被使用",
+     "Sources": "来源数",
+     "Not enough samples": "样本不足",
+-    "Share sources": "分享来源"
++    "Share sources": "分享来源",
++    "New share group": "新建分享分组",
++    "Visibility": "可见性",
++    "Public": "公开",
++    "Limited (invite or assigned users)": "受限（凭邀请或指定用户）",
++    "Only me": "仅自己",
++    "Share groups": "分享分组",
++    "All share groups": "全部分享分组",
++    "Expand all": "展开全部",
++    "Length": "长度",
++    "Select preset": "选择预设"
+   }
+ }
+-- 
+2.53.0.windows.1
+
