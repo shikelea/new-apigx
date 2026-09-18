@@ -49,6 +49,8 @@ const basicAuthSchema = z.object({
   PasswordRegisterEnabled: z.boolean(),
   EmailVerificationEnabled: z.boolean(),
   RegisterEnabled: z.boolean(),
+  // 注册政策（§5 邀请准入）：是否**必须**使用注册邀请码才能注册
+  RegisterInviteRequired: z.boolean(),
   EmailDomainRestrictionEnabled: z.boolean(),
   EmailAliasRestrictionEnabled: z.boolean(),
   EmailDomainWhitelist: z.string(),
@@ -144,6 +146,28 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
                   <FormLabel>{t('Registration Enabled')}</FormLabel>
                   <FormDescription>
                     {t('Allow new users to register')}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+              </SettingsSwitchItem>
+            )}
+          />
+
+          {/* 注册政策（§5 邀请准入）：开启后必须有有效注册邀请码才能注册 */}
+          <FormField
+            control={form.control}
+            name='RegisterInviteRequired'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Registration Invite Required')}</FormLabel>
+                  <FormDescription>
+                    {t('Require a valid registration invite code to sign up')}
                   </FormDescription>
                 </SettingsSwitchContent>
                 <FormControl>

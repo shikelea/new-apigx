@@ -6714,6 +6714,8 @@
     "Price list": "Price list",
     "Registration invite code": "Код приглашения",
     "Enter your registration invite code": "Введите код приглашения",
-    "Please enter the registration invite code": "Введите код приглашения"
+    "Please enter the registration invite code": "Введите код приглашения",
+    "Registration Invite Required": "Обязательный код приглашения",
+    "Require a valid registration invite code to sign up": "Для регистрации требуется действительный код приглашения"
   }
 }

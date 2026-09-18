@@ -6714,6 +6714,8 @@
     "Price list": "Price list",
     "Registration invite code": "Mã mời đăng ký",
     "Enter your registration invite code": "Nhập mã mời đăng ký của bạn",
-    "Please enter the registration invite code": "Vui lòng nhập mã mời đăng ký"
+    "Please enter the registration invite code": "Vui lòng nhập mã mời đăng ký",
+    "Registration Invite Required": "Bắt buộc mã mời đăng ký",
+    "Require a valid registration invite code to sign up": "Yêu cầu mã mời đăng ký hợp lệ để đăng ký"
   }
 }

@@ -6714,6 +6714,8 @@
     "Price list": "Price list",
     "Registration invite code": "註冊邀請碼",
     "Enter your registration invite code": "請輸入註冊邀請碼",
-    "Please enter the registration invite code": "請輸入註冊邀請碼"
+    "Please enter the registration invite code": "請輸入註冊邀請碼",
+    "Registration Invite Required": "必須使用註冊邀請碼",
+    "Require a valid registration invite code to sign up": "註冊時必須提交有效的註冊邀請碼"
   }
 }

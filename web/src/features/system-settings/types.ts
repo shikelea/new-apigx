@@ -152,6 +152,8 @@ export type AuthSettings = {
   PasswordRegisterEnabled: boolean
   EmailVerificationEnabled: boolean
   RegisterEnabled: boolean
+  /** 注册政策（§5 邀请准入）：是否必须使用注册邀请码才能注册 */
+  RegisterInviteRequired: boolean
   EmailDomainRestrictionEnabled: boolean
   EmailAliasRestrictionEnabled: boolean
   EmailDomainWhitelist: string

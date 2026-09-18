@@ -6714,6 +6714,8 @@
     "Price list": "Price list",
     "Registration invite code": "登録招待コード",
     "Enter your registration invite code": "登録招待コードを入力",
-    "Please enter the registration invite code": "登録招待コードを入力してください"
+    "Please enter the registration invite code": "登録招待コードを入力してください",
+    "Registration Invite Required": "登録招待コードを必須にする",
+    "Require a valid registration invite code to sign up": "登録には有効な登録招待コードが必要です"
   }
 }
