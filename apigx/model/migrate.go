@@ -27,7 +27,16 @@ func Migrate(db *gorm.DB) error {
 	if db == nil {
 		return gorm.ErrInvalidDB
 	}
-	if err := db.AutoMigrate(AllModels()...); err != nil {
+	// MySQL 服务端默认引擎可能是 MyISAM —— 本机 phpStudy 的 my.ini 就是 default-storage-engine=MyIsam。
+	// 这里**显式要求 InnoDB**，因为计划书的核心保证都依赖事务与行锁：
+	//   - 预留、额度原子扣减、幂等记录：MyISAM 没有事务，这些保证会**静默失效**；
+	//   - MyISAM 索引上限 1000 字节（InnoDB DYNAMIC 为 3072），底座原生表会直接建不出来。
+	// 只影响我们自己创建的 apigx_* 表，不改变底座表的行为（也不触碰底座的任何表）。
+	migrateDB := db
+	if db.Dialector != nil && db.Dialector.Name() == "mysql" {
+		migrateDB = db.Set("gorm:table_options", "ENGINE=InnoDB")
+	}
+	if err := migrateDB.AutoMigrate(AllModels()...); err != nil {
 		return err
 	}
 	// 迁移成功后才捕获句柄：确保接口层拿到的一定是可用的库
