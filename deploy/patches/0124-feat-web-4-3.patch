@@ -1,0 +1,194 @@
+From dca123dda76b3c0daa5d7b3b276fb987a04a7b0c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:34:00 +0800
+Subject: [PATCH 124/124] =?UTF-8?q?feat(web):=20=E5=88=86=E4=BA=AB?=
+ =?UTF-8?q?=E5=88=86=E7=BB=84=E9=A1=B5=E6=8E=A5=E9=80=9A=E5=85=A5=E5=8F=A3?=
+ =?UTF-8?q?=EF=BC=88=C2=A74=20=E7=AC=AC=203=20=E6=9D=A1=EF=BC=89=E2=80=94?=
+ =?UTF-8?q?=E2=80=94=20=E5=8D=A1=E7=89=87=E4=B8=8A=E7=9A=84=E5=88=86?=
+ =?UTF-8?q?=E7=BB=84=E5=90=8D=E9=93=BE=E5=88=B0=E5=88=86=E7=BB=84=E9=A1=B5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**§4 页面清单逐条核对结果**（八页，对照计划书原文）：
+- 模型广场 → 底座 /pricing（含分享来源数、分享分组筛选）✓
+- 模型详情 → 底座 /pricing/$modelId（含 Code samples 即"调用配置"）✓；**缺**"分享来源表"✗（来源数在卡片上）
+- **分享分组页 → 本轮接通入口**（此前路由在但**界面上无处可达**，是孤儿页）
+- 我的分享 ✓ / 我的 API Key ✓ / 管理后台 ✓
+- **我的用量、任务中心 → 按用户指示并入底座 Usage Logs / Task Logs**（有意删除，不算缺口）
+- **仍缺**：资源邀请的"独立兑换入口"界面 ✗、管理后台的"注册政策"开关界面 ✗（本轮用库改开，下一步补 UI）
+
+**本轮实现**：
+- pricing/lib/apigx-sources.ts：分组改为 `{ publicID, name }[]`（名称去重排序）
+  **刻意保留拿不到对外 ID 的分组名** —— 否则筛选里会凭空少掉该分组；ID 只用于生成链接
+- pricing/components/model-card.tsx：分组名渲染为到 /plaza/group/$groupPublicId 的链接；
+  **没有 ID 时只显示名称**（不生成死链）；无嵌套三元（遵守 web/AGENTS.md §3.2）
+- pricing/index.tsx：随新结构更新筛选逻辑
+- 用例更新：断言 groups 含 publicID 且按名称排序
+检查: typecheck 0 错 / 改动文件 oxlint 0 错 / 用例 5/5 / build ✅
+---
+ .../pricing/__tests__/apigx-sources.test.ts   | 15 +++++----
+ .../pricing/components/model-card.tsx         | 26 +++++++++++++---
+ web/src/features/pricing/index.tsx            |  4 +--
+ web/src/features/pricing/lib/apigx-sources.ts | 31 ++++++++++++++++---
+ 4 files changed, 60 insertions(+), 16 deletions(-)
+
+diff --git a/web/src/features/pricing/__tests__/apigx-sources.test.ts b/web/src/features/pricing/__tests__/apigx-sources.test.ts
+index 840bef0..403ecc3 100644
+--- a/web/src/features/pricing/__tests__/apigx-sources.test.ts
++++ b/web/src/features/pricing/__tests__/apigx-sources.test.ts
+@@ -27,15 +27,18 @@ const item = (over: Partial<PlazaOfferingItem> & { model: string }): PlazaOfferi
+   ({ offering_public_id: over.model + '-o', ...over }) as PlazaOfferingItem
+ 
+ describe('模型广场：分享来源聚合', () => {
+-  it('同一模型的多个来源被汇总，分组名去重且排序', () => {
++  it('同一模型的多个来源被汇总，分组按名称去重排序并带上对外 ID', () => {
+     const map = summarizeModelSources([
+-      item({ model: 'm1', group_name: 'B组' }),
+-      item({ model: 'm1', group_name: 'A组' }),
+-      item({ model: 'm1', group_name: 'B组' }),
+-      item({ model: 'm2', group_name: 'A组' }),
++      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
++      item({ model: 'm1', group_name: 'A组', group_public_id: 'ga' }),
++      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
++      item({ model: 'm2', group_name: 'A组', group_public_id: 'ga' }),
+     ])
+     expect(map.get('m1')?.sourceCount).toBe(3)
+-    expect(map.get('m1')?.groupNames).toEqual(['A组', 'B组'])
++    expect(map.get('m1')?.groups).toEqual([
++      { publicID: 'ga', name: 'A组' },
++      { publicID: 'gb', name: 'B组' },
++    ])
+     expect(map.get('m2')?.sourceCount).toBe(1)
+   })
+ 
+diff --git a/web/src/features/pricing/components/model-card.tsx b/web/src/features/pricing/components/model-card.tsx
+index 9a6b9e0..73f0140 100644
+--- a/web/src/features/pricing/components/model-card.tsx
++++ b/web/src/features/pricing/components/model-card.tsx
+@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
++import { Link } from '@tanstack/react-router'
+ import { ChevronRight } from 'lucide-react'
+ import { memo, useMemo, type ReactNode } from 'react'
+ import { useTranslation } from 'react-i18next'
+@@ -77,9 +78,6 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
+   let sourcesLabel = ''
+   if (props.sources) {
+     sourcesLabel = t('Share sources') + ': ' + props.sources.sourceCount
+-    if (props.sources.groupNames.length > 0) {
+-      sourcesLabel = sourcesLabel + ' · ' + props.sources.groupNames.join(', ')
+-    }
+   }
+   const billingTime = useBillingTime(props.model.billing_expr)
+   const currency = useSystemConfigStore((state) => state.config.currency)
+@@ -398,7 +396,27 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
+           className='border-border/60 border-t pt-2'
+         >
+           {sourcesLabel ? (
+-            <span className='text-muted-foreground truncate text-xs'>{sourcesLabel}</span>
++            <span className='text-muted-foreground truncate text-xs'>
++              {sourcesLabel}
++              {/* 分组名链到「分享分组页」（§4 第 3 条：该页需要真实入口） */}
++              {props.sources?.groups.map((group) => (
++                <span key={group.name}>
++                  {' · '}
++                  {/* 有对外 ID 才做链接（没有就只显示名称，不生成死链） */}
++                  {group.publicID ? (
++                    <Link
++                      to='/plaza/group/$groupPublicId'
++                      params={{ groupPublicId: group.publicID }}
++                      className='hover:underline'
++                    >
++                      {group.name}
++                    </Link>
++                  ) : (
++                    group.name
++                  )}
++                </span>
++              ))}
++            </span>
+           ) : null}
+           <Button variant='ghost' size='sm' onClick={props.onClick}>
+             {t('Details')}
+diff --git a/web/src/features/pricing/index.tsx b/web/src/features/pricing/index.tsx
+index 787c17d..bdfe5df 100644
+--- a/web/src/features/pricing/index.tsx
++++ b/web/src/features/pricing/index.tsx
+@@ -90,14 +90,14 @@ export function Pricing() {
+   } = useFilters(models || [])
+ 
+   // 按分享分组过滤（只影响展示；没有该分组数据的模型在选择具体分组时被排除）
+-  const shareGroups = [...new Set([...sourcesByModel.values()].flatMap((s) => s.groupNames))].sort()
++  const shareGroups = [...new Set([...sourcesByModel.values()].flatMap((s) => s.groups.map((g) => g.name)))].sort()
+   const modelsForView = useMemo(() => {
+     if (shareGroupFilter === '') {
+       return filteredModels
+     }
+     return filteredModels.filter((model) => {
+       const summary = sourcesByModel.get(model.model_name || '')
+-      return summary ? summary.groupNames.includes(shareGroupFilter) : false
++      return summary ? summary.groups.some((g) => g.name === shareGroupFilter) : false
+     })
+   }, [filteredModels, shareGroupFilter, sourcesByModel])
+ 
+diff --git a/web/src/features/pricing/lib/apigx-sources.ts b/web/src/features/pricing/lib/apigx-sources.ts
+index 47c47ec..8b2c0ee 100644
+--- a/web/src/features/pricing/lib/apigx-sources.ts
++++ b/web/src/features/pricing/lib/apigx-sources.ts
+@@ -25,11 +25,18 @@ import type { PlazaOfferingItem } from '@/features/plaza/types'
+  *
+  * 纯函数，便于单测；不做任何请求。
+  */
++export interface ModelSourceGroup {
++  /** 分享分组对外 ID（用于链接到分享分组页，§4） */
++  publicID: string
++  /** 分享分组名称（展示用） */
++  name: string
++}
++
+ export interface ModelSourcesSummary {
+   /** 分享来源条数（有几条已发布供给在提供这个模型） */
+   sourceCount: number
+-  /** 提供该模型的分享分组名（去重、排序） */
+-  groupNames: string[]
++  /** 提供该模型的分享分组（按名称去重排序，带上对外 ID 以便链接） */
++  groups: ModelSourceGroup[]
+   /** 是否全部样本不足（质量不可判定）—— 只有真拿到质量字段时才表达 */
+   allInsufficient: boolean
+   /** 是否有已确认的标准模型 ID（§8.2：对外标准 ID） */
+@@ -52,11 +59,27 @@ export function summarizeModelSources(items: PlazaOfferingItem[]): Map<string, M
+ 
+   const out = new Map<string, ModelSourcesSummary>()
+   for (const [model, list] of byModel) {
+-    const groupNames = [...new Set(list.map((item) => item.group_name ?? '').filter((name) => name !== ''))].sort()
++    // 按分组名去重（同一分组的多条来源只出现一次），再按名称排序。
++    // 注意：即使拿不到对外 ID 也要**保留分组名** —— 否则筛选里会凭空少掉这个分组；
++    // 对外 ID 只用于生成"分享分组页"的链接（没有 ID 时就不渲染链接）。
++    const groupMap = new Map<string, string>()
++    for (const item of list) {
++      const name = item.group_name ?? ''
++      if (name === '') {
++        continue
++      }
++      const publicID = item.group_public_id ?? ''
++      if (!groupMap.has(name) || groupMap.get(name) === '') {
++        groupMap.set(name, publicID)
++      }
++    }
++    const groups: ModelSourceGroup[] = [...groupMap.entries()]
++      .map(([name, publicID]) => ({ publicID, name }))
++      .sort((a, b) => a.name.localeCompare(b.name))
+     const withQuality = list.filter((item) => typeof item.sample_count === 'number')
+     out.set(model, {
+       sourceCount: list.length,
+-      groupNames,
++      groups,
+       // 只有确实拿过质量字段、且全部样本不足时才为真（不拿"没数据"冒充"质量差"）
+       allInsufficient: withQuality.length > 0 && withQuality.every((item) => item.insufficient === true),
+       canonicalModelID: list.find((item) => item.canonical_model_id)?.canonical_model_id,
+-- 
+2.53.0.windows.1
+
