@@ -1,0 +1,658 @@
+From 9db6a0307d3dac98690d28f0c42d22c1c743be14 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 13:47:05 +0800
+Subject: [PATCH 136/136] =?UTF-8?q?feat(share):=20=E3=80=8C=E9=82=80?=
+ =?UTF-8?q?=E8=AF=B7=E7=A0=81=E3=80=8D=E7=95=8C=E9=9D=A2=20+=20=E3=80=8C?=
+ =?UTF-8?q?=E9=80=89=E6=8B=A9=E6=A8=A1=E5=9E=8B=E3=80=8D=E7=95=8C=E9=9D=A2?=
+ =?UTF-8?q?=20=E2=80=94=E2=80=94=20=C2=A74=E3=80=8C=E8=AE=BF=E9=97=AE?=
+ =?UTF-8?q?=E6=8E=88=E6=9D=83=E3=80=8D=E3=80=8C=E5=90=8C=E6=AD=A5=E6=A8=A1?=
+ =?UTF-8?q?=E5=9E=8B=E3=80=8D=E7=9A=84=E6=9C=80=E5=90=8E=E4=B8=A4=E5=9D=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**用户的三个问题，本轮全部落地**：
+1. 不能删除 → 上一轮已补（分组/渠道删除入口）
+2. **邀请码在哪里设置 → 本轮补上界面**：我的分享页新增「访问授权（邀请码）」卡
+   · 选分组 + 可用次数 + 有效期（天）→ 发放 → **就地显示一次性明文并可复制**（并明确提示"只显示这一次"）
+   · 列表：前缀 / 所属分组 / 已用次数 / 状态 → 撤销（**连带撤销**由该邀请产生的授权，与"访问撤销"要求一致）
+3. **加了渠道怎么选模型 → 本轮补上界面**：渠道详情页新增「选择模型」按钮
+   · 先**预览**上游模型清单（fetch-models，import=false，不落数据）→ 用开关勾选 → 只对**勾选的**建草稿供给
+   · 为什么不直接"一键全导"：上游目录常混着本项目不打算提供的模型，全导会制造一堆要清理的草稿供给
+   （原有的「同步模型」按钮行为**未改动**）
+
+**新增/改动**：features/access/api.ts（发放/列表/撤销 + 授权）、features/access/components/invite-card.tsx、
+features/share/components/model-import-dialog.tsx、share/api.ts（createOffering）、channel-actions.tsx（按钮+弹窗）、
+share/index.tsx（挂卡）、i18n 7 语各 16 条
+
+**过程如实记录**：① 我写状态文案时用了**三层嵌套三元**，与 web/AGENTS.md §3.2 冲突 ⇒ 改为查表函数；
+② createOffering 的 URL 我用了单引号写 `${channelId}` ⇒ 变量既未使用、URL 还会带字面量 ✗ ⇒ typecheck
+当场报 "channelId is never read"，已改为字符串拼接。
+检查: typecheck 0 错 / oxlint 0 错 / share+access 用例 13/13 / build ✅
+---
+ .../access/components/invite-card.tsx         | 196 ++++++++++++++++++
+ web/src/features/share/api.ts                 |   6 +
+ .../share/components/channel-actions.tsx      |  16 +-
+ .../share/components/model-import-dialog.tsx  | 116 +++++++++++
+ web/src/features/share/index.tsx              |   4 +-
+ web/src/i18n/locales/en.json                  |  18 +-
+ web/src/i18n/locales/fr.json                  |  18 +-
+ web/src/i18n/locales/ja.json                  |  18 +-
+ web/src/i18n/locales/ru.json                  |  18 +-
+ web/src/i18n/locales/vi.json                  |  18 +-
+ web/src/i18n/locales/zh-TW.json               |  18 +-
+ web/src/i18n/locales/zh.json                  |  18 +-
+ 12 files changed, 455 insertions(+), 9 deletions(-)
+ create mode 100644 web/src/features/access/components/invite-card.tsx
+ create mode 100644 web/src/features/share/components/model-import-dialog.tsx
+
+diff --git a/web/src/features/access/components/invite-card.tsx b/web/src/features/access/components/invite-card.tsx
+new file mode 100644
+index 0000000..1e4ef6b
+--- /dev/null
++++ b/web/src/features/access/components/invite-card.tsx
+@@ -0,0 +1,196 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { ConfirmDialog } from '@/components/confirm-dialog'
++import { CopyButton } from '@/components/copy-button'
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { Button } from '@/components/ui/button'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++
++import type { ShareGroup } from '@/features/share/types'
++
++import { createAccessInvite, listAccessInvites, revokeAccessInvite, type AccessInvite } from '../api'
++
++/**
++ * 访问授权：资源访问邀请（§4「访问授权」/「邀请兑换」）。
++ *
++ * 交互上的两条硬约定：
++ *  1. **明文邀请码只显示一次**（库里只存哈希）⇒ 发放成功后就地展示 + 提供复制，并明确提示"仅此一次"；
++ *  2. 撤销时可以**连带撤销**由该邀请产生的授权（后端支持 `revoke_grants`），默认打开 ——
++ *     否则"撤销邀请"会留下已经发出去的权限，与"访问撤销"的要求不符。
++ */
++/** 邀请状态 → i18n 键（查表代替嵌套三元，遵守 web/AGENTS.md §3.2）。 */
++function inviteStatusLabelKey(status: number): string {
++  if (status === 0) return 'Active'
++  if (status === 1) return 'Revoked'
++  if (status === 2) return 'Used up'
++  return 'Expired'
++}
++
++export function AccessInviteCard(props: { groups: ShareGroup[] }) {
++  const { t } = useTranslation()
++  const queryClient = useQueryClient()
++
++  const [groupId, setGroupId] = useState('')
++  const [maxUses, setMaxUses] = useState('1')
++  const [days, setDays] = useState('7')
++  const [issuedToken, setIssuedToken] = useState('')
++  const [revoking, setRevoking] = useState<AccessInvite | null>(null)
++
++  const query = useQuery({ queryKey: ['apigx-access-invites'], queryFn: () => listAccessInvites() })
++
++  const refresh = () => {
++    void queryClient.invalidateQueries({ queryKey: ['apigx-access-invites'] })
++  }
++
++  const create = useMutation({
++    mutationFn: () => {
++      const parsedMaxUses = Number(maxUses)
++      const parsedDays = Number(days)
++      return createAccessInvite({
++        target_scope_type: 1, // 1=分享分组
++        target_scope_id: Number(groupId),
++        max_uses: Number.isFinite(parsedMaxUses) ? parsedMaxUses : 1,
++        // 有效期按天换算成 UTC epoch 秒；0 表示不过期
++        expires_at: parsedDays > 0 ? Math.floor(Date.now() / 1000) + parsedDays * 86400 : 0,
++        revoke_grants: true,
++      })
++    },
++    onSuccess: (res) => {
++      setIssuedToken(res.data?.token ?? '')
++      refresh()
++    },
++  })
++
++  const revoke = useMutation({
++    mutationFn: (id: number) => revokeAccessInvite(id, true),
++    onSuccess: () => {
++      setRevoking(null)
++      refresh()
++    },
++  })
++
++  const items = query.data?.data?.items ?? []
++  const groupName = (invite: AccessInvite) =>
++    props.groups.find((group) => group.id === invite.target_scope_id)?.name ??
++    String(invite.target_scope_id)
++
++  const columns: StaticDataTableColumn<AccessInvite>[] = [
++    { id: 'prefix', header: t('Invite code'), cell: (row) => row.token_prefix + '…' },
++    { id: 'target', header: t('Share group'), cell: (row) => groupName(row) },
++    {
++      id: 'uses',
++      header: t('Uses'),
++      cell: (row) => (row.max_uses > 0 ? row.used_count + ' / ' + row.max_uses : t('Unlimited')),
++    },
++    { id: 'status', header: t('Status'), cell: (row) => t(inviteStatusLabelKey(row.status)) },
++    {
++      id: 'actions',
++      header: '',
++      cell: (row) => (
++        <Button variant='outline' size='sm' onClick={() => setRevoking(row)}>
++          {t('Revoke')}
++        </Button>
++      ),
++    },
++  ]
++
++  const missing = groupId === ''
++
++  return (
++    <Card>
++      <CardHeader>
++        <CardTitle>{t('Access invites')}</CardTitle>
++      </CardHeader>
++      <CardContent className='space-y-4'>
++        <p className='text-muted-foreground text-sm'>
++          {t('Issue an invite so others can see the resources of a share group.')}
++        </p>
++
++        <div className='grid gap-3 sm:grid-cols-3'>
++          <div className='space-y-2'>
++            <Label>{t('Share group')}</Label>
++            <select
++              className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
++              value={groupId}
++              onChange={(event) => setGroupId(event.target.value)}
++            >
++              <option value=''>{t('Select a share group')}</option>
++              {props.groups.map((group) => (
++                <option key={group.id} value={String(group.id)}>
++                  {group.name}
++                </option>
++              ))}
++            </select>
++          </div>
++          <div className='space-y-2'>
++            <Label>{t('Max uses')}</Label>
++            <Input value={maxUses} onChange={(event) => setMaxUses(event.target.value)} />
++          </div>
++          <div className='space-y-2'>
++            <Label>{t('Valid days')}</Label>
++            <Input value={days} onChange={(event) => setDays(event.target.value)} />
++          </div>
++        </div>
++
++        <Button disabled={missing || create.isPending} onClick={() => create.mutate()}>
++          {t('Issue invite')}
++        </Button>
++
++        {issuedToken === '' ? null : (
++          <div className='bg-muted/40 space-y-2 rounded-md p-3'>
++            <p className='text-sm font-medium'>{t('Copy the invite code now — it is shown only once.')}</p>
++            <div className='flex items-center gap-2'>
++              <code className='bg-background rounded px-2 py-1 font-mono text-xs'>{issuedToken}</code>
++              <CopyButton value={issuedToken} />
++            </div>
++          </div>
++        )}
++
++        {items.length === 0 ? (
++          <EmptyState title={t('No invite yet')} />
++        ) : (
++          <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.id} />
++        )}
++
++        <ConfirmDialog
++          open={revoking !== null}
++          onOpenChange={(next) => {
++            if (!next) setRevoking(null)
++          }}
++          title={t('Revoke invite')}
++          desc={t('The code stops working and grants created by it are revoked.')}
++          destructive
++          confirmText={t('Revoke')}
++          isLoading={revoke.isPending}
++          handleConfirm={() => {
++            if (revoking) revoke.mutate(revoking.id)
++          }}
++        />
++      </CardContent>
++    </Card>
++  )
++}
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 9f21900..b1faa5b 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -67,6 +67,12 @@ export async function getChannelOfferings(channelId: number): Promise<OfferingLi
+  *
+  * 复用底座的取模型能力（40+ 家适配器），这里只是触发与落库。
+  */
++/** 为**指定上游模型**建一条供给（草稿）—— 用于"勾选导入"，而不是一次性全量导入。 */
++export async function createOffering(channelId: number, upstreamModelID: string): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post('/api/apigx/channels/' + channelId + '/offerings', { upstream_model_id: upstreamModelID })
++  return res.data
++}
++
+ export async function fetchUpstreamModels(channelId: number, importAsDraft: boolean): Promise<{ success: boolean; data?: unknown }> {
+   const res = await api.post(`/api/apigx/channels/${channelId}/fetch-models`, { import: importAsDraft })
+   return res.data
+diff --git a/web/src/features/share/components/channel-actions.tsx b/web/src/features/share/components/channel-actions.tsx
+index 2e1a555..adb853f 100644
+--- a/web/src/features/share/components/channel-actions.tsx
++++ b/web/src/features/share/components/channel-actions.tsx
+@@ -27,6 +27,7 @@ import { Label } from '@/components/ui/label'
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+ 
+ import { fetchUpstreamModels, setChannelCapacityPolicy } from '../api'
++import { ModelImportDialog } from './model-import-dialog'
+ import { buildCapacityPolicyPayload, type LimitDimensionInput } from '../lib/capacity'
+ import type { LimitMode } from '../types'
+ 
+@@ -44,6 +45,7 @@ export function ChannelActions(props: { channelId: number }) {
+   const queryClient = useQueryClient()
+ 
+   const [syncOpen, setSyncOpen] = useState(false)
++  const [chooseOpen, setChooseOpen] = useState(false)
+   const [concurrency, setConcurrency] = useState<LimitDimensionInput>({ mode: 0, value: '' })
+   const [rpm, setRpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
+   const [tpm, setTpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
+@@ -76,6 +78,10 @@ export function ChannelActions(props: { channelId: number }) {
+           <Button variant='outline' onClick={() => setSyncOpen(true)}>
+             {t('share.actions.syncModels')}
+           </Button>
++          {/* 「同步模型」是一次性全导；这里让分享者先看清单再挑（避免导出一堆没用的草稿供给） */}
++          <Button variant='outline' onClick={() => setChooseOpen(true)}>
++            {t('Choose models')}
++          </Button>
+           <p className='text-muted-foreground mt-2 text-xs'>{t('share.actions.syncModelsHint')}</p>
+         </div>
+ 
+@@ -94,7 +100,15 @@ export function ChannelActions(props: { channelId: number }) {
+           </Button>
+         </div>
+ 
+-        <ConfirmDialog
++        <ModelImportDialog
++        channelId={props.channelId}
++        open={chooseOpen}
++        onOpenChange={setChooseOpen}
++        onSaved={() => {
++          void queryClient.invalidateQueries({ queryKey: ['apigx-channel-offerings', props.channelId] })
++        }}
++      />
++      <ConfirmDialog
+           open={syncOpen}
+           onOpenChange={setSyncOpen}
+           title={t('share.actions.syncModels')}
+diff --git a/web/src/features/share/components/model-import-dialog.tsx b/web/src/features/share/components/model-import-dialog.tsx
+new file mode 100644
+index 0000000..ece1fa1
+--- /dev/null
++++ b/web/src/features/share/components/model-import-dialog.tsx
+@@ -0,0 +1,116 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useMutation, useQuery } from '@tanstack/react-query'
++import { useMemo, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { Dialog } from '@/components/dialog'
++import { EmptyState } from '@/components/empty-state'
++import { LoadingState } from '@/components/loading-state'
++import { Button } from '@/components/ui/button'
++import { Switch } from '@/components/ui/switch'
++
++import { createOffering, fetchUpstreamModels } from '../api'
++
++/**
++ * 「选择模型」：先**预览**上游模型清单，再挑要导入的那些。
++ *
++ * 为什么不直接"一键导入全部"：上游模型目录里往往混着本项目并不打算提供的模型，
++ * 全导会制造一堆需要人工清理的草稿供给。这里让分享者自己勾 —— 且只对**勾选的**建草稿供给。
++ */
++export function ModelImportDialog(props: {
++  channelId: number
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  onSaved: () => void
++}) {
++  const { t } = useTranslation()
++  const [picked, setPicked] = useState<Record<string, boolean>>({})
++
++  // 只预览（import=false），不落任何数据
++  const query = useQuery({
++    queryKey: ['apigx-upstream-models', props.channelId],
++    queryFn: () => fetchUpstreamModels(props.channelId, false),
++    enabled: props.open,
++  })
++
++  const models = useMemo<string[]>(() => {
++    const raw = (query.data as { data?: { models?: string[] } } | undefined)?.data?.models ?? []
++    return [...raw].sort()
++  }, [query.data])
++
++  const importSelected = useMutation({
++    mutationFn: async () => {
++      const selected = models.filter((model) => picked[model])
++      for (const model of selected) {
++        await createOffering(props.channelId, model)
++      }
++    },
++    onSuccess: () => {
++      setPicked({})
++      props.onOpenChange(false)
++      props.onSaved()
++    },
++  })
++
++  const selectedCount = models.filter((model) => picked[model]).length
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('Choose models')}
++      contentClassName='sm:max-w-2xl'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button
++            disabled={selectedCount === 0 || importSelected.isPending}
++            onClick={() => importSelected.mutate()}
++          >
++            {t('Import selected')} ({selectedCount})
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-3'>
++        <p className='text-muted-foreground text-sm'>
++          {t('These models were reported by the upstream. Import the ones you want to share.')}
++        </p>
++        {query.isPending ? <LoadingState /> : null}
++        {!query.isPending && models.length === 0 ? (
++          <EmptyState title={t('No model reported by the upstream')} />
++        ) : null}
++        <div className='max-h-80 space-y-1 overflow-y-auto'>
++          {models.map((model) => (
++            <div key={model} className='flex items-center justify-between gap-3 rounded-md border px-3 py-2'>
++              <span className='font-mono text-xs'>{model}</span>
++              <Switch
++                checked={Boolean(picked[model])}
++                onCheckedChange={(next) => setPicked((current) => ({ ...current, [model]: next }))}
++              />
++            </div>
++          ))}
++        </div>
++      </div>
++    </Dialog>
++  )
++}
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index 192cecc..49b0826 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -30,6 +30,7 @@ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ 
+ import { deleteShareChannel, deleteShareGroup, getShareChannels, getShareGroups } from './api'
++import { AccessInviteCard } from '@/features/access/components/invite-card'
+ import { ChannelCreateDialog } from './components/channel-create-dialog'
+ import { GroupCreateDialog } from './components/group-create-dialog'
+ import { GroupEditDialog } from './components/group-edit-dialog'
+@@ -186,7 +187,8 @@ export function MyShares() {
+             </CardContent>
+           </Card>
+         </div>
+-        <ConfirmDialog
++          <AccessInviteCard groups={groups} />
++      <ConfirmDialog
+         open={deletingGroup !== null}
+         onOpenChange={(next) => {
+           if (!next) setDeletingGroup(null)
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 1c28001..acc3f83 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6746,6 +6746,22 @@
+     "Delete share group": "Delete share group",
+     "Delete share channel": "Delete share channel",
+     "The group disappears from your lists. Channels under it are not deleted.": "The group disappears from your lists. Channels under it are not deleted.",
+-    "The channel disappears from your lists and stops serving requests.": "The channel disappears from your lists and stops serving requests."
++    "The channel disappears from your lists and stops serving requests.": "The channel disappears from your lists and stops serving requests.",
++    "Access invites": "Access invites",
++    "Issue an invite so others can see the resources of a share group.": "Issue an invite so others can see the resources of a share group.",
++    "Max uses": "Max uses",
++    "Valid days": "Valid days",
++    "Issue invite": "Issue invite",
++    "Copy the invite code now — it is shown only once.": "Copy the invite code now — it is shown only once.",
++    "No invite yet": "No invite yet",
++    "Uses": "Uses",
++    "Revoked": "Revoked",
++    "Used up": "Used up",
++    "Revoke invite": "Revoke invite",
++    "The code stops working and grants created by it are revoked.": "The code stops working and grants created by it are revoked.",
++    "Choose models": "Choose models",
++    "Import selected": "Import selected",
++    "These models were reported by the upstream. Import the ones you want to share.": "These models were reported by the upstream. Import the ones you want to share.",
++    "No model reported by the upstream": "No model reported by the upstream"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 0d067f5..c58f4b3 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6746,6 +6746,22 @@
+     "Delete share group": "Supprimer le groupe de partage",
+     "Delete share channel": "Supprimer le canal de partage",
+     "The group disappears from your lists. Channels under it are not deleted.": "Le groupe disparaît de vos listes. Les canaux associés ne sont pas supprimés.",
+-    "The channel disappears from your lists and stops serving requests.": "Le canal disparaît de vos listes et cesse de servir les requêtes."
++    "The channel disappears from your lists and stops serving requests.": "Le canal disparaît de vos listes et cesse de servir les requêtes.",
++    "Access invites": "Invitations d'accès",
++    "Issue an invite so others can see the resources of a share group.": "Émettez une invitation pour que d'autres voient les ressources d'un groupe de partage.",
++    "Max uses": "Utilisations max",
++    "Valid days": "Validité (jours)",
++    "Issue invite": "Émettre",
++    "Copy the invite code now — it is shown only once.": "Copiez le code maintenant — il n'est affiché qu'une fois.",
++    "No invite yet": "Aucune invitation",
++    "Uses": "Utilisations",
++    "Revoked": "Révoqué",
++    "Used up": "Épuisé",
++    "Revoke invite": "Révoquer l'invitation",
++    "The code stops working and grants created by it are revoked.": "Le code cesse de fonctionner et les autorisations qu’il a créées sont révoquées.",
++    "Choose models": "Choisir des modèles",
++    "Import selected": "Importer la sélection",
++    "These models were reported by the upstream. Import the ones you want to share.": "Ces modèles proviennent de l'amont. Importez seulement ceux à partager.",
++    "No model reported by the upstream": "L'amont n'a signalé aucun modèle"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 35af86b..ee28c1b 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6746,6 +6746,22 @@
+     "Delete share group": "共有グループを削除",
+     "Delete share channel": "共有チャネルを削除",
+     "The group disappears from your lists. Channels under it are not deleted.": "グループは一覧から消えます。配下のチャネルは削除されません。",
+-    "The channel disappears from your lists and stops serving requests.": "チャネルは一覧から消え、リクエストの処理を停止します。"
++    "The channel disappears from your lists and stops serving requests.": "チャネルは一覧から消え、リクエストの処理を停止します。",
++    "Access invites": "アクセス招待",
++    "Issue an invite so others can see the resources of a share group.": "招待を発行すると、相手がその共有グループのリソースを閲覧できます。",
++    "Max uses": "最大利用回数",
++    "Valid days": "有効日数",
++    "Issue invite": "発行",
++    "Copy the invite code now — it is shown only once.": "今すぐ招待コードをコピーしてください — 表示は一度きりです。",
++    "No invite yet": "招待はまだありません",
++    "Uses": "利用回数",
++    "Revoked": "取消済み",
++    "Used up": "使い切り",
++    "Revoke invite": "招待を取消",
++    "The code stops working and grants created by it are revoked.": "コードは無効になり、それによって付与された権限も取り消されます。",
++    "Choose models": "モデルを選択",
++    "Import selected": "選択をインポート",
++    "These models were reported by the upstream. Import the ones you want to share.": "上流が返したモデル一覧です。共有したいものだけインポートしてください。",
++    "No model reported by the upstream": "上流からモデルが返されませんでした"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 8b8b63e..7dfa141 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6746,6 +6746,22 @@
+     "Delete share group": "Удалить группу общих ресурсов",
+     "Delete share channel": "Удалить общий канал",
+     "The group disappears from your lists. Channels under it are not deleted.": "Группа исчезнет из ваших списков. Каналы внутри неё не удаляются.",
+-    "The channel disappears from your lists and stops serving requests.": "Канал исчезнет из ваших списков и перестанет обслуживать запросы."
++    "The channel disappears from your lists and stops serving requests.": "Канал исчезнет из ваших списков и перестанет обслуживать запросы.",
++    "Access invites": "Приглашения доступа",
++    "Issue an invite so others can see the resources of a share group.": "Выдайте приглашение, чтобы другие увидели ресурсы группы общих ресурсов.",
++    "Max uses": "Макс. использований",
++    "Valid days": "Срок действия (дней)",
++    "Issue invite": "Выдать",
++    "Copy the invite code now — it is shown only once.": "Скопируйте код сейчас — он показывается только один раз.",
++    "No invite yet": "Приглашений нет",
++    "Uses": "Использования",
++    "Revoked": "Отозвано",
++    "Used up": "Использовано",
++    "Revoke invite": "Отозвать приглашение",
++    "The code stops working and grants created by it are revoked.": "Код перестанет работать, а выданные им доступы будут отозваны.",
++    "Choose models": "Выбор моделей",
++    "Import selected": "Импортировать выбранные",
++    "These models were reported by the upstream. Import the ones you want to share.": "Это модели, о которых сообщил вышестоящий сервис. Импортируйте только нужные.",
++    "No model reported by the upstream": "Вышестоящий сервис не сообщил моделей"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 45daaf8..a0e1de3 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6746,6 +6746,22 @@
+     "Delete share group": "Xóa nhóm chia sẻ",
+     "Delete share channel": "Xóa kênh chia sẻ",
+     "The group disappears from your lists. Channels under it are not deleted.": "Nhóm sẽ biến mất khỏi danh sách. Các kênh bên trong không bị xóa.",
+-    "The channel disappears from your lists and stops serving requests.": "Kênh sẽ biến mất khỏi danh sách và ngừng phục vụ yêu cầu."
++    "The channel disappears from your lists and stops serving requests.": "Kênh sẽ biến mất khỏi danh sách và ngừng phục vụ yêu cầu.",
++    "Access invites": "Lời mời truy cập",
++    "Issue an invite so others can see the resources of a share group.": "Phát lời mời để người khác thấy tài nguyên của nhóm chia sẻ.",
++    "Max uses": "Số lần tối đa",
++    "Valid days": "Số ngày hiệu lực",
++    "Issue invite": "Phát",
++    "Copy the invite code now — it is shown only once.": "Hãy sao chép mã ngay — mã chỉ hiển thị một lần.",
++    "No invite yet": "Chưa có lời mời",
++    "Uses": "Lượt dùng",
++    "Revoked": "Đã thu hồi",
++    "Used up": "Đã dùng hết",
++    "Revoke invite": "Thu hồi lời mời",
++    "The code stops working and grants created by it are revoked.": "Mã sẽ hết hiệu lực và các quyền do nó tạo ra cũng bị thu hồi.",
++    "Choose models": "Chọn mô hình",
++    "Import selected": "Nhập mục đã chọn",
++    "These models were reported by the upstream. Import the ones you want to share.": "Đây là danh sách mô hình do thượng nguồn trả về. Chỉ nhập những mô hình bạn muốn chia sẻ.",
++    "No model reported by the upstream": "Thượng nguồn không trả về mô hình nào"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index c51047a..2d93735 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6746,6 +6746,22 @@
+     "Delete share group": "刪除分享分組",
+     "Delete share channel": "刪除分享管道",
+     "The group disappears from your lists. Channels under it are not deleted.": "該分組將從你的清單中消失；其下的管道不會被刪除。",
+-    "The channel disappears from your lists and stops serving requests.": "該管道將從你的清單中消失，並停止對外提供服務。"
++    "The channel disappears from your lists and stops serving requests.": "該管道將從你的清單中消失，並停止對外提供服務。",
++    "Access invites": "存取授權（邀請碼）",
++    "Issue an invite so others can see the resources of a share group.": "發放邀請碼後，對方就能看見該分享分組的資源。",
++    "Max uses": "可用次數",
++    "Valid days": "有效期（天）",
++    "Issue invite": "發放邀請碼",
++    "Copy the invite code now — it is shown only once.": "請立即複製邀請碼 —— 它只顯示這一次。",
++    "No invite yet": "還沒有邀請碼",
++    "Uses": "已用/上限",
++    "Revoked": "已撤銷",
++    "Used up": "已用盡",
++    "Revoke invite": "撤銷邀請碼",
++    "The code stops working and grants created by it are revoked.": "該邀請碼立即失效，且由它產生的授權會一併撤銷。",
++    "Choose models": "選擇模型",
++    "Import selected": "匯入所選",
++    "These models were reported by the upstream. Import the ones you want to share.": "這些是上游回傳的模型清單。只匯入你想分享的那些。",
++    "No model reported by the upstream": "上游沒有回傳任何模型"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index ea850f2..c5a38b7 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6746,6 +6746,22 @@
+     "Delete share group": "删除分享分组",
+     "Delete share channel": "删除分享渠道",
+     "The group disappears from your lists. Channels under it are not deleted.": "该分组将从你的列表中消失；其下的渠道不会被删除。",
+-    "The channel disappears from your lists and stops serving requests.": "该渠道将从你的列表中消失，并停止对外提供服务。"
++    "The channel disappears from your lists and stops serving requests.": "该渠道将从你的列表中消失，并停止对外提供服务。",
++    "Access invites": "访问授权（邀请码）",
++    "Issue an invite so others can see the resources of a share group.": "发放邀请码后，对方就能看见该分享分组的资源。",
++    "Max uses": "可用次数",
++    "Valid days": "有效期（天）",
++    "Issue invite": "发放邀请码",
++    "Copy the invite code now — it is shown only once.": "请立即复制邀请码 —— 它只显示这一次。",
++    "No invite yet": "还没有邀请码",
++    "Uses": "已用/上限",
++    "Revoked": "已撤销",
++    "Used up": "已用尽",
++    "Revoke invite": "撤销邀请码",
++    "The code stops working and grants created by it are revoked.": "该邀请码立即失效，且由它产生的授权会被一并撤销。",
++    "Choose models": "选择模型",
++    "Import selected": "导入所选",
++    "These models were reported by the upstream. Import the ones you want to share.": "这些是上游返回的模型清单。只导入你想分享的那些。",
++    "No model reported by the upstream": "上游没有返回任何模型"
+   }
+ }
+-- 
+2.53.0.windows.1
+
