@@ -1,0 +1,221 @@
+From 4635cc8bf30a8f687f78368d803b98bbc5dc6f3f Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:37:44 +0800
+Subject: [PATCH 125/125] =?UTF-8?q?feat(settings):=20=E6=8A=8A=E3=80=8C?=
+ =?UTF-8?q?=E5=BF=85=E9=A1=BB=E4=BD=BF=E7=94=A8=E6=B3=A8=E5=86=8C=E9=82=80?=
+ =?UTF-8?q?=E8=AF=B7=E7=A0=81=E3=80=8D=E6=8E=A5=E8=BF=9B=E7=AE=A1=E7=90=86?=
+ =?UTF-8?q?=E5=90=8E=E5=8F=B0=EF=BC=88=C2=A74=20=E7=AE=A1=E7=90=86?=
+ =?UTF-8?q?=E5=90=8E=E5=8F=B0=20=C2=B7=20=E6=B3=A8=E5=86=8C=E6=94=BF?=
+ =?UTF-8?q?=E7=AD=96=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+补上 §4 清单里"管理后台缺注册政策开关界面"这一缺口（此前只能改库开启）：
+
+- features/system-settings/auth/basic-auth-section.tsx：zod schema 增加 RegisterInviteRequired，
+  并在「注册开关」之后新增同名开关（复用底座既有 SettingsSwitchItem/FormField 结构，不新造控件）
+- features/system-settings/auth/index.tsx：默认值 false（保持底座既有行为）
+- features/system-settings/auth/section-registry.tsx：把服务端设置映射进表单
+- features/system-settings/types.ts：AuthSettings 增加该字段（typecheck 指出缺失后补上）
+- i18n：7 个语言文件各新增 2 条，全部写进 translation 命名空间
+
+**实测（无需重启，即时生效）**：
+  初始 false → 管理员开启后 `/api/status` 立即为 true → 关闭后立即为 false（两次 PUT 均 200）
+  （这得益于上一轮修掉的根因：底座对布尔项按 `Enabled` 后缀统一处理，该键此前不在其中）
+检查: typecheck 0 错 / 改动文件 oxlint 0 错 / system-settings + i18n 用例 85/85 / build ✅
+---
+ .../auth/basic-auth-section.tsx               | 24 +++++++++++++++++++
+ .../features/system-settings/auth/index.tsx   |  2 ++
+ .../system-settings/auth/section-registry.tsx |  1 +
+ web/src/features/system-settings/types.ts     |  2 ++
+ web/src/i18n/locales/en.json                  |  4 +++-
+ web/src/i18n/locales/fr.json                  |  4 +++-
+ web/src/i18n/locales/ja.json                  |  4 +++-
+ web/src/i18n/locales/ru.json                  |  4 +++-
+ web/src/i18n/locales/vi.json                  |  4 +++-
+ web/src/i18n/locales/zh-TW.json               |  4 +++-
+ web/src/i18n/locales/zh.json                  |  4 +++-
+ 11 files changed, 50 insertions(+), 7 deletions(-)
+
+diff --git a/web/src/features/system-settings/auth/basic-auth-section.tsx b/web/src/features/system-settings/auth/basic-auth-section.tsx
+index 624571d..80049a4 100644
+--- a/web/src/features/system-settings/auth/basic-auth-section.tsx
++++ b/web/src/features/system-settings/auth/basic-auth-section.tsx
+@@ -49,6 +49,8 @@ const basicAuthSchema = z.object({
+   PasswordRegisterEnabled: z.boolean(),
+   EmailVerificationEnabled: z.boolean(),
+   RegisterEnabled: z.boolean(),
++  // 注册政策（§5 邀请准入）：是否**必须**使用注册邀请码才能注册
++  RegisterInviteRequired: z.boolean(),
+   EmailDomainRestrictionEnabled: z.boolean(),
+   EmailAliasRestrictionEnabled: z.boolean(),
+   EmailDomainWhitelist: z.string(),
+@@ -156,6 +158,28 @@ export function BasicAuthSection({ defaultValues }: BasicAuthSectionProps) {
+             )}
+           />
+ 
++          {/* 注册政策（§5 邀请准入）：开启后必须有有效注册邀请码才能注册 */}
++          <FormField
++            control={form.control}
++            name='RegisterInviteRequired'
++            render={({ field }) => (
++              <SettingsSwitchItem>
++                <SettingsSwitchContent>
++                  <FormLabel>{t('Registration Invite Required')}</FormLabel>
++                  <FormDescription>
++                    {t('Require a valid registration invite code to sign up')}
++                  </FormDescription>
++                </SettingsSwitchContent>
++                <FormControl>
++                  <Switch
++                    checked={field.value}
++                    onCheckedChange={field.onChange}
++                  />
++                </FormControl>
++              </SettingsSwitchItem>
++            )}
++          />
++
+           <FormField
+             control={form.control}
+             name='PasswordRegisterEnabled'
+diff --git a/web/src/features/system-settings/auth/index.tsx b/web/src/features/system-settings/auth/index.tsx
+index eee4f79..73d66a8 100644
+--- a/web/src/features/system-settings/auth/index.tsx
++++ b/web/src/features/system-settings/auth/index.tsx
+@@ -29,6 +29,8 @@ const defaultAuthSettings: AuthSettings = {
+   PasswordRegisterEnabled: true,
+   EmailVerificationEnabled: false,
+   RegisterEnabled: true,
++  // 注册政策（§5 邀请准入）：默认关闭，保持底座既有行为
++  RegisterInviteRequired: false,
+   EmailDomainRestrictionEnabled: false,
+   EmailAliasRestrictionEnabled: false,
+   EmailDomainWhitelist: '',
+diff --git a/web/src/features/system-settings/auth/section-registry.tsx b/web/src/features/system-settings/auth/section-registry.tsx
+index db225c4..25a14ce 100644
+--- a/web/src/features/system-settings/auth/section-registry.tsx
++++ b/web/src/features/system-settings/auth/section-registry.tsx
+@@ -35,6 +35,7 @@ const AUTH_SECTIONS = [
+           PasswordRegisterEnabled: settings.PasswordRegisterEnabled,
+           EmailVerificationEnabled: settings.EmailVerificationEnabled,
+           RegisterEnabled: settings.RegisterEnabled,
++          RegisterInviteRequired: settings.RegisterInviteRequired,
+           EmailDomainRestrictionEnabled: settings.EmailDomainRestrictionEnabled,
+           EmailAliasRestrictionEnabled: settings.EmailAliasRestrictionEnabled,
+           EmailDomainWhitelist: settings.EmailDomainWhitelist,
+diff --git a/web/src/features/system-settings/types.ts b/web/src/features/system-settings/types.ts
+index 765ff2e..f51b4c7 100644
+--- a/web/src/features/system-settings/types.ts
++++ b/web/src/features/system-settings/types.ts
+@@ -152,6 +152,8 @@ export type AuthSettings = {
+   PasswordRegisterEnabled: boolean
+   EmailVerificationEnabled: boolean
+   RegisterEnabled: boolean
++  /** 注册政策（§5 邀请准入）：是否必须使用注册邀请码才能注册 */
++  RegisterInviteRequired: boolean
+   EmailDomainRestrictionEnabled: boolean
+   EmailAliasRestrictionEnabled: boolean
+   EmailDomainWhitelist: string
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index f867537..a2fba50 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6714,6 +6714,8 @@
+     "Price list": "Price list",
+     "Registration invite code": "Registration invite code",
+     "Enter your registration invite code": "Enter your registration invite code",
+-    "Please enter the registration invite code": "Please enter the registration invite code"
++    "Please enter the registration invite code": "Please enter the registration invite code",
++    "Registration Invite Required": "Registration Invite Required",
++    "Require a valid registration invite code to sign up": "Require a valid registration invite code to sign up"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index dbee829..c507bbc 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6714,6 +6714,8 @@
+     "Price list": "Price list",
+     "Registration invite code": "Code d'invitation",
+     "Enter your registration invite code": "Saisissez votre code d'invitation",
+-    "Please enter the registration invite code": "Veuillez saisir le code d'invitation"
++    "Please enter the registration invite code": "Veuillez saisir le code d'invitation",
++    "Registration Invite Required": "Code d'invitation obligatoire",
++    "Require a valid registration invite code to sign up": "Un code d'invitation valide est requis pour s'inscrire"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 7ce7052..669b81a 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6714,6 +6714,8 @@
+     "Price list": "Price list",
+     "Registration invite code": "登録招待コード",
+     "Enter your registration invite code": "登録招待コードを入力",
+-    "Please enter the registration invite code": "登録招待コードを入力してください"
++    "Please enter the registration invite code": "登録招待コードを入力してください",
++    "Registration Invite Required": "登録招待コードを必須にする",
++    "Require a valid registration invite code to sign up": "登録には有効な登録招待コードが必要です"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 5c663de..98096c3 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6714,6 +6714,8 @@
+     "Price list": "Price list",
+     "Registration invite code": "Код приглашения",
+     "Enter your registration invite code": "Введите код приглашения",
+-    "Please enter the registration invite code": "Введите код приглашения"
++    "Please enter the registration invite code": "Введите код приглашения",
++    "Registration Invite Required": "Обязательный код приглашения",
++    "Require a valid registration invite code to sign up": "Для регистрации требуется действительный код приглашения"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index e5f50aa..ee5e270 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6714,6 +6714,8 @@
+     "Price list": "Price list",
+     "Registration invite code": "Mã mời đăng ký",
+     "Enter your registration invite code": "Nhập mã mời đăng ký của bạn",
+-    "Please enter the registration invite code": "Vui lòng nhập mã mời đăng ký"
++    "Please enter the registration invite code": "Vui lòng nhập mã mời đăng ký",
++    "Registration Invite Required": "Bắt buộc mã mời đăng ký",
++    "Require a valid registration invite code to sign up": "Yêu cầu mã mời đăng ký hợp lệ để đăng ký"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 4e1b968..dede524 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6714,6 +6714,8 @@
+     "Price list": "Price list",
+     "Registration invite code": "註冊邀請碼",
+     "Enter your registration invite code": "請輸入註冊邀請碼",
+-    "Please enter the registration invite code": "請輸入註冊邀請碼"
++    "Please enter the registration invite code": "請輸入註冊邀請碼",
++    "Registration Invite Required": "必須使用註冊邀請碼",
++    "Require a valid registration invite code to sign up": "註冊時必須提交有效的註冊邀請碼"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 0b0b84b..642df85 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6714,6 +6714,8 @@
+     "Price list": "价格列表",
+     "Registration invite code": "注册邀请码",
+     "Enter your registration invite code": "请输入注册邀请码",
+-    "Please enter the registration invite code": "请输入注册邀请码"
++    "Please enter the registration invite code": "请输入注册邀请码",
++    "Registration Invite Required": "必须使用注册邀请码",
++    "Require a valid registration invite code to sign up": "注册时必须提交有效的注册邀请码"
+   }
+ }
+-- 
+2.53.0.windows.1
+
