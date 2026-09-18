@@ -90,14 +90,14 @@ export function Pricing() {
   } = useFilters(models || [])
 
   // 按分享分组过滤（只影响展示；没有该分组数据的模型在选择具体分组时被排除）
-  const shareGroups = [...new Set([...sourcesByModel.values()].flatMap((s) => s.groupNames))].sort()
+  const shareGroups = [...new Set([...sourcesByModel.values()].flatMap((s) => s.groups.map((g) => g.name)))].sort()
   const modelsForView = useMemo(() => {
     if (shareGroupFilter === '') {
       return filteredModels
     }
     return filteredModels.filter((model) => {
       const summary = sourcesByModel.get(model.model_name || '')
-      return summary ? summary.groupNames.includes(shareGroupFilter) : false
+      return summary ? summary.groups.some((g) => g.name === shareGroupFilter) : false
     })
   }, [filteredModels, shareGroupFilter, sourcesByModel])
 

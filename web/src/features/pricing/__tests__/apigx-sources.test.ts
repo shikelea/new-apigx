@@ -27,15 +27,18 @@ const item = (over: Partial<PlazaOfferingItem> & { model: string }): PlazaOfferi
   ({ offering_public_id: over.model + '-o', ...over }) as PlazaOfferingItem
 
 describe('模型广场：分享来源聚合', () => {
-  it('同一模型的多个来源被汇总，分组名去重且排序', () => {
+  it('同一模型的多个来源被汇总，分组按名称去重排序并带上对外 ID', () => {
     const map = summarizeModelSources([
-      item({ model: 'm1', group_name: 'B组' }),
-      item({ model: 'm1', group_name: 'A组' }),
-      item({ model: 'm1', group_name: 'B组' }),
-      item({ model: 'm2', group_name: 'A组' }),
+      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
+      item({ model: 'm1', group_name: 'A组', group_public_id: 'ga' }),
+      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
+      item({ model: 'm2', group_name: 'A组', group_public_id: 'ga' }),
     ])
     expect(map.get('m1')?.sourceCount).toBe(3)
-    expect(map.get('m1')?.groupNames).toEqual(['A组', 'B组'])
+    expect(map.get('m1')?.groups).toEqual([
+      { publicID: 'ga', name: 'A组' },
+      { publicID: 'gb', name: 'B组' },
+    ])
     expect(map.get('m2')?.sourceCount).toBe(1)
   })
 

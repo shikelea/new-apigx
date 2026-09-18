@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Link } from '@tanstack/react-router'
 import { ChevronRight } from 'lucide-react'
 import { memo, useMemo, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -77,9 +78,6 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
   let sourcesLabel = ''
   if (props.sources) {
     sourcesLabel = t('Share sources') + ': ' + props.sources.sourceCount
-    if (props.sources.groupNames.length > 0) {
-      sourcesLabel = sourcesLabel + ' · ' + props.sources.groupNames.join(', ')
-    }
   }
   const billingTime = useBillingTime(props.model.billing_expr)
   const currency = useSystemConfigStore((state) => state.config.currency)
@@ -398,7 +396,27 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           className='border-border/60 border-t pt-2'
         >
           {sourcesLabel ? (
-            <span className='text-muted-foreground truncate text-xs'>{sourcesLabel}</span>
+            <span className='text-muted-foreground truncate text-xs'>
+              {sourcesLabel}
+              {/* 分组名链到「分享分组页」（§4 第 3 条：该页需要真实入口） */}
+              {props.sources?.groups.map((group) => (
+                <span key={group.name}>
+                  {' · '}
+                  {/* 有对外 ID 才做链接（没有就只显示名称，不生成死链） */}
+                  {group.publicID ? (
+                    <Link
+                      to='/plaza/group/$groupPublicId'
+                      params={{ groupPublicId: group.publicID }}
+                      className='hover:underline'
+                    >
+                      {group.name}
+                    </Link>
+                  ) : (
+                    group.name
+                  )}
+                </span>
+              ))}
+            </span>
           ) : null}
           <Button variant='ghost' size='sm' onClick={props.onClick}>
             {t('Details')}
