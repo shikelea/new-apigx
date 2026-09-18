@@ -72,7 +72,7 @@ end
 if ARGV[10] == '0' and redis.call('EXISTS', KEYS[1]) == 0 then
   return 1
 end
-redis.call('HSET', KEYS[1],
+redis.call('HMSET', KEYS[1],
   'Id', ARGV[2], 'Group', ARGV[3], 'Email', ARGV[4],
   'Status', ARGV[5], 'Role', ARGV[6], 'Username', ARGV[7],
   'Setting', ARGV[8], 'AuthVersion', ARGV[1], 'CacheSchema', ARGV[9])
@@ -261,7 +261,7 @@ end
 if current ~= incoming then
   return 1
 end
-redis.call('HSET', KEYS[1], ARGV[2], ARGV[3], 'CacheSchema', ARGV[4])
+redis.call('HMSET', KEYS[1], ARGV[2], ARGV[3], 'CacheSchema', ARGV[4])
 return 1`
 	result, err := common.RDB.Eval(context.Background(), script,
 		[]string{getUserCacheKey(userId), getUserAuthFenceKey(userId), getUserAuthVersionKey(userId)},

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+var affinityTestSequence atomic.Uint64
 
 func buildChannelAffinityTemplateContextForTest(meta channelAffinityMeta) *gin.Context {
 	rec := httptest.NewRecorder()
@@ -204,7 +207,7 @@ func TestGetPreferredChannelByAffinity_RequestHeaderKeySource(t *testing.T) {
 		IncludeModelName: true,
 	}
 
-	affinityValue := fmt.Sprintf("header-hit-%d", time.Now().UnixNano())
+	affinityValue := fmt.Sprintf("header-hit-%d", affinityTestSequence.Add(1))
 	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(rule, "gpt-5", "default", affinityValue)
 
 	cache := getChannelAffinityCache()
@@ -239,7 +242,7 @@ func TestGetPreferredChannelByAffinity_RequestHeaderKeySource(t *testing.T) {
 func TestClearCurrentChannelAffinityCache(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	cacheKeySuffix := fmt.Sprintf("codex cli trace:default:clear-current-%d", time.Now().UnixNano())
+	cacheKeySuffix := fmt.Sprintf("codex cli trace:default:clear-current-%d", affinityTestSequence.Add(1))
 	cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
 	cache := getChannelAffinityCache()
 	require.NoError(t, cache.SetWithTTL(cacheKeySuffix, 9527, time.Minute))
@@ -279,7 +282,7 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
 	}
 	require.NotNil(t, codexRule)
 
-	affinityValue := fmt.Sprintf("pc-hit-%d", time.Now().UnixNano())
+	affinityValue := fmt.Sprintf("pc-hit-%d", affinityTestSequence.Add(1))
 	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(*codexRule, "gpt-5", "default", affinityValue)
 
 	cache := getChannelAffinityCache()

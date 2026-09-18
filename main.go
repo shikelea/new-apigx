@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	apigxstartup "github.com/QuantumNous/new-api/apigx/startup"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
@@ -350,6 +351,9 @@ func InitResources() error {
 	err = common.InitRedisClient()
 	if err != nil {
 		return err
+	}
+	if err = apigxstartup.Validate(model.DB, common.RedisEnabled); err != nil {
+		return fmt.Errorf("APIGX startup validation failed: %w", err)
 	}
 
 	perfmetrics.Init()

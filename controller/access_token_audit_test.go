@@ -438,9 +438,11 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 	t.Helper()
 	if kind == "sqlite" {
 		path := t.TempDir() + "/audit.db"
-		db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+		isolatedDSN := path + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)"
+		db, err := gorm.Open(sqlite.Open(isolatedDSN), &gorm.Config{})
 		require.NoError(t, err)
-		return db, path
+		registerAuditTestDatabaseCleanup(t, db)
+		return db, isolatedDSN
 	}
 	require.NotEmpty(t, dsn)
 	name := fmt.Sprintf("newapi_audit_%d", time.Now().UnixNano())
@@ -485,13 +487,15 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 	db, err := gorm.Open(isolated, &gorm.Config{})
 	require.NoError(t, err)
 	t.Logf("isolated database: %s (%s)", name, kind)
-	t.Cleanup(func() {
-		connection, err := db.DB()
-		if err == nil {
-			_ = connection.Close()
-		}
-	})
+	registerAuditTestDatabaseCleanup(t, db)
 	return db, newDSN
+}
+
+func registerAuditTestDatabaseCleanup(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	connection, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = connection.Close() })
 }
 
 func verifyAuditRoleStorage(t *testing.T) {
@@ -683,7 +687,12 @@ func TestAuditDatabaseMatrix(t *testing.T) {
 					for range 2 {
 						require.NoError(t, model.InitDB())
 						require.NoError(t, model.InitLogDB())
+						registerAuditTestDatabaseCleanup(t, model.DB)
+						if model.LOG_DB != model.DB {
+							registerAuditTestDatabaseCleanup(t, model.LOG_DB)
+						}
 					}
+					db = model.DB
 					if !upgrade {
 						require.NoError(t, db.Create(&model.User{Username: "fresh-owner", Password: "placeholder", AffCode: "fresh-aff"}).Error)
 					}

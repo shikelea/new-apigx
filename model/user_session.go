@@ -328,7 +328,7 @@ end
 if current_version > tonumber(ARGV[3]) then
   return 0
 end
-redis.call('HSET', KEYS[1],
+redis.call('HMSET', KEYS[1],
   'SID', ARGV[1], 'UserID', ARGV[2], 'Version', ARGV[3],
   'UserAuthVersion', ARGV[4], 'Status', ARGV[5],
   'LoginMethod', ARGV[6], 'IP', ARGV[7], 'UserAgent', ARGV[8],

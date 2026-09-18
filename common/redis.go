@@ -144,7 +144,13 @@ func RedisHSetObj(key string, obj any, expiration time.Duration) error {
 	}
 
 	txn := RDB.TxPipeline()
-	txn.HSet(ctx, key, data)
+	// Redis 4.0 才支持一次 HSET 写入多组 field/value。仓库内的 Windows
+	// 便携 Redis 是 3.0；把 map 直接交给 go-redis 会展开成多组参数，导致整笔
+	// 事务以 "Wrong number of args calling Redis command" 失败。逐字段排入同一
+	// TxPipeline 保留事务提交与 TTL 语义，同时兼容 Redis 3 和新版 Redis。
+	for field, value := range data {
+		txn.HSet(ctx, key, field, value)
+	}
 
 	// 只有在 expiration 大于 0 时才设置过期时间
 	if expiration > 0 {
