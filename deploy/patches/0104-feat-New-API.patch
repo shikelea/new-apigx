@@ -1,0 +1,184 @@
+From e93077fad21d17129299cc4eff024bd30ef6858e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 10:03:46 +0800
+Subject: [PATCH 104/104] =?UTF-8?q?feat:=20=E4=BB=B7=E6=A0=BC=E9=85=8D?=
+ =?UTF-8?q?=E7=BD=AE=E5=8F=AA=E5=A4=8D=E7=94=A8=20New=20API=EF=BC=88?=
+ =?UTF-8?q?=E6=8C=89=E7=94=A8=E6=88=B7=E5=86=B3=E5=AE=9A=EF=BC=8C=E5=8F=96?=
+ =?UTF-8?q?=E6=B6=88=E5=85=B6=E4=BB=96=E4=BB=B7=E6=A0=BC=E6=BA=90=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+用户裁决: 一键配置价格以 New API 同步为主, 不做其他来源 => 取消 ModelRadar/模眼接入与批量粘贴界面
+
+本轮: 平台页价格卡加**指引 + 直达链接**（底座的「模型与定价」/system-settings/models 与公开价格列表 /pricing）
+实测底座路径确实可用（否则指引就是空头支票）:
+  GET /api/option/model_pricing -> 200(entries/options/empty_version)
+  GET /api/ratio_sync/channels  -> 200 / 8 条
+  GET /api/pricing              -> 200 / 7 个模型(正好等于保留的 7 条样例)
+
+保留我们这层(与复用底座不冲突): 人工覆盖 price-rules(记录与展示) / 渠道读数 price-sync(平台侧) /
+  发布强制价格闸门(未配价不得发布, 与底座"未配价即不可用"一致)
+检查: typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅
+---
+ web/src/features/apigx-platform/index.tsx | 27 ++++++++++++++++++++++-
+ web/src/i18n/locales/en.json              |  5 ++++-
+ web/src/i18n/locales/fr.json              |  5 ++++-
+ web/src/i18n/locales/ja.json              |  5 ++++-
+ web/src/i18n/locales/ru.json              |  5 ++++-
+ web/src/i18n/locales/vi.json              |  5 ++++-
+ web/src/i18n/locales/zh-TW.json           |  5 ++++-
+ web/src/i18n/locales/zh.json              |  5 ++++-
+ 8 files changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/web/src/features/apigx-platform/index.tsx b/web/src/features/apigx-platform/index.tsx
+index 4eea7fa..544d08b 100644
+--- a/web/src/features/apigx-platform/index.tsx
++++ b/web/src/features/apigx-platform/index.tsx
+@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */import { useMutation, useQuery } from '@tanstack/react-query'
++import { Link } from '@tanstack/react-router'
+ import { useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ 
+@@ -141,6 +142,9 @@ export function ApigxPlatform() {
+           <Card>
+             <CardHeader>
+               <CardTitle>{t('apigxPlatform.priceRules')}</CardTitle>
++            <CardContent className='pt-0'>
++              <PriceEditingHint />
++            </CardContent>
+             </CardHeader>
+             <CardContent className='space-y-4'>
+               <div className='grid gap-3 sm:grid-cols-3'>
+@@ -259,4 +263,25 @@ export function ApigxPlatform() {
+       </SectionPageLayout.Content>
+     </SectionPageLayout>
+   )
+-}
+\ No newline at end of file
++}
++/**
++ * 价格配置指引。
++ *
++ * **复用 New API 自带的定价能力**：模型价格的配置与同步在底座的「系统设置 → 模型与定价」里，
++ * 这里只给出直达入口，不另造一套价格源（渠道价格读数走平台的 price-sync，人工覆盖走本页的输入框）。
++ */
++function PriceEditingHint() {
++  const { t } = useTranslation()
++  return (
++    <p className='text-muted-foreground text-xs'>
++      {t('Prices are configured and synced in New API model pricing.')} 
++      <Link to='/system-settings/models' className='underline'>
++        {t('Open model pricing')}
++      </Link>
++      {' · '}
++      <Link to='/pricing' className='underline'>
++        {t('Price list')}
++      </Link>
++    </p>
++  )
++}
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index f04bad3..4301998 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6715,5 +6715,8 @@
+   "Normalized name Hint": "Normalized name",
+   "Visible resources": "Visible resources",
+   "No visible resource in this group": "No visible resource in this group",
+-  "Provider": "Provider"
++  "Provider": "Provider",
++  "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
++  "Open model pricing": "Open model pricing",
++  "Price list": "Price list"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 73e4dd1..5b167f7 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6715,5 +6715,8 @@
+   "Normalized name Hint": "Normalized name",
+   "Visible resources": "Visible resources",
+   "No visible resource in this group": "No visible resource in this group",
+-  "Provider": "Provider"
++  "Provider": "Provider",
++  "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
++  "Open model pricing": "Open model pricing",
++  "Price list": "Price list"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index da76e39..1402dc3 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6715,5 +6715,8 @@
+   "Normalized name Hint": "Normalized name",
+   "Visible resources": "Visible resources",
+   "No visible resource in this group": "No visible resource in this group",
+-  "Provider": "Provider"
++  "Provider": "Provider",
++  "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
++  "Open model pricing": "Open model pricing",
++  "Price list": "Price list"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 5acc33c..5536071 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6715,5 +6715,8 @@
+   "Normalized name Hint": "Normalized name",
+   "Visible resources": "Visible resources",
+   "No visible resource in this group": "No visible resource in this group",
+-  "Provider": "Provider"
++  "Provider": "Provider",
++  "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
++  "Open model pricing": "Open model pricing",
++  "Price list": "Price list"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index cb0c825..a900e2a 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6715,5 +6715,8 @@
+   "Normalized name Hint": "Normalized name",
+   "Visible resources": "Visible resources",
+   "No visible resource in this group": "No visible resource in this group",
+-  "Provider": "Provider"
++  "Provider": "Provider",
++  "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
++  "Open model pricing": "Open model pricing",
++  "Price list": "Price list"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 5d35e13..094ae93 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6715,5 +6715,8 @@
+   "Normalized name Hint": "Normalized name",
+   "Visible resources": "Visible resources",
+   "No visible resource in this group": "No visible resource in this group",
+-  "Provider": "Provider"
++  "Provider": "Provider",
++  "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
++  "Open model pricing": "Open model pricing",
++  "Price list": "Price list"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index a5b3452..7da1037 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6715,5 +6715,8 @@
+   "Normalized name Hint": "归一化名",
+   "Visible resources": "可见资源",
+   "No visible resource in this group": "该分组下没有你可访问的资源",
+-  "Provider": "分享者"
++  "Provider": "分享者",
++  "Prices are configured and synced in New API model pricing.": "模型价格在底座的「模型与定价」里配置与同步：",
++  "Open model pricing": "打开模型定价",
++  "Price list": "价格列表"
+ }
+-- 
+2.53.0.windows.1
+
