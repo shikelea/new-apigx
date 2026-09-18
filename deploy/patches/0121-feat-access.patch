@@ -1,0 +1,99 @@
+From 01a6395afdf950f033669add510e2179a6756fe8 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:14:15 +0800
+Subject: [PATCH 121/121] =?UTF-8?q?feat(access):=20=E6=B3=A8=E5=86=8C?=
+ =?UTF-8?q?=E9=82=80=E8=AF=B7=E8=A2=AB=E6=8B=92=E6=97=B6=E4=BD=BF=E7=94=A8?=
+ =?UTF-8?q?=E4=B8=93=E9=97=A8=E6=96=87=E6=A1=88=EF=BC=88=E4=B8=89=E8=AF=AD?=
+ =?UTF-8?q?=EF=BC=89=E2=80=94=E2=80=94=20=E4=B8=8D=E5=86=8D=E8=AF=AF?=
+ =?UTF-8?q?=E6=8A=A5"=E6=B3=A8=E5=86=8C=E5=B7=B2=E5=85=B3=E9=97=AD"?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- i18n/keys.go: 新增 MsgUserRegistrationInviteInvalid = user.registration_invite_invalid
+- i18n/locales/{en,zh-CN,zh-TW}.yaml: 三条对应文案
+- controller/user.go: 闸门核销失败时改用该文案（仍不区分具体原因 —— 防枚举）
+
+**实测**（开关打开后）：
+  无邀请码 -> "A valid registration invite code is required (it may be invalid, expired, revoked or already used)"
+  无效邀请码 -> 同一文案 ✓（分得清"注册被关闭"与"邀请码不对"，且不泄露原因）
+环境已恢复（register_invite_required=false，已重启）
+---
+ controller/user.go      | 3 ++-
+ i18n/keys.go            | 7 +++++--
+ i18n/locales/en.yaml    | 1 +
+ i18n/locales/zh-CN.yaml | 1 +
+ i18n/locales/zh-TW.yaml | 1 +
+ 5 files changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/controller/user.go b/controller/user.go
+index 28e671b..cb345d7 100644
+--- a/controller/user.go
++++ b/controller/user.go
+@@ -278,7 +278,8 @@ func Register(c *gin.Context) {
+ 	if common.RegisterInviteRequired {
+ 		claimed, redeemErr := apigxmodel.RedeemRegistrationInvite(model.DB, user.RegisterInviteCode, common.GetTimestamp())
+ 		if redeemErr != nil {
+-			common.ApiErrorI18n(c, i18n.MsgUserRegisterDisabled)
++			// 专门文案：让调用方分得清"注册被关闭"与"邀请码不对"，且不泄露具体原因（防枚举）
++			common.ApiErrorI18n(c, i18n.MsgUserRegistrationInviteInvalid)
+ 			return
+ 		}
+ 		claimedRegistrationInvite = claimed
+diff --git a/i18n/keys.go b/i18n/keys.go
+index 98bac83..9beb112 100644
+--- a/i18n/keys.go
++++ b/i18n/keys.go
+@@ -78,8 +78,11 @@ const (
+ 
+ // User related messages
+ const (
+-	MsgUserPasswordLoginDisabled     = "user.password_login_disabled"
+-	MsgUserRegisterDisabled          = "user.register_disabled"
++	MsgUserPasswordLoginDisabled = "user.password_login_disabled"
++	MsgUserRegisterDisabled      = "user.register_disabled"
++	// MsgUserRegistrationInviteInvalid 注册邀请码无效/已用尽/已过期/已撤销（§5 邀请准入）。
++	// 刻意与"注册已关闭"分开：调用方需要知道"能不能注册"与"码对不对"是两件事。
++	MsgUserRegistrationInviteInvalid = "user.registration_invite_invalid"
+ 	MsgUserPasswordRegisterDisabled  = "user.password_register_disabled"
+ 	MsgUserUsernameOrPasswordEmpty   = "user.username_or_password_empty"
+ 	MsgUserUsernameOrPasswordError   = "user.username_or_password_error"
+diff --git a/i18n/locales/en.yaml b/i18n/locales/en.yaml
+index 3f2a6bc..d0b5594 100644
+--- a/i18n/locales/en.yaml
++++ b/i18n/locales/en.yaml
+@@ -69,6 +69,7 @@ redemption.expire_time_invalid: "Expiration time cannot be earlier than current
+ # User messages
+ user.password_login_disabled: "Password login has been disabled by administrator"
+ user.register_disabled: "New user registration has been disabled by administrator"
++user.registration_invite_invalid: "A valid registration invite code is required (it may be invalid, expired, revoked or already used)"
+ user.password_register_disabled: "Password registration has been disabled by administrator, please use third-party account verification"
+ user.username_or_password_empty: "Username or password is empty"
+ user.username_or_password_error: "Username or password is incorrect, or user has been banned"
+diff --git a/i18n/locales/zh-CN.yaml b/i18n/locales/zh-CN.yaml
+index 574fe36..7047e23 100644
+--- a/i18n/locales/zh-CN.yaml
++++ b/i18n/locales/zh-CN.yaml
+@@ -70,6 +70,7 @@ redemption.expire_time_invalid: "过期时间不能早于当前时间"
+ # User messages
+ user.password_login_disabled: "管理员关闭了密码登录"
+ user.register_disabled: "管理员关闭了新用户注册"
++user.registration_invite_invalid: "需要有效的注册邀请码（可能无效、已过期、已撤销或已被使用）"
+ user.password_register_disabled: "管理员关闭了通过密码进行注册，请使用第三方账户验证的形式进行注册"
+ user.username_or_password_empty: "用户名或密码为空"
+ user.username_or_password_error: "用户名或密码错误，或用户已被封禁"
+diff --git a/i18n/locales/zh-TW.yaml b/i18n/locales/zh-TW.yaml
+index 901611e..bedf989 100644
+--- a/i18n/locales/zh-TW.yaml
++++ b/i18n/locales/zh-TW.yaml
+@@ -70,6 +70,7 @@ redemption.expire_time_invalid: "過期時間不能早於當前時間"
+ # User messages
+ user.password_login_disabled: "管理員關閉了密碼登錄"
+ user.register_disabled: "管理員關閉了新使用者註冊"
++user.registration_invite_invalid: "需要有效的註冊邀請碼（可能無效、已過期、已撤銷或已被使用）"
+ user.password_register_disabled: "管理員關閉了通過密碼進行註冊，請使用第三方帳號驗證的形式進行註冊"
+ user.username_or_password_empty: "使用者名或密碼為空"
+ user.username_or_password_error: "使用者名或密碼錯誤，或使用者已被封禁"
+-- 
+2.53.0.windows.1
+
