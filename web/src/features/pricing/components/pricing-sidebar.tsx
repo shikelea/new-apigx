@@ -61,14 +61,18 @@ export interface PricingSidebarProps {
   endpointTypeFilter: string
   vendorFilter: string
   groupFilter: string
+  /** 分享分组筛选（来自我们的广场）；与上面的"计费分组"不是一回事 */
+  shareGroupFilter?: string
   tagFilter: string
   onQuotaTypeChange: (value: string) => void
   onEndpointTypeChange: (value: string) => void
   onVendorChange: (value: string) => void
   onGroupChange: (value: string) => void
+  onShareGroupChange?: (value: string) => void
   onTagChange: (value: string) => void
   vendors: PricingVendor[]
   groups: string[]
+  shareGroups?: string[]
   groupRatios?: Record<string, number>
   tags: string[]
   models: PricingModel[]
@@ -191,6 +195,16 @@ export function PricingSidebar(props: PricingSidebarProps) {
     })),
   ]
 
+  const shareGroupOptions: FilterOption[] = [
+    {
+      value: FILTER_ALL,
+      label: t('All share groups'),
+    },
+    ...(props.shareGroups ?? []).map((group) => ({
+      value: group,
+      label: group,
+    })),
+  ]
   const quotaOptions: FilterOption[] = [
     {
       value: QUOTA_TYPES.ALL,
@@ -290,6 +304,14 @@ export function PricingSidebar(props: PricingSidebarProps) {
           options={groupOptions}
           onChange={props.onGroupChange}
         />
+        {(props.shareGroups?.length ?? 0) > 0 && (
+          <FilterSection
+            title={t('Share groups')}
+            value={props.shareGroupFilter ?? ''}
+            options={shareGroupOptions}
+            onChange={props.onShareGroupChange ?? (() => {})}
+          />
+        )}
         <FilterSection
           title={t('All Vendors')}
           value={props.vendorFilter}

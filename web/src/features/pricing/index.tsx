@@ -39,6 +39,8 @@ import { usePricingData } from './hooks/use-pricing-data'
 
 export function Pricing() {
   const { t } = useTranslation()
+  // 分享分组筛选（与底座的计费分组筛选相互独立）
+  const [shareGroupFilter, setShareGroupFilter] = useState<string>('')
   const [selectedModelName, setSelectedModelName] = useState<string | null>(
     null
   )
@@ -87,6 +89,18 @@ export function Pricing() {
     clearSearch,
   } = useFilters(models || [])
 
+  // 按分享分组过滤（只影响展示；没有该分组数据的模型在选择具体分组时被排除）
+  const shareGroups = [...new Set([...sourcesByModel.values()].flatMap((s) => s.groupNames))].sort()
+  const modelsForView = useMemo(() => {
+    if (shareGroupFilter === '') {
+      return filteredModels
+    }
+    return filteredModels.filter((model) => {
+      const summary = sourcesByModel.get(model.model_name || '')
+      return summary ? summary.groupNames.includes(shareGroupFilter) : false
+    })
+  }, [filteredModels, shareGroupFilter, sourcesByModel])
+
   const handleModelClick = useCallback((modelName: string) => {
     setSelectedModelName(modelName)
   }, [])
@@ -94,11 +108,11 @@ export function Pricing() {
   const selectedModel = useMemo(
     () =>
       selectedModelName
-        ? (models || []).find(
+        ? (modelsForView || []).find(
             (model) => model.model_name === selectedModelName
           ) || null
         : null,
-    [models, selectedModelName]
+    [modelsForView, selectedModelName]
   )
 
   const availableGroups = useMemo(
@@ -115,7 +129,7 @@ export function Pricing() {
   }, [clearFilters, clearSearch])
 
   const renderPricingContent = () => {
-    if (filteredModels.length === 0) {
+    if (modelsForView.length === 0) {
       return (
         <EmptyState
           searchQuery={searchInput}
@@ -129,7 +143,7 @@ export function Pricing() {
       return (
         <ModelCardGrid
           sourcesByModel={sourcesByModel}
-          models={filteredModels}
+          models={modelsForView}
           onModelClick={handleModelClick}
           priceRate={priceRate}
           usdExchangeRate={usdExchangeRate}
@@ -142,7 +156,7 @@ export function Pricing() {
 
     return (
       <PricingTable
-        models={filteredModels}
+        models={modelsForView}
         priceRate={priceRate}
         usdExchangeRate={usdExchangeRate}
         tokenUnit={tokenUnit}
@@ -231,6 +245,9 @@ export function Pricing() {
 
             <main className='min-w-0 space-y-4'>
               <PricingToolbar
+                shareGroupFilter={shareGroupFilter}
+                shareGroups={shareGroups}
+                onShareGroupChange={setShareGroupFilter}
                 filteredCount={filteredModels.length}
                 totalCount={models?.length}
                 sortBy={sortBy}
