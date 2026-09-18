@@ -40,23 +40,33 @@ func RecordSettlementUsage(c *gin.Context, relayInfo *relaycommon.RelayInfo, pro
 
 	write := func(dimension int, tokens int) {
 		uid := "u:" + relayInfo.RequestId + ":" + strconv.Itoa(dimension)
+		// 取价并计价（未定价 ⇒ 成本保持 0；不认识的计算单位也记未定价）
+		cost := apigxmodel.ResolveUsageCost(db, keyID, offeringID, channelID, dimension, int64(tokens), now)
+
 		event := &apigxmodel.UsageEvent{
-			EventUID:      uid,
-			Kind:          apigxmodel.UsageEventKindUsage,
-			UserID:        int64(relayInfo.UserId),
-			OwnerUserID:   owner,
-			ApiKeyID:      int64(relayInfo.TokenId),
-			ApiModelID:    relayInfo.OriginModelName,
-			OfferingID:    offeringID,
-			ChannelID:     channelID,
-			UpstreamKeyID: keyID,
-			Dimension:     dimension,
-			QuantityMilli: apigxmodel.UsageQuantityMilliFromTokens(tokens),
-			UnitScale:     apigxmodel.UsageUnitScalePerMillionTokens,
-			Trust:         apigxmodel.UsageTrustUpstreamReported,
-			CostState:     apigxmodel.UsageCostStateUnpriced,
-			OccurredAt:    now,
-			CreatedAt:     now,
+			EventUID:        uid,
+			Kind:            apigxmodel.UsageEventKindUsage,
+			UserID:          int64(relayInfo.UserId),
+			OwnerUserID:     owner,
+			ApiKeyID:        int64(relayInfo.TokenId),
+			ApiModelID:      relayInfo.OriginModelName,
+			OfferingID:      offeringID,
+			ChannelID:       channelID,
+			UpstreamKeyID:   keyID,
+			Dimension:       dimension,
+			QuantityMilli:   apigxmodel.UsageQuantityMilliFromTokens(tokens),
+			UnitScale:       apigxmodel.UsageUnitScalePerMillionTokens,
+			Trust:           apigxmodel.UsageTrustUpstreamReported,
+			PriceRuleID:     cost.PriceRuleID,
+			PriceRuleItemID: cost.PriceRuleItemID,
+			UnitPriceMicro:  cost.UnitPriceMicro,
+			Currency:        cost.Currency,
+			FxRateMicro:     cost.FxRateMicro,
+			CostMicro:       cost.CostMicro,
+			CostUsdMicro:    cost.CostUsdMicro,
+			CostState:       cost.CostState,
+			OccurredAt:      now,
+			CreatedAt:       now,
 		}
 		if err := apigxmodel.RecordUsageEvent(db, event); err != nil {
 			common.SysError("relayhook: record usage event failed: " + err.Error())

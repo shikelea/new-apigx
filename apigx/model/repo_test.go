@@ -609,3 +609,41 @@ func TestAbandonedAttemptIsNotEmptySuccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 200, done.HttpStatus)
 }
+
+// TestRecordUsageEventRejectsUnpricedWithCost 覆盖 §5.21 的硬约束：
+// 「未定价」的行 cost_usd_micro 必须为 0 —— 把"价格未知"写成"成本为零"是被禁止的。
+func TestRecordUsageEventRejectsUnpricedWithCost(t *testing.T) {
+	db := newRepoDB(t)
+
+	bad := &UsageEvent{
+		EventUID:     "unpriced-with-cost",
+		Kind:         UsageEventKindUsage,
+		Dimension:    UsageDimensionInputTokens,
+		CostState:    UsageCostStateUnpriced,
+		CostUsdMicro: 123, // 违规：未定价却带成本
+	}
+	require.Error(t, RecordUsageEvent(db, bad), "未定价的事件不得携带成本")
+
+	good := &UsageEvent{
+		EventUID:      "unpriced-zero-cost",
+		Kind:          UsageEventKindUsage,
+		Dimension:     UsageDimensionInputTokens,
+		QuantityMilli: UsageQuantityMilliFromTokens(16),
+		CostState:     UsageCostStateUnpriced,
+	}
+	require.NoError(t, RecordUsageEvent(db, good))
+	var count int64
+	require.NoError(t, db.Model(&UsageEvent{}).Where("event_uid = ?", "unpriced-zero-cost").Count(&count).Error)
+	assert.EqualValues(t, 1, count)
+
+	// 幂等：同一 event_uid 再写一次必须被唯一约束拦下（重试/重复结算不产生重复事件）
+	require.Error(t, RecordUsageEvent(db, good), "同一 event_uid 不得重复写入")
+}
+
+// TestUsageQuantityMilliFromTokens 固定换算口径：规范写明 1 token = 1000（千分之一最小单位）。
+func TestUsageQuantityMilliFromTokens(t *testing.T) {
+	assert.EqualValues(t, 0, UsageQuantityMilliFromTokens(0))
+	assert.EqualValues(t, 0, UsageQuantityMilliFromTokens(-5), "负数按 0 处理，不制造负用量")
+	assert.EqualValues(t, 1000, UsageQuantityMilliFromTokens(1))
+	assert.EqualValues(t, 16000, UsageQuantityMilliFromTokens(16))
+}
