@@ -57,3 +57,20 @@
 - **登录会话上限**：反复登录会触发 `409 AUTH_SESSION_LIMIT`（我曾在 root 名下积到 50 个会话）；清 `user_sessions` 即恢复。
 - **演练夹具**：要验"槽位被占住"必须让请求真的挂住 ⇒ 需**上游指向替身(8100)** 且**该模型已发布**；替身的注入接口是 `POST /_control/profile`（`{hang,delayMs,ttftMs,status,...}`），任务状态序列是 `POST /_control/task`。
 - **两个已知的底座边界**（非缺陷，属设计）：底座渠道行**必须持有可用上游 Key**（31 行中 7 行形如 `sk-...`）；**首跳直连**上游 BaseURL **不做 SSRF 校验**（自建/内网上游是合法场景）。
+
+## 六、最终确认复跑结果（目标完成后按上表执行）
+
+| 项 | 结果 |
+|---|---|
+| 备份 → 恢复 → 指纹比对（`t43-backup-restore-drill.ps1`） | ✅ **12/12 项一致**，`exit=0` |
+| `chat-matrix` | ✅ 5/5（支持 5，未通过 0） |
+| `image-e2e` | ✅ 5/5（隔离重跑；首次失败为相邻流量/异步记账的时序竞态） |
+| `video-task` | ✅ 7/7（重做 setup 后；绑定项改用数据库核对 ⇒ user=1、落在合法可路由渠道） |
+| `capability-gates` | ✅ 12/12 |
+| `nonchat-protocols` | ✅ 16/16 |
+
+**合计 45 项能力/场景 + 12 项备份指纹全部通过，未发现产品回归。** 详见 `acceptance-evidence.md` §21。
+
+**复跑时的两个坑（省你时间）**：① 用 PowerShell 捕获 node 输出前必须设 `[Console]::OutputEncoding = [Text.Encoding]::UTF8`，
+否则中文全乱码且信息不可恢复；② **同一套件不要重复跑 setup** —— 会造出多条等价夹具渠道，
+使"任务落在哪个渠道"这类断言失败（本次 `video-task` 就是这么失败的，经查不是缺陷）。

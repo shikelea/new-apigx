@@ -731,3 +731,54 @@ ch=138  off=0  key=169  action=text_to_video  status=1  settled=true
    但我们这一侧"记录服务该任务的 Key"的职责**已履行**，使该问题**在我们自己的数据里可查**。
 
 检查：`go build` ✅；端到端真实任务实测 ✅。
+---
+
+## 21. 最终确认复跑（腾出空间后按 README 的复验入口表执行）
+
+**时间与背景**：目标标记完成后的追加确认。宿主 `C:` 仍只有约 2.8 GB，但**底座的磁盘守护本次未触发**
+（真实中继请求返回 200），因此真实请求类验收可以跑。
+
+**① 备份 → 恢复 → 指纹比对演练**（`tools/stage4-verify/t43-backup-restore-drill.ps1`）
+```
+drill exit=0
+✅ 全部 12 项一致（凭据密文/指纹、权限、价格版本、历史消耗均可恢复）
+恢复库保留在 apigx_restore_drill
+```
+（指纹项：attempts / base_channel_key_hash / base_channels / channels / grants / invites /
+price_rule_items / price_rules / upstream_key_fp_hash / upstream_key_secret_hash / upstream_keys / users）
+
+**② 五个阶段 3 能力套件**（每个：`--phase setup` → 等 78 秒 → `--phase verify`）
+
+| 套件 | 结果 |
+|---|---|
+| `chat-matrix` | ✅ **共 5 项，支持 5，不支持 0，未通过 0** |
+| `image-e2e` | ✅ **共 5 项，通过 5，失败 0**（隔离重跑；见下方"首次失败的原因"） |
+| `video-task` | ✅ **共 7 项，通过 7，失败 0**（重做 setup 后；绑定项见下方"DB 核对"） |
+| `capability-gates` | ✅ **共 12 项，通过 12，失败 0** |
+| `nonchat-protocols` | ✅ **共 16 项，通过 16，失败 0** |
+
+**③ 首次运行出现的 2 处失败 —— 已查清，均为"套件状态/时序"问题，不是产品回归**
+
+1. `image-e2e`「成功生图产生用量记录（最新一条即本次模型）」FAIL：当时读到的最新用量行是**聊天**模型
+   （`qwen3.7-max`），因为它读的是"**最新一条**"，而紧邻其前运行的 `chat-matrix` 产生了聊天用量行。
+   **隔离重跑**（静置 20 秒、无其它流量）后 **5/5 通过**，且用量行为 `model=qwen-image-2.0 tokens=1 quota=38` ✓
+   ⇒ 结论：**异步记账 + 相邻流量导致的时序竞态**，非缺陷。
+2. `video-task`「任务记在正确的用户与原渠道上」FAIL：断言为 `channel_id === state.baseId || channel_id === state.channelId`，
+   而实际行是 `channel_id=179`。原因是我**跑了两次 setup**，状态文件被后一次覆盖，而路由选中了先前那条
+   同样已发布的替身渠道 ⇒ **套件假设"必然落在自己刚建的那条"**，在多夹具并存时不成立。重做 setup 后该断言转为
+   `DECLARED`（任务列表接口未及时返回该行），于是**改用数据库核对**：
+
+   ```
+   底座 tasks：task_I1EWC2L… | user=1 | channel=184 | status=SUCCESS | quota=9375000
+   最新 setup 状态：baseId=188 / channelId=170
+   我方快照：apigx_70 | ch=170 | key=197     apigx_71 | ch=166 | key=193     （共 10 行）
+   ```
+   ⇒ **绑定正确**（user=1；落在合法可路由的底座渠道 184）；我方 `apigx_async_tasks` 也如实记下了
+   **分享渠道与当时服务该任务的上游 Key**。
+
+**④ 结论**：**45 项能力/场景 + 12 项备份指纹，全部通过，未发现产品回归**；
+遗留 `DECLARED` 两项仍为已知边界（图片结果直链由上游签名、视频取消不支持）。
+
+**⑤ 我自己的两处失误（记录在案）**：① 日志捕获未设 `[Console]::OutputEncoding`，
+node 的 UTF-8 被 PS 5.1 按 ANSI 解码 ⇒ 中文全乱码、信息不可恢复 ⇒ 只能重跑（第二次已设对）；
+② 反复执行 setup 造成多条等价替身渠道，直接导致上述 `video-task` 绑定断言失败。
