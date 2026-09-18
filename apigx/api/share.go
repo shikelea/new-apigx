@@ -49,6 +49,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		groups.PATCH("/:id", h.updateShareGroup)
 		groups.GET("/:id", h.getShareGroup)
 		groups.DELETE("/:id", h.deleteShareGroup)
+		// 平台侧审核：发布 / 暂停（分享者不能自行把草稿对外放出）
+		groups.POST("/:id/publish-status", h.setShareGroupPublishStatus)
 		groups.GET("/:id/channels", h.listChannels)
 	}
 
@@ -227,7 +229,10 @@ func (h *handler) createShareGroup(c *gin.Context) {
 		Name:              strings.TrimSpace(req.Name),
 		Description:       req.Description,
 		DefaultVisibility: 0,
-		PublishStatus:     0, // 待审核（计划书 §12：新公开资源先审核）
+		// 发布状态（字段注释为准：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停 / 4=已退役）。
+		// 规则：**公开**分组先审核（计划书 §12「新公开资源先审核」）；非公开（受限/私有）不对外暴露，
+		// 无需审核即视为已发布 —— 否则分享者每次自用都要等一次人工审核，体验不合理。
+		PublishStatus: initialGroupPublishStatus(groupVisibilityOrDefault(req.DefaultVisibility)),
 	}
 	if req.DefaultVisibility != nil {
 		group.DefaultVisibility = *req.DefaultVisibility
@@ -281,6 +286,59 @@ func (h *handler) getShareGroup(c *gin.Context) {
 		"description": group.Description, "default_visibility": group.DefaultVisibility,
 		"publish_status": group.PublishStatus, "created_at": group.CreatedAt, "updated_at": group.UpdatedAt,
 	})
+}
+
+// initialGroupPublishStatus 返回新建分组时的初始发布状态。
+//
+// **公开**分组必须先审核（返回待审核），**非公开**分组不对外暴露，直接视为已发布。
+// groupVisibilityOrDefault 取分组的可见性，未指定时按**公开**处理。
+//
+// 保守默认：未指定可见性时宁可按「公开 ⇒ 先审核」，也不要静默变成一个对人可见的分组。
+func groupVisibilityOrDefault(input *int) int {
+	if input == nil {
+		return apigxmodel.ShareGroupVisibilityPublic
+	}
+	return *input
+}
+
+func initialGroupPublishStatus(visibility int) int {
+	if visibility == apigxmodel.ShareGroupVisibilityPublic {
+		return apigxmodel.ShareGroupPublishPending
+	}
+	return apigxmodel.ShareGroupPublishPublished
+}
+
+// setGroupPublishStatusRequest 平台的审核动作（发布 / 暂停）。
+type setGroupPublishStatusRequest struct {
+	Status int `json:"status" binding:"required"`
+}
+
+// setShareGroupPublishStatus 平台侧：把分享分组置为「已发布」或「已暂停」。
+//
+// 为什么由平台做：这属于「资源审核」（§4 管理后台），分享者不能自己把草稿/待审核的分组对外放出。
+// 已在用（已发布）的分组被暂停后，新请求应停止 —— 生效点见广场可见性与路由候选的判据。
+func (h *handler) setShareGroupPublishStatus(c *gin.Context) {
+	if !requirePlatformReviewer(c) {
+		return
+	}
+	groupID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req setGroupPublishStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	if req.Status != apigxmodel.ShareGroupPublishPublished && req.Status != apigxmodel.ShareGroupPublishSuspended {
+		fail(c, http.StatusBadRequest, "invalid_status", "status must be 2 (published) or 3 (suspended)")
+		return
+	}
+	if err := apigxmodel.SetShareGroupPublishStatus(h.db, groupID, req.Status); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": groupID, "publish_status": req.Status})
 }
 
 func (h *handler) deleteShareGroup(c *gin.Context) {

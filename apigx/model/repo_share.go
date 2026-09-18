@@ -121,6 +121,39 @@ func ListShareGroups(db *gorm.DB, ownerUserID int64, limit int) ([]ShareGroup, e
 }
 
 // DeleteShareGroup 软删除分组（墓碑语义）。
+// ShareGroup 发布状态（字段注释为准：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停 / 4=已退役）。
+const (
+	// ShareGroupPublishDraft 草稿：分享者还在准备，不对外可见。
+	ShareGroupPublishDraft int = 0
+	// ShareGroupPublishPending 待审核：已提交，等待平台审核（公开分组的新建初始状态）。
+	ShareGroupPublishPending int = 1
+	// ShareGroupPublishPublished 已发布：对外可见、可被路由。
+	ShareGroupPublishPublished int = 2
+	// ShareGroupPublishSuspended 已暂停：曾发布，现停止对外服务。
+	ShareGroupPublishSuspended int = 3
+	// ShareGroupPublishRetired 已退役：不再使用。
+	ShareGroupPublishRetired int = 4
+)
+
+// SetShareGroupPublishStatus 设置分组的发布状态（平台审核动作）。
+//
+// 只改状态一个字段：不触碰分组名、可见性、成员等其他信息，避免审核动作顺带改写分享者的内容。
+func SetShareGroupPublishStatus(db *gorm.DB, groupID int64, status int) error {
+	if groupID <= 0 {
+		return fmt.Errorf("%w: group_id is required", ErrInvalidArgument)
+	}
+	res := db.Model(&ShareGroup{}).
+		Where("id = ? AND deleted_at IS NULL", groupID).
+		Update("publish_status", status)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func DeleteShareGroup(db *gorm.DB, ownerUserID, id int64) error {
 	return softDeleteByOwner(db, &ShareGroup{}, ownerUserID, id)
 }

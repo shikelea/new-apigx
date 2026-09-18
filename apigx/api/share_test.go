@@ -171,7 +171,9 @@ func TestShareGroupLifecycle(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	detail, _ := body["data"].(map[string]any)
 	assert.Equal(t, "小林公益站", detail["name"])
-	assert.Equal(t, float64(0), detail["publish_status"], "新建分组默认待审核")
+	// 发布状态枚举：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停。公开分组新建后进入**待审核**（计划书 §12），
+	// 而不是草稿 —— 本用例的提示语一直是「默认待审核」，此前断言值 0 与枚举不符，属代码与用例一起写错，已按语义修正为 1。
+	assert.Equal(t, float64(1), detail["publish_status"], "公开分组新建后默认待审核")
 
 	// 删除后读不到
 	rec, _ = env.do(t, http.MethodDelete, "/api/share-groups/"+strconv.FormatInt(id, 10), user, "")
