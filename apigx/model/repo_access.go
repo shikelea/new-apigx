@@ -153,9 +153,12 @@ func RedeemAccessInvite(db *gorm.DB, token string, redeemerUserID int64) (*Grant
 	var invite Invite
 	err := db.Transaction(func(tx *gorm.DB) error {
 		// 先按条件原子抢占（次数与状态一起判定）
+		// 必须**限定邀请类型**：§10.1 要求两类邀请校验逻辑独立。
+		// 不限定的话，注册类邀请（target_scope_type=0）会被当成资源邀请核销，
+		// 生成 resource_id=0 的垃圾授权 —— 这是跨类型漏洞。
 		res := tx.Model(&Invite{}).
-			Where("token_hash = ? AND status = ? AND (expires_at = 0 OR expires_at > ?) AND (max_uses = 0 OR used_count < max_uses)",
-				hashInviteToken(token), InviteStatusActive, now).
+			Where("token_hash = ? AND invite_type = ? AND status = ? AND (expires_at = 0 OR expires_at > ?) AND (max_uses = 0 OR used_count < max_uses)",
+				hashInviteToken(token), InviteTypeAccess, InviteStatusActive, now).
 			Updates(map[string]any{
 				"used_count": gorm.Expr("used_count + 1"),
 				"updated_at": now,
@@ -167,7 +170,7 @@ func RedeemAccessInvite(db *gorm.DB, token string, redeemerUserID int64) (*Grant
 			// 不存在 / 已撤销 / 已过期 / 已用尽 —— 一律同一结果
 			return ErrNotFound
 		}
-		if err := tx.Where("token_hash = ?", hashInviteToken(token)).First(&invite).Error; err != nil {
+		if err := tx.Where("token_hash = ? AND invite_type = ?", hashInviteToken(token), InviteTypeAccess).First(&invite).Error; err != nil {
 			return err
 		}
 
