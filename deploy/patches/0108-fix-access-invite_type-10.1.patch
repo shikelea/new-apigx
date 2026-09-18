@@ -1,7 +1,7 @@
 From ba25a7d064404a25029e30066e2f6d1bca98c9d0 Mon Sep 17 00:00:00 2001
 From: shikelea <chengxinim@163.com>
 Date: Fri, 18 Sep 2026 10:41:41 +0800
-Subject: [PATCH 108/137] =?UTF-8?q?fix(access):=20=E6=A0=B8=E9=94=80?=
+Subject: [PATCH 108/138] =?UTF-8?q?fix(access):=20=E6=A0=B8=E9=94=80?=
  =?UTF-8?q?=E9=99=90=E5=AE=9A=20invite=5Ftype=20=E2=80=94=E2=80=94=20?=
  =?UTF-8?q?=E5=A0=B5=E4=BD=8F=E6=B3=A8=E5=86=8C=E9=82=80=E8=AF=B7=E8=A2=AB?=
  =?UTF-8?q?=E5=BD=93=E6=88=90=E8=B5=84=E6=BA=90=E9=82=80=E8=AF=B7=E6=A0=B8?=

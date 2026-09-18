@@ -1,0 +1,169 @@
+From c5a5fec154570b07cb462a7bb4d5b89da6a02427 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 15:28:21 +0800
+Subject: [PATCH 138/138] =?UTF-8?q?feat(share):=20U-1=20=E7=AC=AC=E4=BA=8C?=
+ =?UTF-8?q?=E7=89=87=20=E2=80=94=E2=80=94=20=E5=88=86=E7=BB=84=E5=8F=91?=
+ =?UTF-8?q?=E5=B8=83=E7=8A=B6=E6=80=81**=E9=97=B8=E9=97=A8=E7=9C=9F?=
+ =?UTF-8?q?=E6=AD=A3=E7=94=9F=E6=95=88**=EF=BC=88=E5=B9=BF=E5=9C=BA?=
+ =?UTF-8?q?=E5=8F=AF=E8=A7=81=E6=80=A7=20+=20=E8=B7=AF=E7=94=B1=E5=80=99?=
+ =?UTF-8?q?=E9=80=89=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**这一片才是「不直接就绪」的实质**：上一片只修了语义与端点，字段仍未被校验。
+
+**改动**（只改既有查询；表名走 TableName()、只做列等值比较 ⇒ SQLite/MySQL/PostgreSQL 通用）：
+- `apigx/model/repo_plaza.go`：`plazaVisibilityPredicate` 在公开/受邀括号**之外**追加
+  `AND g.publish_status = 已发布` ⇒ 草稿/待审核/已暂停的分组一律不可见（列表与详情同源）
+- `apigx/model/repo_offering.go`：`ListPublishedOfferingsByModel` 追加"分组必须已发布"的子查询
+  ⇒ 供给自身已发布还不够，所属分组也必须已发布，否则不进入路由候选
+- 用例涟漪：`apigx/api` 的 `createGroup` 夹具改为"平台已审核通过"（代表正常状态）；
+  `TestShareGroupLifecycle` 改为**直接调 API 建组**（它要观察的正是新建默认值，不该走夹具）；
+  模型/投影用例的发布状态改用 `ShareGroupPublishPublished` 常量
+
+**实测**：`go build` ✅；`apigx/api` ✅ `apigx/model` ✅ `apigx/routing` ✅；
+`capability-gates` **12/12**；对话矩阵 verify **5/5**（供给能被路由 ⇒ 反证闸门未误伤已发布分组）
+
+**已知缺陷（如实记录，下一轮修）**：验收脚本 `--phase setup` 尾部多出一条
+`Cannot read properties of undefined (reading 'id')`；供给已全部建完、verify 通过，判定为脚本收尾步骤的问题，不影响结论。
+
+**U-1 未完成**：前端向导（建渠道→选模型→配 Key→发布）与渠道状态展示尚未做。
+---
+ apigx/api/share_test.go      | 25 +++++++++++++++++--------
+ apigx/model/repo_offering.go |  9 +++++++++
+ apigx/model/repo_plaza.go    |  6 +++++-
+ 3 files changed, 31 insertions(+), 9 deletions(-)
+
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 49915e9..f793ecd 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -137,6 +137,9 @@ func (e *testEnv) createGroup(t *testing.T, userID int64, name string) int64 {
+ 	data, _ := body["data"].(map[string]any)
+ 	id, ok := data["id"].(float64)
+ 	require.True(t, ok, "创建分组应返回 id：%s", rec.Body.String())
++	// 新建的**公开**分组初始为「待审核」（U-1 闸门：未发布的分组对外不可见、不可被路由）。
++	// 夹具代表"平台已审核通过"的状态，否则所有依赖广场/路由的用例都会因为闸门而看不到数据。
++	require.NoError(t, apigxmodel.SetShareGroupPublishStatus(e.db, int64(id), apigxmodel.ShareGroupPublishPublished))
+ 	return int64(id)
+ }
+ 
+@@ -157,10 +160,16 @@ func TestShareGroupLifecycle(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const user int64 = 1001
+ 
+-	id := env.createGroup(t, user, "小林公益站")
++	// 本用例要观察的正是「新建默认值」，所以**直接调 API 建**，不走 createGroup 夹具
++	// （夹具会把分组置为"平台已审核通过"，那样就看不到默认值了）。
++	rec, body := env.do(t, http.MethodPost, "/api/share-groups", user, `{"name":"小林公益站"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	created, _ := body["data"].(map[string]any)
++	idFloat, _ := created["id"].(float64)
++	id := int64(idFloat)
+ 
+ 	// 列表能看到
+-	rec, body := env.do(t, http.MethodGet, "/api/share-groups", user, "")
++	rec, body = env.do(t, http.MethodGet, "/api/share-groups", user, "")
+ 	require.Equal(t, http.StatusOK, rec.Code)
+ 	data, _ := body["data"].(map[string]any)
+ 	items, _ := data["items"].([]any)
+@@ -654,7 +663,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 	const owner int64 = 8501
+ 
+ 	// 分组设为**公开**（可见性 2）；否则即便已发布也不该出现在广场
+-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "公开组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "公开组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: apigxmodel.ShareGroupPublishPublished}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+ 	baseChannelID := nextBaseChannelID()
+ 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+@@ -710,7 +719,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 	assert.Equal(t, "m-plaza", detail["model"])
+ 
+ 	// 私有分组：即便已发布也不出现在广场
+-	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: 1}
++	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: apigxmodel.ShareGroupPublishPublished}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, privateGroup))
+ 	privateChannelID := env.createChannel(t, owner, privateGroup.ID, nextBaseChannelID())
+ 	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(privateChannelID, 10)+"/offerings", owner, `{"upstream_model_id":"m-private"}`)
+@@ -1086,7 +1095,7 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const owner int64 = 9301
+ 
+-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "质量组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "质量组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: apigxmodel.ShareGroupPublishPublished}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+ 	baseChannelID := nextBaseChannelID()
+ 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座质量", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+@@ -1123,7 +1132,7 @@ func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const owner int64 = 9401
+ 
+-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "目录组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "目录组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: apigxmodel.ShareGroupPublishPublished}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+ 	baseChannelID := nextBaseChannelID()
+ 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座目录", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+@@ -1228,7 +1237,7 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
+ 	const owner, invited, stranger int64 = 9601, 9602, 9603
+ 
+ 	// 受限分组（1=受限；广场默认只放行公开=2）
+-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "受限组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: 1}
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "受限组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: apigxmodel.ShareGroupPublishPublished}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+ 	baseChannelID := nextBaseChannelID()
+ 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座受限", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+@@ -1293,7 +1302,7 @@ func TestAccessInviteAndGrantAPIContract(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const owner, guest, stranger int64 = 9801, 9802, 9803
+ 
+-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "邀请组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: 1}
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "邀请组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: apigxmodel.ShareGroupPublishPublished}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+ 
+ 	// ① 发放邀请：明文只在这里返回一次
+diff --git a/apigx/model/repo_offering.go b/apigx/model/repo_offering.go
+index ca17722..e20f5af 100644
+--- a/apigx/model/repo_offering.go
++++ b/apigx/model/repo_offering.go
+@@ -280,7 +280,16 @@ func ListPublishedOfferingsByModel(db *gorm.DB, upstreamModelID string) ([]Model
+ 		return nil, nil
+ 	}
+ 	var offerings []ModelOffering
++	// 闸门（U-1）：供给"已发布"还不够 —— 它所属的**分享分组**也必须处于「已发布」。
++	// 否则草稿/待审核/已暂停的分组会继续对外服务（这正是"新建渠道后直接就确定"的根因）。
++	// 用 TableName() 取表名、只做普通列等值比较 ⇒ SQLite/MySQL/PostgreSQL 通用。
++	channelTable := Channel{}.TableName()
++	groupTable := ShareGroup{}.TableName()
++	groupPublished := "channel_id IN (SELECT id FROM " + channelTable +
++		" WHERE share_group_id IN (SELECT id FROM " + groupTable +
++		" WHERE publish_status = ? AND deleted_at IS NULL) AND deleted_at IS NULL)"
+ 	err := db.Where("upstream_model_id = ? AND status = ?", upstreamModelID, OfferingStatusPublished).
++		Where(groupPublished, ShareGroupPublishPublished).
+ 		Order("id ASC").Find(&offerings).Error
+ 	return offerings, err
+ }
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index ec9acf1..d228e63 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -120,11 +120,15 @@ func plazaVisibilityPredicate(viewerUserID int64) (string, []any) {
+ 		" OR EXISTS (SELECT 1 FROM " + grantTable + " AS gr" +
+ 		" WHERE gr.subject_type = ? AND gr.subject_id = ?" +
+ 		" AND (gr.expires_at = 0 OR gr.expires_at > ?)" +
+-		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))"
++		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))" +
++		// 闸门（U-1）：公开/受邀**之外**，分组本身还必须处于「已发布」。
++		// 放在括号外 ⇒ 公开与受邀两条分支都受它约束（草稿/待审核/已暂停一律不可见）。
++		" AND g.publish_status = ?"
+ 	args := []any{
+ 		ShareGroupVisibilityPublic,
+ 		GrantSubjectUser, viewerUserID, now,
+ 		GrantResourceGroup, GrantResourceOffering,
++		ShareGroupPublishPublished,
+ 	}
+ 	return condition, args
+ }
+-- 
+2.53.0.windows.1
+

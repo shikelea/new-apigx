@@ -96,6 +96,12 @@ async function seedOffering(root, model, stamp, baseChannelName) {
   if (!base?.id) throw new Error('查不到底座渠道 ' + baseChannelName);
 
   const g = await call(`${BASE}/api/apigx/share-groups`, { method: 'POST', auth: root, body: { name: 'T31组-' + stamp, default_visibility: 2 } });
+  // U-1：分组新建后是「待审核」，本脚本代表"平台已审核通过"的正常状态
+  await call(`${BASE}/api/apigx/share-groups/${g.json.data.id}/publish-status`, {
+    method: 'POST',
+    auth: root,
+    body: { status: 2 },
+  });
   const ch = await call(`${BASE}/api/apigx/channels`, {
     method: 'POST', auth: root,
     body: { share_group_id: g.json.data.id, base_channel_id: base.id, name: 'T31渠道-' + model.replace(/[^\w.-]/g, '_') + '-' + stamp, protocol: 'openai', base_url: UPSTREAM },
