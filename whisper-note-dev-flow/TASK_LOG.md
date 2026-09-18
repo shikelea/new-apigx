@@ -74,7 +74,12 @@
     ② **#19 明确未实现** —— `PriceScopeUpstreamKey` 已建模，但 `routing/assemble.go` 取价只用"供给→渠道"两级 ⇒ 需补 Key 维度；
     ③ **#28 本环境无法验** —— `apigx_usage_events` 0 行、无写入方，事件级"重复/修订"无数据可验；
     ④ **#1 未闭合** —— 新增用例取不到夹具供给（换第三方浏览者仍 0 项，而既有广场用例可过）⇒ 用例已**显式 Skip**（不留红测试），差异待查。
-    详见 `docs/stage4/acceptance-evidence.md` 第 11 节。- [ ] T4.5 阶段 4：剩余边界场景逐条出证据（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
+    详见 `docs/stage4/acceptance-evidence.md` 第 11 节。  - 进展（2026-09-18 第二批，**仍未完成**）：**又钉死三条** ——
+    `TestAttemptIdempotencyKeyRejectsDuplicate`（#29 幂等键重发被唯一约束拦下）、
+    `TestKeyPoolDetailsAreOwnerOnly`（#20 非所有者读 Key 池一律 404）、
+    `TestAbandonedAttemptIsNotEmptySuccess`（#9 中断的尝试不算成功，且对照正常完成必须 200）⇒ 三条均 **PASS**，整包 model/api/routing 全 ok；
+    **#19 定为"未实现 + 已给实施方案"**（执行 Key 在 `relayhook/capacity_hook.go` 才确定 ⇒ 应在该处以 `PriceScopeUpstreamKey` 优先取价并贯通估算/预留/结算；涉计费不变量，须单独一轮）。
+    剩余 ⚠️ 8 项：#1（案例已 Skip）、#3、#19、#21、#22、#23、#28、#30。详见台账第 12 节。- [ ] T4.5 阶段 4：剩余边界场景逐条出证据（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
 - [ ] T4.6 最终验收：按计划书 §11 阶段 4 的 27 条表格**逐条归档证据**
 ## [已完成] 阶段 2：价格与质量路由 (2026-09-17)
 

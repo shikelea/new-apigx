@@ -1,0 +1,141 @@
+From 4e6c8889c93847412175292a1b2f193895c962d0 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 16:24:16 +0800
+Subject: [PATCH 147/147] =?UTF-8?q?test(T4.5):=20=E5=86=8D=E9=92=89?=
+ =?UTF-8?q?=E6=AD=BB=E4=B8=89=E6=9D=A1=EF=BC=88#29=20=E5=B9=82=E7=AD=89?=
+ =?UTF-8?q?=E9=94=AE=20/=20#20=20Key=20=E6=B1=A0=E4=B8=8D=E5=A4=96?=
+ =?UTF-8?q?=E6=B3=84=20/=20#9=20=E4=B8=AD=E6=96=AD=E4=B8=8D=E7=AE=97?=
+ =?UTF-8?q?=E6=88=90=E5=8A=9F=EF=BC=89=EF=BC=9B#19=20=E5=AE=9A=E4=B8=BA?=
+ =?UTF-8?q?=E6=9C=AA=E5=AE=9E=E7=8E=B0=E5=B9=B6=E7=BB=99=E6=96=B9=E6=A1=88?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**新增测试（均扩展既有文件）**：
+- `apigx/model/repo_test.go`：`TestAttemptIdempotencyKeyRejectsDuplicate`（同 request_id+attempt_index 重发被唯一约束拦下；
+  日志可见 constraint failed）与 `TestAbandonedAttemptIsNotEmptySuccess`（中断 ⇒ http_status=0 ⇒ 不算成功；
+  对照正常完成必须 200，确保断言有区分力）
+- `apigx/api/share_test.go`：`TestKeyPoolDetailsAreOwnerOnly`（所有者 200 / 非所有者 404）
+- **三条全部 PASS**；`apigx/model`、`apigx/api`、`apigx/routing` 三个整包回归 **ok**
+
+**#19（按实际执行 Key 计价）定为未实现 + 实施方案**：执行 Key 只在预留/计量环节确定
+（`relayhook/capacity_hook.go` 取 `ContextKeyChannelMultiKeyIndex` → `ResolveKeyIdentity` → `UpstreamKeyID`），
+应在该处以 `PriceScopeUpstreamKey` 优先取价并贯通估算→预留→结算；因涉计费不变量，须按 AGENTS.md 计费清单单独一轮。
+
+**过程记录（三次"猜"被纠正）**：① `CompleteAttempt` 传猜的 state=1 ⇒ 报 `state must be succeeded or failed`
+⇒ 改用 `AttemptStateSucceeded`；② `MarkAttemptAbandoned` 只对 `AttemptStateStarted` 生效 ⇒ 一并改常量；
+③ 我过滤日志时把关键报错行滤掉了 ⇒ 改为输出完整尾段才看清。
+---
+ apigx/api/share_test.go  | 21 ++++++++++++
+ apigx/model/repo_test.go | 69 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 90 insertions(+)
+
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index f0604e1..c6627f2 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1464,3 +1464,24 @@ func publishTestOffering(t *testing.T, env *testEnv, owner, channelID int64, mod
+ 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(int64(id), 10)+"/publish", owner, "")
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ }
++
++// TestKeyPoolDetailsAreOwnerOnly 覆盖阶段 4 验收表第 20 行：
++// 「一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，**使用者仍只能看到分享来源和授权结果**」。
++//
++// 可验证且最关键的一半：Key 池细节（有哪些 Key、权重、状态）**只对所有者可见**，
++// 非所有者读该渠道的 Key 池一律 404（不确认存在）。
++func TestKeyPoolDetailsAreOwnerOnly(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner, stranger int64 = 8801, 8802
++
++	groupID := env.createGroup(t, owner, "池细节分组")
++	channelID := env.createChannel(t, owner, groupID, 71001)
++
++	// 所有者能读
++	rec, _ := env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner, "")
++	assert.Equal(t, http.StatusOK, rec.Code, "所有者应能读取自己渠道的 Key 池")
++
++	// 陌生人（使用者视角）不能读
++	rec, _ = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", stranger, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code, "非所有者读取 Key 池必须 404（不确认存在）")
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 7a57051..80e6acb 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -540,3 +540,72 @@ func TestImportModelOfferingsIsIdempotentAndDraft(t *testing.T) {
+ 	_, _, err = ImportModelOfferings(db, other, channel.ID, []string{"x"})
+ 	assert.ErrorIs(t, err, ErrNotFound)
+ }
++
++// TestAttemptIdempotencyKeyRejectsDuplicate 覆盖阶段 4 验收表第 29 行：
++// 「同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建」。
++//
++// 幂等键 = (request_id, attempt_index)：同一请求的同一次尝试只能有一条记录。
++func TestAttemptIdempotencyKeyRejectsDuplicate(t *testing.T) {
++	db := newRepoDB(t)
++
++	first := &Attempt{
++		AttemptUID:   "idem-uid-1",
++		RequestID:    880001,
++		AttemptIndex: 0,
++		State:        AttemptStateStarted,
++		StartedAt:    1700000000,
++	}
++	require.NoError(t, BeginAttempt(db, first), "首次尝试应能落库")
++
++	// 同一幂等键重发 ⇒ 必须被唯一约束拦下（不产生第二条记录）
++	duplicate := &Attempt{
++		AttemptUID:   "idem-uid-2",
++		RequestID:    880001,
++		AttemptIndex: 0,
++		State:        AttemptStateStarted,
++		StartedAt:    1700000001,
++	}
++	require.Error(t, BeginAttempt(db, duplicate), "同一幂等键重发不得创建新记录")
++
++	var count int64
++	require.NoError(t, db.Model(&Attempt{}).Where("request_id = ? AND attempt_index = ?", 880001, 0).Count(&count).Error)
++	assert.EqualValues(t, 1, count, "同一幂等键只应有一条尝试记录")
++}
++
++// TestAbandonedAttemptIsNotEmptySuccess 覆盖阶段 4 验收表第 9 行：
++// 「流中断或异步状态未知 ⇒ 不误计完整成功」。
++//
++// 口径：**以 http_status 判定**（2xx=成功；0=未拿到状态码 ⇒ 未完成），
++// 与 U-3 消耗视图的聚合口径一致（[015]）。中断的尝试必须落在"未完成"而不是"成功"。
++func TestAbandonedAttemptIsNotEmptySuccess(t *testing.T) {
++	db := newRepoDB(t)
++
++	interrupted := &Attempt{
++		AttemptUID:   "abandoned-uid",
++		RequestID:    880002,
++		AttemptIndex: 0,
++		State:        AttemptStateStarted,
++		StartedAt:    1700000000,
++	}
++	require.NoError(t, BeginAttempt(db, interrupted))
++	require.NoError(t, MarkAttemptAbandoned(db, "abandoned-uid"))
++
++	got, err := GetAttemptByUID(db, "abandoned-uid")
++	require.NoError(t, err)
++	assert.Equal(t, 0, got.HttpStatus, "中断的尝试不得被记为拿到过状态码")
++	assert.False(t, got.HttpStatus >= 200 && got.HttpStatus < 300, "中断的尝试不得算作成功")
++
++	// 对照：正常完成的尝试必须有 2xx 状态码（否则上面的断言就没有区分力）
++	completed := &Attempt{
++		AttemptUID:   "completed-uid",
++		RequestID:    880003,
++		AttemptIndex: 0,
++		State:        AttemptStateStarted,
++		StartedAt:    1700000000,
++	}
++	require.NoError(t, BeginAttempt(db, completed))
++	require.NoError(t, CompleteAttempt(db, "completed-uid", AttemptStateSucceeded, 200))
++	done, err := GetAttemptByUID(db, "completed-uid")
++	require.NoError(t, err)
++	assert.Equal(t, 200, done.HttpStatus)
++}
+-- 
+2.53.0.windows.1
+

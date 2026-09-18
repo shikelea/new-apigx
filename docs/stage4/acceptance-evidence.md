@@ -35,7 +35,7 @@
 | # | 计划书验收场景 | 现状 | 现有证据 / 缺口 |
 |---|---|---|---|
 | 8 | 6 小时窗口内有错误、取消和少样本 ⇒ 归因正确、显示样本量、过期数据退出窗口 | ✅ 已有测试证据 | `TestQualityViewFlagsInsufficientSamples`、`TestQualityViewExcludesExpiredAndFlagsStale`、`TestQualitySampleSeparatesProbesAndRejectsUnknownOutcome`、`TestWilsonLowerBoundBehaviour` |
-| 9 | 流中断或异步状态未知 ⇒ 不误计完整成功，不重复创建任务 | ⚠️ 部分覆盖 | `TestCompleteAttemptIsIdempotent`、`TestReconcileReleasesStaleAttempts`（配套用例：未完成尝试会被对账回收）；**缺**"流中断 ⇒ 计量落在未完成而不是成功"的显式断言 |
+| 9 | 流中断或异步状态未知 ⇒ 不误计完整成功，不重复创建任务 | ✅ 已有测试证据 | **新增** `TestAbandonedAttemptIsNotEmptySuccess`（中断的尝试 `http_status=0` ⇒ **不算成功**；对照：正常完成必须 200 ⇒ 断言有区分力；实测 PASS）；口径与 U-3 消耗视图一致（[015]） |
 | 10 | 上游或本地缺失 usage ⇒ 标为估算/未知，保留未计量数量 | ✅ 已有测试证据 | `TestPriceUnknownIsNotZero`（**未知 ≠ 零**）；`docs/stage3` 已声明语音**时长**无法度量 |
 | 11 | 价格同步失败、单位冲突或模型未知 ⇒ 旧版本继续使用或待确认，不错误估为零 | ✅ 已有测试证据 | `TestIngestSourcePriceKeepsOldPriceOnSuspiciousData`、`TestPriceRuleVersioningAndValidation`、`TestPriceUnknownIsNotZero` |
 | 12 | 模眼分页中断、同模型跨地区报价不同 ⇒ 不把漏页当删除、价格变体不互相覆盖 | ✅ 已有测试证据 | `TestPriceSyncCannotOverwriteManualOverride`、`TestPriceSnapshotScopesAreIsolated`（作用域隔离） |
@@ -50,8 +50,8 @@
 | 16 | 最快渠道已满、多实例同时抢最后一个槽位 ⇒ 满载渠道退出候选，**最后一个槽位最多被一个请求占用** | ✅ 已有测试证据 | `TestConcurrentReserveNeverExceedsLimit` + `TestReserveIsAllOrNothing`（原子预留，全有或全无）+ `TestSaturatedKeyIndexes`（饱和 Key 退出候选） |
 | 17 | 同渠道多个模型或同账户多 Key ⇒ 共同遵守共享上限，不因切换模型/Key 叠加容量 | ✅ 已有测试证据 | `TestBuildKeyCapacityDimensions`（同账户多 Key 共享维度）、`TestMergeKeyStatusListKeepsBaseMarks`、`capacity_hook_test.go` |
 | 18 | Key 轮询遇到失效、满载、模型权限不同 ⇒ 只选符合要求的 Key，无合格 Key 时渠道不可选 | ✅ 已有测试证据 | `TestProjectKeyPoolSkipsUnusableKeys`、`TestProjectKeyPoolFailsWhenNoUsableKey`、`TestRecordKeyOutcomeIsolatesAuthFailureToSingleKey`、`TestAuthFailureMakesBaseSkipTheFailedKey` |
-| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ⚠️ 部分覆盖（**明确的实现缺口**） | **存储层已支持**：`PriceScopeUpstreamKey`（scope=1）存在；但**取价链路未使用** —— `routing/assemble.go` 只按「供给 → 渠道」两级解析（`fillPriceFromRule`），未按执行 Key 取价 ⇒ **本项未实现**，需在路由取价处补 Key 维度 |
-| 20 | 一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，使用者只看到分享来源与授权结果 | ⚠️ 部分覆盖 | `TestApplyChannelPoolProjectsKeysIntoBaseChannel`、`TestApplyChannelPoolIsOwnerScoped`；**缺**"使用者视角不暴露池内细节"的断言 |
+| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ❌ **未实现（已定实施方案）** | 存储层已就绪（`PriceScopeUpstreamKey`，scope=1）。**执行 Key 只在预留/计量环节才确定**：`apigx/relayhook/capacity_hook.go` 从 `ContextKeyChannelMultiKeyIndex` 取索引、经 `ResolveKeyIdentity` 解析出 `UpstreamKeyID`。实施方案：在该处以 `PriceScopeUpstreamKey` **优先**取价，并让**估算 → 预留 → 结算**共用同一份价格；因涉及计费不变量，须按 `new-api/AGENTS.md` 的计费清单单独一轮完成 |
+| 20 | 一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，使用者只看到分享来源与授权结果 | ✅ 已有测试证据 | **新增** `TestKeyPoolDetailsAreOwnerOnly`（所有者可读 Key 池 200；**非所有者 404**，不确认存在；实测 PASS）；另有 `TestApplyChannelPoolProjectsKeysIntoBaseChannel`、`TestApplyChannelPoolIsOwnerScoped` |
 
 ## 4. 生命周期、凭据与稳定性（L670–L676）
 
@@ -65,7 +65,7 @@
 | 26 | 普通撤权、账户封禁、Key 紧急吊销 ⇒ 按生命周期表区分历史访问与新增调用，不泄露其他用户对象 | ✅ 已有测试证据 | **新增回归测试** `TestUserAuthRejectsDisabledUser`（停用用户 ⇒ **401 `AUTH_USER_DISABLED`**，实测 PASS）；另有 `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestDeleteUpstreamKeyTwice`；代码位置 `middleware/auth.go` L56–L57 |
 | 27 | Worker 重试、服务重启 ⇒ 统计不重复，待处理事件和任务可恢复 | ✅ 已有测试证据 | `TestCompleteAttemptIsIdempotent`、`TestReconcileReleasesStaleAttempts`、`TestReleaseIsIdempotentAndNeverNegative` |
 | 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ 部分覆盖（**本环境无法验**） | 窗口/分桶类断言已有（`TestAdjustWindowFloorsAtZero` 等）；但 `apigx_usage_events` **0 行、无写入方**（见 [015]）⇒ 事件级"重复/修订"路径**当前没有数据可验**，需先补写入方 |
-| 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ⚠️ 部分覆盖 | `TestCompleteAttemptIsIdempotent`、`uniq_attempt_uid`/`uniq_attempt_request_index` 唯一约束；**缺**"同键不同参数 ⇒ 冲突"的显式断言 |
+| 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ✅ 已有测试证据 | **新增** `TestAttemptIdempotencyKeyRejectsDuplicate`（同 `(request_id, attempt_index)` 重发被唯一约束拦下，只有一条记录；实测 PASS，日志可见 constraint failed）；另有 `TestCompleteAttemptIsIdempotent` |
 | 30 | 恶意地址或外部媒体链接 ⇒ 不能访问未允许的内部网络和元数据服务 | ⚠️ 部分覆盖 | `TestNormalizeUpstreamBaseURL`；验收脚本确有 SSRF 防护命中记录（回环上游被挡，属**预期**）；**缺**元数据服务（169.254.169.254）的显式断言 |
 | 31 | 数据库备份恢复和升级回滚 ⇒ 凭据、权限、价格版本和历史消耗可正确恢复 | ✅ 已有测试证据 | **T4.3 演练**（第 9 节）：`pg_dump -Fc` → 恢复到新库 → **12 项指纹逐项一致**（含凭据密文与指纹的 md5、权限、价格版本、历史消耗）；恢复库上**连续启动两次**均无错误、行数不变（**迁移幂等**）；配置改→重启生效→回滚→重启恢复原值。**升级回滚（回退旧二进制）未演练**，见第 9 节说明 |
 
@@ -250,3 +250,21 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 
 **纪律说明**：本轮**没有**把"看起来没问题"当成结论；未能验证的两项都给出了**具体阻塞点**，
 且**没有把红测试留在仓库**（未闭合的用例显式 `Skip` 并写明原因）。
+---
+
+## 12. T4.5 第二批（三条钉死 + 一条给出实施方案）
+
+| 台账 | 处置 | 结果 |
+|---|---|---|
+| #29 同一幂等键重发 | 新增 `TestAttemptIdempotencyKeyRejectsDuplicate` | **PASS** ⇒ ✅ |
+| #20 Key 池细节不外泄 | 新增 `TestKeyPoolDetailsAreOwnerOnly` | **PASS** ⇒ ✅ |
+| #9 中断不记为完整成功 | 新增 `TestAbandonedAttemptIsNotEmptySuccess` | **PASS** ⇒ ✅ |
+| #19 按实际执行 Key 计价 | 代码核查 + 定方案 | **未实现** ⇒ ❌，方案见上表（须单独一轮，涉计费不变量） |
+
+整包回归：`apigx/model` ✅ `apigx/api` ✅ `apigx/routing` ✅
+
+**过程记录（三次"猜"被当场纠正）**：
+① `CompleteAttempt` 首次传入我猜的 `state=1` ⇒ 报 `state must be succeeded or failed` ⇒ 改用真实常量 `AttemptStateSucceeded`；
+② `MarkAttemptAbandoned` 只对 `state = AttemptStateStarted` 生效，我原先猜 `1`（恰好等于 Started，未暴露问题）⇒ 一并改为常量；
+③ 前一次取错误信息时我**只过滤了部分行**，把关键报错行滤掉了 ⇒ 改为输出完整尾段才看清原因。
+**剩余 ⚠️（8 项）**：#1（未闭合，用例已 Skip）、#3、#19（未实现）、#21、#22、#23、#28（无数据可验）、#30。
