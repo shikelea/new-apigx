@@ -463,6 +463,8 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
 		logger.LogError(ctx, "error settling billing: "+err.Error())
 	}
+	// #19 第一段：结算之后追加分享者用量记录（只记录，不影响扣费；拿不到用量就不写）
+	relayhook.RecordSettlementUsage(ctx, relayInfo, summary.PromptTokens, summary.CompletionTokens)
 
 	logModel := summary.ModelName
 	if strings.HasPrefix(logModel, "gpt-4-gizmo") {
