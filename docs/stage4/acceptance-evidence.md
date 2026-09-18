@@ -329,3 +329,27 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 5. 按 `new-api/AGENTS.md` 计费清单补回归：饱和转换用 `common.*Checked`、钳制事件经 `attachQuotaSaturation` 落审计。
 
 **结论**：本项**不是一行取价分支**，而是**接通成本记录链路** ⇒ 本环境**未实现**，也不假装实现。
+---
+
+## 15. #19 实施勘察（第一段该挂在哪 —— 一次"查明后否掉自己方案"）
+
+**原计划**：在 `service.SettleBilling` 里挂一个 usage 记录器（一处收口，覆盖所有结算路径）。
+
+**勘察后否掉**，理由三条（都有据）：
+1. **结算点拿不到真实用量**：`SettleBilling(ctx, relayInfo, actualQuota)`（`service/billing.go:54`）只收到
+   **底座的额度值**，没有 token 数、没有计量维度 ⇒ 在此处记账只能写出 `quantity = 0` 的事件，
+   那是**误导**（等于宣称"本次没有消耗"），比不记更糟。
+2. **真实用量在调用方**：`service/text_quota.go:463` 处有 `summary.PromptTokens / summary.CompletionTokens`
+   （同文件 `:542` 已在用它们调 `AdjustReservedTPM`）；任务路径在 `controller/relay.go:643` 有自己的用量。
+   ⇒ 记录器应挂在**调用方**，而不是 `SettleBilling` 内部。
+3. **循环依赖已排除**：`apigx/relayhook` 不 import `service`，而 `service/text_quota.go` 已 import `relayhook`
+   ⇒ 从 `service/*` 调用 `relayhook` 是安全的（这点结论可复用）。
+
+**因此第一段的正确落点**是这几处调用方（各自都能提供真实用量与计量维度）：
+`service/quota.go:231`、`service/quota.go:364`、`service/text_quota.go:463`、`controller/relay.go:643`。
+
+**下一段的验收标准（先写清再动手）**：
+- 每个落点写出的 `UsageEvent` **必须**带真实 `Dimension` 与数量；**拿不到用量就不写**（宁缺勿假）；
+- `CostState` 如实区分"已计价/未定价"；未定价时 `cost_usd_micro` 必须为 0（schema 硬约束）；
+- `EventUID` 唯一 ⇒ 重试/重复结算不产生重复事件；
+- 用**真实请求**验证落库，并与底座结算数值对照。
