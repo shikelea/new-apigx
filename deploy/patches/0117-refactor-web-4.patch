@@ -1,0 +1,223 @@
+From 681f02524139a39f47f3f7002ed3c07eb2af81b3 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 11:45:02 +0800
+Subject: [PATCH 117/117] =?UTF-8?q?refactor(web):=20=E5=88=A0=E9=99=A4?=
+ =?UTF-8?q?=E6=88=91=E5=A4=9A=E4=BD=99=E7=9A=84=E3=80=8C=E8=B0=83=E7=94=A8?=
+ =?UTF-8?q?=E9=85=8D=E7=BD=AE=E3=80=8D=E4=BB=A3=E7=A0=81=20=E2=80=94?=
+ =?UTF-8?q?=E2=80=94=20=E5=BA=95=E5=BA=A7=E6=97=A2=E6=9C=89=E8=83=BD?=
+ =?UTF-8?q?=E5=8A=9B=E5=B7=B2=E6=BB=A1=E8=B6=B3=20=C2=A74?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**核实（有据）**：底座 src/features/pricing/components/model-details-api.tsx 的「Code samples」区块
+本身就已经提供 §4 要求的「调用配置」：
+- 接口地址：`base_url="${ctx.baseUrl}/v1"`（Python）/ `baseURL: '${ctx.baseUrl}/v1'`（JS）
+- 模型名、可复制的完整示例、多语言（Python/JS/curl 等）、多协议（按 endpoint 切换）
+⇒ 底座这一项**比我自己写的更完整**，所以按"不要造轮子"删除我的重复实现：
+  features/plaza/components/invocation-card.tsx、features/plaza/lib/invocation.ts 及其用例
+
+删除后 features/plaza 只剩被复用与计划要求的部分：
+  api.ts / types.ts（pricing 与平台页在用）、components/plaza-group.tsx（§4 分享分组页）、lib/format.ts
+检查: typecheck 0 错 / oxlint 0 错 / plaza+pricing 用例 247/247 / build ✅
+---
+ .../plaza/__tests__/invocation.test.ts        | 40 -----------
+ .../plaza/components/invocation-card.tsx      | 63 ------------------
+ web/src/features/plaza/lib/invocation.ts      | 66 -------------------
+ 3 files changed, 169 deletions(-)
+ delete mode 100644 web/src/features/plaza/__tests__/invocation.test.ts
+ delete mode 100644 web/src/features/plaza/components/invocation-card.tsx
+ delete mode 100644 web/src/features/plaza/lib/invocation.ts
+
+diff --git a/web/src/features/plaza/__tests__/invocation.test.ts b/web/src/features/plaza/__tests__/invocation.test.ts
+deleted file mode 100644
+index 960427d..0000000
+--- a/web/src/features/plaza/__tests__/invocation.test.ts
++++ /dev/null
+@@ -1,40 +0,0 @@
+-/*
+-Copyright (C) 2023-2026 QuantumNous
+-
+-This program is free software: you can redistribute it and/or modify
+-it under the terms of the GNU Affero General Public License as
+-published by the Free Software Foundation, either version 3 of the
+-License, or (at your option) any later version.
+-
+-This program is distributed in the hope that it will be useful,
+-but WITHOUT ANY WARRANTY; without even the implied warranty of
+-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+-GNU Affero General Public License for more details.
+-
+-You should have received a copy of the GNU Affero General Public License
+-along with this program. If not, see <https://www.gnu.org/licenses/>.
+-
+-For commercial licensing, please contact support@quantumnous.com
+-*/
+-
+-import { describe, expect, it } from 'vitest'
+-
+-import { buildInvocationSnippets } from '../lib/invocation'
+-
+-describe('调用配置片段', () => {
+-  it('地址末尾的斜杠不会产生双斜杠的 /v1', () => {
+-    const s = buildInvocationSnippets('https://api.example.com/', 'glm-5.3-flash')
+-    expect(s.baseURL).toBe('https://api.example.com/v1')
+-  })
+-
+-  it('模型名进入两个片段（curl 与 Python）', () => {
+-    const s = buildInvocationSnippets('https://api.example.com', 'qwen3.8-max')
+-    expect(s.curl).toContain('"model":"qwen3.8-max"')
+-    expect(s.python).toContain('model="qwen3.8-max"')
+-  })
+-
+-  it('片段使用 /v1 前缀（OpenAI 兼容路径）', () => {
+-    const s = buildInvocationSnippets('https://api.example.com', 'm')
+-    expect(s.curl).toContain('https://api.example.com/v1/chat/completions')
+-  })
+-})
+diff --git a/web/src/features/plaza/components/invocation-card.tsx b/web/src/features/plaza/components/invocation-card.tsx
+deleted file mode 100644
+index ab1894e..0000000
+--- a/web/src/features/plaza/components/invocation-card.tsx
++++ /dev/null
+@@ -1,63 +0,0 @@
+-/*
+-Copyright (C) 2023-2026 QuantumNous
+-
+-This program is free software: you can redistribute it and/or modify
+-it under the terms of the GNU Affero General Public License as
+-published by the Free Software Foundation, either version 3 of the
+-License, or (at your option) any later version.
+-
+-This program is distributed in the hope that it will be useful,
+-but WITHOUT ANY WARRANTY; without even the implied warranty of
+-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+-GNU Affero General Public License for more details.
+-
+-You should have received a copy of the GNU Affero General Public License
+-along with this program. If not, see <https://www.gnu.org/licenses/>.
+-
+-For commercial licensing, please contact support@quantumnous.com
+-*/import { useTranslation } from 'react-i18next'
+-
+-import { CopyButton } from '@/components/copy-button'
+-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+-
+-import { buildInvocationSnippets, resolveServerAddress } from '../lib/invocation'
+-
+-/** 模型详情的「调用配置」：地址、模型名与可直接复制的最小示例。 */
+-export function InvocationCard(props: { model: string }) {
+-  const { t } = useTranslation()
+-  const snippets = buildInvocationSnippets(resolveServerAddress(), props.model)
+-
+-  return (
+-    <Card>
+-      <CardHeader>
+-        <CardTitle>{t('Invocation')}</CardTitle>
+-      </CardHeader>
+-      <CardContent className='space-y-4'>
+-        <div className='grid gap-2 text-sm sm:grid-cols-2'>
+-          <div className='break-all'>
+-            {t('Base URL')}: <span className='font-mono text-xs'>{snippets.baseURL}</span>
+-          </div>
+-          <div className='break-all'>
+-            {t('Model')}: <span className='font-mono text-xs'>{snippets.model}</span>
+-          </div>
+-        </div>
+-
+-        <div className='space-y-1'>
+-          <div className='flex items-center justify-between'>
+-            <span className='text-sm font-medium'>curl</span>
+-            <CopyButton value={snippets.curl} />
+-          </div>
+-          <pre className='bg-muted overflow-x-auto rounded-md p-3 text-xs'>{snippets.curl}</pre>
+-        </div>
+-
+-        <div className='space-y-1'>
+-          <div className='flex items-center justify-between'>
+-            <span className='text-sm font-medium'>Python (OpenAI SDK)</span>
+-            <CopyButton value={snippets.python} />
+-          </div>
+-          <pre className='bg-muted overflow-x-auto rounded-md p-3 text-xs'>{snippets.python}</pre>
+-        </div>
+-      </CardContent>
+-    </Card>
+-  )
+-}
+\ No newline at end of file
+diff --git a/web/src/features/plaza/lib/invocation.ts b/web/src/features/plaza/lib/invocation.ts
+deleted file mode 100644
+index fa03245..0000000
+--- a/web/src/features/plaza/lib/invocation.ts
++++ /dev/null
+@@ -1,66 +0,0 @@
+-/*
+-Copyright (C) 2023-2026 QuantumNous
+-
+-This program is free software: you can redistribute it and/or modify
+-it under the terms of the GNU Affero General Public License as
+-published by the Free Software Foundation, either version 3 of the
+-License, or (at your option) any later version.
+-
+-This program is distributed in the hope that it will be useful,
+-but WITHOUT ANY WARRANTY; without even the implied warranty of
+-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+-GNU Affero General Public License for more details.
+-
+-You should have received a copy of the GNU Affero General Public License
+-along with this program. If not, see <https://www.gnu.org/licenses/>.
+-
+-For commercial licensing, please contact support@quantumnous.com
+-*/
+-/**
+- * 生成「调用配置」片段（计划书 §4 模型详情要求）。
+- *
+- * 纯函数：地址与模型名进来，片段出去 —— 便于测试，也避免把这段字符串拼装散在组件里。
+- * 地址按项目的既有约定读取（`status.server_address`，缺省用当前站点），
+- * 这里只负责拼装，**不做任何网络请求**。
+- */
+-export interface InvocationSnippets {
+-  baseURL: string
+-  model: string
+-  curl: string
+-  python: string
+-}
+-
+-export function buildInvocationSnippets(baseURL: string, model: string): InvocationSnippets {
+-  const root = baseURL.replace(/\/+$/, '')
+-  const openaiBase = `${root}/v1`
+-  const curl = [
+-    `curl ${openaiBase}/chat/completions \\`,
+-    `  -H "Authorization: Bearer $APIGX_KEY" \\`,
+-    `  -H "Content-Type: application/json" \\`,
+-    `  -d '{"model":"${model}","messages":[{"role":"user","content":"hello"}]}'`,
+-  ].join('\n')
+-  const python = [
+-    'from openai import OpenAI',
+-    '',
+-    `client = OpenAI(base_url="${openaiBase}", api_key="<your APIGX key>")`,
+-    `resp = client.chat.completions.create(model="${model}", messages=[{"role": "user", "content": "hello"}])`,
+-    'print(resp.choices[0].message.content)',
+-  ].join('\n')
+-  return { baseURL: openaiBase, model, curl, python }
+-}
+-
+-/** 读取服务地址：与项目既有做法一致（后端 status 优先，缺省用当前站点）。 */
+-export function resolveServerAddress(): string {
+-  try {
+-    const raw = localStorage.getItem('status')
+-    if (raw) {
+-      const status = JSON.parse(raw) as { server_address?: string }
+-      if (status.server_address) {
+-        return status.server_address
+-      }
+-    }
+-  } catch {
+-    /* 读不到就用当前站点 */
+-  }
+-  return window.location.origin
+-}
+\ No newline at end of file
+-- 
+2.53.0.windows.1
+
