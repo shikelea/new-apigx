@@ -1,0 +1,503 @@
+From aef866c2442e831c29b2e239a1961c38284dfeb7 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 09:36:30 +0800
+Subject: [PATCH 103/103] =?UTF-8?q?feat:=20=C2=A74=20=E7=AC=AC=203=20?=
+ =?UTF-8?q?=E9=A1=B9=E8=A1=A5=E9=BD=90=20=E2=80=94=E2=80=94=20=E5=88=86?=
+ =?UTF-8?q?=E4=BA=AB=E5=88=86=E7=BB=84=E9=A1=B5=EF=BC=88=E8=AE=BF=E5=AE=A2?=
+ =?UTF-8?q?=E8=A7=86=E8=A7=92=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 后端: 广场条目新增 group_description(JOIN 本就有, 只是没取这列)
+- 前端: 新增 /plaza/group/:groupPublicId —— 分组名/介绍/分享者/可见资源表; 广场分组标题链到该页
+- **只从广场取数**: 广场本身只返回当前用户有权看见的供给 => 按分组过滤即可,
+  不另开能绕过授权的查询(避免"为了做个页面顺手开越权接口")
+- 实测: 广场 200 且带出分组说明(正是先前编辑弹窗写入的那段 => 闭环); canonical_model_id 为空(映射未确认, 合规)
+- 检查: go build ✅ / apigx/model + apigx/api 用例 ✅ / typecheck ✅ / oxlint 0 错 ✅ / build ✅
+
+❗又发现一项"只有 schema、没有实现"的计划内能力: **邀请兑换与"我可见的资源"没有任何接口**
+  (Invite/Grant 只有表; 接口层零命中) => 属 §4「访问控制/邀请兑换/撤销与到期」与 §5「邀请准入」,
+  独立且不小, 作为下一项成体系地做, 不塞半成品
+---
+ apigx/api/share.go                            |   1 +
+ apigx/model/repo_plaza.go                     |  28 +++--
+ .../features/plaza/components/plaza-group.tsx | 113 ++++++++++++++++++
+ web/src/features/plaza/index.tsx              |  10 +-
+ web/src/features/plaza/types.ts               |   2 +
+ web/src/i18n/locales/en.json                  |   5 +-
+ web/src/i18n/locales/fr.json                  |   5 +-
+ web/src/i18n/locales/ja.json                  |   5 +-
+ web/src/i18n/locales/ru.json                  |   5 +-
+ web/src/i18n/locales/vi.json                  |   5 +-
+ web/src/i18n/locales/zh-TW.json               |   5 +-
+ web/src/i18n/locales/zh.json                  |   5 +-
+ web/src/routeTree.gen.ts                      |  23 ++++
+ .../plaza/group/$groupPublicId.tsx            |  30 +++++
+ 14 files changed, 222 insertions(+), 20 deletions(-)
+ create mode 100644 web/src/features/plaza/components/plaza-group.tsx
+ create mode 100644 web/src/routes/_authenticated/plaza/group/$groupPublicId.tsx
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 2f9a4fa..ce63488 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -1322,6 +1322,7 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
+ 		"latency_ms_p50":              item.LatencyMsP50,
+ 		"insufficient":                item.Insufficient,
+ 		"stale":                       item.Stale,
++		"group_description":           item.GroupDescription,
+ 		"group_public_id":             item.GroupPublicID,
+ 		"group_name":                  item.GroupName,
+ 		"model":                       item.UpstreamModelID,
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index 4ed670f..8fcbc60 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -41,8 +41,10 @@ type PlazaItem struct {
+ 	Insufficient             bool
+ 	Stale                    bool
+ 	// GroupPublicID/GroupName 用于广场按"分享分组"组织（我们的模式）。
+-	GroupPublicID    string
+-	GroupName        string
++	GroupPublicID string
++	GroupName     string
++	// GroupDescription 供"分享分组页（访客视角）"显示介绍（不可信文本，渲染前转义）
++	GroupDescription string
+ 	OfferingPublicID string
+ 	UpstreamModelID  string
+ 	ChannelPublicID  string
+@@ -128,20 +130,21 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 	}
+ 
+ 	type row struct {
+-		ID              int64
+-		GroupPublicID   string
+-		GroupName       string
+-		PublicID        string
+-		UpstreamModelID string
+-		ChannelPublicID string
+-		OwnerUserID     int64
+-		Capabilities    string
+-		UpdatedAt       int64
++		ID               int64
++		GroupPublicID    string
++		GroupName        string
++		GroupDescription string
++		PublicID         string
++		UpstreamModelID  string
++		ChannelPublicID  string
++		OwnerUserID      int64
++		Capabilities     string
++		UpdatedAt        int64
+ 	}
+ 	var rows []row
+ 	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
+ 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
+-		"g.public_id AS group_public_id, g.name AS group_name, " +
++		"g.public_id AS group_public_id, g.name AS group_name, g.description AS group_description, " +
+ 		"o.capabilities AS capabilities, o.updated_at AS updated_at").
+ 		Order("o.updated_at DESC, o.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error
+ 	if err != nil {
+@@ -184,6 +187,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 			ChannelPublicID:          r.ChannelPublicID,
+ 			GroupPublicID:            r.GroupPublicID,
+ 			GroupName:                r.GroupName,
++			GroupDescription:         r.GroupDescription,
+ 			OwnerUserID:              r.OwnerUserID,
+ 			Capabilities:             effective,
+ 			UnverifiedCapabilities:   unverified,
+diff --git a/web/src/features/plaza/components/plaza-group.tsx b/web/src/features/plaza/components/plaza-group.tsx
+new file mode 100644
+index 0000000..e1d778f
+--- /dev/null
++++ b/web/src/features/plaza/components/plaza-group.tsx
+@@ -0,0 +1,113 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { useQuery } from '@tanstack/react-query'
++import { useMemo } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { ErrorState } from '@/components/error-state'
++import { SectionPageLayout } from '@/components/layout'
++import { LoadingState } from '@/components/loading-state'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++
++import { getPlaza } from '../api'
++import { describePlazaQuality } from '../lib/format'
++import type { PlazaOfferingItem } from '../types'
++
++/**
++ * 分享分组页（**访客视角**，计划书 §4：分享者、分享名称、介绍、当前用户有权看见的资源）。
++ *
++ * 数据来自广场：广场只会返回**当前用户有权看见**的供给（已发布 + 可见性判定），
++ * 因此这里按分组过滤即可，不需要也不应该另开一条能绕过授权的查询。
++ */
++export function PlazaGroup(props: { groupPublicID: string }) {
++  const { t } = useTranslation()
++
++  const query = useQuery({ queryKey: ['apigx-plaza'], queryFn: () => getPlaza({ page: 1, page_size: 100 }) })
++
++  const items = useMemo(
++    () => (query.data?.data?.items ?? []).filter((item) => item.group_public_id === props.groupPublicID),
++    [query.data, props.groupPublicID]
++  )
++
++  if (query.isPending) {
++    return <LoadingState />
++  }
++  if (query.isError) {
++    return (
++      <ErrorState
++        onRetry={() => {
++          void query.refetch()
++        }}
++      />
++    )
++  }
++
++  const columns: StaticDataTableColumn<PlazaOfferingItem>[] = [
++    { id: 'model', header: t('Model'), cell: (row) => row.model },
++    { id: 'channel', header: t('Channel'), cell: (row) => row.channel_public_id },
++    { id: 'quality', header: t('Quality'), cell: (row) => describePlazaQuality(row) },
++    {
++      id: 'capabilities',
++      header: t('Capabilities'),
++      cell: (row) => (row.capabilities ?? []).join(', '),
++    },
++  ]
++
++  const first = items[0]
++
++  return (
++    <SectionPageLayout>
++      <SectionPageLayout.Title>{first?.group_name || t('Share group')}</SectionPageLayout.Title>
++      <SectionPageLayout.Content>
++        <div className='space-y-6'>
++          <Card>
++            <CardHeader>
++              <CardTitle>{t('Share group')}</CardTitle>
++            </CardHeader>
++            <CardContent className='space-y-2 text-sm'>
++              {/* 介绍是不可信文本：按纯文本渲染 */}
++              {first?.group_description ? (
++                <p className='text-muted-foreground whitespace-pre-wrap'>{first.group_description}</p>
++              ) : null}
++              <div className='text-muted-foreground'>
++                {t('Provider')}: {first?.owner_user_id ?? '-'}
++              </div>
++            </CardContent>
++          </Card>
++
++          <Card>
++            <CardHeader>
++              <CardTitle>{t('Visible resources')}</CardTitle>
++            </CardHeader>
++            <CardContent>
++              {items.length === 0 ? (
++                <EmptyState title={t('No visible resource in this group')} />
++              ) : (
++                <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.offering_public_id} />
++              )}
++            </CardContent>
++          </Card>
++        </div>
++      </SectionPageLayout.Content>
++    </SectionPageLayout>
++  )
++}
+diff --git a/web/src/features/plaza/index.tsx b/web/src/features/plaza/index.tsx
+index 18c6bc2..2918574 100644
+--- a/web/src/features/plaza/index.tsx
++++ b/web/src/features/plaza/index.tsx
+@@ -104,7 +104,15 @@ export function Plaza() {
+           <div className='space-y-8'>
+             {groups.map((group) => (
+               <section key={group.key} className='space-y-3'>
+-                <h2 className='text-sm font-medium'>{group.name === '' ? t('Ungrouped') : group.name}</h2>
++                <h2 className='text-sm font-medium'>
++                  {group.key === '' ? (
++                    t('Ungrouped')
++                  ) : (
++                    <Link to='/plaza/group/$groupPublicId' params={{ groupPublicId: group.key }} className='hover:underline'>
++                      {group.name === '' ? t('Ungrouped') : group.name}
++                    </Link>
++                  )}
++                </h2>
+                 <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
+                   {group.cards.map((card) => (
+               <Card key={card.model}>
+diff --git a/web/src/features/plaza/types.ts b/web/src/features/plaza/types.ts
+index 4dd280b..a6cbec8 100644
+--- a/web/src/features/plaza/types.ts
++++ b/web/src/features/plaza/types.ts
+@@ -33,6 +33,8 @@ export interface PlazaOfferingItem {
+   /** 分享分组对外 ID 与名称（广场按"分享分组"组织） */
+   group_public_id?: string
+   group_name?: string
++  /** 分组介绍（不可信文本，按纯文本渲染） */
++  group_description?: string
+   /** 分享渠道对外 ID */
+   channel_public_id: string
+   /** 分享者用户 ID */
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index b2b3955..f04bad3 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6712,5 +6712,8 @@
+   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
+   "Confirm": "Confirm",
+   "Reject": "Reject",
+-  "Normalized name Hint": "Normalized name"
++  "Normalized name Hint": "Normalized name",
++  "Visible resources": "Visible resources",
++  "No visible resource in this group": "No visible resource in this group",
++  "Provider": "Provider"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 6894741..73e4dd1 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6712,5 +6712,8 @@
+   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
+   "Confirm": "Confirm",
+   "Reject": "Reject",
+-  "Normalized name Hint": "Normalized name"
++  "Normalized name Hint": "Normalized name",
++  "Visible resources": "Visible resources",
++  "No visible resource in this group": "No visible resource in this group",
++  "Provider": "Provider"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 0749489..da76e39 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6712,5 +6712,8 @@
+   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
+   "Confirm": "Confirm",
+   "Reject": "Reject",
+-  "Normalized name Hint": "Normalized name"
++  "Normalized name Hint": "Normalized name",
++  "Visible resources": "Visible resources",
++  "No visible resource in this group": "No visible resource in this group",
++  "Provider": "Provider"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 60eebd3..5acc33c 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6712,5 +6712,8 @@
+   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
+   "Confirm": "Confirm",
+   "Reject": "Reject",
+-  "Normalized name Hint": "Normalized name"
++  "Normalized name Hint": "Normalized name",
++  "Visible resources": "Visible resources",
++  "No visible resource in this group": "No visible resource in this group",
++  "Provider": "Provider"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index b5e5ffd..cb0c825 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6712,5 +6712,8 @@
+   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
+   "Confirm": "Confirm",
+   "Reject": "Reject",
+-  "Normalized name Hint": "Normalized name"
++  "Normalized name Hint": "Normalized name",
++  "Visible resources": "Visible resources",
++  "No visible resource in this group": "No visible resource in this group",
++  "Provider": "Provider"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 72094cd..5d35e13 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6712,5 +6712,8 @@
+   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
+   "Confirm": "Confirm",
+   "Reject": "Reject",
+-  "Normalized name Hint": "Normalized name"
++  "Normalized name Hint": "Normalized name",
++  "Visible resources": "Visible resources",
++  "No visible resource in this group": "No visible resource in this group",
++  "Provider": "Provider"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 76d35f0..a5b3452 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6712,5 +6712,8 @@
+   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "候选会随着创建供给自动累积；只有**确认之后**，广场才会显示对外标准 ID 与模型介绍。",
+   "Confirm": "确认",
+   "Reject": "拒绝",
+-  "Normalized name Hint": "归一化名"
++  "Normalized name Hint": "归一化名",
++  "Visible resources": "可见资源",
++  "No visible resource in this group": "该分组下没有你可访问的资源",
++  "Provider": "分享者"
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index fc99ded..43dcc47 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -63,6 +63,7 @@ import { Route as AuthenticatedUsageIndexRouteImport } from './routes/_authentic
+ import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
+ import { Route as AuthenticatedWalletIndexRouteImport } from './routes/_authenticated/wallet/index'
+ import { Route as PricingModelIdIndexRouteImport } from './routes/pricing/$modelId/index'
++import { Route as AuthenticatedPlazaGroupGroupPublicIdRouteImport } from './routes/_authenticated/plaza/group/$groupPublicId'
+ import { Route as AuthenticatedSystemSettingsAuthIndexRouteImport } from './routes/_authenticated/system-settings/auth/index'
+ import { Route as AuthenticatedSystemSettingsAuthSectionRouteImport } from './routes/_authenticated/system-settings/auth/$section'
+ import { Route as AuthenticatedSystemSettingsBillingIndexRouteImport } from './routes/_authenticated/system-settings/billing/index'
+@@ -368,6 +369,12 @@ const PricingModelIdIndexRoute = PricingModelIdIndexRouteImport.update({
+   path: '/pricing/$modelId/',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const AuthenticatedPlazaGroupGroupPublicIdRoute =
++  AuthenticatedPlazaGroupGroupPublicIdRouteImport.update({
++    id: '/plaza/group/$groupPublicId',
++    path: '/plaza/group/$groupPublicId',
++    getParentRoute: () => AuthenticatedRouteRoute,
++  } as any)
+ const AuthenticatedSystemSettingsAuthIndexRoute =
+   AuthenticatedSystemSettingsAuthIndexRouteImport.update({
+     id: '/auth/',
+@@ -506,6 +513,7 @@ export interface FileRoutesByFullPath {
+   '/users/': typeof AuthenticatedUsersIndexRoute
+   '/wallet/': typeof AuthenticatedWalletIndexRoute
+   '/pricing/$modelId/': typeof PricingModelIdIndexRoute
++  '/plaza/group/$groupPublicId': typeof AuthenticatedPlazaGroupGroupPublicIdRoute
+   '/system-settings/auth/$section': typeof AuthenticatedSystemSettingsAuthSectionRoute
+   '/system-settings/billing/$section': typeof AuthenticatedSystemSettingsBillingSectionRoute
+   '/system-settings/content/$section': typeof AuthenticatedSystemSettingsContentSectionRoute
+@@ -573,6 +581,7 @@ export interface FileRoutesByTo {
+   '/users': typeof AuthenticatedUsersIndexRoute
+   '/wallet': typeof AuthenticatedWalletIndexRoute
+   '/pricing/$modelId': typeof PricingModelIdIndexRoute
++  '/plaza/group/$groupPublicId': typeof AuthenticatedPlazaGroupGroupPublicIdRoute
+   '/system-settings/auth/$section': typeof AuthenticatedSystemSettingsAuthSectionRoute
+   '/system-settings/billing/$section': typeof AuthenticatedSystemSettingsBillingSectionRoute
+   '/system-settings/content/$section': typeof AuthenticatedSystemSettingsContentSectionRoute
+@@ -644,6 +653,7 @@ export interface FileRoutesById {
+   '/_authenticated/users/': typeof AuthenticatedUsersIndexRoute
+   '/_authenticated/wallet/': typeof AuthenticatedWalletIndexRoute
+   '/pricing/$modelId/': typeof PricingModelIdIndexRoute
++  '/_authenticated/plaza/group/$groupPublicId': typeof AuthenticatedPlazaGroupGroupPublicIdRoute
+   '/_authenticated/system-settings/auth/$section': typeof AuthenticatedSystemSettingsAuthSectionRoute
+   '/_authenticated/system-settings/billing/$section': typeof AuthenticatedSystemSettingsBillingSectionRoute
+   '/_authenticated/system-settings/content/$section': typeof AuthenticatedSystemSettingsContentSectionRoute
+@@ -714,6 +724,7 @@ export interface FileRouteTypes {
+     | '/users/'
+     | '/wallet/'
+     | '/pricing/$modelId/'
++    | '/plaza/group/$groupPublicId'
+     | '/system-settings/auth/$section'
+     | '/system-settings/billing/$section'
+     | '/system-settings/content/$section'
+@@ -781,6 +792,7 @@ export interface FileRouteTypes {
+     | '/users'
+     | '/wallet'
+     | '/pricing/$modelId'
++    | '/plaza/group/$groupPublicId'
+     | '/system-settings/auth/$section'
+     | '/system-settings/billing/$section'
+     | '/system-settings/content/$section'
+@@ -851,6 +863,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/users/'
+     | '/_authenticated/wallet/'
+     | '/pricing/$modelId/'
++    | '/_authenticated/plaza/group/$groupPublicId'
+     | '/_authenticated/system-settings/auth/$section'
+     | '/_authenticated/system-settings/billing/$section'
+     | '/_authenticated/system-settings/content/$section'
+@@ -1266,6 +1279,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof PricingModelIdIndexRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/_authenticated/plaza/group/$groupPublicId': {
++      id: '/_authenticated/plaza/group/$groupPublicId'
++      path: '/plaza/group/$groupPublicId'
++      fullPath: '/plaza/group/$groupPublicId'
++      preLoaderRoute: typeof AuthenticatedPlazaGroupGroupPublicIdRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/system-settings/auth/': {
+       id: '/_authenticated/system-settings/auth/'
+       path: '/auth'
+@@ -1480,6 +1500,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedUsageIndexRoute: typeof AuthenticatedUsageIndexRoute
+   AuthenticatedUsersIndexRoute: typeof AuthenticatedUsersIndexRoute
+   AuthenticatedWalletIndexRoute: typeof AuthenticatedWalletIndexRoute
++  AuthenticatedPlazaGroupGroupPublicIdRoute: typeof AuthenticatedPlazaGroupGroupPublicIdRoute
+ }
+ 
+ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+@@ -1514,6 +1535,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedUsageIndexRoute: AuthenticatedUsageIndexRoute,
+   AuthenticatedUsersIndexRoute: AuthenticatedUsersIndexRoute,
+   AuthenticatedWalletIndexRoute: AuthenticatedWalletIndexRoute,
++  AuthenticatedPlazaGroupGroupPublicIdRoute:
++    AuthenticatedPlazaGroupGroupPublicIdRoute,
+ }
+ 
+ const AuthenticatedRouteRouteWithChildren =
+diff --git a/web/src/routes/_authenticated/plaza/group/$groupPublicId.tsx b/web/src/routes/_authenticated/plaza/group/$groupPublicId.tsx
+new file mode 100644
+index 0000000..61e6384
+--- /dev/null
++++ b/web/src/routes/_authenticated/plaza/group/$groupPublicId.tsx
+@@ -0,0 +1,30 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { createFileRoute } from '@tanstack/react-router'
++
++import { PlazaGroup } from '@/features/plaza/components/plaza-group'
++
++function PlazaGroupRoute() {
++  const params = Route.useParams()
++  return <PlazaGroup groupPublicID={params.groupPublicId} />
++}
++
++export const Route = createFileRoute('/_authenticated/plaza/group/$groupPublicId')({
++  component: PlazaGroupRoute,
++})
+-- 
+2.53.0.windows.1
+
