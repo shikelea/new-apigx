@@ -31,6 +31,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 import { deleteShareChannel, deleteShareGroup, getShareChannels, getShareGroups } from './api'
 import { AccessInviteCard } from '@/features/access/components/invite-card'
+import { UsageSummaryCard } from './components/usage-summary-card'
 import { ChannelCreateDialog } from './components/channel-create-dialog'
 import { GroupCreateDialog } from './components/group-create-dialog'
 import { GroupEditDialog } from './components/group-edit-dialog'
@@ -199,6 +200,7 @@ export function MyShares() {
           </Card>
         </div>
           <AccessInviteCard groups={groups} />
+        <UsageSummaryCard />
       <ConfirmDialog
         open={deletingGroup !== null}
         onOpenChange={(next) => {

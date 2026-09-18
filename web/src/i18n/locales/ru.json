@@ -6766,6 +6766,15 @@
     "Pending review": "На проверке",
     "Suspended": "Приостановлено",
     "Retired": "Выведено",
-    "Draft": "Черновик"
+    "Draft": "Черновик",
+    "My consumption": "Моё потребление",
+    "By channel": "По каналу",
+    "By key": "По ключу",
+    "By model": "По модели",
+    "Succeeded": "Успешно",
+    "Unfinished": "Не завершено",
+    "Avg first token (ms)": "Среднее время до первого токена (мс)",
+    "How much your shared channels were used. Amounts are not shown here yet.": "Насколько использовались ваши общие каналы. Суммы пока не показываются.",
+    "No consumption recorded yet": "Потребления пока не зафиксировано"
   }
 }

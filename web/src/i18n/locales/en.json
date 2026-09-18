@@ -6766,6 +6766,15 @@
     "Pending review": "Pending review",
     "Suspended": "Suspended",
     "Retired": "Retired",
-    "Draft": "Draft"
+    "Draft": "Draft",
+    "My consumption": "My consumption",
+    "By channel": "By channel",
+    "By key": "By key",
+    "By model": "By model",
+    "Succeeded": "Succeeded",
+    "Unfinished": "Unfinished",
+    "Avg first token (ms)": "Avg first token (ms)",
+    "How much your shared channels were used. Amounts are not shown here yet.": "How much your shared channels were used. Amounts are not shown here yet.",
+    "No consumption recorded yet": "No consumption recorded yet"
   }
 }

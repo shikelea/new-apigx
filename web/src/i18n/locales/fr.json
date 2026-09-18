@@ -6766,6 +6766,15 @@
     "Pending review": "En attente de validation",
     "Suspended": "Suspendu",
     "Retired": "Retiré",
-    "Draft": "Brouillon"
+    "Draft": "Brouillon",
+    "My consumption": "Ma consommation",
+    "By channel": "Par canal",
+    "By key": "Par clé",
+    "By model": "Par modèle",
+    "Succeeded": "Réussies",
+    "Unfinished": "Inachevées",
+    "Avg first token (ms)": "Premier token moyen (ms)",
+    "How much your shared channels were used. Amounts are not shown here yet.": "L'utilisation de vos canaux partagés. Les montants ne sont pas encore affichés.",
+    "No consumption recorded yet": "Aucune consommation enregistrée"
   }
 }

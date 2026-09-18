@@ -6766,6 +6766,15 @@
     "Pending review": "待审核",
     "Suspended": "已暂停",
     "Retired": "已退役",
-    "Draft": "草稿"
+    "Draft": "草稿",
+    "My consumption": "我的消耗",
+    "By channel": "按渠道",
+    "By key": "按 Key",
+    "By model": "按模型",
+    "Succeeded": "成功",
+    "Unfinished": "未完成",
+    "Avg first token (ms)": "平均首字延迟(ms)",
+    "How much your shared channels were used. Amounts are not shown here yet.": "你分享的渠道被用了多少。这里暂不显示金额。",
+    "No consumption recorded yet": "还没有消耗记录"
   }
 }

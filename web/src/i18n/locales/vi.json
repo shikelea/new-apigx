@@ -6766,6 +6766,15 @@
     "Pending review": "Chờ duyệt",
     "Suspended": "Tạm dừng",
     "Retired": "Ngừng sử dụng",
-    "Draft": "Bản nháp"
+    "Draft": "Bản nháp",
+    "My consumption": "Mức tiêu thụ của tôi",
+    "By channel": "Theo kênh",
+    "By key": "Theo khóa",
+    "By model": "Theo mô hình",
+    "Succeeded": "Thành công",
+    "Unfinished": "Chưa xong",
+    "Avg first token (ms)": "Token đầu trung bình (ms)",
+    "How much your shared channels were used. Amounts are not shown here yet.": "Mức sử dụng các kênh bạn chia sẻ. Số tiền chưa được hiển thị.",
+    "No consumption recorded yet": "Chưa có ghi nhận tiêu thụ"
   }
 }

@@ -133,3 +133,25 @@ export async function deleteUpstreamKey(keyId: number): Promise<{ success: boole
   const res = await api.delete('/api/apigx/upstream-keys/' + keyId)
   return res.data
 }
+
+// U-3：分享者视角的消耗汇总（按渠道 / 按 Key / 按模型）。
+// 口径由后端保证：success=HTTP 2xx、failed=非 2xx、unfinished=无状态码，三者相加=attempts；
+// **不返回金额**（attempts 表没有费用字段，后端不臆造）。
+export interface UsageSummaryItem {
+  group_id?: number
+  name: string
+  attempts: number
+  success: number
+  failed: number
+  unfinished: number
+  output_tokens: number
+  ttft_ms_sum: number
+  ttft_samples: number
+}
+
+export async function getUsageSummary(
+  groupBy: 'channel' | 'key' | 'model'
+): Promise<{ success: boolean; data?: { group_by: string; items: UsageSummaryItem[] } }> {
+  const res = await api.get('/api/apigx/usage/summary', { params: { group_by: groupBy } })
+  return res.data
+}
