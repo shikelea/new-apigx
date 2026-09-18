@@ -24,7 +24,7 @@
 |---|---|---|---|
 | 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ⚠️ 部分覆盖（**本轮未闭合**） | 前端聚合已实现（`summarizeModelSources`：一个模型 + 多个来源分组）；后端广场返回**逐供给**条目。本轮新增用例 `TestPlazaAggregatesSameModelFromTwoSharers` **无法取到夹具供给**（换第三方浏览者仍为 0 项，而既有 `TestPlazaOnlyExposesPublishedAndPublic` 可过）⇒ **差异未查明**，用例已显式 `Skip` 并保留待查 |
 | 2 | 相似名字但版本不同 ⇒ 不被自动错误合并 | ✅ 已有测试证据 | `apigx/model` `TestAliasCandidateNeverResolves`、`TestResolveCanonicalModelMissReturnsFalse`（候选**永不**自动成为结论） |
-| 3 | 目录不支持自动获取 ⇒ 可人工录入，显示获取边界 | ⚠️ 部分覆盖 | `docs/stage3/acceptance-report.md` 已声明上游能力边界；**缺**"人工录入"路径的界面/接口证据 |
+| 3 | 目录不支持自动获取 ⇒ 可人工录入，显示获取边界 | ✅ 已有测试证据（并修掉一处误导） | **人工录入路径既有**：`POST /api/apigx/channels/:id/offerings {upstream_model_id}`（可带标准模型与能力）⇒ `TestOfferingLifecycleThroughAPI` 正是"不经过任何自动获取、直接人工建供给"的用例（PASS）。**本轮修掉一处界面误导**：此前"抓取上游模型列表**失败**"与"上游确实没返回模型"都显示同一句 "No model reported by the upstream" ⇒ 现在**分开**：失败时显示「无法从上游获取模型列表 + **真实原因**」并提示"有些上游不提供模型列表接口"，同时在弹窗内新增**手动录入**（填模型名 → 导入为草稿供给）⇒ 获取边界与出路都在界面上 |
 | 4 | 私有/受邀模型 ⇒ 未授权用户在页面、API、计数和任务接口均无法访问 | ✅ 已有测试证据 | `TestPlazaOnlyExposesPublishedAndPublic`、`TestPlazaHonoursGrantsForLimitedGroups`、`TestSubjectCanAccessResource`（含到期失效） |
 | 5 | 固定来源 Key 携带另一个渠道的请求头 ⇒ 不扩大授权、不改用未允许来源 | ✅ 已有测试证据 | **新增回归测试** `TestSetupContextForTokenRejectsPinSuffixForNonAdmin`（普通用户带 `-<channelId>` ⇒ **403** 且返 `specific_channel_version` 头，实测 PASS）；代码位置 `middleware/auth.go` L540–L552 |
 | 6 | 模型合并、别名歧义、分组更名 ⇒ 不扩大授权、不重写历史；歧义调用明确拒绝 | ✅ 已有测试证据 | `TestAliasCandidateNeverResolves`、`TestAliasCandidateIsIdempotent`、`TestShareGroupNameAndDescription`、`TestResolveCanonicalModelMissReturnsFalse` |
@@ -128,7 +128,7 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 |---|---|---|---|
 | 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ⚠️ 部分覆盖（**本轮未闭合**） | 前端聚合已实现（`summarizeModelSources`：一个模型 + 多个来源分组）；后端广场返回**逐供给**条目。本轮新增用例 `TestPlazaAggregatesSameModelFromTwoSharers` **无法取到夹具供给**（换第三方浏览者仍为 0 项，而既有 `TestPlazaOnlyExposesPublishedAndPublic` 可过）⇒ **差异未查明**，用例已显式 `Skip` 并保留待查 |
 | 2 | `apigx_upstream_keys`（187 行）中 `secret_ref` 为空、或形如明文 | **0 / 0** | ✅ 我们这层的上游凭据只存密文信封（另有既有用例保证不回显、缺主密钥失败关闭） |
-| 3 | `apigx_attempts.reservation_uid` 形如密钥 | **0 条** | ✅ 预留标识不携带凭据 |
+| 3 | 目录不支持自动获取 ⇒ 可人工录入，显示获取边界 | ✅ 已有测试证据（并修掉一处误导） | **人工录入路径既有**：`POST /api/apigx/channels/:id/offerings {upstream_model_id}`（可带标准模型与能力）⇒ `TestOfferingLifecycleThroughAPI` 正是"不经过任何自动获取、直接人工建供给"的用例（PASS）。**本轮修掉一处界面误导**：此前"抓取上游模型列表**失败**"与"上游确实没返回模型"都显示同一句 "No model reported by the upstream" ⇒ 现在**分开**：失败时显示「无法从上游获取模型列表 + **真实原因**」并提示"有些上游不提供模型列表接口"，同时在弹窗内新增**手动录入**（填模型名 → 导入为草稿供给）⇒ 获取边界与出路都在界面上 |
 | 4 | 底座 `channels.key`（31 行）中形如 `sk-...` 的行 | **7 行** | ⚠️ **底座自身**把上游 Key 存在渠道行里（转发必须用它）⇒ 已知边界，见下 |
 
 **第 4 项的如实说明**：我们这层存的是**密文信封 + 指纹**；但**底座渠道行**必须持有可用 Key 才能转发，

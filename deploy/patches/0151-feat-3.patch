@@ -1,0 +1,241 @@
+From c3c908d2a344d5d5c97d91a6d73bad37e3c4bbba Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 16:48:52 +0800
+Subject: [PATCH 151/151] =?UTF-8?q?feat(#3):=20=E7=9B=AE=E5=BD=95=E8=87=AA?=
+ =?UTF-8?q?=E5=8A=A8=E8=8E=B7=E5=8F=96=E5=A4=B1=E8=B4=A5=E6=97=B6=E7=BB=99?=
+ =?UTF-8?q?=E5=87=BA=E7=9C=9F=E5=AE=9E=E5=8E=9F=E5=9B=A0=20+=20=E5=B0=B1?=
+ =?UTF-8?q?=E5=9C=B0=E4=BA=BA=E5=B7=A5=E5=BD=95=E5=85=A5=EF=BC=88=E4=BF=AE?=
+ =?UTF-8?q?=E6=8E=89=E4=B8=80=E5=A4=84=E7=95=8C=E9=9D=A2=E8=AF=AF=E5=AF=BC?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**#3 场景**：目录不支持自动获取 ⇒ 可人工录入，**显示获取边界**。
+
+- **人工录入路径既有**：`POST /api/apigx/channels/:id/offerings {upstream_model_id}`（可带标准模型与能力）⇒
+  `TestOfferingLifecycleThroughAPI` 正是"不经过任何自动获取、直接人工建供给"的用例。
+- **本轮修掉一处误导**：`ModelImportDialog` 此前把"抓取上游模型列表**失败**"与"上游确实没返回模型"
+  显示成同一句 "No model reported by the upstream" ⇒ 现在**分开**呈现：
+  · 失败 ⇒ 「无法从上游获取模型列表」+ **真实原因**（`query.error.message`）+ "有些上游不提供模型列表接口"
+  · 空 ⇒ 保留原提示
+- **新增手动录入**：弹窗内填模型名 → 「导入该模型」⇒ 走同一接口建草稿供给（与勾选导入一致）
+- i18n：7 个语言文件各补 5 条（含 Reason / Manual entry 等）
+检查: typecheck 0 错 / oxlint 0 错 / share+i18n 用例 13/13 / build ✅ / 网关产物与 dist 一致 ✅
+---
+ .../share/components/model-import-dialog.tsx  | 50 ++++++++++++++++++-
+ web/src/i18n/locales/en.json                  |  7 ++-
+ web/src/i18n/locales/fr.json                  |  7 ++-
+ web/src/i18n/locales/ja.json                  |  7 ++-
+ web/src/i18n/locales/ru.json                  |  7 ++-
+ web/src/i18n/locales/vi.json                  |  7 ++-
+ web/src/i18n/locales/zh-TW.json               |  7 ++-
+ web/src/i18n/locales/zh.json                  |  7 ++-
+ 8 files changed, 91 insertions(+), 8 deletions(-)
+
+diff --git a/web/src/features/share/components/model-import-dialog.tsx b/web/src/features/share/components/model-import-dialog.tsx
+index ece1fa1..ed1cb51 100644
+--- a/web/src/features/share/components/model-import-dialog.tsx
++++ b/web/src/features/share/components/model-import-dialog.tsx
+@@ -24,6 +24,8 @@ import { Dialog } from '@/components/dialog'
+ import { EmptyState } from '@/components/empty-state'
+ import { LoadingState } from '@/components/loading-state'
+ import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
+ import { Switch } from '@/components/ui/switch'
+ 
+ import { createOffering, fetchUpstreamModels } from '../api'
+@@ -42,6 +44,8 @@ export function ModelImportDialog(props: {
+ }) {
+   const { t } = useTranslation()
+   const [picked, setPicked] = useState<Record<string, boolean>>({})
++  // 人工录入（上游不支持下自动获取时的出路）：直接填模型名建供给
++  const [manualModel, setManualModel] = useState('')
+ 
+   // 只预览（import=false），不落任何数据
+   const query = useQuery({
+@@ -69,6 +73,16 @@ export function ModelImportDialog(props: {
+     },
+   })
+ 
++  // 人工录入：与勾选导入走同一个接口，只是模型名由人填
++  const createOne = useMutation({
++    mutationFn: () => createOffering(props.channelId, manualModel.trim()),
++    onSuccess: () => {
++      setManualModel('')
++      props.onOpenChange(false)
++      props.onSaved()
++    },
++  })
++
+   const selectedCount = models.filter((model) => picked[model]).length
+ 
+   return (
+@@ -96,9 +110,43 @@ export function ModelImportDialog(props: {
+           {t('These models were reported by the upstream. Import the ones you want to share.')}
+         </p>
+         {query.isPending ? <LoadingState /> : null}
+-        {!query.isPending && models.length === 0 ? (
++        {/* 抓取**失败**与"上游没返回模型"是两件事：失败必须显示真实原因（获取边界），不能混为一谈 */}
++        {query.isError ? (
++          <div className='space-y-2 rounded-md border border-dashed p-3'>
++            <p className='text-sm font-medium'>{t('Could not fetch the model list from the upstream')}</p>
++            <p className='text-muted-foreground text-xs'>
++              {t('Reason')}: {String((query.error as Error)?.message ?? '')}
++            </p>
++            <p className='text-muted-foreground text-xs'>
++              {t('Some upstreams do not expose a model list. Add the model name manually below.')}
++            </p>
++          </div>
++        ) : null}
++        {!query.isPending && !query.isError && models.length === 0 ? (
+           <EmptyState title={t('No model reported by the upstream')} />
+         ) : null}
++        <div className='space-y-2 border-t pt-3'>
++          <Label htmlFor='manual-model'>{t('Manual entry')}</Label>
++          <p className='text-muted-foreground text-xs'>
++            {t('Type an upstream model ID and import it as a draft offering.')}
++          </p>
++          <div className='flex items-end gap-2'>
++            <Input
++              id='manual-model'
++              value={manualModel}
++              placeholder='model-id'
++              onChange={(event) => setManualModel(event.target.value)}
++            />
++            <Button
++              variant='outline'
++              disabled={manualModel.trim() === '' || createOne.isPending}
++              onClick={() => createOne.mutate()}
++            >
++              {t('Import this model')}
++            </Button>
++          </div>
++        </div>
++
+         <div className='max-h-80 space-y-1 overflow-y-auto'>
+           {models.map((model) => (
+             <div key={model} className='flex items-center justify-between gap-3 rounded-md border px-3 py-2'>
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index d6f2851..bb4d660 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6775,6 +6775,11 @@
+     "Unfinished": "Unfinished",
+     "Avg first token (ms)": "Avg first token (ms)",
+     "How much your shared channels were used. Amounts are not shown here yet.": "How much your shared channels were used. Amounts are not shown here yet.",
+-    "No consumption recorded yet": "No consumption recorded yet"
++    "No consumption recorded yet": "No consumption recorded yet",
++    "Could not fetch the model list from the upstream": "Could not fetch the model list from the upstream",
++    "Some upstreams do not expose a model list. Add the model name manually below.": "Some upstreams do not expose a model list. Add the model name manually below.",
++    "Manual entry": "Manual entry",
++    "Type an upstream model ID and import it as a draft offering.": "Type an upstream model ID and import it as a draft offering.",
++    "Import this model": "Import this model"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index b12dca4..10b0ac2 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6775,6 +6775,11 @@
+     "Unfinished": "Inachevées",
+     "Avg first token (ms)": "Premier token moyen (ms)",
+     "How much your shared channels were used. Amounts are not shown here yet.": "L'utilisation de vos canaux partagés. Les montants ne sont pas encore affichés.",
+-    "No consumption recorded yet": "Aucune consommation enregistrée"
++    "No consumption recorded yet": "Aucune consommation enregistrée",
++    "Could not fetch the model list from the upstream": "Impossible de récupérer la liste des modèles depuis l'amont",
++    "Some upstreams do not expose a model list. Add the model name manually below.": "Certains amonts n'exposent pas de liste de modèles. Ajoutez le nom manuellement ci-dessous.",
++    "Manual entry": "Saisie manuelle",
++    "Type an upstream model ID and import it as a draft offering.": "Saisissez un ID de modèle amont pour l'importer comme offre brouillon.",
++    "Import this model": "Importer ce modèle"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 1f736ed..5613727 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6775,6 +6775,11 @@
+     "Unfinished": "未完了",
+     "Avg first token (ms)": "平均初回トークン(ms)",
+     "How much your shared channels were used. Amounts are not shown here yet.": "共有チャネルがどれだけ使われたか。金額はまだ表示しません。",
+-    "No consumption recorded yet": "まだ消費記録がありません"
++    "No consumption recorded yet": "まだ消費記録がありません",
++    "Could not fetch the model list from the upstream": "上流からモデル一覧を取得できませんでした",
++    "Some upstreams do not expose a model list. Add the model name manually below.": "上流によってはモデル一覧を公開していません。下にモデル名を手入力してください。",
++    "Manual entry": "手動入力",
++    "Type an upstream model ID and import it as a draft offering.": "上流モデル ID を入力すると、下書き供給として取り込めます。",
++    "Import this model": "このモデルを取り込む"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 88a092c..af224b4 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6775,6 +6775,11 @@
+     "Unfinished": "Не завершено",
+     "Avg first token (ms)": "Среднее время до первого токена (мс)",
+     "How much your shared channels were used. Amounts are not shown here yet.": "Насколько использовались ваши общие каналы. Суммы пока не показываются.",
+-    "No consumption recorded yet": "Потребления пока не зафиксировано"
++    "No consumption recorded yet": "Потребления пока не зафиксировано",
++    "Could not fetch the model list from the upstream": "Не удалось получить список моделей от вышестоящего сервиса",
++    "Some upstreams do not expose a model list. Add the model name manually below.": "Некоторые сервисы не отдают список моделей. Укажите название вручную ниже.",
++    "Manual entry": "Ручной ввод",
++    "Type an upstream model ID and import it as a draft offering.": "Укажите ID модели вышестоящего сервиса, чтобы импортировать её как черновик.",
++    "Import this model": "Импортировать эту модель"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 373d21e..7498fc1 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6775,6 +6775,11 @@
+     "Unfinished": "Chưa xong",
+     "Avg first token (ms)": "Token đầu trung bình (ms)",
+     "How much your shared channels were used. Amounts are not shown here yet.": "Mức sử dụng các kênh bạn chia sẻ. Số tiền chưa được hiển thị.",
+-    "No consumption recorded yet": "Chưa có ghi nhận tiêu thụ"
++    "No consumption recorded yet": "Chưa có ghi nhận tiêu thụ",
++    "Could not fetch the model list from the upstream": "Không lấy được danh sách mô hình từ thượng nguồn",
++    "Some upstreams do not expose a model list. Add the model name manually below.": "Một số thượng nguồn không cung cấp danh sách mô hình. Hãy nhập tên mô hình bên dưới.",
++    "Manual entry": "Nhập thủ công",
++    "Type an upstream model ID and import it as a draft offering.": "Nhập ID mô hình thượng nguồn để nhập thành bản nháp.",
++    "Import this model": "Nhập mô hình này"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index b6eee5c..16eeebd 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6775,6 +6775,11 @@
+     "Unfinished": "未完成",
+     "Avg first token (ms)": "平均首字延遲(ms)",
+     "How much your shared channels were used. Amounts are not shown here yet.": "你分享的管道被用了多少。這裡暫不顯示金額。",
+-    "No consumption recorded yet": "還沒有消耗記錄"
++    "No consumption recorded yet": "還沒有消耗記錄",
++    "Could not fetch the model list from the upstream": "無法從上游取得模型清單",
++    "Some upstreams do not expose a model list. Add the model name manually below.": "有些上游不提供模型清單介面，請在下方手動填寫模型名稱。",
++    "Manual entry": "手動輸入",
++    "Type an upstream model ID and import it as a draft offering.": "填寫上游模型 ID，即可作為草稿供給匯入。",
++    "Import this model": "匯入該模型"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 6f25c4f..86d24f4 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6775,6 +6775,11 @@
+     "Unfinished": "未完成",
+     "Avg first token (ms)": "平均首字延迟(ms)",
+     "How much your shared channels were used. Amounts are not shown here yet.": "你分享的渠道被用了多少。这里暂不显示金额。",
+-    "No consumption recorded yet": "还没有消耗记录"
++    "No consumption recorded yet": "还没有消耗记录",
++    "Could not fetch the model list from the upstream": "无法从上游获取模型列表",
++    "Some upstreams do not expose a model list. Add the model name manually below.": "有些上游不提供模型列表接口，请在下面手动填写模型名。",
++    "Manual entry": "手动录入",
++    "Type an upstream model ID and import it as a draft offering.": "填写上游模型 ID，即可作为草稿供给导入。",
++    "Import this model": "导入该模型"
+   }
+ }
+-- 
+2.53.0.windows.1
+
