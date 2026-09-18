@@ -10,7 +10,10 @@ export const meta = {
   version: "1.0.3",
   channelTypes: [55, 1], // OpenAI-type channels natively serve sora with the same wire format
   author: { name: "QuantumNous" },
-  models: ["sora-2", "sora-2-pro"],
+  // 本项目（二开）用 aiping.cn 提供视频能力，它的视频接口就是 OpenAI 风格的 `/v1/videos`
+  // ⇒ 与 sora 插件协议完全一致。这里把它实际支持的模型名加进来，
+  // 让底座把该模型**认领给 sora 插件**（而不是内置的 hailuo 原生插件）。
+  models: ["sora-2", "sora-2-pro", "MiniMax-Hailuo-02"],
   fetchMode: "per_task",
   usageSchema: {
     // Requested video duration in seconds.
