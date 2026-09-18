@@ -1,0 +1,269 @@
+From f11209e48dc627995863ba02f62851199e2cd21e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 10:26:40 +0800
+Subject: [PATCH 106/106] =?UTF-8?q?feat(access):=20=E8=AE=A9=E6=8E=88?=
+ =?UTF-8?q?=E6=9D=83=E7=9C=9F=E6=AD=A3=E7=94=9F=E6=95=88=20=E2=80=94?=
+ =?UTF-8?q?=E2=80=94=20=E5=8F=97=E9=99=90=E5=88=86=E7=BB=84=E5=AF=B9?=
+ =?UTF-8?q?=E5=8F=97=E9=82=80=E8=80=85=E5=8F=AF=E8=A7=81=EF=BC=88=E5=B9=BF?=
+ =?UTF-8?q?=E5=9C=BA=E5=88=A4=E6=8D=AE=20+=20=E8=AF=A6=E6=83=85=E5=90=8C?=
+ =?UTF-8?q?=E6=BA=90=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 广场判据: 公开 -> 「公开 或 该分组/该供给上有**未过期**授权」; 列表复用 plazaVisibilityPredicate 一处
+- 详情接口原先自己又写了一遍判据 => 改为与列表同源(用只查授权的 GrantExistsForResource)
+- 两个广场处理器原本把登录用户丢掉了(if _, valid := ...) => 保留并传入, 可见性才能按主体判定
+- 新增 GrantExistsForResource(**不含 owner 放行**) 与 SubjectCanAccessResource(**含 owner**) 刻意不合并, 分工写入注释
+
+❗既有用例抓到我一个设计错误: 我最初写成"公开 或 **本人所有** 或 有授权" =>
+  TestPlazaOnlyExposesPublishedAndPublic 立刻失败(它断言广场对私有组连所有者本人都不该显示) => **测试对、我错**
+  理由: 广场是发现面, 分享者看自己的东西走「我的分享」; 把所有者私有资源塞进广场会破坏既有约定
+  => 已改为「公开 或 授权」并把口径写进注释; 新用例也修正(含"所有者也不在广场看到它")
+
+用例: 受邀者列表+详情均可见 / 陌生人列表空+详情404 / 到期后不可见 / 既有约定用例仍通过
+检查: go build ✅ / apigx/api + apigx/model ✅
+---
+ apigx/api/share.go         | 11 ++++---
+ apigx/api/share_test.go    | 66 ++++++++++++++++++++++++++++++++++++++
+ apigx/model/repo_access.go | 28 ++++++++++++++++
+ apigx/model/repo_plaza.go  | 51 ++++++++++++++++++++++++++---
+ 4 files changed, 147 insertions(+), 9 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index ce63488..895c4c0 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -1269,7 +1269,9 @@ func (h *handler) fetchUpstreamModels(c *gin.Context) {
+ // 分享者声明但尚未具备的单独列在 `unverified_capabilities` 里如实展示——
+ // 既不冒充可用，也不隐瞒（计划书「只启用已完成能力」）。
+ func (h *handler) listPlaza(c *gin.Context) {
+-	if _, valid := h.ownerID(c); !valid {
++	// 保留浏览者身份：广场的可见性判定需要它（公开 / 本人所有 / 有未过期授权）
++	viewer, valid := h.ownerID(c)
++	if !valid {
+ 		return
+ 	}
+ 	page, pageSize := 1, 20
+@@ -1283,7 +1285,7 @@ func (h *handler) listPlaza(c *gin.Context) {
+ 			pageSize = parsed
+ 		}
+ 	}
+-	items, total, err := apigxmodel.ListPlazaItems(h.db, pageSize, (page-1)*pageSize)
++	items, total, err := apigxmodel.ListPlazaItems(h.db, viewer, pageSize, (page-1)*pageSize)
+ 	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+@@ -1296,11 +1298,12 @@ func (h *handler) listPlaza(c *gin.Context) {
+ }
+ 
+ func (h *handler) getPlazaItem(c *gin.Context) {
+-	if _, valid := h.ownerID(c); !valid {
++	viewer, valid := h.ownerID(c)
++	if !valid {
+ 		return
+ 	}
+ 	publicID := c.Param("publicId")
+-	item, err := apigxmodel.GetPlazaItem(h.db, publicID)
++	item, err := apigxmodel.GetPlazaItem(h.db, viewer, publicID)
+ 	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 408f4fc..85be747 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1208,3 +1208,69 @@ func TestAliasConfirmationWorkflow(t *testing.T) {
+ 	require.True(t, okModel)
+ 	assert.Equal(t, "bulk-name-x", canonical.APIModelID)
+ }
++
++// 授权必须**真正生效**：受限（非公开）分组对"受邀者"可见，对陌生人**不可见**。
++//
++// 这是"邀请兑换"有没有意义的判据 —— 只把授权写进表、广场仍只放行公开分组，等于没做。
++// 列表与详情**两条路径都覆盖**（计划书要求两者判据一致）。
++func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner, invited, stranger int64 = 9601, 9602, 9603
++
++	// 受限分组（1=受限；广场默认只放行公开=2）
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "受限组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: 1}
++	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座受限", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
++
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"limited-model"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++	publicID := body["data"].(map[string]any)["public_id"].(string)
++
++	// 先配价再发布（产品规则：未配价不得发布）
++	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
++
++	// ① 未授权时：陌生人看不到（列表空），详情 404
++	_, body = env.do(t, http.MethodGet, "/api/plaza", stranger, "")
++	assert.Empty(t, body["data"].(map[string]any)["items"], "受限分组未授权前不得出现在陌生人的广场")
++	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, stranger, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code, "受限供给的详情对未授权者不存在")
++
++	// ② 所有者**也不**在广场看到它 —— 广场是"公开 or 受邀"的发现面，
++	//    分享者看自己的东西走「我的分享」页（既有用例 TestPlazaOnlyExposesPublishedAndPublic
++	//    对"私有组"就是这条口径；此处对"受限组"保持一致）。
++	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	items, _ := body["data"].(map[string]any)["items"].([]any)
++	assert.Empty(t, items, "广场只放行公开或受邀，所有者应去「我的分享」看自己的受限供给")
++
++	// ③ 授予访问权（指定用户，§4）：受邀者可见
++	grant := apigxmodel.Grant{
++		SubjectType: apigxmodel.GrantSubjectUser, SubjectID: invited,
++		ResourceType: apigxmodel.GrantResourceGroup, ResourceID: group.ID,
++		ScopeKind: apigxmodel.GrantScopeAssigned, GrantedByUserID: owner,
++	}
++	require.NoError(t, env.db.Create(&grant).Error)
++
++	_, body = env.do(t, http.MethodGet, "/api/plaza", invited, "")
++	items, _ = body["data"].(map[string]any)["items"].([]any)
++	require.NotEmpty(t, items, "被授权者应当看得见受限分组的供给")
++	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, invited, "")
++	assert.Equal(t, http.StatusOK, rec.Code, "被授权者的详情应当可见")
++
++	// ④ 陌生人仍不可见（授权是**按主体**的，不是"一旦有人被授权就公开"）
++	_, body = env.do(t, http.MethodGet, "/api/plaza", stranger, "")
++	assert.Empty(t, body["data"].(map[string]any)["items"], "授权只对受邀者生效，陌生人仍不可见")
++	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, stranger, "")
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++
++	// ⑤ 授权**到期**后不可见（撤销与到期）
++	require.NoError(t, env.db.Model(&apigxmodel.Grant{}).Where("id = ?", grant.ID).Update("expires_at", 1000).Error)
++	_, body = env.do(t, http.MethodGet, "/api/plaza", invited, "")
++	assert.Empty(t, body["data"].(map[string]any)["items"], "授权到期后不应再可见")
++}
+diff --git a/apigx/model/repo_access.go b/apigx/model/repo_access.go
+index d4ddbaa..205dd6a 100644
+--- a/apigx/model/repo_access.go
++++ b/apigx/model/repo_access.go
+@@ -276,3 +276,31 @@ func SubjectCanAccessResource(db *gorm.DB, subjectType int, subjectID int64, res
+ 	}
+ 	return count > 0, nil
+ }
++
++// GrantExistsForResource 只判断"该主体在该资源上是否有未过期授权"，**不含所有者放行**。
++//
++// 与 SubjectCanAccessResource 的分工（刻意不合并）：
++//   - 前者用于**广场可见性**：广场是发现面，"公开 or 受邀"才是它的口径，
++//     分享者本人的私有资源不该出现在广场（他有「我的分享」页）；
++//   - 后者用于**访问判定**：所有者本人当然有权访问自己的资源。
++//
++// 若合并成一个"owner-aware"的函数，广场会顺手把所有者私有资源也显示出来 —— 口径就被悄悄改掉了。
++func GrantExistsForResource(db *gorm.DB, subjectType int, subjectID int64, resourceType int, resourceID int64, now int64) (bool, error) {
++	if db == nil {
++		return false, errors.New("apigxmodel: nil db")
++	}
++	if subjectID <= 0 || resourceID <= 0 {
++		return false, nil
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	var count int64
++	if err := db.Model(&Grant{}).
++		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND (expires_at = 0 OR expires_at > ?)",
++			subjectType, subjectID, resourceType, resourceID, now).
++		Count(&count).Error; err != nil {
++		return false, err
++	}
++	return count > 0, nil
++}
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index 8fcbc60..ec9acf1 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -101,8 +101,36 @@ func projectCapabilities(declared Capability) (Capability, []string) {
+ 	return effective, unverified
+ }
+ 
++// plazaVisibilityPredicate 返回"某浏览者能否看见该广场条目"的 SQL 条件（**列表与详情共用一处**，
++// 计划书明确要求两者判据一致；两处各写一份迟早会分叉）。
++//
++// 可见 = 以下任一：
++//  1. 分组**公开**（§4「访问控制：公开」）；
++//  2. 该分组或**该供给**上存在**未过期**的授权（§4「指定用户 / 邀请兑换」，§7）。
++//
++// 授权到期即失效（expires_at = 0 表示不过期）——对应"访问撤销与到期"。
++//
++// **刻意不含"本人所有"**：广场是**发现面**；分享者看自己的东西走「我的分享」页。
++// 把所有者本人的私有分组也塞进广场，既与"广场只暴露公开/受邀"的既有约定冲突
++// （既有用例 TestPlazaOnlyExposesPublishedAndPublic 正是如此断言的），也让"私有"名不副实。
++func plazaVisibilityPredicate(viewerUserID int64) (string, []any) {
++	grantTable := Grant{}.TableName()
++	now := common.GetTimestamp()
++	condition := "(g.default_visibility = ?" +
++		" OR EXISTS (SELECT 1 FROM " + grantTable + " AS gr" +
++		" WHERE gr.subject_type = ? AND gr.subject_id = ?" +
++		" AND (gr.expires_at = 0 OR gr.expires_at > ?)" +
++		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))"
++	args := []any{
++		ShareGroupVisibilityPublic,
++		GrantSubjectUser, viewerUserID, now,
++		GrantResourceGroup, GrantResourceOffering,
++	}
++	return condition, args
++}
++
+ // ListPlazaItems 列出广场条目（已发布 + 分组公开），按更新时间倒序。
+-func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) {
++func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]PlazaItem, int64, error) {
+ 	if db == nil {
+ 		return nil, 0, errors.New("apigxmodel: nil db")
+ 	}
+@@ -121,8 +149,10 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ 	query := db.Table(offeringTable+" AS o").
+ 		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL").
+ 		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL").
+-		Where("o.deleted_at IS NULL AND o.status = ?", OfferingStatusPublished).
+-		Where("g.default_visibility = ?", ShareGroupVisibilityPublic)
++		Where("o.deleted_at IS NULL AND o.status = ?", OfferingStatusPublished)
++
++	visibility, visibilityArgs := plazaVisibilityPredicate(viewerUserID)
++	query = query.Where(visibility, visibilityArgs...)
+ 
+ 	var total int64
+ 	if err := query.Count(&total).Error; err != nil {
+@@ -198,7 +228,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error)
+ }
+ 
+ // GetPlazaItem 按供给的对外 public_id 取详情（判据与列表一致：已发布 + 分组公开）。
+-func GetPlazaItem(db *gorm.DB, offeringPublicID string) (*PlazaItem, error) {
++func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*PlazaItem, error) {
+ 	if db == nil || offeringPublicID == "" {
+ 		return nil, errors.New("apigxmodel: offering public id is required")
+ 	}
+@@ -221,8 +251,19 @@ func GetPlazaItem(db *gorm.DB, offeringPublicID string) (*PlazaItem, error) {
+ 	if err := db.Where("id = ?", channel.ShareGroupID).First(&group).Error; err != nil {
+ 		return nil, ErrNotFound
+ 	}
++	// 可见性与**列表同源**：公开，或该分组/该供给上有未过期授权（**不含本人所有**，理由见列表判据注释）。
+ 	if group.DefaultVisibility != ShareGroupVisibilityPublic {
+-		return nil, ErrNotFound
++		allowedGroup, err := GrantExistsForResource(db, GrantSubjectUser, viewerUserID, GrantResourceGroup, group.ID, 0)
++		if err != nil {
++			return nil, err
++		}
++		allowedOffering, err := GrantExistsForResource(db, GrantSubjectUser, viewerUserID, GrantResourceOffering, offering.ID, 0)
++		if err != nil {
++			return nil, err
++		}
++		if !allowedGroup && !allowedOffering {
++			return nil, ErrNotFound
++		}
+ 	}
+ 
+ 	effective, unverified := projectCapabilities(offering.CapabilityOf())
+-- 
+2.53.0.windows.1
+
