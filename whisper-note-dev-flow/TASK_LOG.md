@@ -94,7 +94,11 @@
     `summary.PromptTokens/CompletionTokens`、`controller/relay.go:643` 的任务路径）。
     另确认**循环依赖不存在**（`service/text_quota.go` 已 import `relayhook`）⇒ 可安全从 `service/*` 调用。
     ⇒ 第一段的正确落点为 4 处调用方，验收标准已先写清（拿不到用量就不写、未定价成本必须为 0、EventUID 唯一、真实请求对照）。
-    详见台账第 15 节。- [ ] T4.5 阶段 4：剩余边界场景逐条出证据（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
+    详见台账第 15 节。  - 进展（2026-09-18 第六批，**#19 第一段完成并实测**）：新增 `apigx/model/usage_event.go`（按 §5.16/§5.21 补枚举常量 +
+    `RecordUsageEvent`，**强制未定价时成本为 0**）与 `apigx/relayhook/usage_record.go`（**拿不到用量就不写**、
+    归属解析不到留 0、失败不影响请求），并在 `service/text_quota.go` 结算后接入。**真实请求实测**：一次对话落 **2 行**
+    （dim=0/1，`quantity_milli=16000` ⇒ 符合"1 token=1000"），`owner/channel/key` 均正确解析（**已带实际执行的 Key**），
+    `cost_state=2` 且 `cost_usd_micro=0`（满足硬约束），`event_uid` 幂等。⇒ #19 由 ❌ 升为 ⚠️（记录链路已通，**取价/计价未做**）。- [ ] T4.5 阶段 4：剩余边界场景逐条出证据（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
 - [ ] T4.6 最终验收：按计划书 §11 阶段 4 的 27 条表格**逐条归档证据**
 ## [已完成] 阶段 2：价格与质量路由 (2026-09-17)
 

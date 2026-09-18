@@ -50,7 +50,7 @@
 | 16 | 最快渠道已满、多实例同时抢最后一个槽位 ⇒ 满载渠道退出候选，**最后一个槽位最多被一个请求占用** | ✅ 已有测试证据 | `TestConcurrentReserveNeverExceedsLimit` + `TestReserveIsAllOrNothing`（原子预留，全有或全无）+ `TestSaturatedKeyIndexes`（饱和 Key 退出候选） |
 | 17 | 同渠道多个模型或同账户多 Key ⇒ 共同遵守共享上限，不因切换模型/Key 叠加容量 | ✅ 已有测试证据 | `TestBuildKeyCapacityDimensions`（同账户多 Key 共享维度）、`TestMergeKeyStatusListKeepsBaseMarks`、`capacity_hook_test.go` |
 | 18 | Key 轮询遇到失效、满载、模型权限不同 ⇒ 只选符合要求的 Key，无合格 Key 时渠道不可选 | ✅ 已有测试证据 | `TestProjectKeyPoolSkipsUnusableKeys`、`TestProjectKeyPoolFailsWhenNoUsableKey`、`TestRecordKeyOutcomeIsolatesAuthFailureToSingleKey`、`TestAuthFailureMakesBaseSkipTheFailedKey` |
-| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ❌ **未实现（根因与依赖链已查明）** | **表结构本就为此设计**：`UpstreamKey.PriceRuleID`（`models_identity.go:263`）注释即「Key 价格配置；**0=继承供给/渠道**」；`UsageEvent.CostUsdMicro/CostState` 亦已建模。**但运行时链路未接通**：`apigx_usage_events` 无写入方（仅 `migrate.go` 建表，[015] 实测 0 行）、`Attempt.PriceRuleID` 无写入方、成本记录代码不存在 ⇒ 当前实际扣费由**底座 `BillingSession` 预扣/结算**完成，我们的价格快照只服务**候选估算与展示**。**执行 Key 的确定点**：`relayhook/capacity_hook.go`（`ContextKeyChannelMultiKeyIndex` → `ResolveKeyIdentity`）。**接线方案**：在该处按 `PriceScopeUpstreamKey`（0=继承）取价 → 写入 `Attempt.PriceRuleID` → 结算时按同一份价格产生 `UsageEvent`（`CostState` 区分已知/未定价）→ 估算/预留/结算共用之。**这属于"接通成本记录链路"，工作量与计费风险都自成一档，须单独排一轮** |
+| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ⚠️ **部分覆盖（记录链路已接通并实测；取价/计价部分未做）** | **已做**：`apigx/model/usage_event.go`（按 §5.16/§5.21 补 `Kind/Dimension/UnitScale/Trust/CostState` 常量 + `RecordUsageEvent`，**强制未定价时成本为 0**）+ `apigx/relayhook/usage_record.go`（从上下文解析归属，**拿不到用量就不写**）+ `service/text_quota.go` 结算后接入。**真实请求实测**：一次对话（prompt=16/completion=16）落 **2 行**（dim=0/1，`quantity_milli=16000` 符合"1 token=1000"），归属 `owner=1/channel=154/key=182`，`cost_state=2` 且 `cost_usd_micro=0`，`event_uid=u:<请求ID>:<维度>` 幂等。**已具备"实际执行 Key"锚点**（`upstream_key_id`）⇒ 剩下的只是"按该 Key **取价**并计价"。**未做**：按 Key 取价、成本计算、`Attempt.PriceRuleID` 写入、其余 3 个落点（音频/两个 quota 路径）与任务路径（后者拿不到 token 维度，明确不记） |
 | 20 | 一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，使用者只看到分享来源与授权结果 | ✅ 已有测试证据 | **新增** `TestKeyPoolDetailsAreOwnerOnly`（所有者可读 Key 池 200；**非所有者 404**，不确认存在；实测 PASS）；另有 `TestApplyChannelPoolProjectsKeysIntoBaseChannel`、`TestApplyChannelPoolIsOwnerScoped` |
 
 ## 4. 生命周期、凭据与稳定性（L670–L676）
@@ -353,3 +353,26 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 - `CostState` 如实区分"已计价/未定价"；未定价时 `cost_usd_micro` 必须为 0（schema 硬约束）；
 - `EventUID` 唯一 ⇒ 重试/重复结算不产生重复事件；
 - 用**真实请求**验证落库，并与底座结算数值对照。
+---
+
+## 16. #19 第一段：记录链路已接通（真实请求实测）
+
+**改动（只追加记录，未触碰底座扣费）**：
+| 文件 | 内容 |
+|---|---|
+| `apigx/model/usage_event.go`（新） | 依 §5.16/§5.21 补枚举常量（`Kind/Dimension/UnitScale/Trust/CostState`）+ `UsageQuantityMilliFromTokens`（1 token=1000）+ `RecordUsageEvent`（**强制**"未定价 ⇒ `cost_usd_micro=0`"，违规直接拒写） |
+| `apigx/relayhook/usage_record.go`（新） | `RecordSettlementUsage`：**拿不到用量就不写**；归属解析不到就留 0（不猜）；失败只记日志、**不影响请求** |
+| `service/text_quota.go` | 文本结算成功后接入（`summary.PromptTokens/CompletionTokens`） |
+
+**真实请求实测（一次对话，prompt=16 / completion=16）**：
+```
+dim=1（输出 token） qty_milli=16000  owner=1  channel=154  key=182  cost_state=2  cost_usd_micro=0
+dim=0（输入 token） qty_milli=16000  owner=1  channel=154  key=182  cost_state=2  cost_usd_micro=0
+event_uid = u:<请求ID>:<维度>   ⇒ 幂等
+```
+- `quantity_milli=16000` ⇒ 符合规范"1 token = 1000"；
+- `cost_state=2`（未定价）且 `cost_usd_micro=0` ⇒ 满足 schema 硬约束（**不把"价格未知"写成"成本为零"**）；
+- **记录里已带 `upstream_key_id`（实际执行的 Key）** ⇒ 这正是 #19 剩余部分（按执行 Key 取价）所需的锚点。
+
+**尚未做（如实）**：按 Key 取价与成本计算；`Attempt.PriceRuleID` 写入；音频与两个 quota 落点；
+任务路径**拿不到 token 维度 ⇒ 明确不记**（不留假记录）。

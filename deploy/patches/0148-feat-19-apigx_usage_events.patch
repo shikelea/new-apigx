@@ -1,0 +1,226 @@
+From 05745d851fbead22dddc43c3f15793e7518888cd Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 16:36:17 +0800
+Subject: [PATCH 148/148] =?UTF-8?q?feat(#19=20=E7=AC=AC=E4=B8=80=E6=AE=B5)?=
+ =?UTF-8?q?:=20=E6=8E=A5=E9=80=9A=20apigx=5Fusage=5Fevents=20=E5=86=99?=
+ =?UTF-8?q?=E5=85=A5=E6=96=B9=EF=BC=88=E5=8F=AA=E8=AE=B0=E5=BD=95=E3=80=81?=
+ =?UTF-8?q?=E4=B8=8D=E7=A2=B0=E6=89=A3=E8=B4=B9=EF=BC=89+=20=E7=9C=9F?=
+ =?UTF-8?q?=E5=AE=9E=E8=AF=B7=E6=B1=82=E5=AE=9E=E6=B5=8B?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**背景**：上一轮否掉了"SettleBilling 内一处收口"（那里只有底座额度值，会写出 0 用量的误导记录），
+本轮改在**能拿到真实用量的调用方**接入，并按 schema-draft §5.16/§5.21 的规范写字段。
+
+**改动**：
+- `apigx/model/usage_event.go`（新）：补 `Kind/Dimension/UnitScale/Trust/CostState` 枚举常量
+  （此前这些取值只写在字段注释里，代码无常量）+ `UsageQuantityMilliFromTokens`（1 token = 1000）+
+  `RecordUsageEvent`（**强制**"未定价 ⇒ cost_usd_micro = 0"，违规拒写）
+- `apigx/relayhook/usage_record.go`（新）：`RecordSettlementUsage` —— 拿不到用量就**不写**；
+  归属解析不到**留 0 不猜**；任何失败只记日志、**绝不影响请求**
+- `service/text_quota.go`：文本结算成功后接入（`summary.PromptTokens/CompletionTokens`）
+
+**真实请求实测**（一次对话，prompt=16 / completion=16）：
+`dim=0/1 各一行，quantity_milli=16000`（符合 1 token=1000）、`owner=1 / channel=154 / key=182`、
+`cost_state=2` 且 `cost_usd_micro=0`（满足"未定价成本必须为 0"的硬约束）、`event_uid=u:<请求ID>:<维度>`（幂等）。
+**记录里已带实际执行的 Key**（`upstream_key_id`）⇒ 这正是 #19 剩余部分（按执行 Key 取价）所需的锚点。
+
+**未做（如实）**：按 Key 取价与成本计算；`Attempt.PriceRuleID` 写入；音频与两个 quota 落点；
+任务路径拿不到 token 维度 ⇒ **明确不记**（不留假记录）。
+**过程记录**：首次编译四处错（多余 `time`、`common` 名字冲突、缺 `gorm`、`ResolveKeyIdentity` 实为
+`channelpool` 包）⇒ 一并修正；另有一次我自己的校验脚本报了**假警报**（字符串比对过严），实际 build 已通过。
+---
+ apigx/model/usage_event.go      | 61 +++++++++++++++++++++
+ apigx/relayhook/usage_record.go | 97 +++++++++++++++++++++++++++++++++
+ service/text_quota.go           |  2 +
+ 3 files changed, 160 insertions(+)
+ create mode 100644 apigx/model/usage_event.go
+ create mode 100644 apigx/relayhook/usage_record.go
+
+diff --git a/apigx/model/usage_event.go b/apigx/model/usage_event.go
+new file mode 100644
+index 0000000..b0efc89
+--- /dev/null
++++ b/apigx/model/usage_event.go
+@@ -0,0 +1,61 @@
++package apigxmodel
++
++import (
++	"fmt"
++
++	"gorm.io/gorm"
++)
++
++// UsageEvent 枚举（取值依据 docs/stage0/schema-draft.md §5.16 / §5.21）。
++//
++// 此前这些取值只写在字段注释里，代码中没有任何常量 ⇒ 写入方无从下笔。
++// 这里把**已在规范中定死**的那部分补成常量，避免各处写魔数。
++const (
++	// UsageEventKindUsage 用量事件（0=用量 / 1=调整 / 2=校正）。
++	UsageEventKindUsage int = 0
++
++	// UsageDimensionInputTokens 计量维度：输入 token。
++	UsageDimensionInputTokens int = 0
++	// UsageDimensionOutputTokens 计量维度：输出 token。
++	UsageDimensionOutputTokens int = 1
++
++	// UsageUnitScalePerMillionTokens 单价计量单位：/1M tokens。
++	UsageUnitScalePerMillionTokens int = 0
++
++	// UsageTrustUpstreamReported 可信度：上游上报（非本地估算）。
++	UsageTrustUpstreamReported int = 0
++
++	// UsageCostStateUnpriced 成本状态：未定价（此状态下 cost_usd_micro 必须为 0）。
++	UsageCostStateUnpriced int = 2
++)
++
++// UsageQuantityMilliFromTokens 把 token 数换算成 quantity_milli（千分之一最小单位）。
++//
++// 规范：1 token = 1000。负数按 0 处理（不制造负用量）。
++func UsageQuantityMilliFromTokens(tokens int) int64 {
++	if tokens <= 0 {
++		return 0
++	}
++	return int64(tokens) * 1000
++}
++
++// RecordUsageEvent 追加一条用量事件。
++//
++// 表是**不可变快照**：整行一次写入、绝不回写；重复事件靠 event_uid 唯一约束去重
++// （调用方负责生成稳定 UID）。未定价时 cost_usd_micro 必须为 0 —— 这里强制校验并拒绝违规写入，
++// 避免把"价格未知"写成"成本为零"。
++func RecordUsageEvent(db *gorm.DB, event *UsageEvent) error {
++	if db == nil {
++		return fmt.Errorf("%w: nil db", ErrInvalidArgument)
++	}
++	if event == nil {
++		return fmt.Errorf("%w: nil event", ErrInvalidArgument)
++	}
++	if event.EventUID == "" {
++		return fmt.Errorf("%w: event_uid is required", ErrInvalidArgument)
++	}
++	if event.CostState == UsageCostStateUnpriced && event.CostUsdMicro != 0 {
++		return fmt.Errorf("%w: unpriced event must have zero usd cost", ErrInvalidArgument)
++	}
++	return db.Create(event).Error
++}
+diff --git a/apigx/relayhook/usage_record.go b/apigx/relayhook/usage_record.go
+new file mode 100644
+index 0000000..79b4031
+--- /dev/null
++++ b/apigx/relayhook/usage_record.go
+@@ -0,0 +1,97 @@
++package relayhook
++
++import (
++	"strconv"
++
++	"github.com/gin-gonic/gin"
++	"gorm.io/gorm"
++
++	"github.com/QuantumNous/new-api/apigx/channelpool"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++)
++
++// RecordSettlementUsage 在**结算之后**追加分享者的用量记录（#19 第一段）。
++//
++// 边界（刻意保守，宁缺勿假）：
++//   - 只有拿到**真实 token 数**才写；两个维度都为 0 就**不写**（不制造"零用量"的假记录）；
++//   - 成本相关字段一律按**未定价**写（cost_state=2、cost_usd_micro=0）—— 取价与计价是后续阶段的事，
++//     本轮只接通"记录链路"，不碰底座扣费；
++//   - 归属（渠道/供给/Key）从请求上下文解析，**解析不到就留 0**（快照如实反映"当时不知道"）；
++//   - 任何失败只记日志，**绝不影响请求结果**。
++//
++// 幂等：event_uid 由请求 ID + 维度拼成 ⇒ 重试/重复结算不会产生重复事件（唯一约束兜底）。
++func RecordSettlementUsage(c *gin.Context, relayInfo *relaycommon.RelayInfo, promptTokens, completionTokens int) {
++	if c == nil || relayInfo == nil {
++		return
++	}
++	if promptTokens <= 0 && completionTokens <= 0 {
++		return
++	}
++	db := apigxmodel.DefaultDB()
++	if db == nil {
++		return
++	}
++
++	owner, channelID, offeringID, keyID := resolveUsageAttribution(db, c)
++	now := common.GetTimestamp()
++
++	write := func(dimension int, tokens int) {
++		uid := "u:" + relayInfo.RequestId + ":" + strconv.Itoa(dimension)
++		event := &apigxmodel.UsageEvent{
++			EventUID:      uid,
++			Kind:          apigxmodel.UsageEventKindUsage,
++			UserID:        int64(relayInfo.UserId),
++			OwnerUserID:   owner,
++			ApiKeyID:      int64(relayInfo.TokenId),
++			ApiModelID:    relayInfo.OriginModelName,
++			OfferingID:    offeringID,
++			ChannelID:     channelID,
++			UpstreamKeyID: keyID,
++			Dimension:     dimension,
++			QuantityMilli: apigxmodel.UsageQuantityMilliFromTokens(tokens),
++			UnitScale:     apigxmodel.UsageUnitScalePerMillionTokens,
++			Trust:         apigxmodel.UsageTrustUpstreamReported,
++			CostState:     apigxmodel.UsageCostStateUnpriced,
++			OccurredAt:    now,
++			CreatedAt:     now,
++		}
++		if err := apigxmodel.RecordUsageEvent(db, event); err != nil {
++			common.SysError("relayhook: record usage event failed: " + err.Error())
++		}
++	}
++
++	if promptTokens > 0 {
++		write(apigxmodel.UsageDimensionInputTokens, promptTokens)
++	}
++	if completionTokens > 0 {
++		write(apigxmodel.UsageDimensionOutputTokens, completionTokens)
++	}
++}
++
++// resolveUsageAttribution 从上下文解析"这条用量归谁"：分享者、分享渠道、供给、上游 Key。
++//
++// 解析不到就返回 0 —— 快照如实反映"当时没记录到"，不猜、不填默认值。
++func resolveUsageAttribution(db *gorm.DB, c *gin.Context) (owner, channelID, offeringID, keyID int64) {
++	baseChannelID := common.GetContextKeyInt(c, constant.ContextKeyChannelId)
++	if baseChannelID <= 0 {
++		return 0, 0, 0, 0
++	}
++	var channel apigxmodel.Channel
++	if err := db.Where("base_channel_id = ?", baseChannelID).First(&channel).Error; err != nil {
++		return 0, 0, 0, 0
++	}
++	owner = channel.OwnerUserID
++	channelID = channel.ID
++
++	// 上游 Key：底座在请求上下文里给出多渠道索引，映射回我们这边的 Key
++	if idx := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex); idx >= 0 {
++		if identity, ok := channelpool.ResolveKeyIdentity(db, baseChannelID, idx); ok {
++			keyID = identity.UpstreamKeyID
++		}
++	}
++	// 供给：本轮不强求（上下文未必带），留 0 由快照如实表达
++	return owner, channelID, 0, keyID
++}
+diff --git a/service/text_quota.go b/service/text_quota.go
+index 6ac8343..332b1f8 100644
+--- a/service/text_quota.go
++++ b/service/text_quota.go
+@@ -463,6 +463,8 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
+ 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
+ 		logger.LogError(ctx, "error settling billing: "+err.Error())
+ 	}
++	// #19 第一段：结算之后追加分享者用量记录（只记录，不影响扣费；拿不到用量就不写）
++	relayhook.RecordSettlementUsage(ctx, relayInfo, summary.PromptTokens, summary.CompletionTokens)
+ 
+ 	logModel := summary.ModelName
+ 	if strings.HasPrefix(logModel, "gpt-4-gizmo") {
+-- 
+2.53.0.windows.1
+
