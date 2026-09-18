@@ -1690,3 +1690,22 @@ task_AZ3j9suvLs2hQjkR6jaYz | SUCCESS | -                     ← 正常成功（
   > `the model is claimed by task plugin "hailuo", which has no enabled channel serving it. To let another plugin or channel serve this model, disable or override plugin "hailuo"`
   ⇒ 即 `MiniMax-Hailuo-02` 被底座自带的 **`hailuo`** 插件认领 ✗（那套走 MiniMax 原生协议，与 aiping 的 OpenAI 风格不符 ✗）。
   **下一步**：在测试环境里**停用/覆盖 `hailuo` 插件** ✓，让该模型落到我们的 `sora` 渠道 ✓，再跑一次"提交 + 轮询 + 结果访问" ✓（可逆 ✓，属测试环境配置 ✓）。
+### 平台侧视频接线：卡在底座"插件认领"，我把线索追到了尽头（如实记录）
+
+**已查明的事实（都有证据）**：
+1. 底座按**模型名**认领任务插件 ✓ —— `MiniMax-Hailuo-02` 被内置 `hailuo` 插件认领 ✓
+   （实测该插件 `meta.models` 共 10 个，**其中就有 `MiniMax-Hailuo-02`** ✓，且 `enabled=true` / `channel_count=0` ✓）；
+2. 底座自带 **10 个**任务插件：`alibaba, doubao, google, hailuo, jimeng, kling, sora, sunoapi, vertex-ai, vidu` ✓；
+3. 其中 **`sora` 插件的出站协议与 aiping 完全一致** ✓（`{baseUrl}/v1/videos` + `GET /v1/videos/{id}` + `/content` ✓），
+   我已按它建好任务插件渠道（`type=61` + `setting={"task_plugin_key":"sora"}` ✓，渠道 154）与分享供给（133/85 ✓，配价与发布均 200 ✓）；
+4. **要让它生效，必须让底座不再把该模型认领给 `hailuo`** ✓ —— 错误信息自己也这么说 ✓（"disable or override plugin `hailuo`" ✓）。
+
+**我试过、且已排除的路径**：
+- `PUT /api/plugin/task`：它的 `Source` 字段是**插件源码**（拿去做 eval ✗：`evaluate plugin: ReferenceError: factory is not defined` ✓），**不是启用开关** ✗；
+- `task_plugins` 表**存在但没有任何行** ✓ ⇒ 内置插件的 `enabled/active` 来自**默认值** ✓，DB 行只是**覆盖** ✓，因此"停用"要么写一行覆盖 ✓、要么走底座那个界面上开关的接口 ✗（**该接口我没找到** ✗，路由表里 `/plugin/task` 只有 GET/POST/PUT/GET :key/GET :key/icon ✓）。
+
+**⇒ 我不再猜接口** ✗。请二选一（都很快）：
+- **你在底座界面点一下**：任务插件页里把 `hailuo` 停用 ✓（10 秒 ✓，可逆 ✓）；
+- 或者**让我直接往 `task_plugins` 插一行覆盖**（`key='hailuo', enabled=false` ✓）并重启底座 ✓ —— 需要我先读该表的列定义 ✓（我还没读，不猜 ✓）。
+
+**注意**：这**不影响**②的成果 ✓ —— 真实厂商提交与查询已经成功并核实 ✓（任务 `442957341339943` ✓）。
