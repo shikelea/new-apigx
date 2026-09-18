@@ -5,11 +5,26 @@
 // v2 改进：显式传入完整网关环境；重启后重新登录；用 node 直连 Redis（RESP over TCP）确证 apigx:cap:* 租约存在
 import { spawn, spawnSync } from 'node:child_process'
 import net from 'node:net'
+import fs0 from 'node:fs'
 
 const B = 'http://127.0.0.1:3000'
 const STUB = 'http://127.0.0.1:8100'
 const EXE = 'D:\\Github\\apigx\\.toolchain\\bin\\new-api.exe'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// leaseKeysViaRedisCli 用**真实 redis-cli** 读租约键。
+// 为什么不直连 RESP：我先前那个 node RESP 读法返回空（不可信）；而 node 的 stdio:'pipe' 在此沙箱下受限，
+// 因此让 PowerShell 自己跑管道、把结果写文件，再由 node 读文件。
+const leaseKeysViaRedisCli = () => {
+  const cli = 'D:\\Github\\apigx\\.toolchain\\redis\\redis-cli.exe'
+  const out = 'D:\\Github\\apigx\\.toolchain\\_state\\t22-leases.txt'
+  try { fs0.unlinkSync(out) } catch {}
+  const cmd = "& '" + cli + "' -h 127.0.0.1 -p 6379 KEYS 'apigx:cap:*' | Out-File -Encoding ascii -FilePath '" + out + "'"
+  spawnSync('powershell.exe', ['-NoProfile', '-Command', cmd], { stdio: 'ignore' })
+  try {
+    return fs0.readFileSync(out, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)
+  } catch { return [] }
+}
 
 const GATEWAY_ENV = {
   ...process.env,
@@ -98,7 +113,7 @@ const waitPort = async (port, tries = 90) => {
     // 必须挑上游是替身的渠道：v2 挑到真实厂商渠道 ⇒ 注入 hang 完全无效
     if (!String(ch.base_url ?? "").includes("8100")) continue
     const offs = await get(B + '/api/apigx/channels/' + ch.id + '/offerings', auth)
-    if ((offs.json?.data?.items ?? []).some((o) => o.upstream_model_id === 'stub/model-x-202609' && o.status === 2)) { target = ch; break }
+    if ((offs.json?.data?.items ?? []).some((o) => o.upstream_model_id === 'stub/model-y-202609' && o.status === 2)) { target = ch; break }
   }
   if (!target) { console.log('❌ 没有"上游指向替身(8100)且已发布 glm-5.3-flash"的渠道 —— 无法做本演练'); process.exit(2) }
   console.log('  渠道 #' + target.id + ' ' + target.name)
@@ -115,14 +130,13 @@ const waitPort = async (port, tries = 90) => {
   const pk = 'Bearer ' + k.json.data.key
 
   console.log('=== 2) 请求 A（挂住）===')
-  const aPromise = post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'hold' }], max_tokens: 4 }, pk, 150000)
+  const aPromise = post(B + '/v1/chat/completions', { model: 'stub/model-y-202609', messages: [{ role: 'user', content: 'hold' }], max_tokens: 4 }, pk, 150000)
   await sleep(5000)
 
   console.log('=== 3) **确证**请求 A 真的占住了槽位（查 Redis 租约）===')
-  const leaseRaw = (await redisCmd(['KEYS', 'apigx:cap:*'])).trim()
-  const leaseArr = leaseRaw.match(/^\*(\d+)/m);   // RESP 数组长度：*0=空。此前误把 "*" 数成 1
-  const leaseCount = leaseArr ? Number(leaseArr[1]) : 0;
-  console.log('  租约响应 =', leaseRaw.replace(/\r?\n/g, ' ').slice(0, 120), '⇒ 条数 =', leaseCount)
+  const leaseKeys = leaseKeysViaRedisCli()
+  const leaseCount = leaseKeys.length;
+  console.log('  租约键 =', JSON.stringify(leaseKeys).slice(0, 160))
   if (leaseCount === 0) {
     console.log('  ⚠️ 没有租约 ⇒ 请求 A 未占住槽位（很可能是它自己失败了：见下方状态）')
     console.log('  请求 A 结果 =', JSON.stringify(await aPromise).slice(0, 180))
@@ -133,7 +147,7 @@ const waitPort = async (port, tries = 90) => {
   }
 
   console.log('=== 4) 请求 B（有租约时才能期望 429）===')
-  const b = await post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'second' }], max_tokens: 4 }, pk)
+  const b = await post(B + '/v1/chat/completions', { model: 'stub/model-y-202609', messages: [{ role: 'user', content: 'second' }], max_tokens: 4 }, pk)
   console.log('  请求 B ->', b.status, b.status === 429 ? '✓ 并发控制生效' : JSON.stringify(b.json ?? b.text).slice(0, 160))
 
   console.log('=== 5) 真实杀掉网关进程 ===')
@@ -147,17 +161,17 @@ const waitPort = async (port, tries = 90) => {
   auth = await login()
   console.log('  重启后登录 =', auth ? '成功 ✓（v1 在这里失败过）' : '失败 ✗')
 
-  const leaseAfter = (await redisCmd(['KEYS', 'apigx:cap:*'])).trim()
-  const afterArr = leaseAfter.match(/^\*(\d+)/m);
-  const afterCount = afterArr ? Number(afterArr[1]) : 0;
+  // 崩溃后是否仍有租约（同一辅助函数）
+  
+  const afterCount = leaseKeysViaRedisCli().length;
   console.log('  崩溃后租约仍在 =', afterCount > 0 ? '是（说明不是"凭空可用"）' : '否（已过期或未被持有）')
 
-  const c = await post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'after-restart' }], max_tokens: 4 }, pk)
+  const c = await post(B + '/v1/chat/completions', { model: 'stub/model-y-202609', messages: [{ role: 'user', content: 'after-restart' }], max_tokens: 4 }, pk)
   console.log('  重启后立刻请求 ->', c.status)
 
   console.log('=== 7) 等租约 TTL（90s + 余量）后自动恢复 ===')
   await sleep(100000)
-  const d = await post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'after-ttl' }], max_tokens: 4 }, pk)
+  const d = await post(B + '/v1/chat/completions', { model: 'stub/model-y-202609', messages: [{ role: 'user', content: 'after-ttl' }], max_tokens: 4 }, pk)
   console.log('  TTL 之后 ->', d.status)
 
   console.log('=== 8) 收尾（用**新登录态**，v1 在这里 401 过）===')
