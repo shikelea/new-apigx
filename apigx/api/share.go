@@ -136,6 +136,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	usage := r.Group("/usage")
 	{
 		usage.GET("", h.listUsage)
+		// U-3：分享者视角的消耗汇总（按渠道 / 按 Key / 按模型）
+		usage.GET("/summary", h.summarizeOwnerUsage)
 	}
 
 	platformKeys := r.Group("/platform-keys")
@@ -2104,4 +2106,50 @@ func baseChannelTypeForProtocol(protocol string) (int, bool) {
 func upstreamKeyStableID(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return "apigx-" + hex.EncodeToString(sum[:8])
+}
+
+// summarizeOwnerUsage 返回**当前分享者自己**的消耗汇总（U-3）。
+//
+// 只认自己：归属由"渠道 → owner_user_id"推出，绝不返回别人的量。
+// 金额不在此输出 —— attempts 表没有费用字段，不臆造。
+func (h *handler) summarizeOwnerUsage(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+
+	groupBy := apigxmodel.OwnerUsageGroupBy(c.DefaultQuery("group_by", "channel"))
+	start := int64(0)
+	if raw := c.Query("start"); raw != "" {
+		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
+			start = parsed
+		}
+	}
+	end := int64(0)
+	if raw := c.Query("end"); raw != "" {
+		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
+			end = parsed
+		}
+	}
+
+	if groupBy == apigxmodel.OwnerUsageByModel {
+		rows, err := apigxmodel.SummarizeOwnerAttemptsByModel(h.db, owner, start, end)
+		if err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		ok(c, gin.H{"group_by": string(groupBy), "items": rows})
+		return
+	}
+
+	rows, err := apigxmodel.SummarizeOwnerAttempts(h.db, owner, groupBy, start, end)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if err = apigxmodel.FillOwnerUsageNames(h.db, owner, groupBy, rows); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"group_by": string(groupBy), "items": rows})
 }
