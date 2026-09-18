@@ -50,7 +50,7 @@
 | 16 | 最快渠道已满、多实例同时抢最后一个槽位 ⇒ 满载渠道退出候选，**最后一个槽位最多被一个请求占用** | ✅ 已有测试证据 | `TestConcurrentReserveNeverExceedsLimit` + `TestReserveIsAllOrNothing`（原子预留，全有或全无）+ `TestSaturatedKeyIndexes`（饱和 Key 退出候选） |
 | 17 | 同渠道多个模型或同账户多 Key ⇒ 共同遵守共享上限，不因切换模型/Key 叠加容量 | ✅ 已有测试证据 | `TestBuildKeyCapacityDimensions`（同账户多 Key 共享维度）、`TestMergeKeyStatusListKeepsBaseMarks`、`capacity_hook_test.go` |
 | 18 | Key 轮询遇到失效、满载、模型权限不同 ⇒ 只选符合要求的 Key，无合格 Key 时渠道不可选 | ✅ 已有测试证据 | `TestProjectKeyPoolSkipsUnusableKeys`、`TestProjectKeyPoolFailsWhenNoUsableKey`、`TestRecordKeyOutcomeIsolatesAuthFailureToSingleKey`、`TestAuthFailureMakesBaseSkipTheFailedKey` |
-| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ❌ **未实现（已定实施方案）** | 存储层已就绪（`PriceScopeUpstreamKey`，scope=1）。**执行 Key 只在预留/计量环节才确定**：`apigx/relayhook/capacity_hook.go` 从 `ContextKeyChannelMultiKeyIndex` 取索引、经 `ResolveKeyIdentity` 解析出 `UpstreamKeyID`。实施方案：在该处以 `PriceScopeUpstreamKey` **优先**取价，并让**估算 → 预留 → 结算**共用同一份价格；因涉及计费不变量，须按 `new-api/AGENTS.md` 的计费清单单独一轮完成 |
+| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ❌ **未实现（根因与依赖链已查明）** | **表结构本就为此设计**：`UpstreamKey.PriceRuleID`（`models_identity.go:263`）注释即「Key 价格配置；**0=继承供给/渠道**」；`UsageEvent.CostUsdMicro/CostState` 亦已建模。**但运行时链路未接通**：`apigx_usage_events` 无写入方（仅 `migrate.go` 建表，[015] 实测 0 行）、`Attempt.PriceRuleID` 无写入方、成本记录代码不存在 ⇒ 当前实际扣费由**底座 `BillingSession` 预扣/结算**完成，我们的价格快照只服务**候选估算与展示**。**执行 Key 的确定点**：`relayhook/capacity_hook.go`（`ContextKeyChannelMultiKeyIndex` → `ResolveKeyIdentity`）。**接线方案**：在该处按 `PriceScopeUpstreamKey`（0=继承）取价 → 写入 `Attempt.PriceRuleID` → 结算时按同一份价格产生 `UsageEvent`（`CostState` 区分已知/未定价）→ 估算/预留/结算共用之。**这属于"接通成本记录链路"，工作量与计费风险都自成一档，须单独排一轮** |
 | 20 | 一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，使用者只看到分享来源与授权结果 | ✅ 已有测试证据 | **新增** `TestKeyPoolDetailsAreOwnerOnly`（所有者可读 Key 池 200；**非所有者 404**，不确认存在；实测 PASS）；另有 `TestApplyChannelPoolProjectsKeysIntoBaseChannel`、`TestApplyChannelPoolIsOwnerScoped` |
 
 ## 4. 生命周期、凭据与稳定性（L670–L676）
@@ -299,3 +299,33 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 `apigx/relayhook/capacity_hook.go` 通过 `ContextKeyChannelMultiKeyIndex` → `ResolveKeyIdentity` 把底座索引映射回我们的 Key。
 **未做**：一条**端到端**断言"预留时确定的 Key 与最终出站使用的 Key 是同一把" —— 需要在真实中继路径上观测，
 本环境未闭环 ⇒ 保持 ⚠️。
+---
+
+## 14. T4.5 第四批（#19 的根因与依赖链 —— 为什么它不是"补一个分支"）
+
+**目标场景**：Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价。
+
+**已就绪的部分（设计意图很清楚）**：
+- `UpstreamKey.PriceRuleID`（`apigx/model/models_identity.go:263`）注释写明：**Key 价格配置，`apigx_price_rules.id`；0=继承供给/渠道** ⇒ 继承语义已定义
+- 价格作用域枚举已含 `PriceScopeUpstreamKey`（scope=1）
+- `UsageEvent` 已建模 `CostMicro / CostUsdMicro / CostState`（并有"未定价 ⇒ 成本必须为 0"的硬约束注释）
+
+**缺的部分（这才是真正的工作量）**：
+| 缺口 | 证据 |
+|---|---|
+| `apigx_usage_events` **无写入方** | 全仓搜索只有 `migrate.go` 建表；实测 **0 行**（[015]） |
+| `Attempt.PriceRuleID` **无写入方** | 全仓搜索无赋值处 |
+| 成本记录代码不存在 | `CostState` 仅出现在字段定义与注释中 |
+
+**当前事实**：实际扣费由**底座自身的 `BillingSession` 预扣/结算**完成（`relay/billing.go`），
+我们的价格快照服务的是**候选估算与展示**。
+
+**接线方案（供实施）**：
+1. 在 `relayhook/capacity_hook.go`（此处经 `ContextKeyChannelMultiKeyIndex → ResolveKeyIdentity` 已知**执行 Key**）
+   按 `PriceScopeUpstreamKey` 取价，缺失时按 `0=继承` 回退到供给 → 渠道；
+2. 把选中的 `PriceRuleID` 写入 `Attempt`；
+3. 结算时以**同一份**价格产生 `UsageEvent`（`CostState` 区分"已计价/未定价"，未定价时 `cost_usd_micro=0`）；
+4. 估算 → 预留 → 结算共用该价格对象，避免三处各自取价而分叉；
+5. 按 `new-api/AGENTS.md` 计费清单补回归：饱和转换用 `common.*Checked`、钳制事件经 `attachQuotaSaturation` 落审计。
+
+**结论**：本项**不是一行取价分支**，而是**接通成本记录链路** ⇒ 本环境**未实现**，也不假装实现。
