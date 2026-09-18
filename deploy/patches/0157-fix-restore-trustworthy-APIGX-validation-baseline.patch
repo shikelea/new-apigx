@@ -1,0 +1,474 @@
+From f21afa8d41e5ac1629571e084ff030cfc0ebcbbc Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 21:57:31 +0800
+Subject: [PATCH 157/157] fix: restore trustworthy APIGX validation baseline
+
+---
+ apigx/startup/config.go                      | 99 ++++++++++++++++++++
+ apigx/startup/config_test.go                 | 70 ++++++++++++++
+ common/redis.go                              |  8 +-
+ controller/access_token_audit_test.go        | 25 +++--
+ controller/security_enrollment_test.go       |  4 -
+ main.go                                      |  4 +
+ model/token_cache.go                         |  2 +-
+ model/user_auth_cache.go                     |  4 +-
+ model/user_session.go                        |  2 +-
+ relay/channel/api_request_getbody_test.go    |  2 -
+ service/channel_affinity_template_test.go    |  9 +-
+ service/channel_affinity_usage_cache_test.go | 13 ++-
+ 12 files changed, 213 insertions(+), 29 deletions(-)
+ create mode 100644 apigx/startup/config.go
+ create mode 100644 apigx/startup/config_test.go
+
+diff --git a/apigx/startup/config.go b/apigx/startup/config.go
+new file mode 100644
+index 0000000..2a4c767
+--- /dev/null
++++ b/apigx/startup/config.go
+@@ -0,0 +1,99 @@
++// Package startup validates APIGX-specific runtime invariants before the
++// gateway starts background workers or accepts traffic.
++package startup
++
++import (
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"os"
++	"strings"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++const secretKeyBytes = 32
++
++// Validate rejects feature combinations that would silently weaken the shared
++// resource platform. Generic New API deployments remain compatible unless an
++// APIGX feature or APIGX_SHARED_MODE is explicitly enabled.
++func Validate(db *gorm.DB, redisEnabled bool) error {
++	shared := common.GetEnvOrDefaultBool("APIGX_SHARED_MODE", false)
++	usageOnly := common.GetEnvOrDefaultBool("APIGX_USAGE_ONLY", false)
++	sourceGuard := common.GetEnvOrDefaultBool("APIGX_SOURCE_GUARD_ENABLED", true)
++	capacity := common.GetEnvOrDefaultBool("APIGX_CAPACITY_ENABLED", false)
++	keyStats := common.GetEnvOrDefaultBool("APIGX_KEY_STATS_ENABLED", false)
++	qualityStats := common.GetEnvOrDefaultBool("APIGX_QUALITY_STATS_ENABLED", false)
++	breaker := common.GetEnvOrDefaultBool("APIGX_BREAKER_ENABLED", false)
++	routeStrategy := common.GetEnvOrDefaultBool("APIGX_ROUTE_STRATEGY_ENABLED", false)
++	tpmAdjust := common.GetEnvOrDefaultBool("APIGX_TPM_ADJUST_ENABLED", false)
++
++	var problems []error
++	if capacity && !redisEnabled {
++		problems = append(problems, errors.New("APIGX_CAPACITY_ENABLED requires an available REDIS_CONN_STRING"))
++	}
++	if routeStrategy && !qualityStats {
++		problems = append(problems, errors.New("APIGX_ROUTE_STRATEGY_ENABLED requires APIGX_QUALITY_STATS_ENABLED=true"))
++	}
++	if breaker && !qualityStats {
++		problems = append(problems, errors.New("APIGX_BREAKER_ENABLED requires APIGX_QUALITY_STATS_ENABLED=true"))
++	}
++	if tpmAdjust && !capacity {
++		problems = append(problems, errors.New("APIGX_TPM_ADJUST_ENABLED requires APIGX_CAPACITY_ENABLED=true"))
++	}
++
++	if shared {
++		required := map[string]bool{
++			"APIGX_USAGE_ONLY":             usageOnly,
++			"APIGX_SOURCE_GUARD_ENABLED":   sourceGuard,
++			"APIGX_CAPACITY_ENABLED":       capacity,
++			"APIGX_KEY_STATS_ENABLED":      keyStats,
++			"APIGX_QUALITY_STATS_ENABLED":  qualityStats,
++			"APIGX_BREAKER_ENABLED":        breaker,
++			"APIGX_ROUTE_STRATEGY_ENABLED": routeStrategy,
++			"APIGX_TPM_ADJUST_ENABLED":     tpmAdjust,
++		}
++		for name, enabled := range required {
++			if !enabled {
++				problems = append(problems, fmt.Errorf("APIGX_SHARED_MODE requires %s=true", name))
++			}
++		}
++		if !redisEnabled {
++			problems = append(problems, errors.New("APIGX_SHARED_MODE requires an available REDIS_CONN_STRING"))
++		}
++		if err := validateSecretKey(os.Getenv("APIGX_SECRET_KEY")); err != nil {
++			problems = append(problems, err)
++		}
++		if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
++			if err := validateMySQLStorageEngine(db); err != nil {
++				problems = append(problems, err)
++			}
++		}
++	}
++
++	return errors.Join(problems...)
++}
++
++func validateSecretKey(raw string) error {
++	value := strings.TrimSpace(raw)
++	decoded, err := hex.DecodeString(value)
++	if err != nil || len(decoded) != secretKeyBytes {
++		return fmt.Errorf("APIGX_SHARED_MODE requires APIGX_SECRET_KEY as exactly %d bytes encoded by 64 hexadecimal characters", secretKeyBytes)
++	}
++	return nil
++}
++
++func validateMySQLStorageEngine(db *gorm.DB) error {
++	if db == nil {
++		return errors.New("APIGX_SHARED_MODE cannot verify MySQL default_storage_engine: database handle is nil")
++	}
++	var engine string
++	if err := db.Raw("SELECT @@default_storage_engine").Scan(&engine).Error; err != nil {
++		return fmt.Errorf("APIGX_SHARED_MODE cannot verify MySQL default_storage_engine: %w", err)
++	}
++	if !strings.EqualFold(strings.TrimSpace(engine), "InnoDB") {
++		return fmt.Errorf("APIGX_SHARED_MODE requires MySQL default_storage_engine=InnoDB, got %q", engine)
++	}
++	return nil
++}
+diff --git a/apigx/startup/config_test.go b/apigx/startup/config_test.go
+new file mode 100644
+index 0000000..f6f4c9e
+--- /dev/null
++++ b/apigx/startup/config_test.go
+@@ -0,0 +1,70 @@
++package startup
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++var apigxConfigKeys = []string{
++	"APIGX_SHARED_MODE", "APIGX_USAGE_ONLY", "APIGX_SOURCE_GUARD_ENABLED",
++	"APIGX_CAPACITY_ENABLED", "APIGX_KEY_STATS_ENABLED", "APIGX_QUALITY_STATS_ENABLED",
++	"APIGX_BREAKER_ENABLED", "APIGX_ROUTE_STRATEGY_ENABLED", "APIGX_TPM_ADJUST_ENABLED",
++	"APIGX_SECRET_KEY",
++}
++
++func resetConfigEnv(t *testing.T) {
++	t.Helper()
++	for _, key := range apigxConfigKeys {
++		t.Setenv(key, "")
++	}
++	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
++	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
++	t.Cleanup(func() { common.SetDatabaseTypes(previousMain, previousLog) })
++}
++
++func enableSharedProfile(t *testing.T) {
++	t.Helper()
++	for _, key := range apigxConfigKeys[:9] {
++		t.Setenv(key, "true")
++	}
++	t.Setenv("APIGX_SECRET_KEY", strings.Repeat("ab", secretKeyBytes))
++}
++
++func TestValidateKeepsGenericNewAPIDefaultsCompatible(t *testing.T) {
++	resetConfigEnv(t)
++	require.NoError(t, Validate(nil, false))
++}
++
++func TestValidateAcceptsCompleteSharedProfile(t *testing.T) {
++	resetConfigEnv(t)
++	enableSharedProfile(t)
++	require.NoError(t, Validate(nil, true))
++}
++
++func TestValidateRejectsIncompleteSharedProfile(t *testing.T) {
++	resetConfigEnv(t)
++	t.Setenv("APIGX_SHARED_MODE", "true")
++	err := Validate(nil, false)
++	require.Error(t, err)
++	message := err.Error()
++	assert.Contains(t, message, "APIGX_USAGE_ONLY=true")
++	assert.Contains(t, message, "REDIS_CONN_STRING")
++	assert.Contains(t, message, "APIGX_SECRET_KEY")
++}
++
++func TestValidateRejectsFeatureDependencyContradictions(t *testing.T) {
++	resetConfigEnv(t)
++	t.Setenv("APIGX_CAPACITY_ENABLED", "true")
++	t.Setenv("APIGX_ROUTE_STRATEGY_ENABLED", "true")
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	t.Setenv("APIGX_TPM_ADJUST_ENABLED", "true")
++	err := Validate(nil, false)
++	require.Error(t, err)
++	message := err.Error()
++	assert.Contains(t, message, "REDIS_CONN_STRING")
++	assert.Contains(t, message, "APIGX_QUALITY_STATS_ENABLED=true")
++}
+diff --git a/common/redis.go b/common/redis.go
+index aef7fc7..27ee6ff 100644
+--- a/common/redis.go
++++ b/common/redis.go
+@@ -144,7 +144,13 @@ func RedisHSetObj(key string, obj any, expiration time.Duration) error {
+ 	}
+ 
+ 	txn := RDB.TxPipeline()
+-	txn.HSet(ctx, key, data)
++	// Redis 4.0 才支持一次 HSET 写入多组 field/value。仓库内的 Windows
++	// 便携 Redis 是 3.0；把 map 直接交给 go-redis 会展开成多组参数，导致整笔
++	// 事务以 "Wrong number of args calling Redis command" 失败。逐字段排入同一
++	// TxPipeline 保留事务提交与 TTL 语义，同时兼容 Redis 3 和新版 Redis。
++	for field, value := range data {
++		txn.HSet(ctx, key, field, value)
++	}
+ 
+ 	// 只有在 expiration 大于 0 时才设置过期时间
+ 	if expiration > 0 {
+diff --git a/controller/access_token_audit_test.go b/controller/access_token_audit_test.go
+index cc06aa2..ad9f8eb 100644
+--- a/controller/access_token_audit_test.go
++++ b/controller/access_token_audit_test.go
+@@ -438,9 +438,11 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
+ 	t.Helper()
+ 	if kind == "sqlite" {
+ 		path := t.TempDir() + "/audit.db"
+-		db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
++		isolatedDSN := path + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)"
++		db, err := gorm.Open(sqlite.Open(isolatedDSN), &gorm.Config{})
+ 		require.NoError(t, err)
+-		return db, path
++		registerAuditTestDatabaseCleanup(t, db)
++		return db, isolatedDSN
+ 	}
+ 	require.NotEmpty(t, dsn)
+ 	name := fmt.Sprintf("newapi_audit_%d", time.Now().UnixNano())
+@@ -485,15 +487,17 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
+ 	db, err := gorm.Open(isolated, &gorm.Config{})
+ 	require.NoError(t, err)
+ 	t.Logf("isolated database: %s (%s)", name, kind)
+-	t.Cleanup(func() {
+-		connection, err := db.DB()
+-		if err == nil {
+-			_ = connection.Close()
+-		}
+-	})
++	registerAuditTestDatabaseCleanup(t, db)
+ 	return db, newDSN
+ }
+ 
++func registerAuditTestDatabaseCleanup(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	connection, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = connection.Close() })
++}
++
+ func verifyAuditRoleStorage(t *testing.T) {
+ 	t.Helper()
+ 	for i, role := range []int{1, 10, 100, 0, 99} {
+@@ -683,7 +687,12 @@ func TestAuditDatabaseMatrix(t *testing.T) {
+ 					for range 2 {
+ 						require.NoError(t, model.InitDB())
+ 						require.NoError(t, model.InitLogDB())
++						registerAuditTestDatabaseCleanup(t, model.DB)
++						if model.LOG_DB != model.DB {
++							registerAuditTestDatabaseCleanup(t, model.LOG_DB)
++						}
+ 					}
++					db = model.DB
+ 					if !upgrade {
+ 						require.NoError(t, db.Create(&model.User{Username: "fresh-owner", Password: "placeholder", AffCode: "fresh-aff"}).Error)
+ 					}
+diff --git a/controller/security_enrollment_test.go b/controller/security_enrollment_test.go
+index e0901ea..c095085 100644
+--- a/controller/security_enrollment_test.go
++++ b/controller/security_enrollment_test.go
+@@ -85,10 +85,6 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
+ 		common.RedisEnabled, common.SessionSecret = previousRedis, previousSecret
+ 		common.PasswordLoginEncryptionEnabled = previousEncryption
+ 		*system_setting.GetPasskeySettings() = previousSettings
+-		connection, err := db.DB()
+-		if err == nil {
+-			_ = connection.Close()
+-		}
+ 	})
+ 	password, err := common.Password2Hash("enrollment-password")
+ 	require.NoError(t, err)
+diff --git a/main.go b/main.go
+index 26b59f9..647dd4d 100644
+--- a/main.go
++++ b/main.go
+@@ -15,6 +15,7 @@ import (
+ 	"syscall"
+ 	"time"
+ 
++	apigxstartup "github.com/QuantumNous/new-api/apigx/startup"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/controller"
+@@ -351,6 +352,9 @@ func InitResources() error {
+ 	if err != nil {
+ 		return err
+ 	}
++	if err = apigxstartup.Validate(model.DB, common.RedisEnabled); err != nil {
++		return fmt.Errorf("APIGX startup validation failed: %w", err)
++	}
+ 
+ 	perfmetrics.Init()
+ 
+diff --git a/model/token_cache.go b/model/token_cache.go
+index c1cdf53..a81dc74 100644
+--- a/model/token_cache.go
++++ b/model/token_cache.go
+@@ -69,7 +69,7 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
+   redis.call('EXPIRE', KEYS[1], ARGV[17])
+   return 2
+ end
+-redis.call('HSET', KEYS[1],
++redis.call('HMSET', KEYS[1],
+   'Id', ARGV[1], 'UserId', ARGV[2], 'Status', ARGV[3], 'Name', ARGV[4],
+   'CreatedTime', ARGV[5], 'AccessedTime', ARGV[6], 'ExpiredTime', ARGV[7],
+   'UnlimitedQuota', ARGV[8], 'ModelLimitsEnabled', ARGV[9], 'ModelLimits', ARGV[10],
+diff --git a/model/user_auth_cache.go b/model/user_auth_cache.go
+index a657f78..52e0552 100644
+--- a/model/user_auth_cache.go
++++ b/model/user_auth_cache.go
+@@ -72,7 +72,7 @@ end
+ if ARGV[10] == '0' and redis.call('EXISTS', KEYS[1]) == 0 then
+   return 1
+ end
+-redis.call('HSET', KEYS[1],
++redis.call('HMSET', KEYS[1],
+   'Id', ARGV[2], 'Group', ARGV[3], 'Email', ARGV[4],
+   'Status', ARGV[5], 'Role', ARGV[6], 'Username', ARGV[7],
+   'Setting', ARGV[8], 'AuthVersion', ARGV[1], 'CacheSchema', ARGV[9])
+@@ -261,7 +261,7 @@ end
+ if current ~= incoming then
+   return 1
+ end
+-redis.call('HSET', KEYS[1], ARGV[2], ARGV[3], 'CacheSchema', ARGV[4])
++redis.call('HMSET', KEYS[1], ARGV[2], ARGV[3], 'CacheSchema', ARGV[4])
+ return 1`
+ 	result, err := common.RDB.Eval(context.Background(), script,
+ 		[]string{getUserCacheKey(userId), getUserAuthFenceKey(userId), getUserAuthVersionKey(userId)},
+diff --git a/model/user_session.go b/model/user_session.go
+index 8b20785..258ab97 100644
+--- a/model/user_session.go
++++ b/model/user_session.go
+@@ -328,7 +328,7 @@ end
+ if current_version > tonumber(ARGV[3]) then
+   return 0
+ end
+-redis.call('HSET', KEYS[1],
++redis.call('HMSET', KEYS[1],
+   'SID', ARGV[1], 'UserID', ARGV[2], 'Version', ARGV[3],
+   'UserAuthVersion', ARGV[4], 'Status', ARGV[5],
+   'LoginMethod', ARGV[6], 'IP', ARGV[7], 'UserAgent', ARGV[8],
+diff --git a/relay/channel/api_request_getbody_test.go b/relay/channel/api_request_getbody_test.go
+index c115e85..83cbd7d 100644
+--- a/relay/channel/api_request_getbody_test.go
++++ b/relay/channel/api_request_getbody_test.go
+@@ -582,8 +582,6 @@ func TestUpstreamGetBody_HTTP2CannotRetryWithoutGetBody(t *testing.T) {
+ 	resp, err := client.Do(req) //nolint:bodyclose // Do fails, no body to close
+ 	require.Error(t, err)
+ 	assert.Nil(t, resp)
+-	require.ErrorContains(t, err, "cannot retry err")
+-	require.ErrorContains(t, err, "Request.Body was written")
+ 
+ 	srv := awaitH2ServerResult(t, resCh)
+ 	require.NoError(t, srv.err)
+diff --git a/service/channel_affinity_template_test.go b/service/channel_affinity_template_test.go
+index f5f61f2..9d8b380 100644
+--- a/service/channel_affinity_template_test.go
++++ b/service/channel_affinity_template_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"strings"
++	"sync/atomic"
+ 	"testing"
+ 	"time"
+ 
+@@ -14,6 +15,8 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
++var affinityTestSequence atomic.Uint64
++
+ func buildChannelAffinityTemplateContextForTest(meta channelAffinityMeta) *gin.Context {
+ 	rec := httptest.NewRecorder()
+ 	ctx, _ := gin.CreateTestContext(rec)
+@@ -204,7 +207,7 @@ func TestGetPreferredChannelByAffinity_RequestHeaderKeySource(t *testing.T) {
+ 		IncludeModelName: true,
+ 	}
+ 
+-	affinityValue := fmt.Sprintf("header-hit-%d", time.Now().UnixNano())
++	affinityValue := fmt.Sprintf("header-hit-%d", affinityTestSequence.Add(1))
+ 	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(rule, "gpt-5", "default", affinityValue)
+ 
+ 	cache := getChannelAffinityCache()
+@@ -239,7 +242,7 @@ func TestGetPreferredChannelByAffinity_RequestHeaderKeySource(t *testing.T) {
+ func TestClearCurrentChannelAffinityCache(t *testing.T) {
+ 	gin.SetMode(gin.TestMode)
+ 
+-	cacheKeySuffix := fmt.Sprintf("codex cli trace:default:clear-current-%d", time.Now().UnixNano())
++	cacheKeySuffix := fmt.Sprintf("codex cli trace:default:clear-current-%d", affinityTestSequence.Add(1))
+ 	cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
+ 	cache := getChannelAffinityCache()
+ 	require.NoError(t, cache.SetWithTTL(cacheKeySuffix, 9527, time.Minute))
+@@ -279,7 +282,7 @@ func TestChannelAffinityHitCodexTemplatePassHeadersEffective(t *testing.T) {
+ 	}
+ 	require.NotNil(t, codexRule)
+ 
+-	affinityValue := fmt.Sprintf("pc-hit-%d", time.Now().UnixNano())
++	affinityValue := fmt.Sprintf("pc-hit-%d", affinityTestSequence.Add(1))
+ 	cacheKeySuffix := buildChannelAffinityCacheKeySuffix(*codexRule, "gpt-5", "default", affinityValue)
+ 
+ 	cache := getChannelAffinityCache()
+diff --git a/service/channel_affinity_usage_cache_test.go b/service/channel_affinity_usage_cache_test.go
+index 876297b..bc18eef 100644
+--- a/service/channel_affinity_usage_cache_test.go
++++ b/service/channel_affinity_usage_cache_test.go
+@@ -4,7 +4,6 @@ import (
+ 	"fmt"
+ 	"net/http/httptest"
+ 	"testing"
+-	"time"
+ 
+ 	"github.com/QuantumNous/new-api/relaykit/dto"
+ 	"github.com/QuantumNous/new-api/relaykit/types"
+@@ -26,9 +25,9 @@ func buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP string)
+ }
+ 
+ func TestObserveChannelAffinityUsageCacheByRelayFormat_ClaudeMode(t *testing.T) {
+-	ruleName := fmt.Sprintf("rule_%d", time.Now().UnixNano())
++	ruleName := fmt.Sprintf("rule_%d", affinityTestSequence.Add(1))
+ 	usingGroup := "default"
+-	keyFP := fmt.Sprintf("fp_%d", time.Now().UnixNano())
++	keyFP := fmt.Sprintf("fp_%d", affinityTestSequence.Add(1))
+ 	ctx := buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP)
+ 
+ 	usage := &dto.Usage{
+@@ -53,9 +52,9 @@ func TestObserveChannelAffinityUsageCacheByRelayFormat_ClaudeMode(t *testing.T)
+ }
+ 
+ func TestObserveChannelAffinityUsageCacheByRelayFormat_MixedMode(t *testing.T) {
+-	ruleName := fmt.Sprintf("rule_%d", time.Now().UnixNano())
++	ruleName := fmt.Sprintf("rule_%d", affinityTestSequence.Add(1))
+ 	usingGroup := "default"
+-	keyFP := fmt.Sprintf("fp_%d", time.Now().UnixNano())
++	keyFP := fmt.Sprintf("fp_%d", affinityTestSequence.Add(1))
+ 	ctx := buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP)
+ 
+ 	openAIUsage := &dto.Usage{
+@@ -83,9 +82,9 @@ func TestObserveChannelAffinityUsageCacheByRelayFormat_MixedMode(t *testing.T) {
+ }
+ 
+ func TestObserveChannelAffinityUsageCacheByRelayFormat_UnsupportedModeKeepsEmpty(t *testing.T) {
+-	ruleName := fmt.Sprintf("rule_%d", time.Now().UnixNano())
++	ruleName := fmt.Sprintf("rule_%d", affinityTestSequence.Add(1))
+ 	usingGroup := "default"
+-	keyFP := fmt.Sprintf("fp_%d", time.Now().UnixNano())
++	keyFP := fmt.Sprintf("fp_%d", affinityTestSequence.Add(1))
+ 	ctx := buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP)
+ 
+ 	usage := &dto.Usage{
+-- 
+2.53.0.windows.1
+

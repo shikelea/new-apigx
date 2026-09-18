@@ -114,7 +114,7 @@ redis-server.exe deploy\local\redis.conf
 连接串（写入 `.env`）：
 
 ```
-DATABASE_URL=postgres://apigx:apigx_dev@127.0.0.1:5433/apigx_dev?sslmode=disable
+SQL_DSN=postgres://apigx:apigx_dev@127.0.0.1:5433/apigx_dev?sslmode=disable
 ```
 
 ### 两个 Windows／沙箱限制（都已在脚本里绕开或说明）

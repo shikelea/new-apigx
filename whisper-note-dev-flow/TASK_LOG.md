@@ -1,5 +1,25 @@
 # 任务清单
 
+## [已完成] 接手整改阶段 A：恢复可信工程基线（2026-09-18）
+
+**本轮目标**：先消除验收假绿和 Windows 测试隔离问题，再建立可审查的 APIGX 配置基线与启动自检，为后续 ACL、审核和渠道生命周期整改提供可信反馈。
+**验收标准**：① 所有脚本断言失败均返回非零；② TPM 用例形成机器可判定闭环；③ 已定位的 Windows 缓存键与 SQLite/LOG_DB 资源问题修复；④ 正式模板覆盖关键开关；⑤ 启动前能拒绝明显矛盾或缺失的生产配置；⑥ 受影响测试及合理范围回归通过。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 验收脚本 | `tools/stage0-verify/**`、`tools/stage2-verify/**` | 修改 | 统一断言计数、退出码与 TPM 自动核对 |
+| Windows 测试隔离 | `new-api/service/*_test.go`、`new-api/controller/*_test.go` | 修改 | 去除时钟碰撞，关闭 SQLite 主库与独立 LOG_DB |
+| 配置基线 | `.env.example`、`new-api/apigx/**` | 修改/新增 | 列出关键开关并增加启动前一致性检查 |
+| 补丁交付 | `deploy/patches/**`、`docs/stage0/upstream-diff.md` | 新增/修改 | 每个 inner fork 提交同步导出为补丁并登记 |
+
+**任务清单**：
+- [x] A1 修复 stage0/stage2 验收脚本假绿与 TPM 人工断言 → 5 个脚本受控失败均退出 1；TPM 开启/关闭真实闭环分别得到 Redis=46/8204
+- [x] A2 修复 `service` 缓存键碰撞和 `controller` SQLite/LOG_DB 句柄清理 → 缓存用例 50 次、两类并发用例各 20 次、`service`/`controller` 整包通过
+- [x] A3 补齐 APIGX 正式配置模板与启动自检 → `apigx/startup` 通过；真实 MySQL 默认 MyISAM 拒绝、InnoDB 会话接受；Redis 3 缓存写入兼容
+- [x] A4 运行受影响测试、全仓回归和脚本自测，记录仍属上游或环境的边界 → 根模块 `go test ./... -count=1` 通过；`relaykit` 独立构建通过；SQLite/MySQL/PostgreSQL fresh+upgrade 矩阵通过
+- [x] A5 同步补丁链、差异台账、项目状态并提交阶段 A → inner `f21afa8`、`deploy/patches/0157-*`、157 个补丁重建 tree 与 HEAD tree 一致
+
 ## [已完成] 前端使用逻辑二次审查与实施顺序补充（2026-09-18）
 
 **本轮目标**：落实“后端修改完成后，再结合具体使用逻辑优化必要前端”的要求；依据现有页面源码明确真实缺口、三类角色任务流和前后端实施顺序，本轮不修改业务代码。

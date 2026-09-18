@@ -38,6 +38,7 @@ const USER_B_PASS = 'ApigxB#2026';
 const VERIFY_TOKEN = 'apigx-stage0-verify';
 const WAIT_S = Number(argOf('--wait', '0'));
 const ONLY = (argOf('--only', '') || '').split(',').map((s) => s.trim()).filter(Boolean);
+const SELF_TEST_FAILURE = argv.includes('--self-test-failure');
 
 const PIN_MODEL = 'stub/pin-model-202609';
 // A3/A4 用一个「确定已有渠道」的模型，避免把「找不到渠道」误判成「余额不足」。
@@ -413,15 +414,19 @@ async function A5() {
 // ---------------------------------------------------------------- main
 (async () => {
   console.log(`目标底座 ${BASE} ；替身 ${STUB}`);
-  dashAuth = await login(ROOT_USER, ROOT_PASS);
-  dim('root 登录 OK');
-  const run = (id, fn) => (!ONLY.length || ONLY.includes(id)) ? fn() : Promise.resolve();
+  if (SELF_TEST_FAILURE) {
+    note('SELF', 'FAIL', '受控失败自测：验证脚本必须返回退出码 1');
+  } else {
+    dashAuth = await login(ROOT_USER, ROOT_PASS);
+    dim('root 登录 OK');
+    const run = (id, fn) => (!ONLY.length || ONLY.includes(id)) ? fn() : Promise.resolve();
 
-  await run('A1', A1);
-  await run('A2', A2);
-  await run('A3', A3);
-  await run('A4', A4);
-  await run('A5', A5);
+    await run('A1', A1);
+    await run('A2', A2);
+    await run('A3', A3);
+    await run('A4', A4);
+    await run('A5', A5);
+  }
 
   step('结果汇总');
   const by = (v) => findings.filter((f) => f.verdict === v).length;
@@ -433,5 +438,6 @@ async function A5() {
   if (by('FAIL')) {
     console.log('\n\x1b[31m  失败项\x1b[0m');
     for (const f of findings.filter((x) => x.verdict === 'FAIL')) console.log(`    [${f.id}] ${f.detail}`);
+    process.exitCode = 1;
   }
 })().catch((e) => { console.error('\x1b[31m异常终止：' + e.message + '\x1b[0m'); process.exitCode = 2; });

@@ -16,6 +16,7 @@ const BASE = argOf('--base', 'http://127.0.0.1:3000');
 const STUB = argOf('--stub', 'http://127.0.0.1:8100');
 const PHASE = argOf('--phase', 'setup');
 const ROUNDS = Number(argOf('--rounds', '16'));
+const SELF_TEST_FAILURE = argv.includes('--self-test-failure');
 
 async function call(url, { method = 'GET', body, auth } = {}) {
   const h = { accept: 'application/json' };
@@ -27,8 +28,9 @@ async function call(url, { method = 'GET', body, auth } = {}) {
   return { status: res.status, json, text };
 }
 
+let failureCount = 0;
 const pass = (s) => console.log('  \x1b[32mPASS\x1b[0m  ' + s);
-const fail = (s) => console.log('  \x1b[31mFAIL\x1b[0m  ' + s);
+const fail = (s) => { failureCount++; console.log('  \x1b[31mFAIL\x1b[0m  ' + s); };
 const info = (s) => console.log('  \x1b[36mINFO\x1b[0m  ' + s);
 
 const crypto = await import('node:crypto');
@@ -64,6 +66,10 @@ async function platformKey(root) {
 }
 
 async function main() {
+  if (SELF_TEST_FAILURE) {
+    fail('受控失败自测：验证脚本必须返回退出码 1');
+    return;
+  }
   const root = await login('apigxroot', 'ApigxDev#2026');
 
   if (PHASE === 'setup') {
@@ -157,7 +163,7 @@ async function main() {
       await new Promise((res) => setTimeout(res, 120));
     }
     const okCount = statuses.filter((s) => s === 200).length;
-    console.log(`  ${okCount === ROUNDS ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m'}  请求全部成功 — ${okCount}/${ROUNDS}`);
+    (okCount === ROUNDS ? pass : fail)(`请求全部成功 — ${okCount}/${ROUNDS}`);
 
     // 从**替身自己的日志**里数每把 Key 收到多少次（这是上游侧的事实）。
     //
@@ -193,4 +199,6 @@ async function main() {
   throw new Error('未知阶段：' + PHASE);
 }
 
-main().catch((e) => { console.error('\x1b[31m异常：' + e.message + '\x1b[0m'); process.exitCode = 2; });
+main()
+  .then(() => { if (failureCount > 0) process.exitCode = 1; })
+  .catch((e) => { console.error('\x1b[31m异常：' + e.message + '\x1b[0m'); process.exitCode = 2; });

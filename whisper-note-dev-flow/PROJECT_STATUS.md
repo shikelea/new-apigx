@@ -4,15 +4,36 @@
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
 ## 当前阶段
-**全仓接手审查完成，进入可信基线与 P0 整改准备。**
+**阶段 A 可信工程基线已完成，进入阶段 B 的 P0 权限与资源生命周期整改。**
 
-当前版本已确认存在资源 ACL 绕过、默认 `auto` 未使用质量路由、管理员无法跨 owner 审核、渠道创建/删除生命周期不完整、验收脚本假绿等 P0 问题。旧阶段 4 的“31/31”“全部通过”结论已降级为历史记录；P0 全部关闭并重新验收前，项目**不可上线**。前端按用户新增要求放在阶段 A-D 后，待后端业务语义冻结，再从三类角色的真实使用逻辑重做必要界面。
+验收脚本假绿、Windows 测试隔离、共享模式配置和启动自检已修复；仍有资源 ACL 绕过、默认 `auto` 未使用质量路由、管理员无法跨 owner 审核、渠道创建/删除生命周期不完整四项业务 P0。旧阶段 4 的“31/31”“全部通过”结论仍是历史记录；业务 P0 全部关闭并重新验收前，项目**不可上线**。前端继续后置到阶段 A-D 后端语义冻结之后。
 
 ## 当前任务
-[已完成] 前端使用逻辑二次审查与实施顺序补充（详见 `docs/TAKEOVER_AUDIT.md` 阶段 E）。
-- 审查结论：保留 New API 底座，收敛 APIGX 出站授权与资源生命周期；确认 **P0 5 项、P1 7 项、P2 5 项**。
-- 前端结论：当前主要问题是任务流和信息架构，不是单纯样式；分享者、使用者、管理员路径均需在后端稳定后重做。
-- 下一开发批次：阶段 A（验收与配置基线）→ B-D 后端闭环 → 阶段 E 三角色前端重做 → 阶段 F 运维交付。
+[已完成] 接手整改阶段 A：恢复可信工程基线。
+- 五个验收脚本的断言失败均返回 1，基础设施异常返回 2；TPM 已形成 Redis 自动核对闭环。
+- 根模块全仓回归、独立 `relaykit` 构建、三库 fresh/upgrade 矩阵全部通过。
+- 正式共享模式会在接流量前检查关键开关、Redis、加密主密钥和 MySQL InnoDB。
+- 下一开发批次：阶段 B 统一出站 ACL → 跨 owner 审核 → 渠道创建补偿与删除停用。
+
+### [024] 2026-09-18 接手整改阶段 A：可信工程基线
+
+**做了什么**：消除五个验收脚本假绿与 TPM 人工断言，修复 Windows 缓存键/SQLite 连接隔离、Redis 3 缓存写入兼容和 HTTP/2 测试脆弱断言，新增共享模式正式配置模板与启动失败关闭校验，并把内层提交固化为第 157 个补丁。
+
+**涉及模块**：验收脚本、APIGX 启动配置、Redis 缓存、Windows 测试隔离、补丁交付与接手文档
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `tools/stage0-verify/acceptance.mjs`、`tools/stage2-verify/*.mjs` | 验收 | 断言失败退出 1、异常退出 2；TPM 自取本次用量和 Redis 窗口计数 |
+| `.env.example`、`new-api/apigx/startup/**`、`new-api/main.go` | 配置/启动 | 增加共享模式配置基线及依赖一致性失败关闭 |
+| `new-api/common/redis.go`、`new-api/model/*cache*.go`、`user_session.go` | Redis | 兼容 Redis 3 的多字段 Hash 写入 |
+| `new-api/service/*affinity*_test.go`、`new-api/controller/*_test.go` | 测试 | 单调隔离键、WAL/busy timeout、捕获并关闭被全局覆盖的数据库句柄 |
+| `new-api/relay/channel/api_request_getbody_test.go` | 测试 | 按可观察重试契约断言，移除平台相关错误文案依赖 |
+| `deploy/patches/0157-*`、`deploy/base.lock.json`、`docs/stage0/upstream-diff.md` | 交付 | 更新 fork HEAD、差异统计与补丁重建证据 |
+
+**验证**：`go test ./... -count=1` ✅；`service`/`controller` 整包 ✅；SQLite 并发用例各 20 次 ✅；亲和缓存 50 次 ✅；HTTP/2 负例 100 次 ✅；`relaykit` 在 `GOWORK=off` 下独立构建 ✅；SQLite 3.50.4 / MySQL 8.0.12 / PostgreSQL 18.4 fresh+upgrade 矩阵 ✅；五个脚本受控失败均退出 1；TPM 开启/关闭分别为 Redis 46/8204；157 个补丁从锁定基线重建 tree 与 HEAD tree 一致。
+
+**剩余风险**：四项业务 P0 尚未关闭，当前不可上线；本机 MySQL 默认 MyISAM 只能用于拒绝路径验证，APIGX 运行需 InnoDB；没有真实第三方上游、生产多实例、持续压测或正式安全测试结论。
 
 ### [023] 2026-09-18 前端使用逻辑二次审查与后端后置约束
 
