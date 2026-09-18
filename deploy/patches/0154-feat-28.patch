@@ -1,0 +1,98 @@
+From 3aebe0d8b2908caec76ecfb429e0d5131003e6b5 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 17:49:47 +0800
+Subject: [PATCH 154/154] =?UTF-8?q?feat(#28):=20=E8=A1=A5=E4=B8=8A"?=
+ =?UTF-8?q?=E8=B7=A8=E6=97=A5=E7=BB=93=E7=AE=97=E5=9B=9E=E5=88=B0=E5=8E=9F?=
+ =?UTF-8?q?=E9=A2=84=E7=95=99=E5=91=A8=E6=9C=9F"=E7=9A=84=E5=91=A8?=
+ =?UTF-8?q?=E6=9C=9F=E7=94=9F=E4=BA=A7=E8=80=85=EF=BC=88=E7=9C=9F=E5=AE=9E?=
+ =?UTF-8?q?=E8=AF=B7=E6=B1=82=E5=AE=9E=E6=B5=8B=E9=80=9A=E8=BF=87=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**背景**：`Reservation.CycleKey` 与 `Request.AdmissionCycleKey` 在 schema 里都有，但**没有任何写入方** ——
+这正是本项唯一缺的一环。
+
+**实现**：
+- **生产者**：`relayhook/capacity_hook.go` 的 `AcquireForAttempt`（**预留时刻**）调用 `storeAdmissionCycleKey(c, time.Now())`，
+  写入 `YYYYMMDDHHmm`（14 位，符合 `size:16` 列宽）；
+- **消费者**：`relayhook/usage_record.go` 结算时从上下文读取并写入 `UsageEvent.CycleKey`；
+- **为什么必须在预留时刻取**：若按结算时刻取，23:59 进入、00:01 结算的请求会被算进新周期，
+  与其实际占用资源的周期不一致 —— 这正是要求"回到**原**预留周期"的原因。
+
+**真实请求实测**（替身渠道 `stub/model-y-202609`）：
+```
+cycle_key=[202609180949] dim=1 qty=34000 model=stub/model-y-202609
+cycle_key=[202609180949] dim=0 qty=12000 model=stub/model-y-202609
+```
+⇒ 周期有值且格式正确；token 12/34 与替身注入一致 ⇒ 记录完整。
+
+检查：`go build` ✅；`apigx/relayhook` 整包 ✅。台账 #28 升 ✅（计划 31 行 ⇒ 只剩 #21 一项 ⚠️）。
+---
+ apigx/relayhook/capacity_hook.go | 18 ++++++++++++++++++
+ apigx/relayhook/usage_record.go  |  9 +++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index 0dffd88..7b79a08 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -370,6 +370,9 @@ const leaseContextKey = "apigx_capacity_lease"
+ //
+ // 返回 false 表示**容量不足或账本不可用，且已经写出错误响应**，调用方必须停止本次尝试。
+ func AcquireForAttempt(c *gin.Context, channelID int) bool {
++	// 预留时刻确定"结算归属周期"（跨日结算要回到这个周期，见 schema-draft §5.21 / §5.18）。
++	// 只记时间桶，不含任何凭据或用户信息；≤16 字符，符合列宽。
++	storeAdmissionCycleKey(c, time.Now())
+ 	if c == nil {
+ 		return true
+ 	}
+@@ -433,3 +436,18 @@ func ReleaseFromContext(c *gin.Context) {
+ 	}
+ 	c.Set(leaseContextKey, (*Lease)(nil))
+ }
++
++// admissionCycleKey 是"本次预留所属周期"的上下文键。
++const admissionCycleKey = "apigx_admission_cycle_key"
++
++// storeAdmissionCycleKey 在**预留时刻**记下结算归属周期。
++//
++// 为什么在预留时刻取：计划书要求"跨日结算回到**原预留周期**"—— 若在结算时按当时时间取，
++// 一个 23:59 进入、00:01 结算的请求就会被算进新的一天，与其占用资源的周期不一致。
++// 周期粒度取到**分钟**（14 位：YYYYMMDDHHmm），既可跨日回溯，也不超出列宽（16）。
++func storeAdmissionCycleKey(c *gin.Context, at time.Time) {
++	if c == nil {
++		return
++	}
++	c.Set(admissionCycleKey, at.UTC().Format("200601021504"))
++}
+diff --git a/apigx/relayhook/usage_record.go b/apigx/relayhook/usage_record.go
+index e8b8478..0c013ed 100644
+--- a/apigx/relayhook/usage_record.go
++++ b/apigx/relayhook/usage_record.go
+@@ -41,6 +41,14 @@ func RecordSettlementUsage(c *gin.Context, relayInfo *relaycommon.RelayInfo, pro
+ 	write := func(dimension int, tokens int) {
+ 		uid := "u:" + relayInfo.RequestId + ":" + strconv.Itoa(dimension)
+ 		// 取价并计价（未定价 ⇒ 成本保持 0；不认识的计算单位也记未定价）
++		// 结算归属周期：**在预留时刻**已确定（见 capacity_hook.storeAdmissionCycleKey）
++		cycleKey := ""
++		if v, ok := c.Get(admissionCycleKey); ok {
++			if s, isStr := v.(string); isStr {
++				cycleKey = s
++			}
++		}
++
+ 		cost := apigxmodel.ResolveUsageCost(db, keyID, offeringID, channelID, dimension, int64(tokens), now)
+ 
+ 		event := &apigxmodel.UsageEvent{
+@@ -57,6 +65,7 @@ func RecordSettlementUsage(c *gin.Context, relayInfo *relaycommon.RelayInfo, pro
+ 			QuantityMilli:   apigxmodel.UsageQuantityMilliFromTokens(tokens),
+ 			UnitScale:       apigxmodel.UsageUnitScalePerMillionTokens,
+ 			Trust:           apigxmodel.UsageTrustUpstreamReported,
++			CycleKey:        cycleKey,
+ 			PriceRuleID:     cost.PriceRuleID,
+ 			PriceRuleItemID: cost.PriceRuleItemID,
+ 			UnitPriceMicro:  cost.UnitPriceMicro,
+-- 
+2.53.0.windows.1
+

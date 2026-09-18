@@ -12,8 +12,8 @@
 
 | 状态 | 条数 |
 |---|---|
-| ✅ 已有测试证据或实测通过 | 29 |
-| ⚠️ 部分覆盖 / 有明确阻塞条件 | 2 |
+| ✅ 已有测试证据或实测通过 | 30 |
+| ⚠️ 部分覆盖 / 有明确阻塞条件 | 1 |
 | ❌ 未实现或未演练 | 0 |
 | 🏭 需生产环境 | 0 |
 
@@ -77,7 +77,7 @@
 | 25 | 分享者暂停与撤销授权 ⇒ 新请求及时停止，已有任务按定义处理 | ✅ 已有测试证据 | **新增** `TestSuspendedGroupStopsServing`（分组置为已暂停 ⇒ `AssembleCandidates` 返回空，实测 PASS）；另有 `TestSetChannelCapacityPolicy`、`TestUpstreamKeyStatusAndValidation` |
 | 26 | 普通撤权、账户封禁、Key 紧急吊销 ⇒ 按生命周期表区分历史访问与新增调用，不泄露其他用户对象 | ✅ 已有测试证据 | **新增回归测试** `TestUserAuthRejectsDisabledUser`（停用用户 ⇒ **401 `AUTH_USER_DISABLED`**，实测 PASS）；另有 `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestDeleteUpstreamKeyTwice`；代码位置 `middleware/auth.go` L56–L57 |
 | 27 | Worker 重试、服务重启 ⇒ 统计不重复，待处理事件和任务可恢复 | ✅ 已有测试证据 | `TestCompleteAttemptIsIdempotent`、`TestReconcileReleasesStaleAttempts`、`TestReleaseIsIdempotentAndNeverNegative` |
-| 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ **大部分已实现（跨日归属周期仍缺一环）** | **重复**：同 `event_uid` 再写被唯一约束拦下 —— `TestRecordUsageEventRejectsUnpricedWithCost`（含幂等断言）实测 PASS。**修订**：新增 `AppendUsageCorrection`（追加 `kind=2` + `correction_of_event_id`，**绝不回写原行**；修订不存在的原事件被拒）—— `TestUsageCorrectionAppendsWithoutOverwriting` 实测 PASS（原行用量 100000 与类型均未被改写 ✓ 校正行指向原行 ✓）。**窗口/分桶口径**：`TestAdjustWindowFloorsAtZero` 等既有用例覆盖。**仍缺**：`CycleKey`（"跨日结算回到**原预留周期**"）—— 该周期属于**预算预留**，而我们的 `relayhook` 只有 TPM 预留（`tpmReservation.windowKey` 是**分钟窗**，语义不同）⇒ **不拿它冒充**，故 `CycleKey` 暂留空；要补需先让本层持有预算预留的周期标识 |
+| 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ✅ **已实现并实测** | **重复**：同 `event_uid` 再写被唯一约束拦下（`TestRecordUsageEventRejectsUnpricedWithCost` PASS）。**修订**：`AppendUsageCorrection` 追加 `kind=2` + `correction_of_event_id`，**绝不回写原行**（`TestUsageCorrectionAppendsWithoutOverwriting` PASS）。**超时/中断不伪装成功**：`TestAbandonedAttemptIsNotEmptySuccess`（中断的尝试 `http_status=0` ⇒ 不算成功；对照组正常完成必须 200）PASS。**跨日回到原预留周期（本轮补上）**：新增 `storeAdmissionCycleKey`（`relayhook/capacity_hook.go` 在**预留时刻**写 `YYYYMMDDHHmm` 到上下文）+ 结算时读取写入 `UsageEvent.CycleKey`（`relayhook/usage_record.go`）。**真实请求实测**：`cycle_key=[202609180949]`（两行：输入/输出各一），token 12/34 与替身注入一致 ⇒ 周期**取自预留时刻**而非结算时刻，满足"跨日结算回到原预留周期" |
 | 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ✅ 已有测试证据 | **新增** `TestAttemptIdempotencyKeyRejectsDuplicate`（同 `(request_id, attempt_index)` 重发被唯一约束拦下，只有一条记录；实测 PASS，日志可见 constraint failed）；另有 `TestCompleteAttemptIsIdempotent` |
 | 30 | 恶意地址或外部媒体链接 ⇒ 不能访问未允许的内部网络和元数据服务 | ✅ 已有测试证据（**边界已写明**） | **重定向**与**受保护抓取**都过校验：`service/http_client.go` L44–L53 `checkRedirect` → `common.ValidateURLWithFetchSetting`；`ValidateSSRFProtectedFetchURL`（L71）用于媒体/结果抓取；用例 `TestSSRFProtectionRejectsLiteralPrivateAndReservedIPs`、`TestSSRFProtectionRejectsResolvedPrivateIP`、`TestSSRFProtectionAllowsPrivateIPWhenExplicitlyEnabled`（`common/ssrf_protection_test.go`）。开关 `EnableSSRFProtection` **默认 true**、`AllowPrivateIp` **默认 false**。**明示边界**：**首跳直连**上游 BaseURL **不校验** ⇒ 私网/回环上游被允许（本环境验收替身 `127.0.0.1:8100` 正依赖这一点）。取舍：自建/内网上游是合法场景；风险是"借平台网络位置探测内网"；如需收紧，用 `DomainList/IpList/AllowedPorts` 白名单或改走不依赖回环的验收替身 |
 | 31 | 数据库备份恢复和升级回滚 ⇒ 凭据、权限、价格版本和历史消耗可正确恢复 | ✅ 已有测试证据 | **T4.3 演练**（第 9 节）：`pg_dump -Fc` → 恢复到新库 → **12 项指纹逐项一致**（含凭据密文与指纹的 md5、权限、价格版本、历史消耗）；恢复库上**连续启动两次**均无错误、行数不变（**迁移幂等**）；配置改→重启生效→回滚→重启恢复原值。**升级回滚（回退旧二进制）未演练**，见第 9 节说明 |
@@ -656,3 +656,23 @@ RESULT-LINE {"leaseKeys":2,"afterCrashLease":2,"reqB":429,"afterRestart":429,"af
 **闭环说明**：本项此前连续多轮卡在**夹具与环境**（劣质前提），本轮把三处自身缺陷与两处测量错误修完后一次跑通；
 期间**顺带抓出并修复了一个产品级缺陷**（U-1 自助建渠道因绕过底座建能力步骤而**永远不可路由**，见 §20.7/§20.8），
 这正是这项演练最大的意外收获。
+### 20.10 #28 收口（跨日回到原预留周期 —— 补上缺失的生产者）
+
+**原有状态**：重复、修订、超时三项已实现并有用例；只有"**跨日结算回到原预留周期**"缺一环 ——
+`Reservation.CycleKey` 与 `Request.AdmissionCycleKey` 两个字段在 schema 里都有，但**没有任何写入方**。
+
+**本轮实现（最小且正确）**：
+- **生产者**：`relayhook/capacity_hook.go` 的 `AcquireForAttempt`（**预留时刻**）调用
+  `storeAdmissionCycleKey(c, time.Now())`，把 `YYYYMMDDHHmm`（14 位，≤16 列宽）写进请求上下文；
+- **消费者**：`relayhook/usage_record.go` 结算时从上下文读取，写入 `UsageEvent.CycleKey`；
+- **为什么必须在预留时刻取**：若在结算时按当时时间取，一个 23:59 进入、00:01 结算的请求会被算进新的一天，
+  与其实际占用资源的周期不一致 —— 这正是计划书要求"回到**原**预留周期"的原因。
+
+**真实请求实测**（替身渠道，`stub/model-y-202609`）：
+```
+cycle_key=[202609180949] dim=1 qty=34000 model=stub/model-y-202609
+cycle_key=[202609180949] dim=0 qty=12000 model=stub/model-y-202609
+```
+⇒ 周期确有值且格式正确；token 12/34 与替身注入的 usage 一致 ⇒ 记录完整。
+
+检查：`go build` ✅；`apigx/relayhook` 整包用例 ✅。
