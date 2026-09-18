@@ -1,0 +1,249 @@
+From 924ec2e8573452d69b9b635612f9c5184d45e61e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:43:05 +0800
+Subject: [PATCH 127/127] =?UTF-8?q?feat(web):=20=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?=E8=AF=A6=E6=83=85=E8=A1=A5=E3=80=8C=E5=88=86=E4=BA=AB=E6=9D=A5?=
+ =?UTF-8?q?=E6=BA=90=E3=80=8D=E8=A1=A8=EF=BC=88=C2=A74=20=E7=AC=AC=202=20?=
+ =?UTF-8?q?=E6=9D=A1=EF=BC=89=E2=80=94=E2=80=94=20=C2=A74=20=E9=A1=B5?=
+ =?UTF-8?q?=E9=9D=A2=E6=B8=85=E5=8D=95=E8=87=B3=E6=AD=A4=E9=80=90=E6=9D=A1?=
+ =?UTF-8?q?=E6=97=A0=E7=BC=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 pricing/components/model-details-sources.tsx：按模型名取我们的广场聚合数据，
+  列出**分享分组（链到分享分组页）· 来源数 · 质量（样本不足/可用）**
+  · 没有数据时**整块不渲染**（公开页访客拿不到数据的情形，不留空壳）
+  · 复用底座 StaticDataTable（先按接口写用法，typecheck 校验通过）
+- model-details.tsx：在 overview 标签页的 ModelBackendDetailsSection **之前**插入该区块
+  （一行插入，不触碰底座的标签页机制）
+- i18n：7 个语言文件补 3 条（其余键已存在，脚本只补缺失），全部写进 translation 命名空间
+检查: typecheck 0 错 / 改动文件 oxlint 0 错 / pricing+i18n 用例 239/239 / build ✅
+---
+ .../components/model-details-sources.tsx      | 79 +++++++++++++++++++
+ .../pricing/components/model-details.tsx      |  4 +
+ web/src/i18n/locales/en.json                  |  5 +-
+ web/src/i18n/locales/fr.json                  |  5 +-
+ web/src/i18n/locales/ja.json                  |  5 +-
+ web/src/i18n/locales/ru.json                  |  5 +-
+ web/src/i18n/locales/vi.json                  |  5 +-
+ web/src/i18n/locales/zh-TW.json               |  5 +-
+ web/src/i18n/locales/zh.json                  |  5 +-
+ 9 files changed, 111 insertions(+), 7 deletions(-)
+ create mode 100644 web/src/features/pricing/components/model-details-sources.tsx
+
+diff --git a/web/src/features/pricing/components/model-details-sources.tsx b/web/src/features/pricing/components/model-details-sources.tsx
+new file mode 100644
+index 0000000..78e3dc9
+--- /dev/null
++++ b/web/src/features/pricing/components/model-details-sources.tsx
+@@ -0,0 +1,79 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { Link } from '@tanstack/react-router'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++
++import { useApigxModelSources } from '../hooks/use-apigx-model-sources'
++import type { PricingModel } from '../types'
++
++/**
++ * 模型详情的「分享来源」区块（§4 第 2 条要求）。
++ *
++ * 数据来自我们的广场（按模型名聚合）—— 展示**谁在提供这个模型**、属于哪些分享分组、质量是否可判定。
++ * 没有数据时**整块不渲染**（公开页访客拿不到数据的情形，不留空壳）。
++ */
++export function ModelDetailsSources(props: { model: PricingModel }) {
++  const { t } = useTranslation()
++  const { byModel } = useApigxModelSources()
++
++  const summary = byModel.get(props.model.model_name || '')
++  if (!summary || summary.groups.length === 0) {
++    return null
++  }
++
++  const columns: StaticDataTableColumn<{ publicID: string; name: string }>[] = [
++    {
++      id: 'group',
++      header: t('Share group'),
++      cell: (row) => (
++        <Link
++          to='/plaza/group/$groupPublicId'
++          params={{ groupPublicId: row.publicID }}
++          className='hover:underline'
++        >
++          {row.name}
++        </Link>
++      ),
++    },
++    {
++      id: 'sources',
++      header: t('Sources'),
++      cell: () => String(summary.sourceCount),
++    },
++    {
++      id: 'quality',
++      header: t('Quality'),
++      cell: () => (summary.allInsufficient ? t('Not enough samples') : t('Available')),
++    },
++  ]
++
++  return (
++    <section>
++      <h3 className='mb-2 text-sm font-semibold'>{t('Share sources')}</h3>
++      <StaticDataTable
++        columns={columns}
++        data={summary.groups}
++        getRowKey={(row) => row.publicID}
++      />
++    </section>
++  )
++}
+diff --git a/web/src/features/pricing/components/model-details.tsx b/web/src/features/pricing/components/model-details.tsx
+index 9db5de9..9c639d6 100644
+--- a/web/src/features/pricing/components/model-details.tsx
++++ b/web/src/features/pricing/components/model-details.tsx
+@@ -103,6 +103,7 @@ import { DynamicPricingBreakdown } from './dynamic-pricing-breakdown'
+ import { ModelBillingModeBadge } from './model-billing-mode-badge'
+ import { ModelDetailsApi } from './model-details-api'
+ import { ModelDetailsPerformance } from './model-details-performance'
++import { ModelDetailsSources } from './model-details-sources'
+ 
+ // ----------------------------------------------------------------------------
+ // Local UI helpers
+@@ -1556,6 +1557,9 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
+             />
+           </section>
+ 
++          {/* 分享来源表（§4 第 2 条）：谁来提供这个模型、属于哪些分享分组、质量是否可判定 */}
++          <ModelDetailsSources model={props.model} />
++
+           <ModelBackendDetailsSection model={props.model} />
+         </TabsContent>
+ 
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 8423bb5..4c16a33 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6722,6 +6722,9 @@
+     "Invite code": "Invite code",
+     "Invite redeemed. The shared resources are now visible.": "Invite redeemed. The shared resources are now visible.",
+     "Open the model plaza": "Open the model plaza",
+-    "Invalid or already used invite code": "Invalid or already used invite code"
++    "Invalid or already used invite code": "Invalid or already used invite code",
++    "Sources": "Sources",
++    "Not enough samples": "Not enough samples",
++    "Share sources": "Share sources"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 94fa479..6f6c529 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6722,6 +6722,9 @@
+     "Invite code": "Code d'invitation",
+     "Invite redeemed. The shared resources are now visible.": "Invitation utilisée. Les ressources partagées sont désormais visibles.",
+     "Open the model plaza": "Ouvrir la place de marché",
+-    "Invalid or already used invite code": "Code invalide ou déjà utilisé"
++    "Invalid or already used invite code": "Code invalide ou déjà utilisé",
++    "Sources": "Sources",
++    "Not enough samples": "Échantillons insuffisants",
++    "Share sources": "Sources partagées"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 8785e78..a99f8ef 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6722,6 +6722,9 @@
+     "Invite code": "招待コード",
+     "Invite redeemed. The shared resources are now visible.": "引き換えが完了しました。共有リソースが表示されます。",
+     "Open the model plaza": "モデル広場を開く",
+-    "Invalid or already used invite code": "招待コードが無効か、既に使用されています"
++    "Invalid or already used invite code": "招待コードが無効か、既に使用されています",
++    "Sources": "提供元数",
++    "Not enough samples": "サンプル不足",
++    "Share sources": "共有元"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index df72063..4fe42e4 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6722,6 +6722,9 @@
+     "Invite code": "Код приглашения",
+     "Invite redeemed. The shared resources are now visible.": "Приглашение активировано. Общие ресурсы теперь доступны.",
+     "Open the model plaza": "Открыть каталог моделей",
+-    "Invalid or already used invite code": "Код недействителен или уже использован"
++    "Invalid or already used invite code": "Код недействителен или уже использован",
++    "Sources": "Источники",
++    "Not enough samples": "Недостаточно данных",
++    "Share sources": "Общие источники"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 2262900..a0dfcd2 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6722,6 +6722,9 @@
+     "Invite code": "Mã mời",
+     "Invite redeemed. The shared resources are now visible.": "Đổi thành công. Tài nguyên chia sẻ đã hiển thị.",
+     "Open the model plaza": "Mở chợ mô hình",
+-    "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng"
++    "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng",
++    "Sources": "Số nguồn",
++    "Not enough samples": "Chưa đủ mẫu",
++    "Share sources": "Nguồn chia sẻ"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 3a653d3..eefb96f 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6722,6 +6722,9 @@
+     "Invite code": "邀請碼",
+     "Invite redeemed. The shared resources are now visible.": "兌換成功，對應的分享資源現在可見了。",
+     "Open the model plaza": "打開模型廣場",
+-    "Invalid or already used invite code": "邀請碼無效或已被使用"
++    "Invalid or already used invite code": "邀請碼無效或已被使用",
++    "Sources": "來源數",
++    "Not enough samples": "樣本不足",
++    "Share sources": "分享來源"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 4d80010..6b6a18e 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6722,6 +6722,9 @@
+     "Invite code": "邀请码",
+     "Invite redeemed. The shared resources are now visible.": "兑换成功，对应的分享资源现在可见了。",
+     "Open the model plaza": "打开模型广场",
+-    "Invalid or already used invite code": "邀请码无效或已被使用"
++    "Invalid or already used invite code": "邀请码无效或已被使用",
++    "Sources": "来源数",
++    "Not enough samples": "样本不足",
++    "Share sources": "分享来源"
+   }
+ }
+-- 
+2.53.0.windows.1
+
