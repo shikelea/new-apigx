@@ -782,3 +782,38 @@ price_rule_items / price_rules / upstream_key_fp_hash / upstream_key_secret_hash
 **⑤ 我自己的两处失误（记录在案）**：① 日志捕获未设 `[Console]::OutputEncoding`，
 node 的 UTF-8 被 PS 5.1 按 ANSI 解码 ⇒ 中文全乱码、信息不可恢复 ⇒ 只能重跑（第二次已设对）；
 ② 反复执行 setup 造成多条等价替身渠道，直接导致上述 `video-task` 绑定断言失败。
+---
+
+## 22. 三库矩阵复核（SQLite ✅ PostgreSQL ✅ MySQL ⛔ 被凭据阻塞）
+
+**背景**：`new-api/AGENTS.md` 硬要求「所有数据库代码必须同时兼容 SQLite / MySQL ≥ 5.7.8 / PostgreSQL ≥ 9.6」，
+且"必须用真实实例验证；单元测试、mock、只测一种方言都不能替代"。仓库里本来就有三库矩阵测试
+`new-api/apigx/model/migrate_matrix_test.go`（由 `APIGX_TEST_PG_DSN` / `APIGX_TEST_MYSQL_DSN` 驱动，
+未设变量时**显式 SKIP 并声明"不允许当作通过"**）。
+
+**本轮复核结果**（`go test ./apigx/model/ -run TestMigrateMatrixOnConfiguredDialects -v`）：
+```
+=== RUN   TestMigrateMatrixOnConfiguredDialects
+=== RUN   TestMigrateMatrixOnConfiguredDialects/sqlite      → 通过
+=== RUN   TestMigrateMatrixOnConfiguredDialects/postgres    → 通过
+=== RUN   TestMigrateMatrixOnConfiguredDialects/mysql
+    migrate_matrix_test.go:51: 未设置 APIGX_TEST_MYSQL_DSN：MySQL 矩阵未执行（不允许当作通过）
+--- PASS: TestMigrateMatrixOnConfiguredDialects
+    --- SKIP: TestMigrateMatrixOnConfiguredDialects/mysql
+ok  	github.com/QuantumNous/new-api/apigx/model	1.737s
+```
+
+**MySQL 的事实更正与阻塞说明（重要）**：
+- **更正**：`tools/stage1-verify/migrate-pg-matrix.ps1` 原写「本机没有 MySQL/MariaDB 实例」——
+  **这是错的**。实测本机 **MySQL 8.0.12 正在 3306 监听**（协议版本 10，`mysqld` pid 28160；版本 ≥ 5.7.8 ✓）。
+  该说明已在脚本里更正为准确表述。
+- **阻塞**：本机 MySQL 没有服务注册、找不到 `my.ini`、没有 `mysql.exe` 客户端、环境变量里也没有凭据。
+  我只做了**一次**常规尝试（`root` + 空密码）：
+  `Error 1045 (28000): Access denied for user 'root'@'localhost' (using password: NO)` ⇒ 无可用凭据。
+  **不做暴力尝试**。
+- **结论（按 AGENTS.md 的要求如实报告）**：MySQL 矩阵**未执行** ⇒
+  **本项目不声称"已通过 MySQL 验证"**；需要提供该实例的凭据（或另起一个可控实例）后，
+  设 `APIGX_TEST_MYSQL_DSN=user:pass@tcp(127.0.0.1:3306)/apigx_mysql_matrix?charset=utf8mb4&parseTime=True&loc=UTC`
+  重跑该子测试即可补上。
+
+**可交付的部分**：SQLite 与 PostgreSQL 两个方言**本轮实测通过**（前者是纯 Go 单测、后者用真实 PostgreSQL 实例）。

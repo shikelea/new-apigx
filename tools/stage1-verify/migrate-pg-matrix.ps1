@@ -105,5 +105,5 @@ if ($baseApigxAfter -ne 27) { Write-Warning "升级库只建出 $baseApigxAfter 
 if ($baseNative -lt 30) { Write-Warning "底座原生表只剩 $baseNative 张，疑似被本次迁移影响"; $ok = $false }
 if ($ok) { Write-Host '  PostgreSQL 矩阵通过：全新库与升级库均建成 27 张表，且底座表未被影响' -ForegroundColor Green }
 Write-Host ''
-Write-Host '注意：MySQL 矩阵未执行（本机没有 MySQL/MariaDB 实例）。' -ForegroundColor Yellow
+Write-Host '注意：MySQL 矩阵未执行。事实更正（2026-09-18）：本机**有** MySQL 8.0.12 在 3306 监听（协议 10），但环境里没有可用凭据 —— root + 空密码被拒（Error 1045）。提供凭据后设 APIGX_TEST_MYSQL_DSN 即可跑通该子测试。' -ForegroundColor Yellow
 Write-Host '      Go 测试会明确 SKIP，不会把它当作通过。' -ForegroundColor Yellow
