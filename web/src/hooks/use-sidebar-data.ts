@@ -24,7 +24,6 @@ import {
   FileText,
   FlaskConical,
   Store,
-  Settings2,
   Share2,
   Key,
   LayoutDashboard,
@@ -188,11 +187,6 @@ export function useSidebarData(): SidebarData {
             url: '/task-plugins',
             icon: PlugZap,
             requiredRole: ROLE.SUPER_ADMIN,
-          },
-          {
-            title: t('apigxPlatform.nav'),
-            url: '/apigx-platform',
-            icon: Settings2,
           },
 
           {

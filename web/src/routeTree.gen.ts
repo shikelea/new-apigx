@@ -35,7 +35,6 @@ import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
 import { Route as SetupIndexRouteImport } from './routes/setup/index'
 import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
 import { Route as AuthenticatedAccessInviteIndexRouteImport } from './routes/_authenticated/access-invite/index'
-import { Route as AuthenticatedApigxPlatformIndexRouteImport } from './routes/_authenticated/apigx-platform/index'
 import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
 import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
 import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
@@ -204,12 +203,6 @@ const AuthenticatedAccessInviteIndexRoute =
   AuthenticatedAccessInviteIndexRouteImport.update({
     id: '/access-invite/',
     path: '/access-invite/',
-    getParentRoute: () => AuthenticatedRouteRoute,
-  } as any)
-const AuthenticatedApigxPlatformIndexRoute =
-  AuthenticatedApigxPlatformIndexRouteImport.update({
-    id: '/apigx-platform/',
-    path: '/apigx-platform/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedChannelsIndexRoute =
@@ -474,7 +467,6 @@ export interface FileRoutesByFullPath {
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/access-invite/': typeof AuthenticatedAccessInviteIndexRoute
-  '/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
   '/channels/': typeof AuthenticatedChannelsIndexRoute
   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/keys/': typeof AuthenticatedKeysIndexRoute
@@ -539,7 +531,6 @@ export interface FileRoutesByTo {
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/access-invite': typeof AuthenticatedAccessInviteIndexRoute
-  '/apigx-platform': typeof AuthenticatedApigxPlatformIndexRoute
   '/channels': typeof AuthenticatedChannelsIndexRoute
   '/dashboard': typeof AuthenticatedDashboardIndexRoute
   '/keys': typeof AuthenticatedKeysIndexRoute
@@ -608,7 +599,6 @@ export interface FileRoutesById {
   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/_authenticated/access-invite/': typeof AuthenticatedAccessInviteIndexRoute
-  '/_authenticated/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
@@ -676,7 +666,6 @@ export interface FileRouteTypes {
     | '/usage-logs/$section'
     | '/usage-logs/audit'
     | '/access-invite/'
-    | '/apigx-platform/'
     | '/channels/'
     | '/dashboard/'
     | '/keys/'
@@ -741,7 +730,6 @@ export interface FileRouteTypes {
     | '/usage-logs/$section'
     | '/usage-logs/audit'
     | '/access-invite'
-    | '/apigx-platform'
     | '/channels'
     | '/dashboard'
     | '/keys'
@@ -809,7 +797,6 @@ export interface FileRouteTypes {
     | '/_authenticated/usage-logs/$section'
     | '/_authenticated/usage-logs/audit'
     | '/_authenticated/access-invite/'
-    | '/_authenticated/apigx-platform/'
     | '/_authenticated/channels/'
     | '/_authenticated/dashboard/'
     | '/_authenticated/keys/'
@@ -1045,13 +1032,6 @@ declare module '@tanstack/react-router' {
       path: '/access-invite'
       fullPath: '/access-invite/'
       preLoaderRoute: typeof AuthenticatedAccessInviteIndexRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/apigx-platform/': {
-      id: '/_authenticated/apigx-platform/'
-      path: '/apigx-platform'
-      fullPath: '/apigx-platform/'
-      preLoaderRoute: typeof AuthenticatedApigxPlatformIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/channels/': {
@@ -1424,7 +1404,6 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
   AuthenticatedAccessInviteIndexRoute: typeof AuthenticatedAccessInviteIndexRoute
-  AuthenticatedApigxPlatformIndexRoute: typeof AuthenticatedApigxPlatformIndexRoute
   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
@@ -1455,7 +1434,6 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
   AuthenticatedAccessInviteIndexRoute: AuthenticatedAccessInviteIndexRoute,
-  AuthenticatedApigxPlatformIndexRoute: AuthenticatedApigxPlatformIndexRoute,
   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,

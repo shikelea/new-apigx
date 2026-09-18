@@ -22,7 +22,6 @@ import { useTranslation } from 'react-i18next'
 
 import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
 import { EmptyState } from '@/components/empty-state'
-import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -135,10 +134,7 @@ export function ApigxPlatform() {
   ]
 
   return (
-    <SectionPageLayout>
-      <SectionPageLayout.Title>{t('apigxPlatform.title')}</SectionPageLayout.Title>
-      <SectionPageLayout.Content>
-        <div className='space-y-6'>
+    <div className='space-y-6'>
           <Card>
             <CardHeader>
               <CardTitle>{t('apigxPlatform.priceRules')}</CardTitle>
@@ -259,9 +255,7 @@ export function ApigxPlatform() {
               ) : null}
             </CardContent>
           </Card>
-        </div>
-      </SectionPageLayout.Content>
-    </SectionPageLayout>
+    </div>
   )
 }
 /**

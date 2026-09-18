@@ -15,10 +15,13 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { createFileRoute } from '@tanstack/react-router'
-
+*/
 import { ApigxPlatform } from '@/features/apigx-platform'
 
-export const Route = createFileRoute('/_authenticated/apigx-platform/')({
-  component: ApigxPlatform,
-})
+/**
+ * 平台管理（资源审核 / 模型映射 / 价格规则）—— 作为**系统设置的一个分区**，
+ * 与底座的认证、计费、运维等设置并列，不再单独占一个顶级入口。
+ */
+export function ApigxPlatformSection() {
+  return <ApigxPlatform />
+}
