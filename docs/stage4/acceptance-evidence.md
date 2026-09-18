@@ -197,3 +197,43 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 - **演练脚本自身的过程教训**：① 脚本为 UTF-8 **无 BOM** 时，Windows PowerShell 5.1 会按 ANSI 读取而乱码报错 ⇒
   已改为 **UTF-8 带 BOM**；② 我最初按 `=` 解析 `psql -tAf` 的 `k|v` 输出 ⇒ 解析出 0 项却打印"✅ 全部一致"（**假绿**）⇒
   已改为按 `|` 解析，并加"0 项即失败"的硬断言。
+---
+
+## 10. T4.4 记录（运营审核 + 指标看板与告警）
+
+### 10.1 运营审核（当场取新鲜证据）
+
+| 用例 | 结果 |
+|---|---|
+| `TestOfferingLifecycleThroughAPI` | **PASS** |
+| `TestShareGroupLifecycle` | **PASS** |
+| `TestAliasConfirmationWorkflow` | **PASS** |
+| `TestCapabilityMatrixIsHonest` | **PASS** |
+
+审核闸门**只对平台侧开放**：供给 `submit → publish`、分组发布状态（[013]）、别名/目录确认，
+均要求 `requirePlatformReviewer`；管理入口已并入**系统设置 → 平台管理**（[007]/[009]）。
+
+### 10.2 指标看板（**复用底座，未另造**）
+
+- 底座自带 `perf_metrics` 表与接口：`GET /api/perf-metrics/summary`、`GET /api/perf-metrics`
+  （`setting/perf_metrics_setting` 默认 `enabled=true`，按 `bucket_time` 聚合、`retention_days` 保留）
+- **实测有数据**：`perf_metrics` 现有 **44 行** ⇒ 看板确实在记录，无需我们重复实现
+
+### 10.3 告警（**本轮新增的缺口**）
+
+盘点结论：我们自己的告警代码**为零**；底座有若干告警配置（消费提醒阈值、会话风暴阈值、通知限流）
+但没有通用告警引擎。
+
+**本轮补的**（最小、复用既有通道）：
+- 位置：`apigx/routing/assemble.go` 的**熔断打开**分支
+- 行为：熔断打开 ⇒ 发**一条限频**运维告警（同一供给 **10 分钟**最多一次），走既有 `common.SysError` 通道
+- 为什么限频：熔断期内每个请求都会走到该分支，不限频会把日志刷爆、**反而掩盖问题**
+- 设计取舍：去重逻辑抽成 **返回 bool** 的 `claimBreakerAlertSlot` ⇒ 测试断言**"是否该告警"这条不变量**，
+  而**不是**断言日志文本（`new-api/AGENTS.md` 明确反对 log-only 断言）
+- 实测：`TestBreakerAlertIsRateLimitedPerOffering` **PASS**（首次告警 ✓、间隔内不重复 ✓、差 1 秒不告警 ✓、
+  间隔后可再告警 ✓、不同供给互不影响 ✓、非法 id 不告警 ✓）；整个 `apigx/routing` 包 **ok**
+
+### 10.4 仍未做（如实标注）
+
+- **可视化看板页面**：底座有接口与数据，但**我们没有做面向运营的汇总页**（价格页已复用部分指标）
+- **外部告警通道**（邮件/Webhook/IM）：**未接入**；当前告警只进入服务日志，需依赖日志采集与规则

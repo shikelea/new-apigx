@@ -10,9 +10,30 @@
 
 ## 当前任务
 [进行中] 阶段 3 收口 → 阶段 4 交付（计划见 `TASK_LOG.md` **顶部**，含验收标准与任务清单 T3.9 / U-1 / U-2 / U-3 / T4.1–T4.6）。
-- 进度：**7/10 项完成**（T3.9 [012]；U-1 [013]；U-2 [014]；U-3 [015]；T4.1 [016]；T4.2 [017]；**T4.3 已完成** [018]）；首轮完成 **§3 规划入档** 与 **T3.9 盘点**（结论：我们**没有**阶段 3 的能力矩阵/验收报告，只有 `docs/stage0/protocol-matrix.md`；下一步新建 `docs/stage3/acceptance-report.md` 逐行给结论）
+- 进度：**8/10 项完成**（T3.9 [012]；U-1 [013]；U-2 [014]；U-3 [015]；T4.1 [016]；T4.2 [017]；T4.3 [018]；**T4.4 已完成** [019]）；首轮完成 **§3 规划入档** 与 **T3.9 盘点**（结论：我们**没有**阶段 3 的能力矩阵/验收报告，只有 `docs/stage0/protocol-matrix.md`；下一步新建 `docs/stage3/acceptance-report.md` 逐行给结论）
 - 用户提出的 3 条问题（U-1 渠道流程 / U-2 邀请界面合并 / U-3 分享者消耗视图）**已记录**，并已进入本轮计划；其中 U-1/U-2 的待澄清点由我拍板（决定已写入 TASK_LOG）
 - 如实保留的未验证项：语音**上传时长**（平台不解码音频）
+### [019] 2026-09-18 T4.4 运营审核 + 指标看板与告警
+
+**做了什么**：① 当场取运营审核链路的新鲜证据；② 指标看板**复用底座**（不另造）；③ 补上我们**唯一缺失**的一环 —— 熔断告警。
+
+**涉及模块**：apigx/routing、docs/stage4
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `apigx/routing/alert.go`（新） | routing | `claimBreakerAlertSlot`（返回 bool 的限频闸门，间隔 600s）+ `resetBreakerAlertState`（仅测试用） |
+| `apigx/routing/assemble.go` | routing | 熔断打开分支接入限频告警：`common.SysError("apigx alert: offering %s breaker OPEN …")` |
+| `apigx/routing/decide_test.go` | 测试 | 新增 `TestBreakerAlertIsRateLimitedPerOffering`：断言限频不变量（非日志文本） |
+| `docs/stage4/acceptance-evidence.md` | 文档 | 第 10 节：审核证据、指标盘点（perf_metrics 44 行）、告警实现与未做项 |
+
+**验证**：审核 4 个用例当场 **PASS**；`perf_metrics` **44 行**（底座接口 `GET /api/perf-metrics/summary` 可用）；
+告警测试 **PASS**、`apigx/routing` 整包 **ok**、`go build` ✅
+**剩余风险**：① **可视化看板页面未做**（底座有数据与接口，我们没做运营汇总页）；② **外部告警通道未接入**
+（邮件/Webhook/IM），当前告警只进服务日志，依赖日志采集与规则；③ 限频状态在**进程内存**中
+（多实例下每实例各限一次，可接受但需知晓）
+**过程记录**：我猜的测试文件名 `breaker_guard_test.go` 不在 `apigx/routing`（它属别的包）⇒ 脚本**校验失败并跳过写入**，
+改到真实存在的 `decide_test.go` 后一次通过（**不猜文件名**这条纪律再次生效）
 ### [018] 2026-09-18 T4.3 备份恢复 / 迁移幂等 / 配置回滚（演练）
 
 **做了什么**：对**本地真实环境**做备份恢复演练（**不动现场库**：恢复到新库校验），并在恢复库上验证迁移幂等，

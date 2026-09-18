@@ -1,0 +1,201 @@
+From 26ffa410a5d04a504650615f0faa9765c419e696 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 16:16:00 +0800
+Subject: [PATCH 145/145] =?UTF-8?q?feat(T4.4):=20=E7=86=94=E6=96=AD?=
+ =?UTF-8?q?=E9=99=90=E9=A2=91=E5=91=8A=E8=AD=A6=EF=BC=88=E9=98=B6=E6=AE=B5?=
+ =?UTF-8?q?=204=20=E5=94=AF=E4=B8=80=E7=BC=BA=E5=A4=B1=E7=9A=84=E5=91=8A?=
+ =?UTF-8?q?=E8=AD=A6=E7=8E=AF=E8=8A=82=EF=BC=89+=20=E8=BF=90=E8=90=A5?=
+ =?UTF-8?q?=E5=AE=A1=E6=A0=B8=E4=B8=8E=E6=8C=87=E6=A0=87=E7=9C=8B=E6=9D=BF?=
+ =?UTF-8?q?=E5=BD=92=E6=A1=A3?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**盘点结论**：运营审核链路已闭环（供给/分组/别名审核闸门均限平台侧）；指标看板**底座已有** ——
+`perf_metrics` 表 + `GET /api/perf-metrics/summary`，**实测 44 行数据**，故**复用不另造**；
+我们自己的**告警代码为零** ⇒ 本轮补这一环。
+
+**改动**：
+- `apigx/routing/alert.go`（新）：`claimBreakerAlertSlot(offeringID, now) bool` —— 限频闸门（同供给 600s 一次）；
+  `resetBreakerAlertState` 仅供测试
+- `apigx/routing/assemble.go`：熔断打开分支接入告警，走既有 `common.SysError` 通道
+- `apigx/routing/decide_test.go`：`TestBreakerAlertIsRateLimitedPerOffering` —— 断言**限频不变量**
+  （首次告警、间隔内不重复、差 1 秒不告警、间隔后可再告警、不同供给独立、非法 id 不告警），
+  而非断言日志文本（遵守 new-api/AGENTS.md 对 log-only 断言的禁止）
+
+**验证**：审核 4 用例当场 PASS；`perf_metrics` 44 行；告警测试 PASS、`apigx/routing` 整包 ok、`go build` ✅
+**未做（如实标注）**：面向运营的**可视化看板页面**；**外部告警通道**（邮件/Webhook/IM）；
+限频状态在进程内存（多实例各限一次）
+**过程记录**：我猜的测试文件名不在该包 ⇒ 脚本校验失败并跳过写入，改到真实存在的 `decide_test.go` 后一次通过
+---
+ apigx/routing/alert.go       | 39 ++++++++++++++++++++++++++
+ apigx/routing/assemble.go    |  9 ++++++
+ apigx/routing/decide_test.go | 19 +++++++++++++
+ middleware/auth_test.go      | 54 ++++++++++++++++++++++++++++++++++++
+ 4 files changed, 121 insertions(+)
+ create mode 100644 apigx/routing/alert.go
+
+diff --git a/apigx/routing/alert.go b/apigx/routing/alert.go
+new file mode 100644
+index 0000000..de70d05
+--- /dev/null
++++ b/apigx/routing/alert.go
+@@ -0,0 +1,39 @@
++package routing
++
++import "sync"
++
++// breakerAlertInterval 同一供给的熔断告警最小间隔（秒）。
++//
++// 取 10 分钟：熔断本身有冷却窗口，10 分钟足以让运维注意到，又不会把日志刷爆。
++const breakerAlertInterval int64 = 600
++
++var (
++	breakerAlertMu   sync.Mutex
++	breakerAlertLast = map[int64]int64{}
++)
++
++// claimBreakerAlertSlot 判断"此刻是否应当为该供给发一条熔断告警"，返回 true 表示应当。
++//
++// 这是**限频闸门**：同一供给在 breakerAlertInterval 秒内只会放行一次。
++// 之所以返回 bool 而不是自己打日志：调用方负责取公开标识与拼消息，
++// 而"是否该告警"作为一条不变量可以被直接测（不依赖日志文本）。
++func claimBreakerAlertSlot(offeringID int64, now int64) bool {
++	if offeringID <= 0 {
++		return false
++	}
++	breakerAlertMu.Lock()
++	defer breakerAlertMu.Unlock()
++	last, seen := breakerAlertLast[offeringID]
++	if seen && now-last < breakerAlertInterval {
++		return false
++	}
++	breakerAlertLast[offeringID] = now
++	return true
++}
++
++// resetBreakerAlertState 清空限频状态（仅测试使用，避免用例间互相影响）。
++func resetBreakerAlertState() {
++	breakerAlertMu.Lock()
++	defer breakerAlertMu.Unlock()
++	breakerAlertLast = map[int64]int64{}
++}
+diff --git a/apigx/routing/assemble.go b/apigx/routing/assemble.go
+index 28b1324..2a0ed3a 100644
+--- a/apigx/routing/assemble.go
++++ b/apigx/routing/assemble.go
+@@ -2,6 +2,7 @@ package routing
+ 
+ import (
+ 	"context"
++	"fmt"
+ 
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+@@ -89,6 +90,14 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
+ 		if breaker.State == BreakerOpen {
+ 			candidate.Allowed = false
+ 			candidate.ExcludeReason = ExcludeBreakerOpen
++			// 阶段 4「告警」：熔断打开时发一条**限频**运维告警（同一供给 10 分钟最多一次），
++			// 否则熔断期内每个请求都会走到这里，日志会被刷爆反而掩盖问题。
++			if claimBreakerAlertSlot(offering.ID, opts.Now) {
++				common.SysError(fmt.Sprintf(
++					"apigx alert: offering %s breaker OPEN — 候选已摘除，冷却结束前不会承接流量",
++					public[offering.ID].OfferingPublicID,
++				))
++			}
+ 		}
+ 
+ 		// 容量：读渠道策略给出的上限与当前占用（未配置上限则不施加约束）
+diff --git a/apigx/routing/decide_test.go b/apigx/routing/decide_test.go
+index a903681..35bbdbb 100644
+--- a/apigx/routing/decide_test.go
++++ b/apigx/routing/decide_test.go
+@@ -600,3 +600,22 @@ func TestBreakerOpenRemovesCandidateWithSpecificReason(t *testing.T) {
+ 	}
+ 	assert.Equal(t, ExcludeBreakerOpen, reasons["off-61"], "解释必须说明是熔断，而不是笼统的未授权")
+ }
++
++// TestBreakerAlertIsRateLimitedPerOffering 覆盖阶段 4 的「告警」要求：
++// 同一供给的熔断告警必须**限频**（避免刷屏），不同供给互不影响，间隔过后可再次告警。
++//
++// 注意：这里断言的是"是否该告警"这一**不变量**，不去断言日志文本
++// （new-api/AGENTS.md 明确反对 log-only 断言）。
++func TestBreakerAlertIsRateLimitedPerOffering(t *testing.T) {
++	resetBreakerAlertState()
++
++	const offeringA, offeringB int64 = 101, 202
++	now := int64(1700000000)
++
++	assert.True(t, claimBreakerAlertSlot(offeringA, now), "首次熔断应当告警")
++	assert.False(t, claimBreakerAlertSlot(offeringA, now+1), "间隔内不得重复告警")
++	assert.False(t, claimBreakerAlertSlot(offeringA, now+breakerAlertInterval-1), "差 1 秒仍不得告警")
++	assert.True(t, claimBreakerAlertSlot(offeringA, now+breakerAlertInterval), "间隔过后应当可以再次告警")
++	assert.True(t, claimBreakerAlertSlot(offeringB, now+1), "不同供给的限频互不影响")
++	assert.False(t, claimBreakerAlertSlot(0, now), "无有效供给 id 时不告警")
++}
+diff --git a/middleware/auth_test.go b/middleware/auth_test.go
+index 530ebbf..f235cc8 100644
+--- a/middleware/auth_test.go
++++ b/middleware/auth_test.go
+@@ -334,3 +334,57 @@ func TestApplyWebSocketSubprotocolAuthorizationReadsRepeatedHeaders(t *testing.T
+ 	assert.True(t, applyWebSocketSubprotocolAuthorization(header))
+ 	assert.Equal(t, "Bearer sk-later-field", header.Get("Authorization"))
+ }
++
++// TestSetupContextForTokenRejectsPinSuffixForNonAdmin 覆盖阶段 4 验收表第 5 行：
++// 「固定来源 Key 携带另一个渠道的请求头」必须是**不扩大授权**的 ——
++// `-<channelId>` 后缀只对管理员生效，普通用户直接 403 并留下 specific_channel_version 头。
++func TestSetupContextForTokenRejectsPinSuffixForNonAdmin(t *testing.T) {
++	setupDashboardAuthMiddlewareTest(t)
++	pat := "pin-nonadmin-pat"
++	user := createMiddlewarePATUser(t, "pin-nonadmin-user", pat)
++
++	// 该夹具的内存库只迁移了 users/AuthFlow ⇒ 这里补 tokens 表（否则 "no such table: tokens"）
++	require.NoError(t, model.DB.AutoMigrate(&model.Token{}))
++
++	token := &model.Token{
++		UserId:       user.Id,
++		Key:          "pin-nonadmin-token-key",
++		Status:       common.TokenStatusEnabled,
++		Name:         "pin-check",
++		CreatedTime:  common.GetTimestamp(),
++		AccessedTime: common.GetTimestamp(),
++		ExpiredTime:  -1,
++	}
++	require.NoError(t, model.DB.Create(token).Error)
++
++	recorder := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Request = httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
++
++	err := SetupContextForToken(c, token, "stable-key", "123")
++	require.Error(t, err, "普通用户带指定渠道后缀必须被拒绝（不扩大授权）")
++	assert.Equal(t, http.StatusForbidden, recorder.Code)
++	assert.NotEmpty(t, recorder.Header().Get("specific_channel_version"))
++}
++
++// TestUserAuthRejectsDisabledUser 覆盖阶段 4 验收表第 26 行的账户封禁路径：
++// 用户被停用后，其平台令牌必须被拒（401），而不是继续可用。
++func TestUserAuthRejectsDisabledUser(t *testing.T) {
++	setupDashboardAuthMiddlewareTest(t)
++	pat := "disabled-user-pat"
++	user := createMiddlewarePATUser(t, "disabled-user", pat)
++	require.NoError(t, model.DB.Model(user).Update("status", common.UserStatusDisabled).Error)
++
++	router := gin.New()
++	router.GET("/protected", UserAuth(), func(c *gin.Context) {
++		c.JSON(http.StatusOK, gin.H{"id": c.GetInt("id")})
++	})
++	request := httptest.NewRequest(http.MethodGet, "/protected", nil)
++	request.Header.Set("Authorization", "Bearer "+pat)
++	response := httptest.NewRecorder()
++
++	router.ServeHTTP(response, request)
++
++	assert.Equal(t, http.StatusUnauthorized, response.Code)
++	assert.Contains(t, response.Body.String(), "AUTH_USER_DISABLED")
++}
+-- 
+2.53.0.windows.1
+
