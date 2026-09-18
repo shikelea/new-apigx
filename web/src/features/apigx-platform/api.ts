@@ -17,7 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */import { api } from '@/lib/api'
 
-import type { ApplyRouteRankingPayload, ManualPricePayload, PriceRuleResponse } from './types'
+import type {
+  AliasCandidateListResponse,
+  ApplyRouteRankingPayload,
+  ConfirmAliasPayload,
+  ManualPricePayload,
+  PriceRuleResponse,
+} from './types'
 
 // 平台侧数据访问：价格规则与路由排名应用。均为**平台侧动作**（后端 requirePlatformReviewer）。
 export async function getPriceRules(scopeType: number, scopeId: number): Promise<PriceRuleResponse> {
@@ -43,5 +49,26 @@ export async function publishOffering(offeringId: number): Promise<{ success: bo
 
 export async function rejectOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
   const res = await api.post(`/api/apigx/offerings/${offeringId}/reject`)
+  return res.data
+}
+// 模型目录（平台侧）：候选列表与确认动作。
+export async function getAliasCandidates(state = 0, page = 1, pageSize = 50): Promise<AliasCandidateListResponse> {
+  const res = await api.get('/api/apigx/model-catalog/candidates', { params: { state, page, page_size: pageSize } })
+  return res.data
+}
+
+export async function confirmAliasCandidate(candidateId: number, payload: ConfirmAliasPayload): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/model-catalog/candidates/${candidateId}/confirm`, payload)
+  return res.data
+}
+
+export async function rejectAliasCandidate(candidateId: number): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/model-catalog/candidates/${candidateId}/reject`)
+  return res.data
+}
+
+// 批量匹配：把归一化后同名的待确认候选一次性指到同一个标准模型。
+export async function bulkConfirmAliases(normalizedModelID: string, payload: ConfirmAliasPayload): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post('/api/apigx/model-catalog/bulk-confirm', { normalized_model_id: normalizedModelID, ...payload })
   return res.data
 }

@@ -55,3 +55,34 @@ export interface ApplyRouteRankingPayload {
   strategy?: string
   dry_run?: boolean
 }
+// 模型目录：别名候选（上游模型名 → 标准模型）。
+export interface AliasCandidate {
+  id: number
+  external_model_id: string
+  normalized_model_id: string
+  scope_type: number
+  scope_id: number
+  source: number
+  source_ref: string
+  /** 0=待确认 / 1=已确认 / 2=已拒绝 */
+  confirmation_state: number
+  target_canonical_model_id: number
+}
+
+export interface AliasCandidateListResponse {
+  success: boolean
+  data?: {
+    items: AliasCandidate[] | null
+    total: number
+    page: number
+    page_size: number
+  }
+}
+
+/** 确认候选：二选一给目标（现成的标准模型 ID，或对外标准 ID —— 后者不存在时后端会顺手创建）。 */
+export interface ConfirmAliasPayload {
+  target_canonical_model_id?: number
+  api_model_id?: string
+  description?: string
+  modality_type?: number
+}

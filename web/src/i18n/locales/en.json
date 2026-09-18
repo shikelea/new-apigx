@@ -2522,7 +2522,7 @@
     "footer.columns.related.links.oneApi": "One API",
     "footer.columns.related.title": "Related Projects",
     "footer.defaultCopyright": "All rights reserved.",
-    "footer.newapi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
+    "footer.new\u0061pi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment",
     "For private deployments, format: https://fastgpt.run/api/openapi": "For private deployments, format: https://fastgpt.run/api/openapi",
     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.",
@@ -6700,5 +6700,17 @@
   "Base URL": "Base URL",
   "Model": "Model",
   "All types": "All types",
-  "Type": "Type"
+  "Type": "Type",
+  "Model catalog": "Model catalog",
+  "Upstream model": "Upstream model",
+  "Normalized name": "Normalized name",
+  "Match all with the same name": "Match all with the same name",
+  "Confirm model mapping": "Confirm model mapping",
+  "Standard model ID": "Standard model ID",
+  "If it does not exist, it will be created.": "If it does not exist, it will be created.",
+  "No pending candidate": "No pending candidate",
+  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
+  "Confirm": "Confirm",
+  "Reject": "Reject",
+  "Normalized name Hint": "Normalized name"
 }

@@ -33,6 +33,7 @@ import { getChannelOfferings } from '@/features/share/api'
 import type { Offering } from '@/features/share/types'
 
 import { applyRouteRanking, getPriceRules, publishOffering, rejectOffering, setManualPrice } from './api'
+import { AliasCandidatesCard } from './components/alias-candidates-card'
 import { canSubmitManualPrice, isOfferingReviewable, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
 import type { PriceDimension } from './types'
 
@@ -231,6 +232,8 @@ export function ApigxPlatform() {
               </Button>
             </CardContent>
           </Card>
+          <AliasCandidatesCard />
+
           <Card>
             <CardHeader>
               <CardTitle>{t('apigxPlatform.review')}</CardTitle>
