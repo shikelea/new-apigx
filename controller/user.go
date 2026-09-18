@@ -278,7 +278,8 @@ func Register(c *gin.Context) {
 	if common.RegisterInviteRequired {
 		claimed, redeemErr := apigxmodel.RedeemRegistrationInvite(model.DB, user.RegisterInviteCode, common.GetTimestamp())
 		if redeemErr != nil {
-			common.ApiErrorI18n(c, i18n.MsgUserRegisterDisabled)
+			// 专门文案：让调用方分得清"注册被关闭"与"邀请码不对"，且不泄露具体原因（防枚举）
+			common.ApiErrorI18n(c, i18n.MsgUserRegistrationInviteInvalid)
 			return
 		}
 		claimedRegistrationInvite = claimed

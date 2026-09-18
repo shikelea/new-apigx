@@ -78,8 +78,11 @@ const (
 
 // User related messages
 const (
-	MsgUserPasswordLoginDisabled     = "user.password_login_disabled"
-	MsgUserRegisterDisabled          = "user.register_disabled"
+	MsgUserPasswordLoginDisabled = "user.password_login_disabled"
+	MsgUserRegisterDisabled      = "user.register_disabled"
+	// MsgUserRegistrationInviteInvalid 注册邀请码无效/已用尽/已过期/已撤销（§5 邀请准入）。
+	// 刻意与"注册已关闭"分开：调用方需要知道"能不能注册"与"码对不对"是两件事。
+	MsgUserRegistrationInviteInvalid = "user.registration_invite_invalid"
 	MsgUserPasswordRegisterDisabled  = "user.password_register_disabled"
 	MsgUserUsernameOrPasswordEmpty   = "user.username_or_password_empty"
 	MsgUserUsernameOrPasswordError   = "user.username_or_password_error"
