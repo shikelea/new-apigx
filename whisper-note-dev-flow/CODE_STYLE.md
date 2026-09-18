@@ -77,3 +77,21 @@
 2. 锚点优先选**不含缩进的短子串**（缩进会被 gofmt/prettier 改动，整段替换极易失配）；
 3. 补丁脚本放 `.toolchain/_state/` 下，执行完删除；
 4. 纯文本追加（如本文档）可以用 PowerShell **单引号 here-string**（`@'...'@`）安全完成。
+## 九、PowerShell 引号与输出捕获（本项目反复踩到，务必照做）
+
+**1. 含中文/引号的文本，一律用「单引号 here-string」或落文件，绝不在双引号字符串里嵌 `"`。**
+本会话至少 5 次因此**整条命令解析失败、一个字都没执行**（我常误以为"跑过了"）。
+
+**2. 捕获 node/子进程输出前必须设控制台编码**，否则 UTF-8 被 PS 5.1 按 ANSI 解码，中文全乱码且**信息不可恢复**：
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+```
+
+**3. 不要在跑「前台长进程」时用 `Select-Object -First N` 截断输出**：管道提前终止会杀掉子进程、退出码变成 `-1`，
+看起来像"命令失败"。要么先重定向到文件再读，要么别截断。
+
+**4. `.ps1` 文件必须带 UTF-8 BOM**（PS 5.1 否则按 ANSI 读，中文与引号都会坏）。
+
+**5. 相对路径要看当前目录**：在 `new-api/` 里写 `.toolchain\_state\x.cjs` 会写到不存在的位置；
+跨目录产物一律用**绝对路径**（如 `D:\Github\apigx\.toolchain\_state\...`）。

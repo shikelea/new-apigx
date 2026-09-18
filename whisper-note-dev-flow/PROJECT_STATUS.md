@@ -10,9 +10,36 @@
 
 ## 当前任务
 [进行中] 阶段 3 收口 → 阶段 4 交付（计划见 `TASK_LOG.md` **顶部**，含验收标准与任务清单 T3.9 / U-1 / U-2 / U-3 / T4.1–T4.6）。
-- 进度：**10/10 项完成**（T3.9 [012]；U-1 [013]；U-2 [014]；U-3 [015]；T4.1 [016]；T4.2 [017]；T4.3 [018]；T4.4 [019]；**T4.5 + T4.6 已完成** [020]）；首轮完成 **§3 规划入档** 与 **T3.9 盘点**（结论：我们**没有**阶段 3 的能力矩阵/验收报告，只有 `docs/stage0/protocol-matrix.md`；下一步新建 `docs/stage3/acceptance-report.md` 逐行给结论）
+- 进度：**10/10 项完成 + 阶段 4 验收表 31 行全部有结论（✅31/⚠️0/❌0）**；三库矩阵（SQLite/PostgreSQL/MySQL）✅；升级回滚演练 ✅；**收尾清单见 [021] 与 docs/stage4/README.md §七**
 - 用户提出的 3 条问题（U-1 渠道流程 / U-2 邀请界面合并 / U-3 分享者消耗视图）**已记录**，并已进入本轮计划；其中 U-1/U-2 的待澄清点由我拍板（决定已写入 TASK_LOG）
 - 如实保留的未验证项：语音**上传时长**（平台不解码音频）
+### [021] 2026-09-18 MySQL 三库矩阵补齐 + 升级回滚演练 + 收尾清单
+
+**做了什么**：拿到 MySQL 凭据后补齐三库矩阵（**先失败后修复再通过**）；用旧版本二进制演练升级回滚；并把"还差什么"逐条落成文档。
+
+**涉及模块**：数据库迁移（`apigx/model`）、文档（`docs/stage4/`）、流程文档
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `new-api/apigx/model/migrate.go` | 数据库迁移 | MySQL 方言下 `Set("gorm:table_options","ENGINE=InnoDB")` 后再 AutoMigrate ⇒ 我们的表**显式 InnoDB**（不依赖服务端默认值）；只影响 `apigx_*` 表 |
+| `docs/stage4/acceptance-evidence.md` | 文档 | 新增 §22（三库矩阵）、§22.1（MySQL 先失败后修复）、§22.2（服务端 MyISAM 问题）、§23（升级回滚演练） |
+| `docs/stage4/README.md` | 文档 | 新增「六、最终确认复跑结果」与「七、还差什么（收尾清单）」 |
+| `tools/stage1-verify/migrate-pg-matrix.ps1` | 脚本 | 更正「本机没有 MySQL 实例」的过时说法（事实：有 8.0.12，但当时缺凭据） |
+| `whisper-note-dev-flow/TASK_LOG.md` | 文档 | 追加三库矩阵、回滚演练记录；顶部新增「收尾清单」任务块 |
+
+**验证**：
+- 三库矩阵：`sqlite ✅ postgres ✅ mysql ✅`，**连跑两次通过**（幂等），`go test ./apigx/model/ -run TestMigrateMatrixOnConfiguredDialects`
+- 升级回滚：旧二进制（`1c981ff`，落后 HEAD 59 个提交）在**新版已迁移的库副本**上启动成功、`/api/status` 200、登录 200，且回滚前后我方新表指纹逐项一致（`usage_events=81 async_tasks=10 channels=166 users=8`）
+- 回归（更早一轮）：`apigx/model`、`apigx/api`、`apigx/relayhook`、`middleware`、`apigx/channelpool` 全 ok；前端 typecheck 0 错、share+i18n 13/13
+
+**剩余风险**：
+1. **MySQL 整机不可用**：该实例 `default-storage-engine=MyISAM` ⇒ 底座自身表建不出来（`Error 1071`）⇒ 需把 `my.ini` 改为 `InnoDB`（详见 README §七 A1）；
+2. 宿主 `C:` 仅剩约 2.8 GB ⇒ 底座 503 守护会间歇触发；
+3. 计划内未做：`perf_metrics` 看板页、外部告警通道、UI 那一轮；
+4. 验收残留 C1–C8（详见 README §七）。
+
+**流程合规说明**：本轮起补记 —— 前几轮（MySQL 修复、回滚演练）只提交了代码与台账，**漏了 PROJECT_STATUS 序号条目**，本条一并补齐；`codebase-memory-mcp` 在本会话**不可用**（工具集中没有该 MCP），按 skill §1 的允许项跳过并在此说明。
 ### [020] 2026-09-18 T4.5 + T4.6 收口：阶段 4 验收表逐条归档完成
 
 **做了什么**：把计划书 §11 阶段 4 验收表（**L650–L680，实为 31 行**，含我拆开的多 Key/指定渠道等行）
