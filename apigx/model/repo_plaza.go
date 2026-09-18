@@ -101,8 +101,36 @@ func projectCapabilities(declared Capability) (Capability, []string) {
 	return effective, unverified
 }
 
+// plazaVisibilityPredicate 返回"某浏览者能否看见该广场条目"的 SQL 条件（**列表与详情共用一处**，
+// 计划书明确要求两者判据一致；两处各写一份迟早会分叉）。
+//
+// 可见 = 以下任一：
+//  1. 分组**公开**（§4「访问控制：公开」）；
+//  2. 该分组或**该供给**上存在**未过期**的授权（§4「指定用户 / 邀请兑换」，§7）。
+//
+// 授权到期即失效（expires_at = 0 表示不过期）——对应"访问撤销与到期"。
+//
+// **刻意不含"本人所有"**：广场是**发现面**；分享者看自己的东西走「我的分享」页。
+// 把所有者本人的私有分组也塞进广场，既与"广场只暴露公开/受邀"的既有约定冲突
+// （既有用例 TestPlazaOnlyExposesPublishedAndPublic 正是如此断言的），也让"私有"名不副实。
+func plazaVisibilityPredicate(viewerUserID int64) (string, []any) {
+	grantTable := Grant{}.TableName()
+	now := common.GetTimestamp()
+	condition := "(g.default_visibility = ?" +
+		" OR EXISTS (SELECT 1 FROM " + grantTable + " AS gr" +
+		" WHERE gr.subject_type = ? AND gr.subject_id = ?" +
+		" AND (gr.expires_at = 0 OR gr.expires_at > ?)" +
+		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))"
+	args := []any{
+		ShareGroupVisibilityPublic,
+		GrantSubjectUser, viewerUserID, now,
+		GrantResourceGroup, GrantResourceOffering,
+	}
+	return condition, args
+}
+
 // ListPlazaItems 列出广场条目（已发布 + 分组公开），按更新时间倒序。
-func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) {
+func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]PlazaItem, int64, error) {
 	if db == nil {
 		return nil, 0, errors.New("apigxmodel: nil db")
 	}
@@ -121,8 +149,10 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 	query := db.Table(offeringTable+" AS o").
 		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL").
 		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL").
-		Where("o.deleted_at IS NULL AND o.status = ?", OfferingStatusPublished).
-		Where("g.default_visibility = ?", ShareGroupVisibilityPublic)
+		Where("o.deleted_at IS NULL AND o.status = ?", OfferingStatusPublished)
+
+	visibility, visibilityArgs := plazaVisibilityPredicate(viewerUserID)
+	query = query.Where(visibility, visibilityArgs...)
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -198,7 +228,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 }
 
 // GetPlazaItem 按供给的对外 public_id 取详情（判据与列表一致：已发布 + 分组公开）。
-func GetPlazaItem(db *gorm.DB, offeringPublicID string) (*PlazaItem, error) {
+func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*PlazaItem, error) {
 	if db == nil || offeringPublicID == "" {
 		return nil, errors.New("apigxmodel: offering public id is required")
 	}
@@ -221,8 +251,19 @@ func GetPlazaItem(db *gorm.DB, offeringPublicID string) (*PlazaItem, error) {
 	if err := db.Where("id = ?", channel.ShareGroupID).First(&group).Error; err != nil {
 		return nil, ErrNotFound
 	}
+	// 可见性与**列表同源**：公开，或该分组/该供给上有未过期授权（**不含本人所有**，理由见列表判据注释）。
 	if group.DefaultVisibility != ShareGroupVisibilityPublic {
-		return nil, ErrNotFound
+		allowedGroup, err := GrantExistsForResource(db, GrantSubjectUser, viewerUserID, GrantResourceGroup, group.ID, 0)
+		if err != nil {
+			return nil, err
+		}
+		allowedOffering, err := GrantExistsForResource(db, GrantSubjectUser, viewerUserID, GrantResourceOffering, offering.ID, 0)
+		if err != nil {
+			return nil, err
+		}
+		if !allowedGroup && !allowedOffering {
+			return nil, ErrNotFound
+		}
 	}
 
 	effective, unverified := projectCapabilities(offering.CapabilityOf())

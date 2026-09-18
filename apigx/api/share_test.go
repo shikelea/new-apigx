@@ -1208,3 +1208,69 @@ func TestAliasConfirmationWorkflow(t *testing.T) {
 	require.True(t, okModel)
 	assert.Equal(t, "bulk-name-x", canonical.APIModelID)
 }
+
+// 授权必须**真正生效**：受限（非公开）分组对"受邀者"可见，对陌生人**不可见**。
+//
+// 这是"邀请兑换"有没有意义的判据 —— 只把授权写进表、广场仍只放行公开分组，等于没做。
+// 列表与详情**两条路径都覆盖**（计划书要求两者判据一致）。
+func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, invited, stranger int64 = 9601, 9602, 9603
+
+	// 受限分组（1=受限；广场默认只放行公开=2）
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "受限组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: 1}
+	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座受限", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
+
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"limited-model"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+	publicID := body["data"].(map[string]any)["public_id"].(string)
+
+	// 先配价再发布（产品规则：未配价不得发布）
+	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+
+	// ① 未授权时：陌生人看不到（列表空），详情 404
+	_, body = env.do(t, http.MethodGet, "/api/plaza", stranger, "")
+	assert.Empty(t, body["data"].(map[string]any)["items"], "受限分组未授权前不得出现在陌生人的广场")
+	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, stranger, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "受限供给的详情对未授权者不存在")
+
+	// ② 所有者**也不**在广场看到它 —— 广场是"公开 or 受邀"的发现面，
+	//    分享者看自己的东西走「我的分享」页（既有用例 TestPlazaOnlyExposesPublishedAndPublic
+	//    对"私有组"就是这条口径；此处对"受限组"保持一致）。
+	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	assert.Empty(t, items, "广场只放行公开或受邀，所有者应去「我的分享」看自己的受限供给")
+
+	// ③ 授予访问权（指定用户，§4）：受邀者可见
+	grant := apigxmodel.Grant{
+		SubjectType: apigxmodel.GrantSubjectUser, SubjectID: invited,
+		ResourceType: apigxmodel.GrantResourceGroup, ResourceID: group.ID,
+		ScopeKind: apigxmodel.GrantScopeAssigned, GrantedByUserID: owner,
+	}
+	require.NoError(t, env.db.Create(&grant).Error)
+
+	_, body = env.do(t, http.MethodGet, "/api/plaza", invited, "")
+	items, _ = body["data"].(map[string]any)["items"].([]any)
+	require.NotEmpty(t, items, "被授权者应当看得见受限分组的供给")
+	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, invited, "")
+	assert.Equal(t, http.StatusOK, rec.Code, "被授权者的详情应当可见")
+
+	// ④ 陌生人仍不可见（授权是**按主体**的，不是"一旦有人被授权就公开"）
+	_, body = env.do(t, http.MethodGet, "/api/plaza", stranger, "")
+	assert.Empty(t, body["data"].(map[string]any)["items"], "授权只对受邀者生效，陌生人仍不可见")
+	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, stranger, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// ⑤ 授权**到期**后不可见（撤销与到期）
+	require.NoError(t, env.db.Model(&apigxmodel.Grant{}).Where("id = ?", grant.ID).Update("expires_at", 1000).Error)
+	_, body = env.do(t, http.MethodGet, "/api/plaza", invited, "")
+	assert.Empty(t, body["data"].(map[string]any)["items"], "授权到期后不应再可见")
+}

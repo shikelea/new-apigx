@@ -1269,7 +1269,9 @@ func (h *handler) fetchUpstreamModels(c *gin.Context) {
 // 分享者声明但尚未具备的单独列在 `unverified_capabilities` 里如实展示——
 // 既不冒充可用，也不隐瞒（计划书「只启用已完成能力」）。
 func (h *handler) listPlaza(c *gin.Context) {
-	if _, valid := h.ownerID(c); !valid {
+	// 保留浏览者身份：广场的可见性判定需要它（公开 / 本人所有 / 有未过期授权）
+	viewer, valid := h.ownerID(c)
+	if !valid {
 		return
 	}
 	page, pageSize := 1, 20
@@ -1283,7 +1285,7 @@ func (h *handler) listPlaza(c *gin.Context) {
 			pageSize = parsed
 		}
 	}
-	items, total, err := apigxmodel.ListPlazaItems(h.db, pageSize, (page-1)*pageSize)
+	items, total, err := apigxmodel.ListPlazaItems(h.db, viewer, pageSize, (page-1)*pageSize)
 	if err != nil {
 		failFromRepo(c, err)
 		return
@@ -1296,11 +1298,12 @@ func (h *handler) listPlaza(c *gin.Context) {
 }
 
 func (h *handler) getPlazaItem(c *gin.Context) {
-	if _, valid := h.ownerID(c); !valid {
+	viewer, valid := h.ownerID(c)
+	if !valid {
 		return
 	}
 	publicID := c.Param("publicId")
-	item, err := apigxmodel.GetPlazaItem(h.db, publicID)
+	item, err := apigxmodel.GetPlazaItem(h.db, viewer, publicID)
 	if err != nil {
 		failFromRepo(c, err)
 		return

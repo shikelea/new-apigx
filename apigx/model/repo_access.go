@@ -276,3 +276,31 @@ func SubjectCanAccessResource(db *gorm.DB, subjectType int, subjectID int64, res
 	}
 	return count > 0, nil
 }
+
+// GrantExistsForResource 只判断"该主体在该资源上是否有未过期授权"，**不含所有者放行**。
+//
+// 与 SubjectCanAccessResource 的分工（刻意不合并）：
+//   - 前者用于**广场可见性**：广场是发现面，"公开 or 受邀"才是它的口径，
+//     分享者本人的私有资源不该出现在广场（他有「我的分享」页）；
+//   - 后者用于**访问判定**：所有者本人当然有权访问自己的资源。
+//
+// 若合并成一个"owner-aware"的函数，广场会顺手把所有者私有资源也显示出来 —— 口径就被悄悄改掉了。
+func GrantExistsForResource(db *gorm.DB, subjectType int, subjectID int64, resourceType int, resourceID int64, now int64) (bool, error) {
+	if db == nil {
+		return false, errors.New("apigxmodel: nil db")
+	}
+	if subjectID <= 0 || resourceID <= 0 {
+		return false, nil
+	}
+	if now <= 0 {
+		now = common.GetTimestamp()
+	}
+	var count int64
+	if err := db.Model(&Grant{}).
+		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND (expires_at = 0 OR expires_at > ?)",
+			subjectType, subjectID, resourceType, resourceID, now).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
