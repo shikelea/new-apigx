@@ -1,0 +1,225 @@
+From 541f4e591770122f691d78ffe86fbaf4e0680894 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 11:36:32 +0800
+Subject: [PATCH 115/115] =?UTF-8?q?feat(share):=20=E3=80=8C=E6=88=91?=
+ =?UTF-8?q?=E7=9A=84=E5=88=86=E4=BA=AB=E3=80=8D=E8=A1=A5=E4=B8=8A=E6=96=B0?=
+ =?UTF-8?q?=E5=BB=BA=E5=88=86=E7=BB=84=E5=85=A5=E5=8F=A3=EF=BC=88=E5=A4=8D?=
+ =?UTF-8?q?=E7=94=A8=E5=BA=95=E5=BA=A7=20Dialog=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- share/api: createShareGroup（POST /api/apigx/share-groups）
+- 新增 GroupCreateDialog：名称/简介/**可见性**（公开 / 受限（凭邀请或指定用户）/ 仅自己），
+  与编辑弹窗同构，复用底座 Dialog/Input/Label/Textarea
+- share/index: 分组卡片标题行加「新建分享分组」按钮 + 挂载弹窗；刷新**复用**编辑弹窗现成的 onSaved 回调
+- i18n 一律写进 translation 命名空间（上轮教训），并在脚本里校验顶层只应有 translation
+**过程如实记录**：① 正则误抓多行 onSaved 导致注入被截断（typecheck 抓到，已按精确文本修复）；
+  ② 类型导入判断条件误匹配 ShareGroupListResponse 导致跳过修复（已改为精确匹配）
+检查: typecheck 0 错 / oxlint 0 错 / share 用例 10/10 / build ✅
+---
+ web/src/features/share/api.ts                 |  19 ++--
+ .../share/components/group-create-dialog.tsx  | 103 ++++++++++++++++++
+ web/src/features/share/index.tsx              |  18 ++-
+ 3 files changed, 130 insertions(+), 10 deletions(-)
+ create mode 100644 web/src/features/share/components/group-create-dialog.tsx
+
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 5a503c2..1f7e816 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -17,14 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import { api } from '@/lib/api'
+ 
+-import type {
+-  CapacityPolicyPayload,
+-  ChannelDetailResponse,
+-  OfferingListResponse,
+-  ShareChannelListResponse,
+-  ShareGroupListResponse,
+-  UpstreamKeyListResponse,
+-} from './types'
++import type { CapacityPolicyPayload, ChannelDetailResponse, OfferingListResponse, ShareChannelListResponse, ShareGroup, ShareGroupListResponse, UpstreamKeyListResponse } from './types'
+ 
+ // 「我的分享」数据访问层：只做请求与类型，错误交给 Query 失败回调（规范 3.9）。
+ export async function getShareGroups(): Promise<ShareGroupListResponse> {
+@@ -78,6 +71,16 @@ export async function submitOffering(offeringId: number): Promise<{ success: boo
+ }
+ 
+ // 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
++/** 创建分享分组（§4：分组是分享的组织单位，可见性在此设定）。 */
++export async function createShareGroup(input: {
++  name: string
++  description?: string
++  default_visibility?: number
++}): Promise<{ success: boolean; data?: ShareGroup }> {
++  const res = await api.post('/api/apigx/share-groups', input)
++  return res.data
++}
++
+ export async function updateShareGroup(
+   groupId: number,
+   input: { name: string; description: string }
+diff --git a/web/src/features/share/components/group-create-dialog.tsx b/web/src/features/share/components/group-create-dialog.tsx
+new file mode 100644
+index 0000000..9f35530
+--- /dev/null
++++ b/web/src/features/share/components/group-create-dialog.tsx
+@@ -0,0 +1,103 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useMutation } from '@tanstack/react-query'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { Dialog } from '@/components/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import { Textarea } from '@/components/ui/textarea'
++
++import { createShareGroup } from '../api'
++
++/**
++ * 新建分享分组（§4「分享分组」）。
++ *
++ * 可见性即访问控制的口径：公开 / 受限（凭邀请或指定用户）/ 仅自己；
++ * "指定用户"与"邀请兑换"不需要在创建时选 —— 它们由后续的授权动作决定。
++ */
++export function GroupCreateDialog(props: { open: boolean; onOpenChange: (open: boolean) => void; onSaved: () => void }) {
++  const { t } = useTranslation()
++  const [name, setName] = useState('')
++  const [description, setDescription] = useState('')
++  const [visibility, setVisibility] = useState('2')
++
++  const create = useMutation({
++    mutationFn: () =>
++      createShareGroup({
++        name: name.trim(),
++        description: description.trim(),
++        default_visibility: Number(visibility),
++      }),
++    onSuccess: () => {
++      setName('')
++      setDescription('')
++      setVisibility('2')
++      props.onOpenChange(false)
++      props.onSaved()
++    },
++  })
++
++  const invalid = name.trim() === '' || name.trim().length > 64
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('New share group')}
++      contentClassName='sm:max-w-lg'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button disabled={invalid || create.isPending} onClick={() => create.mutate()}>
++            {t('Create')}
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-4'>
++        <div className='space-y-2'>
++          <Label>{t('Name')}</Label>
++          <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} />
++          {invalid ? <p className='text-destructive text-xs'>{t('Name is required (1-64 characters)')}</p> : null}
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Description')}</Label>
++          <Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} />
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Visibility')}</Label>
++          <select
++            className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
++            value={visibility}
++            onChange={(event) => setVisibility(event.target.value)}
++          >
++            <option value='2'>{t('Public')}</option>
++            <option value='1'>{t('Limited (invite or assigned users)')}</option>
++            <option value='0'>{t('Only me')}</option>
++          </select>
++        </div>
++      </div>
++    </Dialog>
++  )
++}
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index d5dca5e..abc3638 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ 
+ import { getShareChannels, getShareGroups } from './api'
++import { GroupCreateDialog } from './components/group-create-dialog'
+ import { GroupEditDialog } from './components/group-edit-dialog'
+ import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/labels'
+ import type { ShareChannel, ShareGroup } from './types'
+@@ -38,6 +39,7 @@ export function MyShares() {
+   const { t } = useTranslation()
+   const queryClient = useQueryClient()
+   const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
++  const [creatingGroup, setCreatingGroup] = useState(false)
+ 
+   const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
+   const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
+@@ -114,7 +116,12 @@ export function MyShares() {
+         <div className='space-y-6'>
+           <Card>
+             <CardHeader>
+-              <CardTitle>{t('share.groups')}</CardTitle>
++              <div className='flex items-center justify-between gap-3'>
++          <CardTitle>{t('share.groups')}</CardTitle>
++            <Button size='sm' onClick={() => setCreatingGroup(true)}>
++              {t('New share group')}
++            </Button>
++          </div>
+             </CardHeader>
+             <CardContent>
+               {groups.length === 0 ? (
+@@ -138,7 +145,14 @@ export function MyShares() {
+             </CardContent>
+           </Card>
+         </div>
+-        <GroupEditDialog
++        <GroupCreateDialog
++          open={creatingGroup}
++          onOpenChange={setCreatingGroup}
++          onSaved={() => {
++            void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
++          }}
++        />
++      <GroupEditDialog
+           group={editingGroup}
+           open={editingGroup !== null}
+           onOpenChange={(next) => {
+-- 
+2.53.0.windows.1
+
