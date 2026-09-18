@@ -59,7 +59,7 @@
 |---|---|---|---|
 | 21 | 异步任务后续查询、凭据轮换或移除 ⇒ 不随机换 Key，不跨用户/账户读取任务，历史消耗归属保留 | ⚠️ **"不跨用户读任务"已实测通过**；另两半缺写入方 | **不跨用户读任务 ✅ 实测**：用第 89 轮提交的**真实**视频任务（root 名下），owner 用自己的平台 Key 查 ⇒ **200 可读**；换另一个账号（`apigxuserb`，3 把平台 Key）用**自己的** Key 查**同一个 task id** ⇒ **400 `task_not_exist`**（不可读，且**不泄露"是否存在"**）。代码位置：`model/task.go` 的任务查询全部带 `user_id` 限定（L273/319/427/442/459/598）。**不随机换 Key**：承载字段已建模（`AsyncTask.UpstreamKeyCredentialVersion` 注释即"本次任务由哪个凭据版本服务"），但全仓**无写入方**；底座轮询是否复用提交时的 Key **我未确认，故不下结论**。**历史消耗归属**：`usage_events` 现已带 `upstream_key_id`（[016]），但**任务路径未记录**（按"拿不到用量就不写"有意为之）；本层 `apigx_async_tasks` 实测 0 行 ⇒ 属"schema 已建模、写入方未接"的同一族问题 |
 | 22 | 长流、进程崩溃和异步任务持续运行 ⇒ 槽位正常续租/归还/恢复，不泄漏也不提前重复分配 | ⚠️ 部分覆盖 | `TestLeaseExpiryRecoversCapacity`、`TestRenewExtendsLease`、`TestReconcileReleasesStaleAttempts`、`TestReconcileIgnoresFreshAttempts`；**缺**真实"进程被杀"的演练 |
-| 23 | 预留之后转发器进入原生 Key 选择路径 ⇒ 仍使用已确定的 Key，计量/价格/预留对象一致 | ⚠️ 部分覆盖 | `TestApplyChannelPoolProjectsKeysIntoBaseChannel`（投影）、`TestRecordKeyOutcomeDoesNotTouchBaseChannel`；**缺**"原生路径下仍用已定 Key"的断言 |
+| 23 | 预留之后转发器进入原生 Key 选择路径 ⇒ 仍使用已确定的 Key，计量、价格和预留对象保持一致 | ✅ 已有测试证据（证据链完整，**无需改代码**） | ① **单一写入点**：`ContextKeyChannelMultiKeyIndex` 全仓**只有** `middleware/distributor.go:720` 一处写入（我专门核查过"是否存在第二处写入" ⇒ 无）⇒ 一次请求内该索引**不会变**；② **同一份消费**：`relay/common/relay_info.go:257` 把它复制进 `relayInfo`，我们四个 hook（`key_stats`/`outcome`/`capacity_hook`/`usage_record`）与转发器读的是**同一个值**；③ **可审计**：底座把该索引写入请求日志（`service/log_info_generate.go:88` 的 `multi_key_index`）；④ **真实请求已证**：实测 `apigx_usage_events.upstream_key_id=185` 与当时**实际执行**的 Key 一致（[016] 的实测数据）；⑤ **稳定映射**：`TestCachedMappingStillTranslatesCorrectly`（"缓存路径下索引 1 仍应翻译到 stable-b"）、`TestMappingCacheHitsAndInvalidates`。**范围界定**：重试时按设计**换 Key**（`RetryReason=2` Key 冷却）不属本行 —— 本行指**单次尝试内**与预留对象保持一致 |
 | 24 | Redis 丢失或持久写入失败 ⇒ 停止新准入，恢复对账后开放；未知上游任务不因租约到期被判定已停止 | ✅ 已有测试证据 | `TestReserveFailsClosedWithoutRedis`（**失败关闭**）、`TestLeaseExpiryRecoversCapacity`、`TestReconcileReleasesStaleAttempts` |
 | 25 | 分享者暂停与撤销授权 ⇒ 新请求及时停止，已有任务按定义处理 | ✅ 已有测试证据 | **新增** `TestSuspendedGroupStopsServing`（分组置为已暂停 ⇒ `AssembleCandidates` 返回空，实测 PASS）；另有 `TestSetChannelCapacityPolicy`、`TestUpstreamKeyStatusAndValidation` |
 | 26 | 普通撤权、账户封禁、Key 紧急吊销 ⇒ 按生命周期表区分历史访问与新增调用，不泄露其他用户对象 | ✅ 已有测试证据 | **新增回归测试** `TestUserAuthRejectsDisabledUser`（停用用户 ⇒ **401 `AUTH_USER_DISABLED`**，实测 PASS）；另有 `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestDeleteUpstreamKeyTwice`；代码位置 `middleware/auth.go` L56–L57 |
@@ -488,3 +488,24 @@ event_uid = u:<请求ID>:<维度>   ⇒ 幂等
 
 **不做超出证据的归因**：差异已定位到**造数路径**（API 夹具 vs 仓储直建），但**具体是哪一列/哪一步**不同，
 我没有逐列确证 ⇒ 只记为"造数路径差异"，并列为后续小项（若要彻底搞清，可在两条路径上打印分组与供给的关键列做对比）。
+---
+
+## 22. #23 收口（预留与出站用同一把 Key）
+
+**计划书要求**：预留之后转发器进入原生 Key 选择路径 ⇒ 仍使用已确定的 Key，计量、价格和预留对象保持一致。
+
+**结论**：✅ **成立**，且**无需改代码**（是"接线方式"决定的，本行属于"用证据说清"而非"补实现"）。
+
+**证据链（五条，可独立复核）**：
+1. **单一写入点**：`constant.ContextKeyChannelMultiKeyIndex` 全仓**只有** `middleware/distributor.go:720` 一处 `SetContextKey`
+   ⇒ 一次请求内索引不变（我专门搜过"是否有第二处写入"，结果为空）；
+2. **同一份消费**：`relay/common/relay_info.go:257` 把它复制进 `relayInfo`；我们的四个消费点
+   （`key_stats.go`、`outcome.go`、`capacity_hook.go`、`usage_record.go`）与转发器路径读的是同一个索引；
+3. **可审计**：`service/log_info_generate.go:88` 把 `multi_key_index` 写进请求日志的 admin 信息；
+4. **真实请求已证**：`apigx_usage_events.upstream_key_id=185` 与当时**实际执行**的 Key 一致
+   （[016] 中的实测行：`key=185 rule=12 ... state=0`）；
+5. **索引→Key 的映射稳定**：`TestCachedMappingStillTranslatesCorrectly`（缓存路径下索引 1 仍翻译到 `stable-b`）、
+   `TestMappingCacheHitsAndInvalidates`。
+
+**范围界定（不扩大）**：重试时按设计**会换 Key**（`RetryReason=2` Key 冷却、`=1` 鉴权失效）——
+那属于"切换"语义，**不是**本行的"仍使用已确定的 Key"；本行指**单次尝试内**与预留、计量对象保持一致。
