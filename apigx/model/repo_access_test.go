@@ -172,3 +172,57 @@ func TestSubjectCanAccessResource(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "授权到期后不可访问")
 }
+
+// 注册邀请（§5 邀请准入）：**补偿回补**必须真的把名额还回去，且类型不得串用（§10.1）。
+//
+// 回补的用途：注册流程里"先核销、后建用户"，建用户失败时要把名额还回去（失败不该消耗邀请码）。
+func TestRegistrationInviteRefundRestoresUse(t *testing.T) {
+	db := newRepoDB(t)
+	const adminUser int64 = 9901
+
+	token, invite, err := CreateRegistrationInvite(db, adminUser, 1, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, token)
+	assert.Equal(t, InviteTypeRegistration, invite.InviteType)
+
+	// 先当作资源邀请核销 ⇒ 必须失败（两类邀请校验逻辑独立，不能串用）
+	if _, err := RedeemAccessInvite(db, token, 9902); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("注册邀请码不得被当作资源邀请核销，实际: %v", err)
+	}
+
+	// 正常核销一次 ⇒ 用尽
+	claimed, err := RedeemRegistrationInvite(db, token, 0)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	var afterRedeem Invite
+	require.NoError(t, db.Where("id = ?", invite.ID).First(&afterRedeem).Error)
+	assert.EqualValues(t, 1, afterRedeem.UsedCount)
+	assert.Equal(t, InviteStatusExhaust, afterRedeem.Status)
+
+	// 已用尽 ⇒ 再核销必须失败
+	if _, err := RedeemRegistrationInvite(db, token, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("已用尽的注册邀请码不得再核销，实际: %v", err)
+	}
+
+	// 补偿回补 ⇒ 名额归还、状态回到有效、**并且真的可以再次使用**
+	require.NoError(t, RefundRegistrationInvite(db, invite.ID, 0))
+
+	var afterRefund Invite
+	require.NoError(t, db.Where("id = ?", invite.ID).First(&afterRefund).Error)
+	assert.EqualValues(t, 0, afterRefund.UsedCount, "回补后使用次数应回到 0")
+	assert.Equal(t, InviteStatusActive, afterRefund.Status, "回补后应重新可用")
+
+	again, err := RedeemRegistrationInvite(db, token, 0)
+	require.NoError(t, err, "回补之后应当可以再次核销")
+	assert.NotNil(t, again)
+
+	// 反向隔离：资源邀请码不得被当作注册邀请核销
+	group := &ShareGroup{OwnerUserID: adminUser, Name: "隔离验证组", DefaultVisibility: ShareGroupVisibilityPublic, PublishStatus: 1}
+	require.NoError(t, CreateShareGroup(db, group))
+	accessToken, _, err := CreateAccessInvite(db, adminUser, InviteTargetGroup, group.ID, 1, 0, true)
+	require.NoError(t, err)
+	if _, err := RedeemRegistrationInvite(db, accessToken, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("资源邀请码不得被当作注册邀请核销，实际: %v", err)
+	}
+}

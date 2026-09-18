@@ -39,9 +39,11 @@ import (
 
 // createAccessInviteRequest 发放邀请（资源访问邀请，或注册邀请）。
 type createAccessInviteRequest struct {
-	// InviteType 0=注册邀请（§5「邀请准入」）/ 1=资源访问邀请（默认）。
+	// InviteType 0=注册邀请（§5「邀请准入」）/ 省略或 1=资源访问邀请。
+	// 用**指针**而不是 int：省略时必须是"资源邀请"（向后兼容），
+	// 若用零值 int，省略字段会静默变成"注册邀请"——那是危险的默认值。
 	// 两类邀请**校验逻辑独立**（§10.1），因此走同一个入口但分支处理。
-	InviteType      int   `json:"invite_type"`
+	InviteType      *int  `json:"invite_type"`
 	TargetScopeType int   `json:"target_scope_type"` // 1=分享分组 / 2=模型供给
 	TargetScopeID   int64 `json:"target_scope_id"`
 	MaxUses         int64 `json:"max_uses"`   // 0=不限次数
@@ -66,7 +68,7 @@ func (h *handler) createAccessInvite(c *gin.Context) {
 	}
 	// 注册邀请（§5）：**只由平台侧发放**，且与资源邀请的校验逻辑完全分开。
 	// 它不绑定任何资源、也不携带任何角色信息 ⇒ 不可能借邀请码提权（§10.1）。
-	if req.InviteType == apigxmodel.InviteTypeRegistration {
+	if req.InviteType != nil && *req.InviteType == apigxmodel.InviteTypeRegistration {
 		if !requirePlatformReviewer(c) {
 			return
 		}
