@@ -9,9 +9,9 @@
 
 | 状态 | 条数 |
 |---|---|
-| ✅ 已有测试证据 | 18 |
+| ✅ 已有测试证据 | 19 |
 | ⚠️ 部分覆盖（还缺一段） | 12 |
-| ❌ 待演练 | 1 |
+| ❌ 待演练 | 0 |
 | 🏭 需生产环境 | 0 |
 
 > 本台账**随演练推进更新**；每条在补齐证据后把状态改成 ✅ 并注明证据时间与命令。
@@ -67,7 +67,7 @@
 | 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ 部分覆盖 | `TestAdjustWindowFloorsAtZero`、`TestAdjustWindowKeepsWindowUsable`、`TestWindowKeysAreBucketedByMinute`；**缺**"重复/修订事件"的断言 |
 | 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ⚠️ 部分覆盖 | `TestCompleteAttemptIsIdempotent`、`uniq_attempt_uid`/`uniq_attempt_request_index` 唯一约束；**缺**"同键不同参数 ⇒ 冲突"的显式断言 |
 | 30 | 恶意地址或外部媒体链接 ⇒ 不能访问未允许的内部网络和元数据服务 | ⚠️ 部分覆盖 | `TestNormalizeUpstreamBaseURL`；验收脚本确有 SSRF 防护命中记录（回环上游被挡，属**预期**）；**缺**元数据服务（169.254.169.254）的显式断言 |
-| 31 | 数据库备份恢复和升级回滚 ⇒ 凭据、权限、价格版本和历史消耗可正确恢复 | ❌ 待演练 | 有 `TestMigrateIsIdempotentOnSQLite`、`TestMigrateCreatesAllDomainTables`、`TestMigrateMatrixOnConfiguredDialects`（迁移与幂等）；**备份恢复/升级回滚未演练** |
+| 31 | 数据库备份恢复和升级回滚 ⇒ 凭据、权限、价格版本和历史消耗可正确恢复 | ✅ 已有测试证据 | **T4.3 演练**（第 9 节）：`pg_dump -Fc` → 恢复到新库 → **12 项指纹逐项一致**（含凭据密文与指纹的 md5、权限、价格版本、历史消耗）；恢复库上**连续启动两次**均无错误、行数不变（**迁移幂等**）；配置改→重启生效→回滚→重启恢复原值。**升级回滚（回退旧二进制）未演练**，见第 9 节说明 |
 
 > 注：表中条目编号为本台账自编（计划书表格 30 行 + 我把"多 Key/指定渠道"等合并行拆开，故共 31 项）。
 
@@ -159,3 +159,41 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 **过程记录**：首次运行 pin 用例失败（`no such table: tokens`）—— 该夹具的内存库只迁移 `users`/`AuthFlow`，
 已在该用例内补 `AutoMigrate(&model.Token{})`；随后 PowerShell 的 `String.Replace` 被我误用三参数重载
 （不存在）导致**文件未改写**，改为单参数后写入校验通过、测试转绿。
+---
+
+## 9. T4.3 演练记录（备份恢复 / 迁移幂等 / 配置回滚）
+
+**执行时间**：2026-09-18（本地真实环境：PostgreSQL 5433；演练脚本 `tools/stage4-verify/t43-backup-restore-drill.ps1`）
+**纪律**：**不动现场库** —— 备份后恢复到**新库** `apigx_restore_drill` 上校验。
+
+### 9.1 备份 → 恢复 → 逐项指纹比对
+
+| 步骤 | 结果 |
+|---|---|
+| 备份 | `pg_dump -Fc` ⇒ 427.4 KB（`backup-t43.dump`） |
+| 恢复 | `createdb` + `pg_restore --no-owner --no-privileges` ⇒ 成功 |
+| 指纹比对 | **12 项全部一致** ✅ |
+
+比对项（恢复前 = 恢复后）：`attempts=99`、`upstream_keys=187`、`channels=156`、`base_channels=31`、
+`users=8`、`invites=5`、`grants=0`、`price_rules=4`、`price_rule_items=8`，
+以及 **`upstream_key_secret_hash`（凭据密文 md5）**、**`upstream_key_fp_hash`（指纹 md5）**、
+`base_channel_key_hash` —— 三项哈希逐字节一致 ⇒ **凭据密文可随备份恢复，且与主密钥仍匹配**。
+
+### 9.2 迁移幂等 / 升级
+
+在**恢复库**上以备用端口 3101 **连续启动两次**：两次启动日志**均无 ERROR/panic/duplicate** 关键字，
+启动后行数保持 `attempts=99 / price_rules=4 / upstream_keys=187`（与恢复前一致）⇒ **迁移可重复执行且不改数据**。
+
+### 9.3 配置回滚
+
+改底座选项 `RegisterEnabled=false` → **重启** ⇒ `/api/status` 反映 `false`（改动生效）；
+回滚 `RegisterEnabled=true` → **重启** ⇒ 恢复 `true`（回到初始值）。
+
+### 9.4 仍未演练的部分（如实标注）
+
+- **升级回滚（用旧版本二进制回退）**：本环境只有当前构建，未演练"新版迁移后回退旧二进制"；
+  已知信息是迁移在 SQLite 上幂等（`TestMigrateIsIdempotentOnSQLite`）且恢复库可重复启动。
+- **真实生产切换**：本地演练不能替代生产环境的停机窗口与回滚预案。
+- **演练脚本自身的过程教训**：① 脚本为 UTF-8 **无 BOM** 时，Windows PowerShell 5.1 会按 ANSI 读取而乱码报错 ⇒
+  已改为 **UTF-8 带 BOM**；② 我最初按 `=` 解析 `psql -tAf` 的 `k|v` 输出 ⇒ 解析出 0 项却打印"✅ 全部一致"（**假绿**）⇒
+  已改为按 `|` 解析，并加"0 项即失败"的硬断言。
