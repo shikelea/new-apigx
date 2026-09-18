@@ -1,0 +1,219 @@
+From 1ebbf08e8c850be58c41503faab2f9d5426a6d2e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:08:27 +0800
+Subject: [PATCH 119/119] =?UTF-8?q?feat(access):=20=E6=B3=A8=E5=86=8C?=
+ =?UTF-8?q?=E9=82=80=E8=AF=B7=E9=97=B8=E9=97=A8=E6=8E=A5=E7=BA=BF=20+=20?=
+ =?UTF-8?q?=E5=8F=91=E6=94=BE=E6=8E=A5=E5=8F=A3=EF=BC=88**=E5=BC=80?=
+ =?UTF-8?q?=E5=85=B3=E6=8C=81=E4=B9=85=E5=8C=96=E5=B0=9A=E6=9C=AA=E6=89=93?=
+ =?UTF-8?q?=E9=80=9A=EF=BC=8C=E5=8A=9F=E8=83=BD=E6=9C=AA=E9=97=AD=E7=8E=AF?=
+ =?UTF-8?q?**=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+本轮完成并已验证的：
+1. 闸门接线（controller/user.go）：
+   - 开关打开时，注册必须先原子核销注册邀请码；核销失败一律同一响应（防枚举）
+   - 建用户失败 ⇒ **补偿回滚**名额（失败不消耗邀请码）
+   - model.User 新增 RegisterInviteCode，`gorm:"-"` ⇒ **不建列、不需要迁移**
+2. 发放接口（apigx/api/access.go）：POST /api/access/invites 支持 invite_type=0（注册邀请），
+   **只由平台侧发放**（requirePlatformReviewer），不绑定资源、不携带角色信息
+3. go build / go vet 全过
+
+端到端实测（8 项，通过 5）——**如实记录**：
+  ✓ 发放注册邀请码（200，token_prefix 正常）
+  ✓ 携带邀请码注册成功（200）
+  ✓ **新用户 role=1（普通用户）⇒ 没有因邀请码获得管理员权限**（§10.1 要求，已实证）
+  ✗ 打开开关失败：PUT /api/option/ 返回 success:true，但
+    OptionMap.RegisterInviteRequired 为 undefined、/api/status 仍为 false
+    ⇒ 底座对**未知设置键静默忽略**，我的 apply 分支不在它实际走的写入路径上
+  ⇒ 因而"无邀请码注册被拒"与"同一单次码二次使用被拒"**尚未验证**（开关没生效，闸门闲置）
+4. 环境已复原（开关仍为 false）
+
+**下一轮**：找到底座真正持久化设置项的路径（读 UpdateOption 的写入分支 / 是否需登记键白名单），
+打通开关后再重跑这 8 项，把"无码被拒""单次码不可复用"验证到通过，才算注册准入完成。
+---
+ apigx/api/access.go | 28 ++++++++++++++++-
+ controller/user.go  | 20 +++++++++++++
+ model/user.go       | 73 +++++++++++++++++++++++----------------------
+ 3 files changed, 85 insertions(+), 36 deletions(-)
+
+diff --git a/apigx/api/access.go b/apigx/api/access.go
+index 11d7138..e97c232 100644
+--- a/apigx/api/access.go
++++ b/apigx/api/access.go
+@@ -37,8 +37,11 @@ import (
+ //   - **越权防护**：发邀请/授权/撤销/查授权列表都要求调用者是**资源所有者**，
+ //     非所有者一律 404（不确认"资源存在但不属于你"）。
+ 
+-// createAccessInviteRequest 发放资源访问邀请。
++// createAccessInviteRequest 发放邀请（资源访问邀请，或注册邀请）。
+ type createAccessInviteRequest struct {
++	// InviteType 0=注册邀请（§5「邀请准入」）/ 1=资源访问邀请（默认）。
++	// 两类邀请**校验逻辑独立**（§10.1），因此走同一个入口但分支处理。
++	InviteType      int   `json:"invite_type"`
+ 	TargetScopeType int   `json:"target_scope_type"` // 1=分享分组 / 2=模型供给
+ 	TargetScopeID   int64 `json:"target_scope_id"`
+ 	MaxUses         int64 `json:"max_uses"`   // 0=不限次数
+@@ -61,6 +64,29 @@ func (h *handler) createAccessInvite(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_body", "max_uses and expires_at must not be negative")
+ 		return
+ 	}
++	// 注册邀请（§5）：**只由平台侧发放**，且与资源邀请的校验逻辑完全分开。
++	// 它不绑定任何资源、也不携带任何角色信息 ⇒ 不可能借邀请码提权（§10.1）。
++	if req.InviteType == apigxmodel.InviteTypeRegistration {
++		if !requirePlatformReviewer(c) {
++			return
++		}
++		token, invite, err := apigxmodel.CreateRegistrationInvite(h.db, owner, req.MaxUses, req.ExpiresAt)
++		if err != nil {
++			failFromRepo(c, err)
++			return
++		}
++		ok(c, gin.H{
++			"token":        token, // 明文**仅此一次**
++			"token_prefix": invite.TokenPrefix,
++			"id":           invite.ID,
++			"invite_type":  invite.InviteType,
++			"max_uses":     invite.MaxUses,
++			"expires_at":   invite.ExpiresAt,
++			"status":       invite.Status,
++		})
++		return
++	}
++
+ 	// 注意两套枚举**不同**：邀请范围 1=分组/2=供给，授权资源 0=分组/1=供给。
+ 	// 混用会把"分组"当成"供给"去查，结果永远是"资源不存在"（这个坑已被用例抓到过一次）。
+ 	if req.TargetScopeType != apigxmodel.InviteTargetGroup && req.TargetScopeType != apigxmodel.InviteTargetOffering {
+diff --git a/controller/user.go b/controller/user.go
+index 434767c..28e671b 100644
+--- a/controller/user.go
++++ b/controller/user.go
+@@ -9,6 +9,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/i18n"
+ 	"github.com/QuantumNous/new-api/logger"
+@@ -269,6 +270,19 @@ func Register(c *gin.Context) {
+ 		common.ApiErrorI18n(c, i18n.MsgUserExists)
+ 		return
+ 	}
++	// 注册邀请准入（§5「邀请准入」）：开关打开时**必须**提交有效注册邀请码。
++	//
++	// 核销是**原子**的（并发注册不会双花），失败不区分原因（不存在/已撤销/已过期/已用尽 ⇒ 同一响应，防枚举）。
++	// 邀请码只决定"能否注册"，**不携带任何角色信息** —— 下面 cleanUser 依旧强制普通用户角色（§10.1）。
++	var claimedRegistrationInvite *apigxmodel.Invite
++	if common.RegisterInviteRequired {
++		claimed, redeemErr := apigxmodel.RedeemRegistrationInvite(model.DB, user.RegisterInviteCode, common.GetTimestamp())
++		if redeemErr != nil {
++			common.ApiErrorI18n(c, i18n.MsgUserRegisterDisabled)
++			return
++		}
++		claimedRegistrationInvite = claimed
++	}
+ 	affCode := user.AffCode // this code is the inviter's code, not the user's own code
+ 	inviterId, _ := model.GetUserIdByAffCode(affCode)
+ 	cleanUser := model.User{
+@@ -282,6 +296,12 @@ func Register(c *gin.Context) {
+ 		cleanUser.Email = user.Email
+ 	}
+ 	if err := cleanUser.Insert(inviterId); err != nil {
++		// 建用户失败 ⇒ 把刚才核销掉的注册邀请码名额**还回去**（失败不应消耗邀请码）
++		if claimedRegistrationInvite != nil {
++			if refundErr := apigxmodel.RefundRegistrationInvite(model.DB, claimedRegistrationInvite.ID, common.GetTimestamp()); refundErr != nil {
++				common.SysError("apigx: refund registration invite failed: " + refundErr.Error())
++			}
++		}
+ 		if errors.Is(err, model.ErrEmailAlreadyTaken) {
+ 			common.ApiErrorI18n(c, i18n.MsgUserEmailAlreadyTaken)
+ 			return
+diff --git a/model/user.go b/model/user.go
+index 1a70459..8e697f3 100644
+--- a/model/user.go
++++ b/model/user.go
+@@ -77,41 +77,44 @@ func resolveUserSortOptions(sortOptions []UserSortOptions) UserSortOptions {
+ // User if you add sensitive fields, don't forget to clean them in setupLogin function.
+ // Otherwise, the sensitive information will be saved on local storage in plain text!
+ type User struct {
+-	Id                   int                        `json:"id"`
+-	Username             string                     `json:"username" gorm:"unique;index" validate:"max=20"`
+-	Password             string                     `json:"password" gorm:"not null;" validate:"min=8,max=128"`
+-	HasPassword          bool                       `json:"-" gorm:"-:all"`
+-	OriginalPassword     string                     `json:"original_password" gorm:"-:all"` // this field is only for Password change verification, don't save it to database!
+-	DisplayName          string                     `json:"display_name" gorm:"index" validate:"max=20"`
+-	Role                 int                        `json:"role" gorm:"type:int;default:1"`   // admin, common
+-	Status               int                        `json:"status" gorm:"type:int;default:1"` // enabled, disabled
+-	Email                string                     `json:"email" gorm:"index" validate:"max=50"`
+-	GitHubId             string                     `json:"github_id" gorm:"column:github_id;index"`
+-	DiscordId            string                     `json:"discord_id" gorm:"column:discord_id;index"`
+-	OidcId               string                     `json:"oidc_id" gorm:"column:oidc_id;index"`
+-	WeChatId             string                     `json:"wechat_id" gorm:"column:wechat_id;index"`
+-	TelegramId           string                     `json:"telegram_id" gorm:"column:telegram_id;index"`
+-	VerificationCode     string                     `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
+-	AccessToken          *string                    `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
+-	AccessTokenCreatedAt *int64                     `json:"-" gorm:"type:bigint;column:access_token_created_at"`
+-	Quota                int                        `json:"quota" gorm:"type:int;default:0"`
+-	UsedQuota            int                        `json:"used_quota" gorm:"type:int;default:0;column:used_quota"` // used quota
+-	RequestCount         int                        `json:"request_count" gorm:"type:int;default:0;"`               // request number
+-	Group                string                     `json:"group" gorm:"type:varchar(64);default:'default'"`
+-	AffCode              string                     `json:"aff_code" gorm:"type:varchar(32);column:aff_code;uniqueIndex"`
+-	AffCount             int                        `json:"aff_count" gorm:"type:int;default:0;column:aff_count"`
+-	AffQuota             int                        `json:"aff_quota" gorm:"type:int;default:0;column:aff_quota"`           // 邀请剩余额度
+-	AffHistoryQuota      int                        `json:"aff_history_quota" gorm:"type:int;default:0;column:aff_history"` // 邀请历史额度
+-	InviterId            int                        `json:"inviter_id" gorm:"type:int;column:inviter_id;index"`
+-	DeletedAt            gorm.DeletedAt             `gorm:"index"`
+-	LinuxDOId            string                     `json:"linux_do_id" gorm:"column:linux_do_id;index"`
+-	Setting              string                     `json:"setting" gorm:"type:text;column:setting"`
+-	Remark               string                     `json:"remark,omitempty" gorm:"type:varchar(255)" validate:"max=255"`
+-	StripeCustomer       string                     `json:"stripe_customer" gorm:"type:varchar(64);column:stripe_customer;index"`
+-	CreatedAt            int64                      `json:"created_at" gorm:"autoCreateTime;column:created_at"`
+-	LastLoginAt          int64                      `json:"last_login_at" gorm:"default:0;column:last_login_at"`
+-	AuthVersion          int64                      `json:"-" gorm:"type:bigint;not null;default:1;column:auth_version"`
+-	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
++	Id                   int     `json:"id"`
++	Username             string  `json:"username" gorm:"unique;index" validate:"max=20"`
++	Password             string  `json:"password" gorm:"not null;" validate:"min=8,max=128"`
++	HasPassword          bool    `json:"-" gorm:"-:all"`
++	OriginalPassword     string  `json:"original_password" gorm:"-:all"` // this field is only for Password change verification, don't save it to database!
++	DisplayName          string  `json:"display_name" gorm:"index" validate:"max=20"`
++	Role                 int     `json:"role" gorm:"type:int;default:1"`   // admin, common
++	Status               int     `json:"status" gorm:"type:int;default:1"` // enabled, disabled
++	Email                string  `json:"email" gorm:"index" validate:"max=50"`
++	GitHubId             string  `json:"github_id" gorm:"column:github_id;index"`
++	DiscordId            string  `json:"discord_id" gorm:"column:discord_id;index"`
++	OidcId               string  `json:"oidc_id" gorm:"column:oidc_id;index"`
++	WeChatId             string  `json:"wechat_id" gorm:"column:wechat_id;index"`
++	TelegramId           string  `json:"telegram_id" gorm:"column:telegram_id;index"`
++	VerificationCode     string  `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
++	AccessToken          *string `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
++	AccessTokenCreatedAt *int64  `json:"-" gorm:"type:bigint;column:access_token_created_at"`
++	Quota                int     `json:"quota" gorm:"type:int;default:0"`
++	UsedQuota            int     `json:"used_quota" gorm:"type:int;default:0;column:used_quota"` // used quota
++	RequestCount         int     `json:"request_count" gorm:"type:int;default:0;"`               // request number
++	Group                string  `json:"group" gorm:"type:varchar(64);default:'default'"`
++	AffCode              string  `json:"aff_code" gorm:"type:varchar(32);column:aff_code;uniqueIndex"`
++	// RegisterInviteCode 仅用于**注册请求体**携带注册邀请码（§5「邀请准入」）。
++	// gorm:"-" ⇒ 不建数据库列、不参与读写，因此不需要任何迁移；邀请码哈希存在 apigx_invites。
++	RegisterInviteCode string                     `json:"invite_code" gorm:"-"`
++	AffCount           int                        `json:"aff_count" gorm:"type:int;default:0;column:aff_count"`
++	AffQuota           int                        `json:"aff_quota" gorm:"type:int;default:0;column:aff_quota"`           // 邀请剩余额度
++	AffHistoryQuota    int                        `json:"aff_history_quota" gorm:"type:int;default:0;column:aff_history"` // 邀请历史额度
++	InviterId          int                        `json:"inviter_id" gorm:"type:int;column:inviter_id;index"`
++	DeletedAt          gorm.DeletedAt             `gorm:"index"`
++	LinuxDOId          string                     `json:"linux_do_id" gorm:"column:linux_do_id;index"`
++	Setting            string                     `json:"setting" gorm:"type:text;column:setting"`
++	Remark             string                     `json:"remark,omitempty" gorm:"type:varchar(255)" validate:"max=255"`
++	StripeCustomer     string                     `json:"stripe_customer" gorm:"type:varchar(64);column:stripe_customer;index"`
++	CreatedAt          int64                      `json:"created_at" gorm:"autoCreateTime;column:created_at"`
++	LastLoginAt        int64                      `json:"last_login_at" gorm:"default:0;column:last_login_at"`
++	AuthVersion        int64                      `json:"-" gorm:"type:bigint;not null;default:1;column:auth_version"`
++	AdminPermissions   map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
+ }
+ 
+ func (user *User) ToBaseUser() *UserBase {
+-- 
+2.53.0.windows.1
+
