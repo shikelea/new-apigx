@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 import { getShareChannels, getShareGroups } from './api'
+import { GroupCreateDialog } from './components/group-create-dialog'
 import { GroupEditDialog } from './components/group-edit-dialog'
 import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/labels'
 import type { ShareChannel, ShareGroup } from './types'
@@ -38,6 +39,7 @@ export function MyShares() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
+  const [creatingGroup, setCreatingGroup] = useState(false)
 
   const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
   const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
@@ -114,7 +116,12 @@ export function MyShares() {
         <div className='space-y-6'>
           <Card>
             <CardHeader>
-              <CardTitle>{t('share.groups')}</CardTitle>
+              <div className='flex items-center justify-between gap-3'>
+          <CardTitle>{t('share.groups')}</CardTitle>
+            <Button size='sm' onClick={() => setCreatingGroup(true)}>
+              {t('New share group')}
+            </Button>
+          </div>
             </CardHeader>
             <CardContent>
               {groups.length === 0 ? (
@@ -138,7 +145,14 @@ export function MyShares() {
             </CardContent>
           </Card>
         </div>
-        <GroupEditDialog
+        <GroupCreateDialog
+          open={creatingGroup}
+          onOpenChange={setCreatingGroup}
+          onSaved={() => {
+            void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
+          }}
+        />
+      <GroupEditDialog
           group={editingGroup}
           open={editingGroup !== null}
           onOpenChange={(next) => {

@@ -17,14 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */import { api } from '@/lib/api'
 
-import type {
-  CapacityPolicyPayload,
-  ChannelDetailResponse,
-  OfferingListResponse,
-  ShareChannelListResponse,
-  ShareGroupListResponse,
-  UpstreamKeyListResponse,
-} from './types'
+import type { CapacityPolicyPayload, ChannelDetailResponse, OfferingListResponse, ShareChannelListResponse, ShareGroup, ShareGroupListResponse, UpstreamKeyListResponse } from './types'
 
 // 「我的分享」数据访问层：只做请求与类型，错误交给 Query 失败回调（规范 3.9）。
 export async function getShareGroups(): Promise<ShareGroupListResponse> {
@@ -78,6 +71,16 @@ export async function submitOffering(offeringId: number): Promise<{ success: boo
 }
 
 // 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
+/** 创建分享分组（§4：分组是分享的组织单位，可见性在此设定）。 */
+export async function createShareGroup(input: {
+  name: string
+  description?: string
+  default_visibility?: number
+}): Promise<{ success: boolean; data?: ShareGroup }> {
+  const res = await api.post('/api/apigx/share-groups', input)
+  return res.data
+}
+
 export async function updateShareGroup(
   groupId: number,
   input: { name: string; description: string }
