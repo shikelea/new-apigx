@@ -42,6 +42,8 @@ export interface RegisterPayload {
   email?: string
   verification_code?: string
   aff_code?: string
+  /** 注册邀请码（§5 邀请准入）：仅在服务端要求时提交。 */
+  invite_code?: string
   turnstile?: string
 }
 

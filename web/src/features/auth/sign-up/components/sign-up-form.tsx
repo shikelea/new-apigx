@@ -95,6 +95,7 @@ export function SignUpForm({
       email: '',
       password: '',
       confirmPassword: '',
+      invite_code: '',
     },
   })
 
@@ -109,6 +110,8 @@ export function SignUpForm({
     true
   const hasWeChatLogin = Boolean(status?.wechat_login)
   const turnstileReady = !isTurnstileEnabled || Boolean(turnstileToken)
+  // 注册邀请准入（§5）：由服务端开关决定是否显示并要求邀请码；关闭时界面不出现该字段。
+  const inviteRequired = Boolean(status?.register_invite_required)
 
   const wechatQrCodeUrl = useMemo(() => {
     return (
@@ -157,6 +160,11 @@ export function SignUpForm({
       }
     }
 
+    if (inviteRequired && !data.invite_code?.trim()) {
+      toast.error(t('Please enter the registration invite code'))
+      return
+    }
+
     if (!validateTurnstile()) return
 
     setIsLoading(true)
@@ -167,6 +175,7 @@ export function SignUpForm({
         email: data.email || undefined,
         verification_code: verificationCode || undefined,
         aff_code: getAffiliateCode(),
+        invite_code: data.invite_code?.trim() || undefined,
         turnstile: turnstileToken,
       })
 
@@ -265,6 +274,27 @@ export function SignUpForm({
             </FormItem>
           )}
         />
+
+        {/* 注册邀请码（§5 邀请准入）：仅在服务端要求时显示 —— 不显示无意义的空字段 */}
+        {inviteRequired && (
+          <FormField
+            control={form.control}
+            name='invite_code'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('Registration invite code')}</FormLabel>
+                <FormControl>
+                  <Input
+                    placeholder={t('Enter your registration invite code')}
+                    autoComplete='off'
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
 
         {/* Password Field */}
         <FormField

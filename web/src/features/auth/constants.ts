@@ -33,6 +33,9 @@ export const registerFormSchema = z
   .object({
     username: z.string().min(1, 'Please enter your username'),
     email: z.string().optional(),
+    // 注册邀请码（§5 邀请准入）：字段本身可选，"是否必填"由服务端下发的
+    // register_invite_required 决定，在提交时校验（见 sign-up-form）。
+    invite_code: z.string().optional(),
     password: accountPasswordSchema,
     confirmPassword: z.string().min(1, 'Please confirm your password'),
   })
