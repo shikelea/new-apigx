@@ -6762,6 +6762,10 @@
     "Choose models": "Выбор моделей",
     "Import selected": "Импортировать выбранные",
     "These models were reported by the upstream. Import the ones you want to share.": "Это модели, о которых сообщил вышестоящий сервис. Импортируйте только нужные.",
-    "No model reported by the upstream": "Вышестоящий сервис не сообщил моделей"
+    "No model reported by the upstream": "Вышестоящий сервис не сообщил моделей",
+    "Pending review": "На проверке",
+    "Suspended": "Приостановлено",
+    "Retired": "Выведено",
+    "Draft": "Черновик"
   }
 }

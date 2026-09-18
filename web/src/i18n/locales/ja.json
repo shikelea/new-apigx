@@ -6762,6 +6762,10 @@
     "Choose models": "モデルを選択",
     "Import selected": "選択をインポート",
     "These models were reported by the upstream. Import the ones you want to share.": "上流が返したモデル一覧です。共有したいものだけインポートしてください。",
-    "No model reported by the upstream": "上流からモデルが返されませんでした"
+    "No model reported by the upstream": "上流からモデルが返されませんでした",
+    "Pending review": "審査待ち",
+    "Suspended": "停止中",
+    "Retired": "廃止",
+    "Draft": "下書き"
   }
 }

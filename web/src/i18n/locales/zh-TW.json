@@ -6762,6 +6762,10 @@
     "Choose models": "選擇模型",
     "Import selected": "匯入所選",
     "These models were reported by the upstream. Import the ones you want to share.": "這些是上游回傳的模型清單。只匯入你想分享的那些。",
-    "No model reported by the upstream": "上游沒有回傳任何模型"
+    "No model reported by the upstream": "上游沒有回傳任何模型",
+    "Pending review": "待審核",
+    "Suspended": "已暫停",
+    "Retired": "已退役",
+    "Draft": "草稿"
   }
 }

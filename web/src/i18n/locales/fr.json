@@ -6762,6 +6762,10 @@
     "Choose models": "Choisir des modèles",
     "Import selected": "Importer la sélection",
     "These models were reported by the upstream. Import the ones you want to share.": "Ces modèles proviennent de l'amont. Importez seulement ceux à partager.",
-    "No model reported by the upstream": "L'amont n'a signalé aucun modèle"
+    "No model reported by the upstream": "L'amont n'a signalé aucun modèle",
+    "Pending review": "En attente de validation",
+    "Suspended": "Suspendu",
+    "Retired": "Retiré",
+    "Draft": "Brouillon"
   }
 }

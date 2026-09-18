@@ -38,6 +38,15 @@ import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/l
 import type { ShareChannel, ShareGroup } from './types'
 
 /** 我的分享：分组与渠道。 */
+/** 分组发布状态 → i18n 键（查表代替嵌套三元，遵守 web/AGENTS.md §3.2）。 */
+function groupPublishStatusLabelKey(status: number): string {
+  if (status === 0) return 'Draft'
+  if (status === 1) return 'Pending review'
+  if (status === 2) return 'Published'
+  if (status === 3) return 'Suspended'
+  return 'Retired'
+}
+
 export function MyShares() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -86,6 +95,7 @@ export function MyShares() {
   })
 
   const groupColumns: StaticDataTableColumn<ShareGroup>[] = [
+    { id: 'publish_status', header: t('Status'), cell: (row) => t(groupPublishStatusLabelKey(row.publish_status)) },
     { id: 'name', header: t('share.group.name'), cell: (row) => row.name },
     {
       id: 'visibility',

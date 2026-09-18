@@ -6762,6 +6762,10 @@
     "Choose models": "Choose models",
     "Import selected": "Import selected",
     "These models were reported by the upstream. Import the ones you want to share.": "These models were reported by the upstream. Import the ones you want to share.",
-    "No model reported by the upstream": "No model reported by the upstream"
+    "No model reported by the upstream": "No model reported by the upstream",
+    "Pending review": "Pending review",
+    "Suspended": "Suspended",
+    "Retired": "Retired",
+    "Draft": "Draft"
   }
 }

@@ -6762,6 +6762,10 @@
     "Choose models": "Chọn mô hình",
     "Import selected": "Nhập mục đã chọn",
     "These models were reported by the upstream. Import the ones you want to share.": "Đây là danh sách mô hình do thượng nguồn trả về. Chỉ nhập những mô hình bạn muốn chia sẻ.",
-    "No model reported by the upstream": "Thượng nguồn không trả về mô hình nào"
+    "No model reported by the upstream": "Thượng nguồn không trả về mô hình nào",
+    "Pending review": "Chờ duyệt",
+    "Suspended": "Tạm dừng",
+    "Retired": "Ngừng sử dụng",
+    "Draft": "Bản nháp"
   }
 }
