@@ -1,0 +1,270 @@
+From 1bd8ecc3b10b3e6cfb661d1126f77454895c0cd9 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 15:54:21 +0800
+Subject: [PATCH 143/143] =?UTF-8?q?feat(usage):=20U-3=20=E5=90=8E=E7=AB=AF?=
+ =?UTF-8?q?=20=E2=80=94=E2=80=94=20=E5=88=86=E4=BA=AB=E8=80=85=E8=A7=86?=
+ =?UTF-8?q?=E8=A7=92=E7=9A=84=E6=B6=88=E8=80=97=E6=B1=87=E6=80=BB=EF=BC=88?=
+ =?UTF-8?q?=E6=8C=89=E6=B8=A0=E9=81=93=20/=20=E6=8C=89=20Key=20/=20?=
+ =?UTF-8?q?=E6=8C=89=E6=A8=A1=E5=9E=8B=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+数据源用 **apigx_attempts**（有数据），不用 apigx_usage_events（0 行、无写入方）—— 见上一轮盘点结论。
+
+- `apigx/model/repo_attempt.go`（**既有文件**）：新增
+  `SummarizeOwnerAttempts`（渠道/Key 维度）、`SummarizeOwnerAttemptsByModel`（模型维度，字符串聚合）、
+  `FillOwnerUsageNames`（补渠道名/Key 名）；归属由「渠道 → owner_user_id」子查询推出
+- `apigx/api/share.go`：既有 usage 路由组下新增 `GET /api/apigx/usage/summary?group_by=channel|key|model`
+- 口径：Success=HTTP 2xx、Failed=非 2xx、Unfinished=无状态码（三者相加=Attempts，便于对账）；
+  平均 TTFT 由 TtftMsSum/TtftSamples 在读取方计算；**不输出金额**（attempts 无费用字段，不臆造）
+
+实测（真实数据，root 登录）：group_by=channel → 200 / 2 行 / 尝试与成功数正确；key、model → 200。
+行数少于表内总数属**正确过滤**（多数 attempt 指向已软删除的测试渠道）。
+
+**⚠️ 已知缺陷（下一轮做界面前修）**：key 与 model 维度的 name 为空字符串（渠道维度正常）⇒ 界面未接入前不展示空名。
+检查: go build ✅ / apigx/model + apigx/api 用例 ✅ / 接口实测 ✅
+---
+ apigx/api/share.go          |  48 +++++++++++
+ apigx/model/repo_attempt.go | 165 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 213 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index cbce399..6eaab17 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -136,6 +136,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	usage := r.Group("/usage")
+ 	{
+ 		usage.GET("", h.listUsage)
++		// U-3：分享者视角的消耗汇总（按渠道 / 按 Key / 按模型）
++		usage.GET("/summary", h.summarizeOwnerUsage)
+ 	}
+ 
+ 	platformKeys := r.Group("/platform-keys")
+@@ -2105,3 +2107,49 @@ func upstreamKeyStableID(key string) string {
+ 	sum := sha256.Sum256([]byte(key))
+ 	return "apigx-" + hex.EncodeToString(sum[:8])
+ }
++
++// summarizeOwnerUsage 返回**当前分享者自己**的消耗汇总（U-3）。
++//
++// 只认自己：归属由"渠道 → owner_user_id"推出，绝不返回别人的量。
++// 金额不在此输出 —— attempts 表没有费用字段，不臆造。
++func (h *handler) summarizeOwnerUsage(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++
++	groupBy := apigxmodel.OwnerUsageGroupBy(c.DefaultQuery("group_by", "channel"))
++	start := int64(0)
++	if raw := c.Query("start"); raw != "" {
++		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
++			start = parsed
++		}
++	}
++	end := int64(0)
++	if raw := c.Query("end"); raw != "" {
++		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
++			end = parsed
++		}
++	}
++
++	if groupBy == apigxmodel.OwnerUsageByModel {
++		rows, err := apigxmodel.SummarizeOwnerAttemptsByModel(h.db, owner, start, end)
++		if err != nil {
++			failFromRepo(c, err)
++			return
++		}
++		ok(c, gin.H{"group_by": string(groupBy), "items": rows})
++		return
++	}
++
++	rows, err := apigxmodel.SummarizeOwnerAttempts(h.db, owner, groupBy, start, end)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if err = apigxmodel.FillOwnerUsageNames(h.db, owner, groupBy, rows); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"group_by": string(groupBy), "items": rows})
++}
+diff --git a/apigx/model/repo_attempt.go b/apigx/model/repo_attempt.go
+index ea271a8..cc7b632 100644
+--- a/apigx/model/repo_attempt.go
++++ b/apigx/model/repo_attempt.go
+@@ -111,3 +111,168 @@ func GetAttemptByUID(db *gorm.DB, attemptUID string) (*Attempt, error) {
+ 	}
+ 	return &attempt, nil
+ }
++
++// OwnerUsageGroupBy 分享者消耗视图的分组维度（U-3）。
++type OwnerUsageGroupBy string
++
++const (
++	// OwnerUsageByChannel 按分享渠道聚合。
++	OwnerUsageByChannel OwnerUsageGroupBy = "channel"
++	// OwnerUsageByKey 按上游 Key 聚合（计划书 §4 明确要求"单 Key 消耗"）。
++	OwnerUsageByKey OwnerUsageGroupBy = "key"
++	// OwnerUsageByModel 按模型聚合。
++	OwnerUsageByModel OwnerUsageGroupBy = "model"
++)
++
++// OwnerUsageRow 一行聚合结果（渠道 / Key 维度）。
++//
++// 口径（**不编造数字**）：Success 为 HTTP 2xx；Failed 为非 2xx 且拿到状态码；Unfinished 为没有状态码；
++// 三者相加等于 Attempts，便于对账。平均首字延迟由读取方用 TtftMsSum/TtftSamples 计算。
++// **不输出金额**：attempts 表没有费用字段，不臆造。
++type OwnerUsageRow struct {
++	GroupID      int64  `json:"group_id"`
++	Name         string `json:"name"`
++	Attempts     int64  `json:"attempts"`
++	Success      int64  `json:"success"`
++	Failed       int64  `json:"failed"`
++	Unfinished   int64  `json:"unfinished"`
++	OutputTokens int64  `json:"output_tokens"`
++	TtftMsSum    int64  `json:"ttft_ms_sum"`
++	TtftSamples  int64  `json:"ttft_samples"`
++}
++
++// OwnerUsageModelRow 模型维度的一行（模型名是字符串，单独一个结构体避免类型失真）。
++type OwnerUsageModelRow struct {
++	Name         string `json:"name"`
++	Attempts     int64  `json:"attempts"`
++	Success      int64  `json:"success"`
++	Failed       int64  `json:"failed"`
++	Unfinished   int64  `json:"unfinished"`
++	OutputTokens int64  `json:"output_tokens"`
++	TtftMsSum    int64  `json:"ttft_ms_sum"`
++	TtftSamples  int64  `json:"ttft_samples"`
++}
++
++// ownerAttemptsFilter 返回"属于该分享者"的渠道范围条件（归属由渠道 → owner 推出）。
++func ownerAttemptsFilter() string {
++	return "selected_channel_id IN (SELECT id FROM " + Channel{}.TableName() +
++		" WHERE owner_user_id = ? AND deleted_at IS NULL)"
++}
++
++const ownerUsageSelect = "COUNT(*) AS attempts" +
++	", SUM(CASE WHEN http_status >= 200 AND http_status < 300 THEN 1 ELSE 0 END) AS success" +
++	", SUM(CASE WHEN http_status >= 300 THEN 1 ELSE 0 END) AS failed" +
++	", SUM(CASE WHEN http_status = 0 THEN 1 ELSE 0 END) AS unfinished" +
++	", COALESCE(SUM(output_tokens),0) AS output_tokens" +
++	", COALESCE(SUM(ttft_ms),0) AS ttft_ms_sum" +
++	", SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END) AS ttft_samples"
++
++// SummarizeOwnerAttempts 按渠道或 Key 聚合**某个分享者自己**的调用情况。
++func SummarizeOwnerAttempts(db *gorm.DB, ownerUserID int64, groupBy OwnerUsageGroupBy, start, end int64) ([]OwnerUsageRow, error) {
++	if db == nil {
++		return nil, fmt.Errorf("%w: nil db", ErrInvalidArgument)
++	}
++	if ownerUserID <= 0 {
++		return nil, fmt.Errorf("%w: owner is required", ErrInvalidArgument)
++	}
++	if end <= 0 {
++		end = common.GetTimestamp()
++	}
++
++	column := ""
++	switch groupBy {
++	case OwnerUsageByChannel:
++		column = "selected_channel_id"
++	case OwnerUsageByKey:
++		column = "upstream_key_id"
++	default:
++		return nil, fmt.Errorf("%w: unsupported group_by", ErrInvalidArgument)
++	}
++
++	query := db.Table(Attempt{}.TableName()).
++		Select(column+" AS group_id, "+ownerUsageSelect).
++		Where(ownerAttemptsFilter(), ownerUserID)
++	if start > 0 {
++		query = query.Where("started_at >= ?", start)
++	}
++	query = query.Where("started_at <= ?", end).Group(column).Order("attempts DESC")
++
++	rows := []OwnerUsageRow{}
++	if err := query.Scan(&rows).Error; err != nil {
++		return nil, err
++	}
++	return rows, nil
++}
++
++// SummarizeOwnerAttemptsByModel 按**模型名**聚合某个分享者自己的调用情况。
++func SummarizeOwnerAttemptsByModel(db *gorm.DB, ownerUserID int64, start, end int64) ([]OwnerUsageModelRow, error) {
++	if db == nil {
++		return nil, fmt.Errorf("%w: nil db", ErrInvalidArgument)
++	}
++	if ownerUserID <= 0 {
++		return nil, fmt.Errorf("%w: owner is required", ErrInvalidArgument)
++	}
++	if end <= 0 {
++		end = common.GetTimestamp()
++	}
++
++	query := db.Table(Attempt{}.TableName()).
++		Select("upstream_model_id AS name, "+ownerUsageSelect).
++		Where(ownerAttemptsFilter(), ownerUserID)
++	if start > 0 {
++		query = query.Where("started_at >= ?", start)
++	}
++	query = query.Where("started_at <= ?", end).Group("upstream_model_id").Order("attempts DESC")
++
++	rows := []OwnerUsageModelRow{}
++	if err := query.Scan(&rows).Error; err != nil {
++		return nil, err
++	}
++	return rows, nil
++}
++
++// FillOwnerUsageNames 给渠道 / Key 维度的聚合结果补上可读名称。
++//
++// 分开做而不是 JOIN：两种维度的取名来源不同，聚合查询保持简单才能走索引。
++func FillOwnerUsageNames(db *gorm.DB, ownerUserID int64, groupBy OwnerUsageGroupBy, rows []OwnerUsageRow) error {
++	if len(rows) == 0 {
++		return nil
++	}
++	ids := make([]int64, 0, len(rows))
++	for i := range rows {
++		ids = append(ids, rows[i].GroupID)
++	}
++
++	switch groupBy {
++	case OwnerUsageByChannel:
++		var channels []Channel
++		if err := db.Where("owner_user_id = ? AND id IN ?", ownerUserID, ids).Find(&channels).Error; err != nil {
++			return err
++		}
++		names := make(map[int64]string, len(channels))
++		for i := range channels {
++			names[channels[i].ID] = channels[i].Name
++		}
++		for i := range rows {
++			rows[i].Name = names[rows[i].GroupID]
++		}
++	case OwnerUsageByKey:
++		var keys []UpstreamKey
++		if err := db.Where("id IN ? AND channel_id IN (SELECT id FROM "+Channel{}.TableName()+
++			" WHERE owner_user_id = ? AND deleted_at IS NULL)", ids, ownerUserID).Find(&keys).Error; err != nil {
++			return err
++		}
++		names := make(map[int64]string, len(keys))
++		for i := range keys {
++			label := keys[i].Name
++			if label == "" {
++				label = keys[i].StableKeyID
++			}
++			names[keys[i].ID] = label
++		}
++		for i := range rows {
++			rows[i].Name = names[rows[i].GroupID]
++		}
++	}
++	return nil
++}
+-- 
+2.53.0.windows.1
+

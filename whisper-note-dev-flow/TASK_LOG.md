@@ -49,7 +49,14 @@
       请求数、成功失败与延迟聚合；归属（owner）由「渠道 → owner_user_id」推出。
     · 底座 `logs`（928 行）已有使用者视角的 `/usage`（`listUsage`），本次补的是**分享者**视角。
   - 下一步（下一轮）：在既有 `repo_attempt.go` 里加聚合（不新建文件）、在既有 `usage` 路由组下加
-    `GET /usage/summary?group_by=channel|key|model`，再在「我的分享」加消耗卡。- [ ] U-3 分享者视角的**消耗视图**：按渠道 / 按 Key（§4 要求「单 Key 消耗」）/ 按模型，含调用次数与用量
+    `GET /usage/summary?group_by=channel|key|model`，再在「我的分享」加消耗卡。  - 进展（2026-09-18 第二批，**未完成**）：**后端已实现并实测** ——
+    `repo_attempt.go` 加 `SummarizeOwnerAttempts` / `SummarizeOwnerAttemptsByModel` / `FillOwnerUsageNames`
+    （**不新建文件**）；既有 `usage` 路由组下加 `GET /api/apigx/usage/summary?group_by=channel|key|model`
+    （只按 owner 自己的渠道过滤；成功判定用 HTTP 2xx；**不输出金额**，因为 attempts 表没有费用字段，不臆造）。
+    实测（以 root 登录，真实数据）：`group_by=channel` → **200**，2 个渠道，尝试数/成功数正确；
+    `key` / `model` → **200**。行数（2）少于表内 99 条 = 过滤正确（多数 attempt 指向已软删除的测试渠道）。
+  - ⚠️ **已知缺陷（下一轮做界面前必须修）**：`key` 与 `model` 两个维度的 `name` 返回**空字符串**（渠道维度正常）。
+    在修好之前**不接入界面**，避免展示空名称。前端消耗卡尚未开始。- [ ] U-3 分享者视角的**消耗视图**：按渠道 / 按 Key（§4 要求「单 Key 消耗」）/ 按模型，含调用次数与用量
 - [ ] T4.1 阶段 4：并发与资源耗尽演练（含"最后一个槽位""共享上限不被叠加"）
 - [ ] T4.2 阶段 4：权限绕过检查与日志脱敏
 - [ ] T4.3 阶段 4：备份恢复 / 配置回滚 / 升级回滚
