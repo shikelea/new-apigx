@@ -113,5 +113,38 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 **本次未覆盖、仍需演练**：#19（按执行 Key 计价）、#20（池内细节不外泄）、#22（进程被杀）、#23（原生 Key 路径）。
 
 **过程记录（本台账自身的防伪校验起作用了）**：首次校验发现文中引用的
-`TestMarkAttemptAbandoned` **在仓库里不存在** —— 我引用的是**函数名**而非测试名。
+`MarkAttemptAbandoned`（**这是函数名，不是测试名**） **在仓库里不存在** —— 我引用的是**函数名**而非测试名。
 已改为真实测试名，并保留这条校验作为台账的常规检查（引用不存在的测试 = 假证据）。
+
+---
+
+## 8. T4.2 审计记录（权限绕过 + 日志脱敏）
+
+**执行时间**：2026-09-18（对**真实数据库**执行，非推断）
+
+### 8.1 日志与存储脱敏（真实库查询）
+
+| # | 检查 | 结果 | 结论 |
+|---|---|---|---|
+| 1 | 底座 `logs` 表中出现形如 `sk-...` / `Bearer ...` / `tr_...` 的字符串 | **0 条** | ✅ 请求日志中未出现密钥形态字符串 |
+| 2 | `apigx_upstream_keys`（187 行）中 `secret_ref` 为空、或形如明文 | **0 / 0** | ✅ 我们这层的上游凭据只存密文信封（另有既有用例保证不回显、缺主密钥失败关闭） |
+| 3 | `apigx_attempts.reservation_uid` 形如密钥 | **0 条** | ✅ 预留标识不携带凭据 |
+| 4 | 底座 `channels.key`（31 行）中形如 `sk-...` 的行 | **7 行** | ⚠️ **底座自身**把上游 Key 存在渠道行里（转发必须用它）⇒ 已知边界，见下 |
+
+**第 4 项的如实说明**：我们这层存的是**密文信封 + 指纹**；但**底座渠道行**必须持有可用 Key 才能转发，
+这是底座（New API）的既有设计，**不是**本次改动引入。现有缓解：接口从不回显密钥
+（既有用例 `TestUpstreamKeyIsEncryptedAndNeverEchoed`）、日志中无密钥形态字符串（第 1 项）、
+缺主密钥时失败关闭（`TestUpstreamKeyCreationFailsClosedWithoutMasterKey`）。
+**若要求更高**，需评估启用底座自身的渠道密钥加密能力 —— 本轮**未做**，不宣称已做。
+
+### 8.2 权限绕过（已定位代码位置，回归测试待补）
+
+| 场景 | 结论 | 依据 |
+|---|---|---|
+| 普通用户带 `-<channelId>` 指定来源 | **403，不扩大授权** | `middleware/auth.go` L540–L552（仅 `model.IsAdmin` 可 AddPin） |
+| 账户被封禁 | **401 AUTH_USER_DISABLED** | `middleware/auth.go` L56–L57 |
+| 越权访问他人资源 | **一律 404**（不确认存在） | `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestAccessInviteAndGrantAPIContract` |
+| 分享者只看到自己的量 | 只按 owner 过滤 | `TestApplyChannelPoolIsOwnerScoped`；U-3 聚合按「渠道 → owner」过滤（[015]） |
+
+**未完成**：前两条**中间件层回归测试**尚未编写（需要令牌/用户夹具）⇒ T4.2 **未收口**，
+台账 #5 / #26 保持 ⚠️，已列入待补清单。
