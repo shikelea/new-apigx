@@ -1,0 +1,145 @@
+From 7e20f1d1f0697e26a5f32906666578cae5d54c0c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 18:00:55 +0800
+Subject: [PATCH 155/155] =?UTF-8?q?feat(#21):=20=E6=8E=A5=E9=80=9A?=
+ =?UTF-8?q?=E4=BB=BB=E5=8A=A1=E5=BD=92=E5=B1=9E=E5=BF=AB=E7=85=A7=EF=BC=88?=
+ =?UTF-8?q?=E7=9C=9F=E5=AE=9E=E4=BB=BB=E5=8A=A1=E5=AE=9E=E6=B5=8B=E8=90=BD?=
+ =?UTF-8?q?=E5=BA=93=EF=BC=89=E2=80=94=E2=80=94=20=E8=AE=A1=E5=88=92?=
+ =?UTF-8?q?=E9=AA=8C=E6=94=B6=E8=A1=A8=2031=20=E8=A1=8C=E5=85=A8=E9=83=A8?=
+ =?UTF-8?q?=E6=9C=89=E7=BB=93=E8=AE=BA?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**实现**：`apigx/relayhook/async_task.go` 新增 `RecordAsyncTaskSnapshot`，在**任务提交并结算成功后**
+（`controller/relay.go` 的 `service.LogTaskConsumption` 之后）写入我们自己的 `apigx_async_tasks`。
+
+**纪律（与 #19 的用量记录一致）**：
+- **只追加我们自己的行**，绝不触碰底座扣费；
+- `base_task_id` 唯一 ⇒ **幂等**（写前先查存在性，重复提交不产生第二行）；
+- 快照列**一次写入不回写**；状态按 §5.23 枚举如实写 `1=运行中`；
+- 归属解析不到留 0（**不猜**）；失败只记日志、**不影响任务结果**。
+
+**真实任务实测**（替身视频任务 `kling-v1`）：
+```
+rows=1
+public=apigx_62  base=62  up=task_pI9HxU1SIUlp81q7i2u7k  user=1  owner=1
+ch=138  off=0  key=169  action=text_to_video  status=1  settled=true
+```
+⇒ 分享者、分享渠道、**当时服务该任务的上游 Key**、动作、状态、结算标志**全部落库**
+⇒ "轮换/撤权/封禁后仍能定位原任务"的设计意图落地可查。
+
+**残留（如实）**：`offering_id=0`（结算点上下文未携带供给，未猜填）；"底座轮询是否复用同一把 Key"仍**不可观测**
+（底座不为轮询记账，见 §20.12）—— 但我们这一侧"记录服务该任务的 Key"的职责已履行，该问题**在我们自己的数据里可查**。
+
+检查：`go build` ✅；端到端真实任务实测 ✅。台账 #21 升 ✅ ⇒ **计划 31 行全部有结论：✅31 / ⚠️0 / ❌0**。
+---
+ apigx/relayhook/async_task.go | 74 +++++++++++++++++++++++++++++++++++
+ controller/relay.go           |  3 ++
+ 2 files changed, 77 insertions(+)
+ create mode 100644 apigx/relayhook/async_task.go
+
+diff --git a/apigx/relayhook/async_task.go b/apigx/relayhook/async_task.go
+new file mode 100644
+index 0000000..05a1fcd
+--- /dev/null
++++ b/apigx/relayhook/async_task.go
+@@ -0,0 +1,74 @@
++package relayhook
++
++import (
++	"strconv"
++
++	"github.com/gin-gonic/gin"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++)
++
++// AsyncTask 状态（依据 docs/stage0/schema-draft.md §5.23）。
++const (
++	AsyncTaskStatusPendingSubmit int = 0
++	AsyncTaskStatusRunning       int = 1
++	AsyncTaskStatusSucceeded     int = 2
++	AsyncTaskStatusFailed        int = 3
++	AsyncTaskStatusCanceled      int = 4
++	AsyncTaskStatusUnknown       int = 5
++	AsyncTaskStatusReconciling   int = 6
++)
++
++// RecordAsyncTaskSnapshot 在**任务提交并结算成功之后**写入我们自己的任务归属快照。
++//
++// 为什么需要它（§5.23 的注释即为此）：底座的 tasks 表只记它自己关心的字段；
++// 一旦上游 Key 轮换、授权被撤、分享者被封禁，我们仍要能**定位原任务**——
++// 因此这里把"当时是谁的、哪个渠道/供给、哪把 Key、哪个价格版本"固化成快照。
++//
++// 纪律（与 usage_record 一致）：
++//   - 只**追加**我们自己的行，绝不触碰底座扣费；
++//   - base_task_id 唯一 ⇒ 幂等，重复提交不产生第二行；
++//   - 快照列只写一次，**不回写**；状态列只允许单向推进；
++//   - 解析不到归属就留 0（如实表达"当时没记录到"），不猜；
++//   - 任何失败只记日志，**不影响任务结果**。
++func RecordAsyncTaskSnapshot(c *gin.Context, relayInfo *relaycommon.RelayInfo, baseTaskID int64, upstreamTaskID, action string) {
++	if c == nil || relayInfo == nil || baseTaskID <= 0 {
++		return
++	}
++	db := apigxmodel.DefaultDB()
++	if db == nil {
++		return
++	}
++
++	// 幂等：已有该底座任务的快照就不再写（唯一约束兜底）
++	var existing apigxmodel.AsyncTask
++	if err := db.Where("base_task_id = ?", baseTaskID).First(&existing).Error; err == nil {
++		return
++	}
++
++	owner, channelID, offeringID, keyID := resolveUsageAttribution(db, c)
++	now := common.GetTimestamp()
++
++	task := &apigxmodel.AsyncTask{
++		PublicTaskID:   "apigx_" + strconv.FormatInt(baseTaskID, 10),
++		BaseTaskID:     baseTaskID,
++		UpstreamTaskID: upstreamTaskID,
++		UserID:         int64(relayInfo.UserId),
++		ApiKeyID:       int64(relayInfo.TokenId),
++		OfferingID:     offeringID,
++		ChannelID:      channelID,
++		UpstreamKeyID:  keyID,
++		OwnerUserID:    owner,
++		Action:         action,
++		Status:         AsyncTaskStatusRunning, // 提交并结算成功那一刻，如实记为"运行中"
++		SubmitAt:       now,
++		BillingSettled: true, // 提交时已完成结算（这是本快照的写入时机）
++		CreatedAt:      now,
++		UpdatedAt:      now,
++	}
++	if err := db.Create(task).Error; err != nil {
++		common.SysError("relayhook: record async task snapshot failed: " + err.Error())
++	}
++}
+diff --git a/controller/relay.go b/controller/relay.go
+index 0129934..68fa434 100644
+--- a/controller/relay.go
++++ b/controller/relay.go
+@@ -3,6 +3,7 @@ package controller
+ import (
+ 	"errors"
+ 	"fmt"
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"io"
+ 	"log"
+ 	"net/http"
+@@ -647,6 +648,8 @@ func executeTaskSubmissionWith(
+ 		return nil, taskErr
+ 	}
+ 	service.LogTaskConsumption(c, relayInfo, task)
++	// #21：结算成功后写入我们自己的**任务归属快照**（只追加记录，不触碰扣费）
++	relayhook.RecordAsyncTaskSnapshot(c, relayInfo, int64(task.ID), task.TaskID, task.Action)
+ 	diagnostics.complete(task, result.Quota)
+ 
+ 	return &taskSubmissionOutcome{Result: result, Task: task, RelayInfo: relayInfo}, nil
+-- 
+2.53.0.windows.1
+
