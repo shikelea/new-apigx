@@ -30,6 +30,7 @@ import (
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
+	"github.com/QuantumNous/new-api/middleware"
 	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -102,7 +103,9 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		access.POST("/invites", h.createAccessInvite)
 		access.GET("/invites", h.listAccessInvites)
 		access.POST("/invites/:id/revoke", h.revokeAccessInvite)
-		access.POST("/invites/redeem", h.redeemAccessInvite)
+		// 兑换是**按用户**限流的（§10 安全加固）：邀请码空间足够大，但限流是防爆破的纵深防御，
+		// 复用底座既有的 UserCriticalRateLimit（随 CriticalRateLimitEnable 开关，关闭时自动 no-op）。
+		access.POST("/invites/redeem", middleware.UserCriticalRateLimit("access_invite_redeem"), h.redeemAccessInvite)
 		access.POST("/grants", h.createGrant)
 		access.GET("/grants", h.listGrants)
 		access.DELETE("/grants/:id", h.deleteGrant)
