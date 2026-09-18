@@ -286,11 +286,19 @@ func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
 	const ownerA, ownerB int64 = 5001, 5002
 	groupA := env.createGroup(t, ownerA, "A 的分组")
 
-	// 缺 base_channel_id → 400（该列有唯一索引，未绑定会互相冲突）
+	// 既没给 base_channel_id、也没给"自建配方"（名称/协议/上游地址/Key）→ 400。
+	// 注意：契约在支持「分享者自建渠道」后**有意变化** —— 校验从"必须有 base_channel_id"
+	// 变成"要么绑定既有底座渠道，要么给全自建配方"；这里断言的是后者缺字段时的拒绝。
 	rec, _ := env.do(t, http.MethodPost, "/api/channels", ownerA,
 		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"未绑定"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "base_channel_id")
+	assert.Contains(t, rec.Body.String(), "base_url")
+
+	// 配方不完整（给了上游地址但没给 Key）→ 仍然 400，不允许半成品渠道落地
+	rec, _ = env.do(t, http.MethodPost, "/api/channels", ownerA,
+		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"半成品","protocol":"openai","base_url":"https://example.com"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "upstream_key")
 
 	// 用别人的分组 → 404
 	rec, _ = env.do(t, http.MethodPost, "/api/channels", ownerB,
