@@ -1274,3 +1274,83 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
 	_, body = env.do(t, http.MethodGet, "/api/plaza", invited, "")
 	assert.Empty(t, body["data"].(map[string]any)["items"], "授权到期后不应再可见")
 }
+
+// 访问控制接口的**契约与越权防护**（扩展既有测试文件，不新开文件）。
+//
+// 覆盖：发放邀请（明文只回一次）→ 访客兑换 → 获得访问权；以及
+// **非所有者**对他人资源发邀请/授权/查授权列表一律 404（不确认"存在但不属于你"）。
+func TestAccessInviteAndGrantAPIContract(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, guest, stranger int64 = 9801, 9802, 9803
+
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "邀请组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: 1}
+	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+
+	// ① 发放邀请：明文只在这里返回一次
+	rec, body := env.do(t, http.MethodPost, "/api/access/invites", owner,
+		`{"target_scope_type":1,"target_scope_id":`+strconv.FormatInt(group.ID, 10)+`,"max_uses":1}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	token := body["data"].(map[string]any)["token"].(string)
+	require.NotEmpty(t, token)
+
+	// 库里只有哈希（明文不入库）
+	var stored apigxmodel.Invite
+	require.NoError(t, env.db.Where("created_by_user_id = ?", owner).First(&stored).Error)
+	assert.NotEqual(t, token, stored.TokenHash, "邀请码明文不得入库")
+
+	// 列表接口**不回**明文/哈希
+	_, body = env.do(t, http.MethodGet, "/api/access/invites", owner, "")
+	list := body["data"].(map[string]any)["items"].([]any)
+	require.Len(t, list, 1)
+	first := list[0].(map[string]any)
+	assert.NotContains(t, first, "token")
+	assert.NotContains(t, first, "token_hash")
+
+	// ② **越权防护**：别人不能对他人资源发邀请，也不能查他人资源上的授权
+	rec, _ = env.do(t, http.MethodPost, "/api/access/invites", stranger,
+		`{"target_scope_type":1,"target_scope_id":`+strconv.FormatInt(group.ID, 10)+`,"max_uses":1}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "非所有者发邀请必须 404")
+	rec, _ = env.do(t, http.MethodGet, "/api/access/grants?resource_type=0&resource_id="+strconv.FormatInt(group.ID, 10), stranger, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "非所有者查授权列表必须 404")
+	rec, _ = env.do(t, http.MethodPost, "/api/access/grants", stranger,
+		`{"resource_type":0,"resource_id":`+strconv.FormatInt(group.ID, 10)+`,"target_user_id":`+strconv.FormatInt(guest, 10)+`}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "非所有者授权必须 404")
+
+	// ③ 兑换前：访客无访问权；兑换后有
+	canBefore, err := apigxmodel.SubjectCanAccessResource(env.db, apigxmodel.GrantSubjectUser, guest, apigxmodel.GrantResourceGroup, group.ID, 0)
+	require.NoError(t, err)
+	assert.False(t, canBefore)
+
+	rec, body = env.do(t, http.MethodPost, "/api/access/invites/redeem", guest, `{"token":"`+token+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.EqualValues(t, apigxmodel.GrantScopeRedeemed, body["data"].(map[string]any)["scope_kind"])
+
+	canAfter, err := apigxmodel.SubjectCanAccessResource(env.db, apigxmodel.GrantSubjectUser, guest, apigxmodel.GrantResourceGroup, group.ID, 0)
+	require.NoError(t, err)
+	assert.True(t, canAfter, "兑换后应当有访问权")
+
+	// ④ 单次邀请：第二个人再兑换必须 404（且与"不存在"同一结果）
+	rec, _ = env.do(t, http.MethodPost, "/api/access/invites/redeem", stranger, `{"token":"`+token+`"}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "已用尽的单次邀请必须被拒")
+
+	// ⑤ 指定用户授权 + 撤销
+	rec, body = env.do(t, http.MethodPost, "/api/access/grants", owner,
+		`{"resource_type":0,"resource_id":`+strconv.FormatInt(group.ID, 10)+`,"target_user_id":`+strconv.FormatInt(stranger, 10)+`}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	grantID := int64(body["data"].(map[string]any)["id"].(float64))
+
+	rec, _ = env.do(t, http.MethodDelete, "/api/access/grants/"+strconv.FormatInt(grantID, 10), owner, "")
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	canStranger, err := apigxmodel.SubjectCanAccessResource(env.db, apigxmodel.GrantSubjectUser, stranger, apigxmodel.GrantResourceGroup, group.ID, 0)
+	require.NoError(t, err)
+	assert.False(t, canStranger, "撤销后不应再有访问权")
+
+	// ⑥ 撤销邀请可连带撤销由它产生的授权
+	inviteID := stored.ID
+	rec, _ = env.do(t, http.MethodPost, "/api/access/invites/"+strconv.FormatInt(inviteID, 10)+"/revoke?revoke_grants=true", owner, "")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	canGuest, err := apigxmodel.SubjectCanAccessResource(env.db, apigxmodel.GrantSubjectUser, guest, apigxmodel.GrantResourceGroup, group.ID, 0)
+	require.NoError(t, err)
+	assert.False(t, canGuest, "连带撤销后访客不应再有访问权")
+}

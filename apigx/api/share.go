@@ -90,6 +90,21 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	// 因此做成可配置项，不引入任务表结构变更与迁移风险。
 	r.GET("/task-retention", h.getTaskRetention)
 
+	// 访问控制（§4「邀请兑换 / 指定用户 / 撤销与到期」）：
+	//   - 邀请码是凭证：明文只在创建响应里返回一次，库里只存哈希；
+	//   - 兑换**原子、单次**，失败不区分原因（防枚举）；
+	//   - 发邀请/授权/撤销都要求调用者是**资源所有者**。
+	access := r.Group("/access")
+	{
+		access.POST("/invites", h.createAccessInvite)
+		access.GET("/invites", h.listAccessInvites)
+		access.POST("/invites/:id/revoke", h.revokeAccessInvite)
+		access.POST("/invites/redeem", h.redeemAccessInvite)
+		access.POST("/grants", h.createGrant)
+		access.GET("/grants", h.listGrants)
+		access.DELETE("/grants/:id", h.deleteGrant)
+	}
+
 	// 模型目录（§4「模型目录」+ §4「批量匹配、人工覆盖」）：候选列表与确认动作。
 	// 全部是**平台侧**动作（确认映射会影响对外标准 ID 与价格匹配，不能由分享者自行决定）。
 	catalog := r.Group("/model-catalog")
