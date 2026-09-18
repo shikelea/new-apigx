@@ -1,0 +1,50 @@
+From 4fd0002ff1c89456ebd45be85ba85550d08b5c88 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:11:19 +0800
+Subject: [PATCH 120/120] =?UTF-8?q?fix(access):=20=E6=89=93=E9=80=9A?=
+ =?UTF-8?q?=E6=B3=A8=E5=86=8C=E9=82=80=E8=AF=B7=E5=BC=80=E5=85=B3=E7=9A=84?=
+ =?UTF-8?q?=E6=8C=81=E4=B9=85=E5=8C=96=E4=B8=8E=E5=8A=A0=E8=BD=BD=20?=
+ =?UTF-8?q?=E2=80=94=E2=80=94=20=E7=AB=AF=E5=88=B0=E7=AB=AF=207/7=20?=
+ =?UTF-8?q?=E9=80=9A=E8=BF=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**根因（两层，都有据）**：
+1. 底座对**布尔型配置**是按后缀 `Enabled` 统一处理的（model/option.go：
+   `if strings.HasSuffix(key, "Enabled") || key == ...`），而我的键叫 `RegisterInviteRequired`
+   ⇒ **根本进不了那个 switch** ⇒ PUT 报 success、库里也写了，但内存变量永不更新。
+   ⇒ 已把该键加入该条件（与 DefaultCollapseSidebar 等同列）。
+2. 运行期改配置**不即时生效**（OptionMap 与 common.* 是启动时加载）⇒ 需重启；
+   且该键必须先有 options 行（model.UpdateOption 只更新已存在的键）。
+   ⇒ 这两点都是底座既有行为，本轮按它走（改库 + 重启），未改底座语义。
+
+**端到端验证（开关打开后，7/7 通过）**：
+  ✓ 无邀请码注册被拒   ✓ 无效邀请码被拒
+  ✓ 发放注册邀请码成功 ✓ **有效邀请码注册成功**
+  ✓ **同一单次码二次使用被拒**（原子核销）
+  ✓ **新用户 role=1（普通用户）⇒ 不隐式授予管理员权限**（§10.1）
+**过程如实记录**：我第一版断言只看 HTTP 状态码，而底座对业务失败返回 200 + success:false，
+  导致"3 项失败"的假象；改为看 success 标志后全部通过。
+**已知待改进**：被拒时复用的是"注册已关闭"的既有文案，应换成专门的"邀请码无效或已使用"文案（下一轮）。
+**环境**：开关已恢复为 false。
+---
+ model/option.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/model/option.go b/model/option.go
+index f3b4165..3fa48ea 100644
+--- a/model/option.go
++++ b/model/option.go
+@@ -334,7 +334,7 @@ func updateOptionMap(key string, value string) (err error) {
+ 			common.ImageDownloadPermission = intValue
+ 		}
+ 	}
+-	if strings.HasSuffix(key, "Enabled") || key == "DefaultCollapseSidebar" || key == "DefaultUseAutoGroup" || key == "SMTPForceAuthLogin" || key == "SMTPInsecureSkipVerify" {
++	if strings.HasSuffix(key, "Enabled") || key == "RegisterInviteRequired" || key == "DefaultCollapseSidebar" || key == "DefaultUseAutoGroup" || key == "SMTPForceAuthLogin" || key == "SMTPInsecureSkipVerify" {
+ 		boolValue := value == "true"
+ 		switch key {
+ 		case "PasswordRegisterEnabled":
+-- 
+2.53.0.windows.1
+
