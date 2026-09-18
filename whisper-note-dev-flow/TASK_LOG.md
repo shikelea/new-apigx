@@ -69,6 +69,7 @@
   - ⚠️ **剩余（T4.2 未收口的原因）**：上面两条规则**还没有中间件层回归测试**（需要令牌/用户夹具）⇒
     下一轮补测试后，台账 #5 / #26 才能从 ⚠️ 升到 ✅。详见 `docs/stage4/acceptance-evidence.md` 第 8 节。- [x] T4.2 阶段 4：权限绕过检查与日志脱敏 → `docs/stage4/acceptance-evidence.md` 第 8 节（真实库脱敏查询 + 两条中间件层回归测试 PASS）
 - [x] T4.3 阶段 4：备份恢复 / 配置回滚 / 升级回滚 → `docs/stage4/acceptance-evidence.md` 第 9 节（备份→恢复新库→12 项指纹一致；迁移连跑两次无错误；配置改→重启生效→回滚→恢复原值）
+  - 补充（升级回滚演练，本轮补齐）：用 git worktree 取较早补丁级 1c981ff（落后 HEAD 59 个提交）构建**旧二进制**，在新版已迁移的库副本（apigx_rollback_drill）上运行 ⇒ **启动成功、/api/status 200、登录 200**，且回滚前后我方新表指纹**逐项一致**（usage_events=81 async_tasks=10 channels=166 users=8）⇒ 「新版迁移后回退旧二进制」**可行**。范围：只验回滚可用性，不含旧版本功能全量回归。详见台账 §23。
 - [x] T4.4 阶段 4：运营审核 + 指标看板与告警 → `docs/stage4/acceptance-evidence.md` 第 10 节（审核用例当场 PASS；指标复用底座 perf_metrics 且实测 44 行；新增熔断限频告警 + 不变量测试 PASS）
   - 进展（2026-09-18，**未完成**）：① **#25 已钉死** —— 新用例 `TestSuspendedGroupStopsServing`（分组暂停 ⇒ `AssembleCandidates` 返回空）**PASS** ⇒ 台账升 ✅；
     ② **#19 明确未实现** —— `PriceScopeUpstreamKey` 已建模，但 `routing/assemble.go` 取价只用"供给→渠道"两级 ⇒ 需补 Key 维度；
