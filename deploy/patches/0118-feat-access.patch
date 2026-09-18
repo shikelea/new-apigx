@@ -1,0 +1,286 @@
+From ed78a560840f1d376089114d3db32ebaa003e8f8 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:04:43 +0800
+Subject: [PATCH 118/118] =?UTF-8?q?feat(access):=20=E6=B3=A8=E5=86=8C?=
+ =?UTF-8?q?=E9=82=80=E8=AF=B7=E5=87=86=E5=85=A5=E7=9A=84=E5=9C=B0=E5=9F=BA?=
+ =?UTF-8?q?=EF=BC=88=E5=BC=80=E5=85=B3=20+=20=E5=8E=9F=E5=AD=90=E6=A0=B8?=
+ =?UTF-8?q?=E9=94=80=20+=20=E8=A1=A5=E5=81=BF=E5=9B=9E=E6=BB=9A=EF=BC=89?=
+ =?UTF-8?q?=E2=80=94=E2=80=94=20=E9=97=B8=E9=97=A8=E5=B0=9A=E6=9C=AA?=
+ =?UTF-8?q?=E6=8E=A5=E7=BA=BF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**背景（§5 第 2 条，计划书点名"必须明确修改的底座行为"）**：
+原有 aff_code 只做推广归因，**不等于**必须邀请码才能注册；必须新增真正的注册邀请策略与原子核销。
+本轮先落**可验证的地基**，行为默认不变（开关默认 false）。
+
+已完成并构建通过：
+- common/constants.go：新增 RegisterInviteRequired（默认 false，不改变既有行为）
+- model/option.go：按底座既有机制接入"加载 + 应用"两处
+- controller/misc.go：/api/status 暴露 register_invite_required（前端据此决定是否显示邀请码输入）
+- apigx/model/repo_registration_invite.go（新）：
+  · RedeemRegistrationInvite —— **原子核销**（带条件 UPDATE 抢名额；并发注册不会双花；
+    失败不区分原因，防枚举；**不携带任何角色信息 ⇒ 不隐式授予管理员权限**，符合 §10.1）
+  · RefundRegistrationInvite —— 补偿回滚（用户创建失败时把名额还回去；撤销优先）
+  · CreateRegistrationInvite —— 发放注册邀请码（只存哈希，明文只回一次）
+- apigx/model/repo_access.go：抽出 randomInviteToken（资源邀请与注册邀请两个调用方）
+
+**❗本轮未完成（下一轮继续）**：`controller/user.go` 的**注册闸门尚未接线**（我的补丁脚本因
+模板串里的反引号语法错误而整体未生效），因此上述新函数**目前没有调用方**、
+`invite_type=0` 的邀请码**还不能通过接口发放**。
+⇒ 状态是"地基就位、功能未闭环"，不宣称注册准入已完成。
+检查: go build ./... 0 错（行为零变化：开关默认关闭，且无调用方）
+---
+ apigx/model/repo_access.go              |  17 ++-
+ apigx/model/repo_registration_invite.go | 153 ++++++++++++++++++++++++
+ common/constants.go                     |   4 +
+ controller/misc.go                      |   1 +
+ model/option.go                         |   3 +
+ 5 files changed, 175 insertions(+), 3 deletions(-)
+ create mode 100644 apigx/model/repo_registration_invite.go
+
+diff --git a/apigx/model/repo_access.go b/apigx/model/repo_access.go
+index 4d083bb..0fdbd6c 100644
+--- a/apigx/model/repo_access.go
++++ b/apigx/model/repo_access.go
+@@ -104,11 +104,10 @@ func CreateAccessInvite(db *gorm.DB, createdByUserID int64, targetScopeType int,
+ 		return "", nil, fmt.Errorf("%w: target scope id is required", ErrInvalidArgument)
+ 	}
+ 
+-	raw := make([]byte, accessInviteTokenBytes)
+-	if _, err := rand.Read(raw); err != nil {
++	token, err := randomInviteToken()
++	if err != nil {
+ 		return "", nil, err
+ 	}
+-	token := base64.RawURLEncoding.EncodeToString(raw)
+ 
+ 	now := common.GetTimestamp()
+ 	invite := &Invite{
+@@ -307,3 +306,15 @@ func GrantExistsForResource(db *gorm.DB, subjectType int, subjectID int64, resou
+ 	}
+ 	return count > 0, nil
+ }
++
++// randomInviteToken 生成一次性邀请码明文（base64url，无填充）。
++//
++// 两个调用方：资源访问邀请（CreateAccessInvite）与注册邀请（CreateRegistrationInvite）——
++// 属于稳定的领域概念，而不是"为缩短调用点"抽出来的机械步骤。
++func randomInviteToken() (string, error) {
++	raw := make([]byte, accessInviteTokenBytes)
++	if _, err := rand.Read(raw); err != nil {
++		return "", err
++	}
++	return base64.RawURLEncoding.EncodeToString(raw), nil
++}
+diff --git a/apigx/model/repo_registration_invite.go b/apigx/model/repo_registration_invite.go
+new file mode 100644
+index 0000000..8b6783a
+--- /dev/null
++++ b/apigx/model/repo_registration_invite.go
+@@ -0,0 +1,153 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++package apigxmodel
++
++import (
++	"errors"
++	"fmt"
++	"strings"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++)
++
++// 注册邀请准入（计划书 §5「必须明确修改的底座行为」第 2 条）：
++//
++//	「原有 aff_code 用于推广归因，**不等于**必须提交有效邀请码才能注册。
++//	  新增真正的注册邀请策略及原子核销，不复用其名称就宣称功能完成。」
++//
++// 因此这里**不复用** aff_code：注册邀请码是我们自己的 `apigx_invites`（invite_type=0），
++// 与资源访问邀请码（invite_type=1）**共用表但校验逻辑独立**（§10.1）。
++//
++// 安全要点：
++//   - **原子核销**：与资源邀请同一套"带条件 UPDATE 抢名额"的写法，并发注册时不会双花；
++//   - **失败不区分原因**：不存在 / 已撤销 / 已过期 / 已用尽 ⇒ 同一个错误，避免枚举；
++//   - **不隐式授予管理员权限**：核销只负责"这个码可用"，创建出来的用户一律用**系统默认**角色与分组，
++//     邀请码本身不携带任何角色信息（§10.1 明确要求）。
++
++// RedeemRegistrationInvite 原子核销一个**注册邀请码**。
++//
++// 返回被核销的邀请（调用方在"用户创建失败"时应当调用 RefundRegistrationInvite 回补）。
++func RedeemRegistrationInvite(db *gorm.DB, token string, now int64) (*Invite, error) {
++	if db == nil {
++		return nil, errors.New("apigxmodel: nil db")
++	}
++	token = strings.TrimSpace(token)
++	if token == "" {
++		return nil, ErrNotFound
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	hash := hashInviteToken(token)
++
++	var invite Invite
++	err := db.Transaction(func(tx *gorm.DB) error {
++		res := tx.Model(&Invite{}).
++			Where("token_hash = ? AND invite_type = ? AND status = ? AND (expires_at = 0 OR expires_at > ?) AND (max_uses = 0 OR used_count < max_uses)",
++				hash, InviteTypeRegistration, InviteStatusActive, now).
++			Updates(map[string]any{
++				"used_count": gorm.Expr("used_count + 1"),
++				"updated_at": now,
++			})
++		if res.Error != nil {
++			return res.Error
++		}
++		if res.RowsAffected == 0 {
++			return ErrNotFound
++		}
++		if err := tx.Where("token_hash = ? AND invite_type = ?", hash, InviteTypeRegistration).First(&invite).Error; err != nil {
++			return err
++		}
++		if invite.MaxUses > 0 && invite.UsedCount >= invite.MaxUses {
++			return tx.Model(&Invite{}).Where("id = ? AND status = ?", invite.ID, InviteStatusActive).
++				Updates(map[string]any{"status": InviteStatusExhaust, "updated_at": now}).Error
++		}
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return &invite, nil
++}
++
++// RefundRegistrationInvite 回补一次核销（**仅用于补偿**：用户创建失败时把名额还回去）。
++//
++// 只减次数、不复活已撤销的邀请：若该邀请在核销后被撤销，则保持撤销状态（撤销优先）。
++func RefundRegistrationInvite(db *gorm.DB, inviteID int64, now int64) error {
++	if db == nil {
++		return errors.New("apigxmodel: nil db")
++	}
++	if inviteID <= 0 {
++		return fmt.Errorf("%w: invite id is required", ErrInvalidArgument)
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	res := db.Model(&Invite{}).
++		Where("id = ? AND used_count > 0", inviteID).
++		Updates(map[string]any{
++			"used_count": gorm.Expr("used_count - 1"),
++			"updated_at": now,
++			// 若此前因用尽被置为"已用尽"，回补后重新可用
++			"status": gorm.Expr("CASE WHEN status = ? THEN ? ELSE status END", InviteStatusExhaust, InviteStatusActive),
++		})
++	if res.Error != nil {
++		return res.Error
++	}
++	if res.RowsAffected == 0 {
++		return ErrNotFound
++	}
++	return nil
++}
++
++// CreateRegistrationInvite 发放注册邀请码（返回一次性明文）。
++//
++// 与资源邀请分开的入口，避免"用一个接口既能发注册码又能发资源码"造成的口径混淆。
++func CreateRegistrationInvite(db *gorm.DB, createdByUserID int64, maxUses int64, expiresAt int64) (string, *Invite, error) {
++	if db == nil {
++		return "", nil, errors.New("apigxmodel: nil db")
++	}
++	if createdByUserID <= 0 {
++		return "", nil, fmt.Errorf("%w: creator is required", ErrInvalidArgument)
++	}
++	raw, err := randomInviteToken()
++	if err != nil {
++		return "", nil, err
++	}
++	now := common.GetTimestamp()
++	invite := &Invite{
++		InviteType:      InviteTypeRegistration,
++		TokenHash:       hashInviteToken(raw),
++		TokenPrefix:     raw[:8],
++		TargetScopeType: InviteTargetNone,
++		TargetScopeID:   0,
++		MaxUses:         maxUses,
++		Status:          InviteStatusActive,
++		ExpiresAt:       expiresAt,
++		CreatedByUserID: createdByUserID,
++		CreatedAt:       now,
++		UpdatedAt:       now,
++	}
++	if err := db.Create(invite).Error; err != nil {
++		return "", nil, err
++	}
++	return raw, invite, nil
++}
+diff --git a/common/constants.go b/common/constants.go
+index 2c7b909..5ec7536 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -70,6 +70,10 @@ var TelegramOAuthEnabled = false
+ var TurnstileCheckEnabled = false
+ var RegisterEnabled = true
+ 
++// RegisterInviteRequired 是否**必须**使用注册邀请码才能注册（§5「邀请准入」）。
++// 默认 false：不改变底座既有行为；开启后由 apigx 侧的注册邀请码把关。
++var RegisterInviteRequired = false
++
+ var EmailDomainRestrictionEnabled = false // 是否启用邮箱域名限制
+ var EmailAliasRestrictionEnabled = false  // 是否启用邮箱别名限制
+ var EmailDomainWhitelist = []string{
+diff --git a/controller/misc.go b/controller/misc.go
+index abebc1e..7f60138 100644
+--- a/controller/misc.go
++++ b/controller/misc.go
+@@ -91,6 +91,7 @@ func GetStatus(c *gin.Context) {
+ 		"demo_site_enabled":             operation_setting.DemoSiteEnabled,
+ 		"self_use_mode_enabled":         operation_setting.SelfUseModeEnabled,
+ 		"register_enabled":              common.RegisterEnabled,
++		"register_invite_required":      common.RegisterInviteRequired,
+ 		"password_login_enabled":        common.PasswordLoginEnabled,
+ 		"password_register_enabled":     common.PasswordRegisterEnabled,
+ 		"default_use_auto_group":        setting.DefaultUseAutoGroup,
+diff --git a/model/option.go b/model/option.go
+index 24f0fd6..f3b4165 100644
+--- a/model/option.go
++++ b/model/option.go
+@@ -42,6 +42,7 @@ func InitOptionMap() {
+ 	common.OptionMap["PasswordLoginEnabled"] = strconv.FormatBool(common.PasswordLoginEnabled)
+ 	common.OptionMap["PasswordRegisterEnabled"] = strconv.FormatBool(common.PasswordRegisterEnabled)
+ 	common.OptionMap["EmailVerificationEnabled"] = strconv.FormatBool(common.EmailVerificationEnabled)
++	common.OptionMap["RegisterInviteRequired"] = strconv.FormatBool(common.RegisterInviteRequired)
+ 	common.OptionMap["GitHubOAuthEnabled"] = strconv.FormatBool(common.GitHubOAuthEnabled)
+ 	common.OptionMap["LinuxDOOAuthEnabled"] = strconv.FormatBool(common.LinuxDOOAuthEnabled)
+ 	common.OptionMap["TelegramOAuthEnabled"] = strconv.FormatBool(common.TelegramOAuthEnabled)
+@@ -342,6 +343,8 @@ func updateOptionMap(key string, value string) (err error) {
+ 			common.PasswordLoginEnabled = boolValue
+ 		case "EmailVerificationEnabled":
+ 			common.EmailVerificationEnabled = boolValue
++		case "RegisterInviteRequired":
++			common.RegisterInviteRequired = boolValue
+ 		case "GitHubOAuthEnabled":
+ 			common.GitHubOAuthEnabled = boolValue
+ 		case "LinuxDOOAuthEnabled":
+-- 
+2.53.0.windows.1
+
