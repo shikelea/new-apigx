@@ -1829,3 +1829,30 @@ task_AZ3j9suvLs2hQjkR6jaYz | SUCCESS | -                     ← 正常成功（
 
 **影响面（如实）**：09:34 之后的前端改动 = 广场质量摘要/类型筛选/调用配置/访客分组页/平台页模型目录卡/分享分组说明/价格指引 等 ✓ —— 用户此前**都没看到** ✓；
 其中"看起来像没修好"的若干反馈（如 `taskCenter.title`）大概率同源 ✓。
+## 界面显示原始键名（`usage.title`）—— **真因是我把 i18n 键写错了层级**
+
+**用户反馈**：`usage.title` 这类原始键名"还是那样" ✗（我在上一轮误判为缓存/embed ✗，那次判断**不完整** ✓）。
+
+**这次不猜，先写可复现的用例** ✓（`web/src/i18n/__tests__/dotted-keys.test.ts` ✓）：
+加载真实 i18n 配置并断言 `t('usage.title')` —— **当场复现** ✓（返回键名本身 ✗）。
+
+**逐步定位（都有证据）**：运行时 `keySeparator = false` **确实生效** ✓；但 `i18n.store.data.en.translation` **键数为 0** ✗；
+i18next 日志 `missingKey en translation usage.title` ✓ ⇒ **`translation` 命名空间里根本没有这些键** ✓。
+
+**真因**：语言文件应为 `{ "translation": { 键: 文案 } }` ✓（底座原本就是这样 ✓），
+而我此前用脚本加键时写成了 **`json[key] = value`** ✗ —— 键掉到了 **JSON 顶层** ✗✓，
+被 i18next 当成**命名空间名**（未在 `ns` 列表里 ⇒ 不加载 ✓）⇒ `translation` 内容缺失 ✓。
+
+**为什么"只有少数地方露馅"** ✓：本项目**键就是英文原文** ⇒ 查不到时回显的英文**看着正常** ✓，
+只有带点的键（`usage.title` / `taskCenter.title`）一眼就看出是原始键名 ✓。
+
+**已修** ✓：7 个语言文件共 **搬入 1267 个键**（181×7 ✓，另 6 个已在正确位置 ✓）；
+复验：顶层**只剩 `translation`** ✓，`usage.title` = `My Usage` / `我的用量` ✓。
+
+**回归用例** ✓（3 条，全过 ✓）：① 顶层只应有 `translation` ✓；② 带点键在 `translation` 内 ✓；
+③ 显式灌入资源后带点键**解析为译文** ✓（用显式资源避免测试环境 JSON 导入互操作差异 ✗ —— 这一点如实说明 ✓）。
+
+**同时修掉的另一半** ✓：`go:embed web/dist` ⇒ 前端改动必须**重建二进制** ✓；
+本轮已 `bun run build` → `go build` → 重启 ✓，并复验**网关返回的 `index.js` 与本地 dist 一致** ✓（`index.2b8117fcd2.js` ✓，含中文译文 ✓）。
+
+**教训已写入 `CODE_STYLE.md`**：§五 构建与验证（embed ✓）、§六 i18n 层级（键必须写在 `translation` 里 ✓）。

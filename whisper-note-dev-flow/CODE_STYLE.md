@@ -41,3 +41,13 @@
   > 用户连续报告"改了还是老样子"。**判断方法**：对比 `web/dist/index.html` 与 `curl /` 引用的 `index.*.js` 哈希。
 - 前端改动只有 `dist` 变了、exe 没重建时，**刷新浏览器毫无作用**（不是缓存问题）。
 - 报"界面没变化"之前，先做上面那个哈希对比，不要先让用户清缓存。
+## 六、i18n 语言文件的**层级**（踩过的坑）
+
+- 语言文件结构必须是 **`{ "translation": { 键: 文案 } }`** ✓（i18next 的资源结构是 `{ 语言: { 命名空间: 键 } }`）。
+- **新增键必须写进 `translation` 里** ✗ 不能写在 JSON 顶层：顶层散键会被 i18next 当成**命名空间名**，
+  于是 `t('usage.title')` 在 `translation` 里查不到 ⇒ **原样回显键名**。
+- 本项目**键就是英文原文** ✓，所以这个 bug 很隐蔽：查不到时回显的英文看着正常 ✓，
+  只有**带点的键**（`usage.title`、`taskCenter.title`）一眼露馅 ✓。
+- 用脚本批量加键时，务必 **`json.translation[key] = value`** ✗ 而不是 `json[key] = value`；
+  写完**校验**：`Object.keys(json)` 应当**只有** `translation`。
+- 回归用例：`web/src/i18n/__tests__/dotted-keys.test.ts`（守住"顶层只有 translation"与"带点键能解析"两条）。
