@@ -120,11 +120,15 @@ func plazaVisibilityPredicate(viewerUserID int64) (string, []any) {
 		" OR EXISTS (SELECT 1 FROM " + grantTable + " AS gr" +
 		" WHERE gr.subject_type = ? AND gr.subject_id = ?" +
 		" AND (gr.expires_at = 0 OR gr.expires_at > ?)" +
-		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))"
+		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))" +
+		// 闸门（U-1）：公开/受邀**之外**，分组本身还必须处于「已发布」。
+		// 放在括号外 ⇒ 公开与受邀两条分支都受它约束（草稿/待审核/已暂停一律不可见）。
+		" AND g.publish_status = ?"
 	args := []any{
 		ShareGroupVisibilityPublic,
 		GrantSubjectUser, viewerUserID, now,
 		GrantResourceGroup, GrantResourceOffering,
+		ShareGroupPublishPublished,
 	}
 	return condition, args
 }

@@ -137,6 +137,9 @@ func (e *testEnv) createGroup(t *testing.T, userID int64, name string) int64 {
 	data, _ := body["data"].(map[string]any)
 	id, ok := data["id"].(float64)
 	require.True(t, ok, "创建分组应返回 id：%s", rec.Body.String())
+	// 新建的**公开**分组初始为「待审核」（U-1 闸门：未发布的分组对外不可见、不可被路由）。
+	// 夹具代表"平台已审核通过"的状态，否则所有依赖广场/路由的用例都会因为闸门而看不到数据。
+	require.NoError(t, apigxmodel.SetShareGroupPublishStatus(e.db, int64(id), apigxmodel.ShareGroupPublishPublished))
 	return int64(id)
 }
 
@@ -157,10 +160,16 @@ func TestShareGroupLifecycle(t *testing.T) {
 	env := newTestEnv(t, true)
 	const user int64 = 1001
 
-	id := env.createGroup(t, user, "小林公益站")
+	// 本用例要观察的正是「新建默认值」，所以**直接调 API 建**，不走 createGroup 夹具
+	// （夹具会把分组置为"平台已审核通过"，那样就看不到默认值了）。
+	rec, body := env.do(t, http.MethodPost, "/api/share-groups", user, `{"name":"小林公益站"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	created, _ := body["data"].(map[string]any)
+	idFloat, _ := created["id"].(float64)
+	id := int64(idFloat)
 
 	// 列表能看到
-	rec, body := env.do(t, http.MethodGet, "/api/share-groups", user, "")
+	rec, body = env.do(t, http.MethodGet, "/api/share-groups", user, "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	data, _ := body["data"].(map[string]any)
 	items, _ := data["items"].([]any)
@@ -654,7 +663,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	const owner int64 = 8501
 
 	// 分组设为**公开**（可见性 2）；否则即便已发布也不该出现在广场
-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "公开组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "公开组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
 	baseChannelID := nextBaseChannelID()
 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
@@ -710,7 +719,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	assert.Equal(t, "m-plaza", detail["model"])
 
 	// 私有分组：即便已发布也不出现在广场
-	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: 1}
+	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, privateGroup))
 	privateChannelID := env.createChannel(t, owner, privateGroup.ID, nextBaseChannelID())
 	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(privateChannelID, 10)+"/offerings", owner, `{"upstream_model_id":"m-private"}`)
@@ -1086,7 +1095,7 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
 	env := newTestEnv(t, true)
 	const owner int64 = 9301
 
-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "质量组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "质量组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
 	baseChannelID := nextBaseChannelID()
 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座质量", Key: "x", Status: common.ChannelStatusEnabled}).Error)
@@ -1123,7 +1132,7 @@ func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
 	env := newTestEnv(t, true)
 	const owner int64 = 9401
 
-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "目录组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: 1}
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "目录组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
 	baseChannelID := nextBaseChannelID()
 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座目录", Key: "x", Status: common.ChannelStatusEnabled}).Error)
@@ -1228,7 +1237,7 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
 	const owner, invited, stranger int64 = 9601, 9602, 9603
 
 	// 受限分组（1=受限；广场默认只放行公开=2）
-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "受限组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: 1}
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "受限组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
 	baseChannelID := nextBaseChannelID()
 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座受限", Key: "x", Status: common.ChannelStatusEnabled}).Error)
@@ -1293,7 +1302,7 @@ func TestAccessInviteAndGrantAPIContract(t *testing.T) {
 	env := newTestEnv(t, true)
 	const owner, guest, stranger int64 = 9801, 9802, 9803
 
-	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "邀请组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: 1}
+	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "邀请组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
 
 	// ① 发放邀请：明文只在这里返回一次

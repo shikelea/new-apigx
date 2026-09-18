@@ -280,7 +280,16 @@ func ListPublishedOfferingsByModel(db *gorm.DB, upstreamModelID string) ([]Model
 		return nil, nil
 	}
 	var offerings []ModelOffering
+	// 闸门（U-1）：供给"已发布"还不够 —— 它所属的**分享分组**也必须处于「已发布」。
+	// 否则草稿/待审核/已暂停的分组会继续对外服务（这正是"新建渠道后直接就确定"的根因）。
+	// 用 TableName() 取表名、只做普通列等值比较 ⇒ SQLite/MySQL/PostgreSQL 通用。
+	channelTable := Channel{}.TableName()
+	groupTable := ShareGroup{}.TableName()
+	groupPublished := "channel_id IN (SELECT id FROM " + channelTable +
+		" WHERE share_group_id IN (SELECT id FROM " + groupTable +
+		" WHERE publish_status = ? AND deleted_at IS NULL) AND deleted_at IS NULL)"
 	err := db.Where("upstream_model_id = ? AND status = ?", upstreamModelID, OfferingStatusPublished).
+		Where(groupPublished, ShareGroupPublishPublished).
 		Order("id ASC").Find(&offerings).Error
 	return offerings, err
 }
