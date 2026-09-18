@@ -82,3 +82,21 @@
 | 任务归属校验 | `controller/task.go:233 getTaskForArtifactRequest` | 复用，另在产物访问上收紧默认策略 |
 | 账号会话与令牌校验 | `middleware/auth.go` 主体 | 复用，不另起第二套用户系统 |
 | 管理后台组件 | `web/src/components/` | 前端复用，不另起样式体系 |
+
+## D-028：sora 任务插件声明了本项目实际使用的视频模型（MiniMax-Hailuo-02）
+
+**性质**：**产品需要的改动**（不是底座缺陷）。
+
+**背景**：本项目视频能力走 aiping.cn，其视频接口是 OpenAI 风格 `POST /v1/videos` ——
+与底座内置 `sora` 任务插件协议**完全一致**（`{baseUrl}/v1/videos` + `GET /v1/videos/{id}` + `/content`）。
+但底座按**模型名**把请求认领给插件：`MiniMax-Hailuo-02` 被内置 `hailuo` 插件（MiniMax 原生协议）认领，
+于是我们的 `sora` 渠道拿不到请求（503 "claimed by task plugin hailuo"）。
+
+**改动**：`plugins/tasks/sora/plugin.js` 的 `models` 增加 `"MiniMax-Hailuo-02"`，
+让底座把该模型认领给 `sora` 插件；协议/路由不变（原本就兼容）。
+
+**配套的环境级操作（不写进代码，属部署配置）**：停用内置 `hailuo` 插件以避免认领冲突 ——
+用底座自带机制 `PUT /api/plugin/task` 上传 hailuo 自身源码 + `enabled:false`（**可逆**）。
+
+**验证**：经平台 `POST /v1/videos {model:"MiniMax-Hailuo-02"}` ⇒ **200**，任务
+`task_cgApa5Xj4kAnFIrZzdnBWOqayhV5eo09` ⇒ 轮询 **200 / queued**（真实厂商任务，只提交一次）。
