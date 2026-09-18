@@ -370,6 +370,9 @@ const leaseContextKey = "apigx_capacity_lease"
 //
 // 返回 false 表示**容量不足或账本不可用，且已经写出错误响应**，调用方必须停止本次尝试。
 func AcquireForAttempt(c *gin.Context, channelID int) bool {
+	// 预留时刻确定"结算归属周期"（跨日结算要回到这个周期，见 schema-draft §5.21 / §5.18）。
+	// 只记时间桶，不含任何凭据或用户信息；≤16 字符，符合列宽。
+	storeAdmissionCycleKey(c, time.Now())
 	if c == nil {
 		return true
 	}
@@ -432,4 +435,19 @@ func ReleaseFromContext(c *gin.Context) {
 		lease.Release()
 	}
 	c.Set(leaseContextKey, (*Lease)(nil))
+}
+
+// admissionCycleKey 是"本次预留所属周期"的上下文键。
+const admissionCycleKey = "apigx_admission_cycle_key"
+
+// storeAdmissionCycleKey 在**预留时刻**记下结算归属周期。
+//
+// 为什么在预留时刻取：计划书要求"跨日结算回到**原预留周期**"—— 若在结算时按当时时间取，
+// 一个 23:59 进入、00:01 结算的请求就会被算进新的一天，与其占用资源的周期不一致。
+// 周期粒度取到**分钟**（14 位：YYYYMMDDHHmm），既可跨日回溯，也不超出列宽（16）。
+func storeAdmissionCycleKey(c *gin.Context, at time.Time) {
+	if c == nil {
+		return
+	}
+	c.Set(admissionCycleKey, at.UTC().Format("200601021504"))
 }

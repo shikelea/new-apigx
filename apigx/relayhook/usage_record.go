@@ -41,6 +41,14 @@ func RecordSettlementUsage(c *gin.Context, relayInfo *relaycommon.RelayInfo, pro
 	write := func(dimension int, tokens int) {
 		uid := "u:" + relayInfo.RequestId + ":" + strconv.Itoa(dimension)
 		// 取价并计价（未定价 ⇒ 成本保持 0；不认识的计算单位也记未定价）
+		// 结算归属周期：**在预留时刻**已确定（见 capacity_hook.storeAdmissionCycleKey）
+		cycleKey := ""
+		if v, ok := c.Get(admissionCycleKey); ok {
+			if s, isStr := v.(string); isStr {
+				cycleKey = s
+			}
+		}
+
 		cost := apigxmodel.ResolveUsageCost(db, keyID, offeringID, channelID, dimension, int64(tokens), now)
 
 		event := &apigxmodel.UsageEvent{
@@ -57,6 +65,7 @@ func RecordSettlementUsage(c *gin.Context, relayInfo *relaycommon.RelayInfo, pro
 			QuantityMilli:   apigxmodel.UsageQuantityMilliFromTokens(tokens),
 			UnitScale:       apigxmodel.UsageUnitScalePerMillionTokens,
 			Trust:           apigxmodel.UsageTrustUpstreamReported,
+			CycleKey:        cycleKey,
 			PriceRuleID:     cost.PriceRuleID,
 			PriceRuleItemID: cost.PriceRuleItemID,
 			UnitPriceMicro:  cost.UnitPriceMicro,
