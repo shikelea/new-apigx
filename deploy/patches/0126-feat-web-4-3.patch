@@ -1,0 +1,507 @@
+From c6b55cfb8c26658362bc111815621179226c2f17 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:40:21 +0800
+Subject: [PATCH 126/126] =?UTF-8?q?feat(web):=20=E8=B5=84=E6=BA=90?=
+ =?UTF-8?q?=E9=82=80=E8=AF=B7=E7=9A=84=E7=8B=AC=E7=AB=8B=E5=85=91=E6=8D=A2?=
+ =?UTF-8?q?=E5=85=A5=E5=8F=A3=EF=BC=88=C2=A74=20=E7=AC=AC=203=20=E6=9D=A1?=
+ =?UTF-8?q?=EF=BC=89=E2=80=94=E2=80=94=20=E8=AF=A5=E6=9D=A1=E8=87=B3?=
+ =?UTF-8?q?=E6=AD=A4=E5=AE=8C=E6=95=B4?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+§4 第 3 条要求「资源邀请通过**独立兑换入口**处理」；此前只有后端接口、**没有界面**。
+- features/access-invite/api.ts：redeemAccessInvite（POST /api/apigx/access/invites/redeem）
+- features/access-invite/index.tsx：输入邀请码 → 兑换 → 成功提示并链到模型广场；
+  失败统一提示"邀请码无效或已被使用"
+  **刻意不区分**不存在/已撤销/已过期/已用尽 —— 与后端同一口径，避免用该页面**枚举**有效邀请码
+- routes/_authenticated/access-invite/index.tsx：新路由（由构建重新生成路由树）
+- 导航：个人分组「我的分享」之后新增「兑换邀请」
+- i18n：7 个语言文件各新增 6 条（**写入 translation 命名空间**，脚本校验顶层只应有 translation）
+
+**同时更新一条底座用例**：sidebar-config.test.tsx 断言"个人分组完整列表"，
+因新增「我的分享」「兑换邀请」而需要同步；用例原意（Security & Access 紧跟 Profile）仍成立，
+已在用例里写明原因。
+检查: typecheck 0 错 / 改动文件 oxlint 0 错 / hooks+i18n 用例 16/16 / build ✅
+---
+ web/src/features/access-invite/api.ts         |  45 ++++++++
+ web/src/features/access-invite/index.tsx      | 105 ++++++++++++++++++
+ .../hooks/__tests__/sidebar-config.test.tsx   |  10 +-
+ web/src/hooks/use-sidebar-data.ts             |   5 +
+ web/src/i18n/locales/en.json                  |   8 +-
+ web/src/i18n/locales/fr.json                  |   8 +-
+ web/src/i18n/locales/ja.json                  |   8 +-
+ web/src/i18n/locales/ru.json                  |   8 +-
+ web/src/i18n/locales/vi.json                  |   8 +-
+ web/src/i18n/locales/zh-TW.json               |   8 +-
+ web/src/i18n/locales/zh.json                  |   8 +-
+ web/src/routeTree.gen.ts                      |  22 ++++
+ .../_authenticated/access-invite/index.tsx    |  26 +++++
+ 13 files changed, 261 insertions(+), 8 deletions(-)
+ create mode 100644 web/src/features/access-invite/api.ts
+ create mode 100644 web/src/features/access-invite/index.tsx
+ create mode 100644 web/src/routes/_authenticated/access-invite/index.tsx
+
+diff --git a/web/src/features/access-invite/api.ts b/web/src/features/access-invite/api.ts
+new file mode 100644
+index 0000000..8e7889d
+--- /dev/null
++++ b/web/src/features/access-invite/api.ts
+@@ -0,0 +1,45 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { api } from '@/lib/api'
++
++// 资源邀请兑换入口的数据访问层（§4 第 3 条：资源邀请通过**独立兑换入口**处理）。
++// 只做请求与类型，错误交给调用方处理（规范 3.9）。
++
++export interface RedeemGrant {
++  grant_id: number
++  resource_type: number
++  resource_id: number
++  scope_kind: number
++  source_invite_id: number
++  expires_at: number
++}
++
++export interface RedeemResponse {
++  success: boolean
++  message?: string
++  data?: RedeemGrant
++}
++
++export async function redeemAccessInvite(token: string): Promise<RedeemResponse> {
++  const res = await api.post('/api/apigx/access/invites/redeem', {
++    token: token.trim(),
++  })
++  return res.data
++}
+diff --git a/web/src/features/access-invite/index.tsx b/web/src/features/access-invite/index.tsx
+new file mode 100644
+index 0000000..98a54d8
+--- /dev/null
++++ b/web/src/features/access-invite/index.tsx
+@@ -0,0 +1,105 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { useMutation } from '@tanstack/react-query'
++import { Link } from '@tanstack/react-router'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { SectionPageLayout } from '@/components/layout'
++import { Button } from '@/components/ui/button'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++
++import { redeemAccessInvite } from './api'
++
++/**
++ * 资源邀请兑换入口（§4 第 3 条：资源邀请通过**独立兑换入口**处理）。
++ *
++ * 安全与体验上的两点约定：
++ *  1. 兑换是**一次性**的（后端原子核销）：同一个码不能被两个人同时用掉；
++ *  2. 失败时统一提示"邀请码无效或已被使用" —— 不区分"不存在/已撤销/已过期/已用尽"，
++ *     避免用这个页面**枚举**有效邀请码（与后端同一口径）。
++ */
++export function AccessInviteRedeem() {
++  const { t } = useTranslation()
++  const [token, setToken] = useState('')
++
++  const redeem = useMutation({
++    mutationFn: () => redeemAccessInvite(token),
++    onSuccess: () => {
++      setToken('')
++    },
++  })
++
++  const invalid = token.trim() === ''
++  const succeeded = redeem.isSuccess && redeem.data?.success !== false
++  const failed = redeem.isError || redeem.data?.success === false
++
++  return (
++    <SectionPageLayout>
++      <SectionPageLayout.Title>{t('Redeem an invite')}</SectionPageLayout.Title>
++      <SectionPageLayout.Content>
++        <Card className='max-w-xl'>
++          <CardHeader>
++            <CardTitle>{t('Redeem an invite')}</CardTitle>
++          </CardHeader>
++          <CardContent className='space-y-4'>
++            <p className='text-muted-foreground text-sm'>
++              {t('Paste the invite code you received to unlock the shared resources.')}
++            </p>
++
++            <div className='space-y-2'>
++              <Label htmlFor='access-invite-token'>{t('Invite code')}</Label>
++              <Input
++                id='access-invite-token'
++                value={token}
++                autoComplete='off'
++                onChange={(event) => setToken(event.target.value)}
++              />
++            </div>
++
++            <Button
++              disabled={invalid || redeem.isPending}
++              onClick={() => redeem.mutate()}
++            >
++              {t('Redeem')}
++            </Button>
++
++            {succeeded ? (
++              <p className='text-sm text-emerald-600'>
++                {t('Invite redeemed. The shared resources are now visible.')}{' '}
++                <Link to='/pricing' className='underline'>
++                  {t('Open the model plaza')}
++                </Link>
++              </p>
++            ) : null}
++
++            {failed ? (
++              <p className='text-destructive text-sm'>
++                {t('Invalid or already used invite code')}
++              </p>
++            ) : null}
++          </CardContent>
++        </Card>
++      </SectionPageLayout.Content>
++    </SectionPageLayout>
++  )
++}
+diff --git a/web/src/hooks/__tests__/sidebar-config.test.tsx b/web/src/hooks/__tests__/sidebar-config.test.tsx
+index e69e614..0bf3e88 100644
+--- a/web/src/hooks/__tests__/sidebar-config.test.tsx
++++ b/web/src/hooks/__tests__/sidebar-config.test.tsx
+@@ -83,7 +83,15 @@ describe('security sidebar visibility', () => {
+       result.current
+         .find((group) => group.id === 'personal')
+         ?.items.map((item) => item.title)
+-    ).toEqual(['Wallet', 'Profile', 'Security & Access', 'share.title'])
++    // 二开新增「我的分享」与「兑换邀请」两条入口（都属个人分组），
++    // 本用例的原意（Security & Access 紧跟 Profile）仍然成立。
++    ).toEqual([
++      'Wallet',
++      'Profile',
++      'Security & Access',
++      'share.title',
++      'Redeem an invite',
++    ])
+     expect(
+       result.current
+         .flatMap((group) => group.items)
+diff --git a/web/src/hooks/use-sidebar-data.ts b/web/src/hooks/use-sidebar-data.ts
+index d707218..185c55b 100644
+--- a/web/src/hooks/use-sidebar-data.ts
++++ b/web/src/hooks/use-sidebar-data.ts
+@@ -140,6 +140,11 @@ export function useSidebarData(): SidebarData {
+             url: '/share',
+             icon: Share2,
+           },
++          {
++            title: t('Redeem an invite'),
++            url: '/access-invite',
++            icon: Ticket,
++          },
+ 
+         ],
+       },
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index a2fba50..8423bb5 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6716,6 +6716,12 @@
+     "Enter your registration invite code": "Enter your registration invite code",
+     "Please enter the registration invite code": "Please enter the registration invite code",
+     "Registration Invite Required": "Registration Invite Required",
+-    "Require a valid registration invite code to sign up": "Require a valid registration invite code to sign up"
++    "Require a valid registration invite code to sign up": "Require a valid registration invite code to sign up",
++    "Redeem an invite": "Redeem an invite",
++    "Paste the invite code you received to unlock the shared resources.": "Paste the invite code you received to unlock the shared resources.",
++    "Invite code": "Invite code",
++    "Invite redeemed. The shared resources are now visible.": "Invite redeemed. The shared resources are now visible.",
++    "Open the model plaza": "Open the model plaza",
++    "Invalid or already used invite code": "Invalid or already used invite code"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index c507bbc..94fa479 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6716,6 +6716,12 @@
+     "Enter your registration invite code": "Saisissez votre code d'invitation",
+     "Please enter the registration invite code": "Veuillez saisir le code d'invitation",
+     "Registration Invite Required": "Code d'invitation obligatoire",
+-    "Require a valid registration invite code to sign up": "Un code d'invitation valide est requis pour s'inscrire"
++    "Require a valid registration invite code to sign up": "Un code d'invitation valide est requis pour s'inscrire",
++    "Redeem an invite": "Utiliser une invitation",
++    "Paste the invite code you received to unlock the shared resources.": "Collez le code d'invitation reçu pour débloquer les ressources partagées.",
++    "Invite code": "Code d'invitation",
++    "Invite redeemed. The shared resources are now visible.": "Invitation utilisée. Les ressources partagées sont désormais visibles.",
++    "Open the model plaza": "Ouvrir la place de marché",
++    "Invalid or already used invite code": "Code invalide ou déjà utilisé"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 669b81a..8785e78 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6716,6 +6716,12 @@
+     "Enter your registration invite code": "登録招待コードを入力",
+     "Please enter the registration invite code": "登録招待コードを入力してください",
+     "Registration Invite Required": "登録招待コードを必須にする",
+-    "Require a valid registration invite code to sign up": "登録には有効な登録招待コードが必要です"
++    "Require a valid registration invite code to sign up": "登録には有効な登録招待コードが必要です",
++    "Redeem an invite": "招待を引き換える",
++    "Paste the invite code you received to unlock the shared resources.": "受け取った招待コードを貼り付けると、共有リソースが利用できます。",
++    "Invite code": "招待コード",
++    "Invite redeemed. The shared resources are now visible.": "引き換えが完了しました。共有リソースが表示されます。",
++    "Open the model plaza": "モデル広場を開く",
++    "Invalid or already used invite code": "招待コードが無効か、既に使用されています"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 98096c3..df72063 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6716,6 +6716,12 @@
+     "Enter your registration invite code": "Введите код приглашения",
+     "Please enter the registration invite code": "Введите код приглашения",
+     "Registration Invite Required": "Обязательный код приглашения",
+-    "Require a valid registration invite code to sign up": "Для регистрации требуется действительный код приглашения"
++    "Require a valid registration invite code to sign up": "Для регистрации требуется действительный код приглашения",
++    "Redeem an invite": "Активировать приглашение",
++    "Paste the invite code you received to unlock the shared resources.": "Вставьте полученный код приглашения, чтобы открыть общие ресурсы.",
++    "Invite code": "Код приглашения",
++    "Invite redeemed. The shared resources are now visible.": "Приглашение активировано. Общие ресурсы теперь доступны.",
++    "Open the model plaza": "Открыть каталог моделей",
++    "Invalid or already used invite code": "Код недействителен или уже использован"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index ee5e270..2262900 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6716,6 +6716,12 @@
+     "Enter your registration invite code": "Nhập mã mời đăng ký của bạn",
+     "Please enter the registration invite code": "Vui lòng nhập mã mời đăng ký",
+     "Registration Invite Required": "Bắt buộc mã mời đăng ký",
+-    "Require a valid registration invite code to sign up": "Yêu cầu mã mời đăng ký hợp lệ để đăng ký"
++    "Require a valid registration invite code to sign up": "Yêu cầu mã mời đăng ký hợp lệ để đăng ký",
++    "Redeem an invite": "Đổi mã mời",
++    "Paste the invite code you received to unlock the shared resources.": "Dán mã mời bạn nhận được để mở khóa tài nguyên chia sẻ.",
++    "Invite code": "Mã mời",
++    "Invite redeemed. The shared resources are now visible.": "Đổi thành công. Tài nguyên chia sẻ đã hiển thị.",
++    "Open the model plaza": "Mở chợ mô hình",
++    "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index dede524..3a653d3 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6716,6 +6716,12 @@
+     "Enter your registration invite code": "請輸入註冊邀請碼",
+     "Please enter the registration invite code": "請輸入註冊邀請碼",
+     "Registration Invite Required": "必須使用註冊邀請碼",
+-    "Require a valid registration invite code to sign up": "註冊時必須提交有效的註冊邀請碼"
++    "Require a valid registration invite code to sign up": "註冊時必須提交有效的註冊邀請碼",
++    "Redeem an invite": "兌換邀請",
++    "Paste the invite code you received to unlock the shared resources.": "貼上你收到的邀請碼，即可解鎖對應的分享資源。",
++    "Invite code": "邀請碼",
++    "Invite redeemed. The shared resources are now visible.": "兌換成功，對應的分享資源現在可見了。",
++    "Open the model plaza": "打開模型廣場",
++    "Invalid or already used invite code": "邀請碼無效或已被使用"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 642df85..4d80010 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6716,6 +6716,12 @@
+     "Enter your registration invite code": "请输入注册邀请码",
+     "Please enter the registration invite code": "请输入注册邀请码",
+     "Registration Invite Required": "必须使用注册邀请码",
+-    "Require a valid registration invite code to sign up": "注册时必须提交有效的注册邀请码"
++    "Require a valid registration invite code to sign up": "注册时必须提交有效的注册邀请码",
++    "Redeem an invite": "兑换邀请",
++    "Paste the invite code you received to unlock the shared resources.": "粘贴你收到的邀请码，即可解锁对应的分享资源。",
++    "Invite code": "邀请码",
++    "Invite redeemed. The shared resources are now visible.": "兑换成功，对应的分享资源现在可见了。",
++    "Open the model plaza": "打开模型广场",
++    "Invalid or already used invite code": "邀请码无效或已被使用"
+   }
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index b7bb17f..3e0f06c 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -34,6 +34,7 @@ import { Route as PricingIndexRouteImport } from './routes/pricing/index'
+ import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
+ import { Route as SetupIndexRouteImport } from './routes/setup/index'
+ import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
++import { Route as AuthenticatedAccessInviteIndexRouteImport } from './routes/_authenticated/access-invite/index'
+ import { Route as AuthenticatedApigxPlatformIndexRouteImport } from './routes/_authenticated/apigx-platform/index'
+ import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
+ import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
+@@ -199,6 +200,12 @@ const authUserResetRoute = authUserResetRouteImport.update({
+   path: '/user/reset',
+   getParentRoute: () => authRouteRoute,
+ } as any)
++const AuthenticatedAccessInviteIndexRoute =
++  AuthenticatedAccessInviteIndexRouteImport.update({
++    id: '/access-invite/',
++    path: '/access-invite/',
++    getParentRoute: () => AuthenticatedRouteRoute,
++  } as any)
+ const AuthenticatedApigxPlatformIndexRoute =
+   AuthenticatedApigxPlatformIndexRouteImport.update({
+     id: '/apigx-platform/',
+@@ -466,6 +473,7 @@ export interface FileRoutesByFullPath {
+   '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
++  '/access-invite/': typeof AuthenticatedAccessInviteIndexRoute
+   '/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
+   '/channels/': typeof AuthenticatedChannelsIndexRoute
+   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
+@@ -530,6 +538,7 @@ export interface FileRoutesByTo {
+   '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
++  '/access-invite': typeof AuthenticatedAccessInviteIndexRoute
+   '/apigx-platform': typeof AuthenticatedApigxPlatformIndexRoute
+   '/channels': typeof AuthenticatedChannelsIndexRoute
+   '/dashboard': typeof AuthenticatedDashboardIndexRoute
+@@ -598,6 +607,7 @@ export interface FileRoutesById {
+   '/_authenticated/share/$channelId': typeof AuthenticatedShareChannelIdRoute
+   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
++  '/_authenticated/access-invite/': typeof AuthenticatedAccessInviteIndexRoute
+   '/_authenticated/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
+   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
+   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
+@@ -665,6 +675,7 @@ export interface FileRouteTypes {
+     | '/share/$channelId'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
++    | '/access-invite/'
+     | '/apigx-platform/'
+     | '/channels/'
+     | '/dashboard/'
+@@ -729,6 +740,7 @@ export interface FileRouteTypes {
+     | '/share/$channelId'
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
++    | '/access-invite'
+     | '/apigx-platform'
+     | '/channels'
+     | '/dashboard'
+@@ -796,6 +808,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/share/$channelId'
+     | '/_authenticated/usage-logs/$section'
+     | '/_authenticated/usage-logs/audit'
++    | '/_authenticated/access-invite/'
+     | '/_authenticated/apigx-platform/'
+     | '/_authenticated/channels/'
+     | '/_authenticated/dashboard/'
+@@ -1027,6 +1040,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof authUserResetRouteImport
+       parentRoute: typeof authRouteRoute
+     }
++    '/_authenticated/access-invite/': {
++      id: '/_authenticated/access-invite/'
++      path: '/access-invite'
++      fullPath: '/access-invite/'
++      preLoaderRoute: typeof AuthenticatedAccessInviteIndexRouteImport
++      parentRoute: typeof AuthenticatedRouteRoute
++    }
+     '/_authenticated/apigx-platform/': {
+       id: '/_authenticated/apigx-platform/'
+       path: '/apigx-platform'
+@@ -1403,6 +1423,7 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedShareChannelIdRoute: typeof AuthenticatedShareChannelIdRoute
+   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
+   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
++  AuthenticatedAccessInviteIndexRoute: typeof AuthenticatedAccessInviteIndexRoute
+   AuthenticatedApigxPlatformIndexRoute: typeof AuthenticatedApigxPlatformIndexRoute
+   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
+   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
+@@ -1433,6 +1454,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedShareChannelIdRoute: AuthenticatedShareChannelIdRoute,
+   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
+   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
++  AuthenticatedAccessInviteIndexRoute: AuthenticatedAccessInviteIndexRoute,
+   AuthenticatedApigxPlatformIndexRoute: AuthenticatedApigxPlatformIndexRoute,
+   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
+   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
+diff --git a/web/src/routes/_authenticated/access-invite/index.tsx b/web/src/routes/_authenticated/access-invite/index.tsx
+new file mode 100644
+index 0000000..0fc4f60
+--- /dev/null
++++ b/web/src/routes/_authenticated/access-invite/index.tsx
+@@ -0,0 +1,26 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { createFileRoute } from '@tanstack/react-router'
++
++import { AccessInviteRedeem } from '@/features/access-invite'
++
++export const Route = createFileRoute('/_authenticated/access-invite/')({
++  component: AccessInviteRedeem,
++})
+-- 
+2.53.0.windows.1
+
