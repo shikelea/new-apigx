@@ -1464,3 +1464,24 @@ func publishTestOffering(t *testing.T, env *testEnv, owner, channelID int64, mod
 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(int64(id), 10)+"/publish", owner, "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
+
+// TestKeyPoolDetailsAreOwnerOnly 覆盖阶段 4 验收表第 20 行：
+// 「一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，**使用者仍只能看到分享来源和授权结果**」。
+//
+// 可验证且最关键的一半：Key 池细节（有哪些 Key、权重、状态）**只对所有者可见**，
+// 非所有者读该渠道的 Key 池一律 404（不确认存在）。
+func TestKeyPoolDetailsAreOwnerOnly(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, stranger int64 = 8801, 8802
+
+	groupID := env.createGroup(t, owner, "池细节分组")
+	channelID := env.createChannel(t, owner, groupID, 71001)
+
+	// 所有者能读
+	rec, _ := env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner, "")
+	assert.Equal(t, http.StatusOK, rec.Code, "所有者应能读取自己渠道的 Key 池")
+
+	// 陌生人（使用者视角）不能读
+	rec, _ = env.do(t, http.MethodGet, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", stranger, "")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "非所有者读取 Key 池必须 404（不确认存在）")
+}

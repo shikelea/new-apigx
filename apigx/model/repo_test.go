@@ -540,3 +540,72 @@ func TestImportModelOfferingsIsIdempotentAndDraft(t *testing.T) {
 	_, _, err = ImportModelOfferings(db, other, channel.ID, []string{"x"})
 	assert.ErrorIs(t, err, ErrNotFound)
 }
+
+// TestAttemptIdempotencyKeyRejectsDuplicate 覆盖阶段 4 验收表第 29 行：
+// 「同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建」。
+//
+// 幂等键 = (request_id, attempt_index)：同一请求的同一次尝试只能有一条记录。
+func TestAttemptIdempotencyKeyRejectsDuplicate(t *testing.T) {
+	db := newRepoDB(t)
+
+	first := &Attempt{
+		AttemptUID:   "idem-uid-1",
+		RequestID:    880001,
+		AttemptIndex: 0,
+		State:        AttemptStateStarted,
+		StartedAt:    1700000000,
+	}
+	require.NoError(t, BeginAttempt(db, first), "首次尝试应能落库")
+
+	// 同一幂等键重发 ⇒ 必须被唯一约束拦下（不产生第二条记录）
+	duplicate := &Attempt{
+		AttemptUID:   "idem-uid-2",
+		RequestID:    880001,
+		AttemptIndex: 0,
+		State:        AttemptStateStarted,
+		StartedAt:    1700000001,
+	}
+	require.Error(t, BeginAttempt(db, duplicate), "同一幂等键重发不得创建新记录")
+
+	var count int64
+	require.NoError(t, db.Model(&Attempt{}).Where("request_id = ? AND attempt_index = ?", 880001, 0).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "同一幂等键只应有一条尝试记录")
+}
+
+// TestAbandonedAttemptIsNotEmptySuccess 覆盖阶段 4 验收表第 9 行：
+// 「流中断或异步状态未知 ⇒ 不误计完整成功」。
+//
+// 口径：**以 http_status 判定**（2xx=成功；0=未拿到状态码 ⇒ 未完成），
+// 与 U-3 消耗视图的聚合口径一致（[015]）。中断的尝试必须落在"未完成"而不是"成功"。
+func TestAbandonedAttemptIsNotEmptySuccess(t *testing.T) {
+	db := newRepoDB(t)
+
+	interrupted := &Attempt{
+		AttemptUID:   "abandoned-uid",
+		RequestID:    880002,
+		AttemptIndex: 0,
+		State:        AttemptStateStarted,
+		StartedAt:    1700000000,
+	}
+	require.NoError(t, BeginAttempt(db, interrupted))
+	require.NoError(t, MarkAttemptAbandoned(db, "abandoned-uid"))
+
+	got, err := GetAttemptByUID(db, "abandoned-uid")
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.HttpStatus, "中断的尝试不得被记为拿到过状态码")
+	assert.False(t, got.HttpStatus >= 200 && got.HttpStatus < 300, "中断的尝试不得算作成功")
+
+	// 对照：正常完成的尝试必须有 2xx 状态码（否则上面的断言就没有区分力）
+	completed := &Attempt{
+		AttemptUID:   "completed-uid",
+		RequestID:    880003,
+		AttemptIndex: 0,
+		State:        AttemptStateStarted,
+		StartedAt:    1700000000,
+	}
+	require.NoError(t, BeginAttempt(db, completed))
+	require.NoError(t, CompleteAttempt(db, "completed-uid", AttemptStateSucceeded, 200))
+	done, err := GetAttemptByUID(db, "completed-uid")
+	require.NoError(t, err)
+	assert.Equal(t, 200, done.HttpStatus)
+}
