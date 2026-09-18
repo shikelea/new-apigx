@@ -1,0 +1,54 @@
+From b3807df2067fc44cdf339ad2432b35e8dd3f109a Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 11:41:49 +0800
+Subject: [PATCH 116/116] =?UTF-8?q?feat(profile):=20=E5=8E=BB=E6=8E=89?=
+ =?UTF-8?q?=E4=B8=AA=E4=BA=BA=E9=A1=B5=E5=A4=B4=E9=83=A8=E7=9A=84=E3=80=8C?=
+ =?UTF-8?q?=E5=BD=93=E5=89=8D=E4=BD=99=E9=A2=9D=E3=80=8D=EF=BC=88=E6=88=91?=
+ =?UTF-8?q?=E4=BB=AC=E7=9A=84=E4=BA=A7=E5=93=81=E6=B2=A1=E6=9C=89=E8=B4=A7?=
+ =?UTF-8?q?=E5=B8=81=E7=B3=BB=E7=BB=9F=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 核实：服务端 SidebarModulesAdmin 为空 => 走前端默认；钱包/充值/兑换/订阅此前已默认隐藏
+- 个人页头部三个统计中移除「当前余额」（用户点名的"当前余额这些东西"），保留总用量与请求数
+- 顺手修掉本次改动引入的 lint 错：WalletCards 变成仅类型使用（consistent-type-imports）=> 直接移除该导入
+检查: typecheck 0 错 / oxlint 0 错 / profile 用例通过 / build ✅
+---
+ .../features/profile/components/profile-header.tsx    | 11 ++---------
+ 1 file changed, 2 insertions(+), 9 deletions(-)
+
+diff --git a/web/src/features/profile/components/profile-header.tsx b/web/src/features/profile/components/profile-header.tsx
+index d31a2a9..b8c0ae6 100644
+--- a/web/src/features/profile/components/profile-header.tsx
++++ b/web/src/features/profile/components/profile-header.tsx
+@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import { Activity, BarChart3, WalletCards } from 'lucide-react'
++import { Activity, BarChart3 } from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { StatusBadge } from '@/components/status-badge'
+@@ -88,16 +88,9 @@ export function ProfileHeader({ profile, loading }: ProfileHeaderProps) {
+     label: string
+     value: string
+     description: string
+-    icon: typeof WalletCards
++    icon: typeof Activity
+     tone: IconBadgeTone
+   }[] = [
+-    {
+-      label: t('Current Balance'),
+-      value: formatQuota(profile.quota),
+-      description: t('Remaining quota'),
+-      icon: WalletCards,
+-      tone: 'success',
+-    },
+     {
+       label: t('Total Usage'),
+       value: formatQuota(profile.used_quota),
+-- 
+2.53.0.windows.1
+
