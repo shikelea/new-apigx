@@ -1,0 +1,304 @@
+From 7a8d6aef77d960f5c87ec128e863355b7dbcfe32 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:17:55 +0800
+Subject: [PATCH 122/122] =?UTF-8?q?feat(auth):=20=E6=B3=A8=E5=86=8C?=
+ =?UTF-8?q?=E9=A1=B5=E6=8C=89=E6=9C=8D=E5=8A=A1=E7=AB=AF=E5=BC=80=E5=85=B3?=
+ =?UTF-8?q?=E6=98=BE=E7=A4=BA=E5=B9=B6=E6=8F=90=E4=BA=A4=E3=80=8C=E6=B3=A8?=
+ =?UTF-8?q?=E5=86=8C=E9=82=80=E8=AF=B7=E7=A0=81=E3=80=8D=EF=BC=88=C2=A75?=
+ =?UTF-8?q?=20=E9=82=80=E8=AF=B7=E5=87=86=E5=85=A5=E5=89=8D=E7=AB=AF?=
+ =?UTF-8?q?=E9=97=AD=E7=8E=AF=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- features/auth/constants.ts: registerFormSchema 增加可选字段 invite_code
+  （"是否必填"由服务端下发的 register_invite_required 决定，提交时校验）
+- features/auth/sign-up/components/sign-up-form.tsx:
+  · inviteRequired = status.register_invite_required
+  · 仅在需要时渲染「注册邀请码」输入框（不需要时**不出现**该字段，避免无意义空字段）
+  · 提交前校验：需要但为空 ⇒ 提示并中止；payload 带上 invite_code
+- features/auth/types.ts: RegisterPayload 增加 invite_code?: string
+- i18n：7 个语言文件新增 3 条文案，**全部写进 translation 命名空间**
+  （并脚本校验顶层只应有 translation —— 上轮那个坑的防线）
+检查: typecheck 0 错 / 7 语用例 86/86 / build ✅
+注: src/features/auth/lib/validation.ts 有 2 个**既有** lint 错（非本次改动，未触碰）
+---
+ web/src/features/auth/constants.ts            |  3 ++
+ .../auth/sign-up/components/sign-up-form.tsx  | 30 +++++++++++++++++++
+ web/src/features/auth/types.ts                |  2 ++
+ web/src/i18n/locales/en.json                  |  7 +++--
+ web/src/i18n/locales/fr.json                  |  7 +++--
+ web/src/i18n/locales/ja.json                  |  7 +++--
+ web/src/i18n/locales/ru.json                  |  7 +++--
+ web/src/i18n/locales/vi.json                  |  7 +++--
+ web/src/i18n/locales/zh-TW.json               |  7 +++--
+ web/src/i18n/locales/zh.json                  |  7 +++--
+ 10 files changed, 70 insertions(+), 14 deletions(-)
+
+diff --git a/web/src/features/auth/constants.ts b/web/src/features/auth/constants.ts
+index 0cb3411..10f5d0d 100644
+--- a/web/src/features/auth/constants.ts
++++ b/web/src/features/auth/constants.ts
+@@ -33,6 +33,9 @@ export const registerFormSchema = z
+   .object({
+     username: z.string().min(1, 'Please enter your username'),
+     email: z.string().optional(),
++    // 注册邀请码（§5 邀请准入）：字段本身可选，"是否必填"由服务端下发的
++    // register_invite_required 决定，在提交时校验（见 sign-up-form）。
++    invite_code: z.string().optional(),
+     password: accountPasswordSchema,
+     confirmPassword: z.string().min(1, 'Please confirm your password'),
+   })
+diff --git a/web/src/features/auth/sign-up/components/sign-up-form.tsx b/web/src/features/auth/sign-up/components/sign-up-form.tsx
+index 6dbffb2..afafa33 100644
+--- a/web/src/features/auth/sign-up/components/sign-up-form.tsx
++++ b/web/src/features/auth/sign-up/components/sign-up-form.tsx
+@@ -95,6 +95,7 @@ export function SignUpForm({
+       email: '',
+       password: '',
+       confirmPassword: '',
++      invite_code: '',
+     },
+   })
+ 
+@@ -109,6 +110,8 @@ export function SignUpForm({
+     true
+   const hasWeChatLogin = Boolean(status?.wechat_login)
+   const turnstileReady = !isTurnstileEnabled || Boolean(turnstileToken)
++  // 注册邀请准入（§5）：由服务端开关决定是否显示并要求邀请码；关闭时界面不出现该字段。
++  const inviteRequired = Boolean(status?.register_invite_required)
+ 
+   const wechatQrCodeUrl = useMemo(() => {
+     return (
+@@ -157,6 +160,11 @@ export function SignUpForm({
+       }
+     }
+ 
++    if (inviteRequired && !data.invite_code?.trim()) {
++      toast.error(t('Please enter the registration invite code'))
++      return
++    }
++
+     if (!validateTurnstile()) return
+ 
+     setIsLoading(true)
+@@ -167,6 +175,7 @@ export function SignUpForm({
+         email: data.email || undefined,
+         verification_code: verificationCode || undefined,
+         aff_code: getAffiliateCode(),
++        invite_code: data.invite_code?.trim() || undefined,
+         turnstile: turnstileToken,
+       })
+ 
+@@ -266,6 +275,27 @@ export function SignUpForm({
+           )}
+         />
+ 
++        {/* 注册邀请码（§5 邀请准入）：仅在服务端要求时显示 —— 不显示无意义的空字段 */}
++        {inviteRequired && (
++          <FormField
++            control={form.control}
++            name='invite_code'
++            render={({ field }) => (
++              <FormItem>
++                <FormLabel>{t('Registration invite code')}</FormLabel>
++                <FormControl>
++                  <Input
++                    placeholder={t('Enter your registration invite code')}
++                    autoComplete='off'
++                    {...field}
++                  />
++                </FormControl>
++                <FormMessage />
++              </FormItem>
++            )}
++          />
++        )}
++
+         {/* Password Field */}
+         <FormField
+           control={form.control}
+diff --git a/web/src/features/auth/types.ts b/web/src/features/auth/types.ts
+index 468498f..3d1058d 100644
+--- a/web/src/features/auth/types.ts
++++ b/web/src/features/auth/types.ts
+@@ -42,6 +42,8 @@ export interface RegisterPayload {
+   email?: string
+   verification_code?: string
+   aff_code?: string
++  /** 注册邀请码（§5 邀请准入）：仅在服务端要求时提交。 */
++  invite_code?: string
+   turnstile?: string
+ }
+ 
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index a91fa46..f867537 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Related Projects",
+     "footer.defaultCopyright": "All rights reserved.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
++    "footer.newapi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "For private deployments, format: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.",
+@@ -6711,6 +6711,9 @@
+     "No visible resource in this group": "No visible resource in this group",
+     "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
+     "Open model pricing": "Open model pricing",
+-    "Price list": "Price list"
++    "Price list": "Price list",
++    "Registration invite code": "Registration invite code",
++    "Enter your registration invite code": "Enter your registration invite code",
++    "Please enter the registration invite code": "Please enter the registration invite code"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index e79578e..dbee829 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Projets liés",
+     "footer.defaultCopyright": "Tous droits réservés.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Tous droits réservés. Conçu et développé par les contributeurs du projet.",
++    "footer.newapi.projectAttributionSuffix": "Tous droits réservés. Conçu et développé par les contributeurs du projet.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Pour les canaux ajoutés après le 10 mai 2025, pas besoin de supprimer \".\" des noms de modèles lors du déploiement",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Pour les déploiements privés, format : https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Pour des raisons de sécurité, les jetons d'accès existants ne peuvent pas être réaffichés. Ne les régénérez que si vous en avez besoin d'un nouveau.",
+@@ -6711,6 +6711,9 @@
+     "No visible resource in this group": "No visible resource in this group",
+     "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
+     "Open model pricing": "Open model pricing",
+-    "Price list": "Price list"
++    "Price list": "Price list",
++    "Registration invite code": "Code d'invitation",
++    "Enter your registration invite code": "Saisissez votre code d'invitation",
++    "Please enter the registration invite code": "Veuillez saisir le code d'invitation"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index ff88fed..7ce7052 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "1つのAPI",
+     "footer.columns.related.title": "関連プロジェクト",
+     "footer.defaultCopyright": "すべての権利を留保します。",
+-    "footer.new\u0061pi.projectAttributionSuffix": "すべての権利を留保します。プロジェクトコントリビューターにより設計・開発されています。",
++    "footer.newapi.projectAttributionSuffix": "すべての権利を留保します。プロジェクトコントリビューターにより設計・開発されています。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "2025 年 5 月 10 日以降に追加されたチャネルの場合、デプロイ時にモデル名から「.」を削除する必要はありません",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "プライベートデプロイメントの場合、形式: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "セキュリティ上、既存のアクセストークンは再表示できません。新しいトークンが必要な場合のみ再生成してください。",
+@@ -6711,6 +6711,9 @@
+     "No visible resource in this group": "No visible resource in this group",
+     "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
+     "Open model pricing": "Open model pricing",
+-    "Price list": "Price list"
++    "Price list": "Price list",
++    "Registration invite code": "登録招待コード",
++    "Enter your registration invite code": "登録招待コードを入力",
++    "Please enter the registration invite code": "登録招待コードを入力してください"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index e15189a..5c663de 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "Один API",
+     "footer.columns.related.title": "Связанные проекты",
+     "footer.defaultCopyright": "Все права защищены.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Все права защищены. Разработано участниками проекта.",
++    "footer.newapi.projectAttributionSuffix": "Все права защищены. Разработано участниками проекта.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Для каналов, добавленных после 10 мая 2025 г., не нужно удалять \".\" из имён моделей при развёртывании",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Для частных развертываний, формат: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "В целях безопасности существующие токены доступа нельзя просмотреть повторно. Создавайте новый токен только при необходимости.",
+@@ -6711,6 +6711,9 @@
+     "No visible resource in this group": "No visible resource in this group",
+     "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
+     "Open model pricing": "Open model pricing",
+-    "Price list": "Price list"
++    "Price list": "Price list",
++    "Registration invite code": "Код приглашения",
++    "Enter your registration invite code": "Введите код приглашения",
++    "Please enter the registration invite code": "Введите код приглашения"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 30d18d5..e5f50aa 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Các Dự Án Liên Quan",
+     "footer.defaultCopyright": "Bản quyền được bảo lưu.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Bản quyền được bảo lưu. Được thiết kế và phát triển bởi các cộng tác viên dự án.",
++    "footer.newapi.projectAttributionSuffix": "Bản quyền được bảo lưu. Được thiết kế và phát triển bởi các cộng tác viên dự án.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Đối với các kênh được thêm sau ngày 10 tháng 5 năm 2025, không cần loại bỏ \".\" khỏi tên mô hình trong quá trình triển khai",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Đối với các triển khai riêng tư, định dạng: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Vì lý do bảo mật, không thể hiển thị lại token truy cập hiện có. Chỉ tạo lại khi bạn cần token mới.",
+@@ -6711,6 +6711,9 @@
+     "No visible resource in this group": "No visible resource in this group",
+     "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
+     "Open model pricing": "Open model pricing",
+-    "Price list": "Price list"
++    "Price list": "Price list",
++    "Registration invite code": "Mã mời đăng ký",
++    "Enter your registration invite code": "Nhập mã mời đăng ký của bạn",
++    "Please enter the registration invite code": "Vui lòng nhập mã mời đăng ký"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index ba5f289..4e1b968 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相關項目",
+     "footer.defaultCopyright": "版權所有。",
+-    "footer.new\u0061pi.projectAttributionSuffix": "版權所有，由項目貢獻者設計與開發。",
++    "footer.newapi.projectAttributionSuffix": "版權所有，由項目貢獻者設計與開發。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "對於 2025 年 5 月 10 日之後新增的渠道，在部署時無需從模型名稱中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "對於私有部署，格式為：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "基於安全考量，現有存取令牌無法再次顯示。僅在需要新令牌時重新生成。",
+@@ -6711,6 +6711,9 @@
+     "No visible resource in this group": "No visible resource in this group",
+     "Prices are configured and synced in New API model pricing.": "Prices are configured and synced in New API model pricing:",
+     "Open model pricing": "Open model pricing",
+-    "Price list": "Price list"
++    "Price list": "Price list",
++    "Registration invite code": "註冊邀請碼",
++    "Enter your registration invite code": "請輸入註冊邀請碼",
++    "Please enter the registration invite code": "請輸入註冊邀請碼"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 9e4941d..0b0b84b 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相关项目",
+     "footer.defaultCopyright": "版权所有。",
+-    "footer.new\u0061pi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
++    "footer.newapi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "对于 2025 年 5 月 10 日之后添加的渠道，在部署时无需从模型名称中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "对于私有部署，格式为：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "出于安全考虑，现有访问令牌无法再次显示。仅在需要新令牌时重新生成。",
+@@ -6711,6 +6711,9 @@
+     "No visible resource in this group": "该分组下没有你可访问的资源",
+     "Prices are configured and synced in New API model pricing.": "模型价格在底座的「模型与定价」里配置与同步：",
+     "Open model pricing": "打开模型定价",
+-    "Price list": "价格列表"
++    "Price list": "价格列表",
++    "Registration invite code": "注册邀请码",
++    "Enter your registration invite code": "请输入注册邀请码",
++    "Please enter the registration invite code": "请输入注册邀请码"
+   }
+ }
+-- 
+2.53.0.windows.1
+
