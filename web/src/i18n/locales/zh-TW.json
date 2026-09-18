@@ -6725,6 +6725,16 @@
     "Invalid or already used invite code": "邀請碼無效或已被使用",
     "Sources": "來源數",
     "Not enough samples": "樣本不足",
-    "Share sources": "分享來源"
+    "Share sources": "分享來源",
+    "New share group": "新增分享分組",
+    "Visibility": "可見性",
+    "Public": "公開",
+    "Limited (invite or assigned users)": "受限（憑邀請或指定使用者）",
+    "Only me": "僅自己",
+    "Share groups": "分享分組",
+    "All share groups": "全部分享分組",
+    "Expand all": "展開全部",
+    "Length": "長度",
+    "Select preset": "選擇預設"
   }
 }

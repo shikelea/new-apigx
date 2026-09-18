@@ -6725,6 +6725,16 @@
     "Invalid or already used invite code": "招待コードが無効か、既に使用されています",
     "Sources": "提供元数",
     "Not enough samples": "サンプル不足",
-    "Share sources": "共有元"
+    "Share sources": "共有元",
+    "New share group": "共有グループを作成",
+    "Visibility": "公開範囲",
+    "Public": "公開",
+    "Limited (invite or assigned users)": "限定（招待または指定ユーザー）",
+    "Only me": "自分のみ",
+    "Share groups": "共有グループ",
+    "All share groups": "すべての共有グループ",
+    "Expand all": "すべて展開",
+    "Length": "長さ",
+    "Select preset": "プリセットを選択"
   }
 }

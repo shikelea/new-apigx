@@ -6725,6 +6725,16 @@
     "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng",
     "Sources": "Số nguồn",
     "Not enough samples": "Chưa đủ mẫu",
-    "Share sources": "Nguồn chia sẻ"
+    "Share sources": "Nguồn chia sẻ",
+    "New share group": "Nhóm chia sẻ mới",
+    "Visibility": "Phạm vi hiển thị",
+    "Public": "Công khai",
+    "Limited (invite or assigned users)": "Giới hạn (theo lời mời hoặc người được chỉ định)",
+    "Only me": "Chỉ mình tôi",
+    "Share groups": "Nhóm chia sẻ",
+    "All share groups": "Tất cả nhóm chia sẻ",
+    "Expand all": "Mở rộng tất cả",
+    "Length": "Độ dài",
+    "Select preset": "Chọn mẫu đặt trước"
   }
 }

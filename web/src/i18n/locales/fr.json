@@ -6725,6 +6725,16 @@
     "Invalid or already used invite code": "Code invalide ou déjà utilisé",
     "Sources": "Sources",
     "Not enough samples": "Échantillons insuffisants",
-    "Share sources": "Sources partagées"
+    "Share sources": "Sources partagées",
+    "New share group": "Nouveau groupe de partage",
+    "Visibility": "Visibilité",
+    "Public": "Public",
+    "Limited (invite or assigned users)": "Limité (invitation ou utilisateurs désignés)",
+    "Only me": "Moi uniquement",
+    "Share groups": "Groupes de partage",
+    "All share groups": "Tous les groupes de partage",
+    "Expand all": "Tout développer",
+    "Length": "Longueur",
+    "Select preset": "Choisir un préréglage"
   }
 }

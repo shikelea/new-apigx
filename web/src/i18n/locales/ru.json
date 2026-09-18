@@ -6725,6 +6725,16 @@
     "Invalid or already used invite code": "Код недействителен или уже использован",
     "Sources": "Источники",
     "Not enough samples": "Недостаточно данных",
-    "Share sources": "Общие источники"
+    "Share sources": "Общие источники",
+    "New share group": "Новая группа общих ресурсов",
+    "Visibility": "Видимость",
+    "Public": "Публичный",
+    "Limited (invite or assigned users)": "Ограниченный (по приглашению или назначению)",
+    "Only me": "Только я",
+    "Share groups": "Группы общих ресурсов",
+    "All share groups": "Все группы общих ресурсов",
+    "Expand all": "Развернуть всё",
+    "Length": "Длина",
+    "Select preset": "Выбрать шаблон"
   }
 }

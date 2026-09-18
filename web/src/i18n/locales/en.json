@@ -6725,6 +6725,16 @@
     "Invalid or already used invite code": "Invalid or already used invite code",
     "Sources": "Sources",
     "Not enough samples": "Not enough samples",
-    "Share sources": "Share sources"
+    "Share sources": "Share sources",
+    "New share group": "New share group",
+    "Visibility": "Visibility",
+    "Public": "Public",
+    "Limited (invite or assigned users)": "Limited (invite or assigned users)",
+    "Only me": "Only me",
+    "Share groups": "Share groups",
+    "All share groups": "All share groups",
+    "Expand all": "Expand all",
+    "Length": "Length",
+    "Select preset": "Select preset"
   }
 }
