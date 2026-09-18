@@ -1,0 +1,69 @@
+From 847fb7484405ed882a18b7c657054dc23b9294a2 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 18:53:36 +0800
+Subject: [PATCH 156/156] =?UTF-8?q?fix(model):=20MySQL=20=E6=96=B9?=
+ =?UTF-8?q?=E8=A8=80=E4=B8=8B=E6=98=BE=E5=BC=8F=E8=A6=81=E6=B1=82=20InnoDB?=
+ =?UTF-8?q?=20=E2=80=94=E2=80=94=20=E4=B8=89=E5=BA=93=E7=9F=A9=E9=98=B5?=
+ =?UTF-8?q?=EF=BC=88=E5=90=AB=20MySQL=EF=BC=89=E8=BF=9E=E8=B7=91=E4=B8=A4?=
+ =?UTF-8?q?=E6=AC=A1=E9=80=9A=E8=BF=87?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**背景**：拿到本机 MySQL 凭据后跑三库矩阵，MySQL 子测试**先失败**：
+`expected "InnoDB" / actual "MyISAM"`，且实测服务端 `default_storage_engine = MyISAM`
+（phpStudy 的 my.ini 设置；测试注释里早已记下这个坑）。
+
+**修复**：`apigx/model/migrate.go` 的 `Migrate()` 在 MySQL 方言下显式建 InnoDB 表：
+```go
+migrateDB := db
+if db.Dialector != nil && db.Dialector.Name() == "mysql" {
+    migrateDB = db.Set("gorm:table_options", "ENGINE=InnoDB")
+}
+if err := migrateDB.AutoMigrate(AllModels()...); err != nil { return err }
+```
+只影响我们自己创建的 `apigx_*` 表，不触碰底座表。理由：预留、额度原子扣减、幂等记录依赖**事务与行锁**，
+MyISAM 会让这些保证**静默失效**；且 MyISAM 索引上限 1000 字节（InnoDB DYNAMIC 为 3072）。
+
+**修复后复跑**（先重建空库：`AutoMigrate` 不会改已存在表的引擎，沿用旧库会把结论验错）：
+```
+第一次 PASS  ok 5.796s
+第二次 PASS  ok 2.382s   ← 幂等
+```
+⇒ **sqlite ✓ postgres ✓ mysql ✓**。
+
+**仍存的服务端问题（与本项目代码无关）**：用真实网关连 MySQL 启动失败，实测
+`Error 1071 ... CREATE TABLE passkey_credentials ... max key length is 1000 bytes` ⇒
+底座自身表在 MyISAM 下建不出来，整台应用在该实例上起不来。
+**建议**：把 phpStudy 的 `my.ini` 改成 `default-storage-engine=InnoDB`（我**未**修改你的 MySQL 配置）。
+
+产物：`docs/stage4/acceptance-evidence.md` §22.1/§22.2、`TASK_LOG` 追加记录。
+---
+ apigx/model/migrate.go | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/apigx/model/migrate.go b/apigx/model/migrate.go
+index 0d84388..5515f4e 100644
+--- a/apigx/model/migrate.go
++++ b/apigx/model/migrate.go
+@@ -27,7 +27,16 @@ func Migrate(db *gorm.DB) error {
+ 	if db == nil {
+ 		return gorm.ErrInvalidDB
+ 	}
+-	if err := db.AutoMigrate(AllModels()...); err != nil {
++	// MySQL 服务端默认引擎可能是 MyISAM —— 本机 phpStudy 的 my.ini 就是 default-storage-engine=MyIsam。
++	// 这里**显式要求 InnoDB**，因为计划书的核心保证都依赖事务与行锁：
++	//   - 预留、额度原子扣减、幂等记录：MyISAM 没有事务，这些保证会**静默失效**；
++	//   - MyISAM 索引上限 1000 字节（InnoDB DYNAMIC 为 3072），底座原生表会直接建不出来。
++	// 只影响我们自己创建的 apigx_* 表，不改变底座表的行为（也不触碰底座的任何表）。
++	migrateDB := db
++	if db.Dialector != nil && db.Dialector.Name() == "mysql" {
++		migrateDB = db.Set("gorm:table_options", "ENGINE=InnoDB")
++	}
++	if err := migrateDB.AutoMigrate(AllModels()...); err != nil {
+ 		return err
+ 	}
+ 	// 迁移成功后才捕获句柄：确保接口层拿到的一定是可用的库
+-- 
+2.53.0.windows.1
+

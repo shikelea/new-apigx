@@ -784,7 +784,7 @@ node 的 UTF-8 被 PS 5.1 按 ANSI 解码 ⇒ 中文全乱码、信息不可恢�
 ② 反复执行 setup 造成多条等价替身渠道，直接导致上述 `video-task` 绑定断言失败。
 ---
 
-## 22. 三库矩阵复核（SQLite ✅ PostgreSQL ✅ MySQL ⛔ 被凭据阻塞）
+## 22. 三库矩阵复核（SQLite ✅ PostgreSQL ✅ **MySQL ✅ 已通过**）
 
 **背景**：`new-api/AGENTS.md` 硬要求「所有数据库代码必须同时兼容 SQLite / MySQL ≥ 5.7.8 / PostgreSQL ≥ 9.6」，
 且"必须用真实实例验证；单元测试、mock、只测一种方言都不能替代"。仓库里本来就有三库矩阵测试
@@ -848,3 +848,50 @@ ok  	github.com/QuantumNous/new-api/apigx/model	1.737s
 
 **产物与清理**：worktree 已移除、旧二进制已删除（磁盘紧张）；演练库 `apigx_rollback_drill`
 与备份文件保留，便于复跑。
+### 22.1 拿到凭据后的复跑：MySQL **先失败、后修复、再通过**
+
+**凭据到位后**（用户提供本机 MySQL root 凭据；密码只经环境变量传入，未写入任何被跟踪文件）：
+建库 `apigx_mysql_matrix` / `apigx_mysql_run` ⇒ 跑三库矩阵 ⇒ **MySQL 子测试失败**：
+
+```
+expected: "InnoDB"
+actual  : "MyISAM"
+Messages: APIGX 的表必须使用 InnoDB：MyISAM 无事务（预留/原子扣减会失效）且索引上限仅 1000 字节
+服务端 default_storage_engine = MyISAM
+```
+（该断言正是为此写的：测试注释里记着"本机首次接入时就踩到了：phpStudy 的 my.ini 里
+default-storage-engine=MyIsam，结果 27 张表全部建成 MyISAM、底座自身 FATAL 起不来"。）
+
+**修复（我们的代码）**：`apigx/model/migrate.go` 的 `Migrate()` 在 MySQL 方言下**显式要求 InnoDB**：
+```go
+migrateDB := db
+if db.Dialector != nil && db.Dialector.Name() == "mysql" {
+    migrateDB = db.Set("gorm:table_options", "ENGINE=InnoDB")
+}
+if err := migrateDB.AutoMigrate(AllModels()...); err != nil { return err }
+```
+只影响我们自己创建的 `apigx_*` 表；不触碰底座任何表。理由写进代码注释：
+预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 会让这些保证**静默失效**；
+且 MyISAM 索引上限 1000 字节（InnoDB DYNAMIC 为 3072）。
+
+**修复后复跑**（先**重建**空库 —— `AutoMigrate` 不会修改已存在表的引擎，沿用旧库会把结论验错）：
+```
+第一次：--- PASS: TestMigrateMatrixOnConfiguredDialects   ok  5.796s
+第二次：--- PASS: TestMigrateMatrixOnConfiguredDialects   ok  2.382s   （幂等）
+```
+⇒ **sqlite ✓ postgres ✓ mysql ✓，且连跑两次通过**。
+
+### 22.2 仍然存在的**服务端**问题（与本项目代码无关，需要你改配置）
+
+进一步用真实网关连 MySQL 启动（新库 `apigx_mysql_run`，端口 3002）⇒ **启动失败**，实测日志：
+```
+[SYS] using MySQL as database
+[SYS] database migration started
+mysql error 1071 ... CREATE TABLE `passkey_credentials` (… rp_id varchar(253) …)
+[FATAL] failed to initialize database: Error 1071 (42000): Specified key was too long; max key length is 1000 bytes
+```
+⇒ 这是**底座自身**的表在 MyISAM 下建不出来（MyISAM 索引上限 1000 字节）⇒
+**整台应用在该 MySQL 实例上都起不来**，与我们的改动无关。
+
+**建议（一行配置）**：把 phpStudy 的 `my.ini` 里 `default-storage-engine=MyIsam` 改为 **`InnoDB`** 后重启 MySQL，
+再重跑本节即可；我**没有**去改你的 MySQL 配置（那是你的环境，由你决定）。
