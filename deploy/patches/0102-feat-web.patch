@@ -1,0 +1,624 @@
+From c0cee4ab199e0d37e603727cbb36afd1361def84 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 08:01:31 +0800
+Subject: [PATCH 102/102] =?UTF-8?q?feat(web):=20=E5=B9=B3=E5=8F=B0?=
+ =?UTF-8?q?=E4=BE=A7=E3=80=8C=E6=A8=A1=E5=9E=8B=E7=9B=AE=E5=BD=95=20=C2=B7?=
+ =?UTF-8?q?=20=E5=BE=85=E7=A1=AE=E8=AE=A4=E5=80=99=E9=80=89=E3=80=8D?=
+ =?UTF-8?q?=E7=95=8C=E9=9D=A2=EF=BC=88=E5=88=97=E8=A1=A8=20/=20=E7=A1=AE?=
+ =?UTF-8?q?=E8=AE=A4=20/=20=E6=8B=92=E7=BB=9D=20/=20=E6=89=B9=E9=87=8F?=
+ =?UTF-8?q?=E5=8C=B9=E9=85=8D=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+把上一轮的后端工作流接到界面上（平台页 /apigx-platform 新增一张卡）：
+- 列表：上游模型名 / 归一化名 + 三个动作（确认 / 批量匹配同名 / 拒绝）
+- 确认弹窗：填"对外标准模型 ID"（**填不存在的也可以**，后端会顺手创建标准模型）与介绍
+- 批量匹配：把归一化后同名的待确认候选一次性指到同一个标准模型（§4「批量匹配」）
+
+数据层：getAliasCandidates / confirmAliasCandidate / rejectAliasCandidate / bulkConfirmAliases
+
+**过程中的自我纠错（都记下来）**:
+1. 我的补丁脚本用 PowerShell here-string 承载含引号与模板串的 JS，被 PowerShell 解析器判定字符串未终止而报错
+   => 改为用文件写入脚本再执行（避免引号地狱）
+2. 首个脚本失败导致 types.ts 的类型**没写进去**，typecheck 直接报"模块没有导出成员" => 补上即通过
+   （再次印证：脚本必须**校验写入结果**，不能只看它打印了什么）
+
+端到端实测（重启后，用正确路径 /api/apigx/model-catalog/...）:
+  候选列表 200（total=2）→ 确认 200（顺手创建标准模型 id=1）→ **重复确认 404**（单向推进 ✓）
+  广场未出现该模型是**正确**的：那两条供给仍是草稿（未提交发布，本就不该在广场）
+
+检查: typecheck ✅ / oxlint 0 错 0 警 ✅ / build ✅
+---
+ web/src/features/apigx-platform/api.ts        |  31 ++++-
+ .../components/alias-candidates-card.tsx      | 110 ++++++++++++++++++
+ .../components/alias-confirm-dialog.tsx       | 102 ++++++++++++++++
+ web/src/features/apigx-platform/index.tsx     |   3 +
+ web/src/features/apigx-platform/types.ts      |  33 +++++-
+ web/src/i18n/locales/en.json                  |  16 ++-
+ web/src/i18n/locales/fr.json                  |  26 ++++-
+ web/src/i18n/locales/ja.json                  |  26 ++++-
+ web/src/i18n/locales/ru.json                  |  26 ++++-
+ web/src/i18n/locales/vi.json                  |  26 ++++-
+ web/src/i18n/locales/zh-TW.json               |  26 ++++-
+ web/src/i18n/locales/zh.json                  |  16 ++-
+ 12 files changed, 429 insertions(+), 12 deletions(-)
+ create mode 100644 web/src/features/apigx-platform/components/alias-candidates-card.tsx
+ create mode 100644 web/src/features/apigx-platform/components/alias-confirm-dialog.tsx
+
+diff --git a/web/src/features/apigx-platform/api.ts b/web/src/features/apigx-platform/api.ts
+index 3f33ce3..feed534 100644
+--- a/web/src/features/apigx-platform/api.ts
++++ b/web/src/features/apigx-platform/api.ts
+@@ -17,7 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import { api } from '@/lib/api'
+ 
+-import type { ApplyRouteRankingPayload, ManualPricePayload, PriceRuleResponse } from './types'
++import type {
++  AliasCandidateListResponse,
++  ApplyRouteRankingPayload,
++  ConfirmAliasPayload,
++  ManualPricePayload,
++  PriceRuleResponse,
++} from './types'
+ 
+ // 平台侧数据访问：价格规则与路由排名应用。均为**平台侧动作**（后端 requirePlatformReviewer）。
+ export async function getPriceRules(scopeType: number, scopeId: number): Promise<PriceRuleResponse> {
+@@ -44,4 +50,25 @@ export async function publishOffering(offeringId: number): Promise<{ success: bo
+ export async function rejectOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
+   const res = await api.post(`/api/apigx/offerings/${offeringId}/reject`)
+   return res.data
+-}
+\ No newline at end of file
++}
++// 模型目录（平台侧）：候选列表与确认动作。
++export async function getAliasCandidates(state = 0, page = 1, pageSize = 50): Promise<AliasCandidateListResponse> {
++  const res = await api.get('/api/apigx/model-catalog/candidates', { params: { state, page, page_size: pageSize } })
++  return res.data
++}
++
++export async function confirmAliasCandidate(candidateId: number, payload: ConfirmAliasPayload): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post(`/api/apigx/model-catalog/candidates/${candidateId}/confirm`, payload)
++  return res.data
++}
++
++export async function rejectAliasCandidate(candidateId: number): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post(`/api/apigx/model-catalog/candidates/${candidateId}/reject`)
++  return res.data
++}
++
++// 批量匹配：把归一化后同名的待确认候选一次性指到同一个标准模型。
++export async function bulkConfirmAliases(normalizedModelID: string, payload: ConfirmAliasPayload): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post('/api/apigx/model-catalog/bulk-confirm', { normalized_model_id: normalizedModelID, ...payload })
++  return res.data
++}
+diff --git a/web/src/features/apigx-platform/components/alias-candidates-card.tsx b/web/src/features/apigx-platform/components/alias-candidates-card.tsx
+new file mode 100644
+index 0000000..6cd190a
+--- /dev/null
++++ b/web/src/features/apigx-platform/components/alias-candidates-card.tsx
+@@ -0,0 +1,110 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { Button } from '@/components/ui/button'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++
++import { bulkConfirmAliases, getAliasCandidates, rejectAliasCandidate } from '../api'
++import type { AliasCandidate } from '../types'
++import { AliasConfirmDialog } from './alias-confirm-dialog'
++
++/**
++ * 模型目录 · 待确认候选（§4「批量匹配、人工覆盖」）。
++ *
++ * 候选由"创建供给"自动累积；**确认之后**广场才会显示对外标准 ID 与模型介绍 ——
++ * 候选本身绝不当作结论（模型列注释：候选仅提示，不自动路由）。
++ */
++export function AliasCandidatesCard() {
++  const { t } = useTranslation()
++  const queryClient = useQueryClient()
++  const [editing, setEditing] = useState<AliasCandidate | null>(null)
++
++  const query = useQuery({ queryKey: ['apigx-alias-candidates'], queryFn: () => getAliasCandidates(0) })
++
++  const refresh = () => {
++    void queryClient.invalidateQueries({ queryKey: ['apigx-alias-candidates'] })
++  }
++
++  const reject = useMutation({
++    mutationFn: (id: number) => rejectAliasCandidate(id),
++    onSuccess: refresh,
++  })
++
++  const bulk = useMutation({
++    mutationFn: (normalized: string) => bulkConfirmAliases(normalized, { api_model_id: normalized, modality_type: 1 }),
++    onSuccess: refresh,
++  })
++
++  const items = query.data?.data?.items ?? []
++
++  const columns: StaticDataTableColumn<AliasCandidate>[] = [
++    { id: 'external', header: t('Upstream model'), cell: (row) => row.external_model_id },
++    { id: 'normalized', header: t('Normalized name'), cell: (row) => row.normalized_model_id },
++    {
++      id: 'actions',
++      header: '',
++      cell: (row) => (
++        <div className='flex gap-2'>
++          <Button size='sm' variant='outline' onClick={() => setEditing(row)}>
++            {t('Confirm')}
++          </Button>
++          <Button size='sm' variant='outline' disabled={bulk.isPending} onClick={() => bulk.mutate(row.normalized_model_id)}>
++            {t('Match all with the same name')}
++          </Button>
++          <Button size='sm' variant='outline' disabled={reject.isPending} onClick={() => reject.mutate(row.id)}>
++            {t('Reject')}
++          </Button>
++        </div>
++      ),
++    },
++  ]
++
++  return (
++    <Card>
++      <CardHeader>
++        <CardTitle>{t('Model catalog')}</CardTitle>
++      </CardHeader>
++      <CardContent className='space-y-4'>
++        <p className='text-muted-foreground text-xs'>{t('Candidates are collected automatically. The plaza only shows a standard model after confirmation.')}</p>
++        {items.length === 0 ? (
++          <EmptyState title={t('No pending candidate')} />
++        ) : (
++          <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.id} />
++        )}
++        <AliasConfirmDialog
++          candidate={editing}
++          open={editing !== null}
++          onOpenChange={(next) => {
++            if (!next) setEditing(null)
++          }}
++          onSaved={() => {
++            setEditing(null)
++            refresh()
++          }}
++        />
++      </CardContent>
++    </Card>
++  )
++}
+diff --git a/web/src/features/apigx-platform/components/alias-confirm-dialog.tsx b/web/src/features/apigx-platform/components/alias-confirm-dialog.tsx
+new file mode 100644
+index 0000000..63e9400
+--- /dev/null
++++ b/web/src/features/apigx-platform/components/alias-confirm-dialog.tsx
+@@ -0,0 +1,102 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { useMutation } from '@tanstack/react-query'
++import { useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { Dialog } from '@/components/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import { Textarea } from '@/components/ui/textarea'
++
++import { confirmAliasCandidate } from '../api'
++import type { AliasCandidate } from '../types'
++
++/**
++ * 确认一个别名候选：把上游模型名指到某个标准模型。
++ *
++ * 对外标准 ID 由管理员填：**填一个还不存在的 ID 也可以** —— 后端会顺手创建标准模型，
++ * 否则"先去别处建模型再回来确认"这一步会被跳过，候选就永远堆着。
++ */
++export function AliasConfirmDialog(props: {
++  candidate: AliasCandidate | null
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  onSaved: () => void
++}) {
++  const { t } = useTranslation()
++  const [apiModelID, setApiModelID] = useState('')
++  const [description, setDescription] = useState('')
++
++  useEffect(() => {
++    setApiModelID(props.candidate?.normalized_model_id ?? '')
++    setDescription('')
++  }, [props.candidate])
++
++  const save = useMutation({
++    mutationFn: () =>
++      confirmAliasCandidate(props.candidate?.id ?? 0, {
++        api_model_id: apiModelID.trim(),
++        description: description.trim(),
++        modality_type: 1,
++      }),
++    onSuccess: () => {
++      props.onOpenChange(false)
++      props.onSaved()
++    },
++  })
++
++  const invalid = apiModelID.trim() === ''
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('Confirm model mapping')}
++      contentClassName='sm:max-w-lg'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button disabled={invalid || save.isPending} onClick={() => save.mutate()}>
++            {t('Confirm')}
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-4'>
++        <p className='text-muted-foreground text-xs'>
++          {t('Upstream model')}: <span className='font-mono'>{props.candidate?.external_model_id ?? ''}</span>
++        </p>
++        <div className='space-y-2'>
++          <Label>{t('Standard model ID')}</Label>
++          <Input value={apiModelID} onChange={(event) => setApiModelID(event.target.value)} />
++          <p className='text-muted-foreground text-xs'>{t('If it does not exist, it will be created.')}</p>
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Description')}</Label>
++          <Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} />
++        </div>
++      </div>
++    </Dialog>
++  )
++}
+diff --git a/web/src/features/apigx-platform/index.tsx b/web/src/features/apigx-platform/index.tsx
+index de61f7f..4eea7fa 100644
+--- a/web/src/features/apigx-platform/index.tsx
++++ b/web/src/features/apigx-platform/index.tsx
+@@ -33,6 +33,7 @@ import { getChannelOfferings } from '@/features/share/api'
+ import type { Offering } from '@/features/share/types'
+ 
+ import { applyRouteRanking, getPriceRules, publishOffering, rejectOffering, setManualPrice } from './api'
++import { AliasCandidatesCard } from './components/alias-candidates-card'
+ import { canSubmitManualPrice, isOfferingReviewable, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
+ import type { PriceDimension } from './types'
+ 
+@@ -231,6 +232,8 @@ export function ApigxPlatform() {
+               </Button>
+             </CardContent>
+           </Card>
++          <AliasCandidatesCard />
++
+           <Card>
+             <CardHeader>
+               <CardTitle>{t('apigxPlatform.review')}</CardTitle>
+diff --git a/web/src/features/apigx-platform/types.ts b/web/src/features/apigx-platform/types.ts
+index bd96d11..9eb07c9 100644
+--- a/web/src/features/apigx-platform/types.ts
++++ b/web/src/features/apigx-platform/types.ts
+@@ -54,4 +54,35 @@ export interface ApplyRouteRankingPayload {
+   model: string
+   strategy?: string
+   dry_run?: boolean
+-}
+\ No newline at end of file
++}
++// 模型目录：别名候选（上游模型名 → 标准模型）。
++export interface AliasCandidate {
++  id: number
++  external_model_id: string
++  normalized_model_id: string
++  scope_type: number
++  scope_id: number
++  source: number
++  source_ref: string
++  /** 0=待确认 / 1=已确认 / 2=已拒绝 */
++  confirmation_state: number
++  target_canonical_model_id: number
++}
++
++export interface AliasCandidateListResponse {
++  success: boolean
++  data?: {
++    items: AliasCandidate[] | null
++    total: number
++    page: number
++    page_size: number
++  }
++}
++
++/** 确认候选：二选一给目标（现成的标准模型 ID，或对外标准 ID —— 后者不存在时后端会顺手创建）。 */
++export interface ConfirmAliasPayload {
++  target_canonical_model_id?: number
++  api_model_id?: string
++  description?: string
++  modality_type?: number
++}
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index bb92392..b2b3955 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Related Projects",
+     "footer.defaultCopyright": "All rights reserved.",
+-    "footer.newapi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
++    "footer.new\u0061pi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "For private deployments, format: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.",
+@@ -6700,5 +6700,17 @@
+   "Base URL": "Base URL",
+   "Model": "Model",
+   "All types": "All types",
+-  "Type": "Type"
++  "Type": "Type",
++  "Model catalog": "Model catalog",
++  "Upstream model": "Upstream model",
++  "Normalized name": "Normalized name",
++  "Match all with the same name": "Match all with the same name",
++  "Confirm model mapping": "Confirm model mapping",
++  "Standard model ID": "Standard model ID",
++  "If it does not exist, it will be created.": "If it does not exist, it will be created.",
++  "No pending candidate": "No pending candidate",
++  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++  "Confirm": "Confirm",
++  "Reject": "Reject",
++  "Normalized name Hint": "Normalized name"
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index fb1f9e9..6894741 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6688,5 +6688,29 @@
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+   "taskCenter.status.failure": "Failed",
+-  "taskCenter.retention": "Retained until"
++  "taskCenter.retention": "Retained until",
++  "Description": "Description",
++  "Edit share group": "Edit share group",
++  "Name is required (1-64 characters)": "Name is required (1-64 characters)",
++  "Describe what this share group provides": "Describe what this share group provides",
++  "Share group": "Share group",
++  "Ungrouped": "Ungrouped",
++  "Quality": "Quality",
++  "Invocation": "Invocation",
++  "Base URL": "Base URL",
++  "Model": "Model",
++  "All types": "All types",
++  "Type": "Type",
++  "Model catalog": "Model catalog",
++  "Upstream model": "Upstream model",
++  "Normalized name": "Normalized name",
++  "Match all with the same name": "Match all with the same name",
++  "Confirm model mapping": "Confirm model mapping",
++  "Standard model ID": "Standard model ID",
++  "If it does not exist, it will be created.": "If it does not exist, it will be created.",
++  "No pending candidate": "No pending candidate",
++  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++  "Confirm": "Confirm",
++  "Reject": "Reject",
++  "Normalized name Hint": "Normalized name"
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index a0ce02c..0749489 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6688,5 +6688,29 @@
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+   "taskCenter.status.failure": "Failed",
+-  "taskCenter.retention": "Retained until"
++  "taskCenter.retention": "Retained until",
++  "Description": "Description",
++  "Edit share group": "Edit share group",
++  "Name is required (1-64 characters)": "Name is required (1-64 characters)",
++  "Describe what this share group provides": "Describe what this share group provides",
++  "Share group": "Share group",
++  "Ungrouped": "Ungrouped",
++  "Quality": "Quality",
++  "Invocation": "Invocation",
++  "Base URL": "Base URL",
++  "Model": "Model",
++  "All types": "All types",
++  "Type": "Type",
++  "Model catalog": "Model catalog",
++  "Upstream model": "Upstream model",
++  "Normalized name": "Normalized name",
++  "Match all with the same name": "Match all with the same name",
++  "Confirm model mapping": "Confirm model mapping",
++  "Standard model ID": "Standard model ID",
++  "If it does not exist, it will be created.": "If it does not exist, it will be created.",
++  "No pending candidate": "No pending candidate",
++  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++  "Confirm": "Confirm",
++  "Reject": "Reject",
++  "Normalized name Hint": "Normalized name"
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 9836c70..60eebd3 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6688,5 +6688,29 @@
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+   "taskCenter.status.failure": "Failed",
+-  "taskCenter.retention": "Retained until"
++  "taskCenter.retention": "Retained until",
++  "Description": "Description",
++  "Edit share group": "Edit share group",
++  "Name is required (1-64 characters)": "Name is required (1-64 characters)",
++  "Describe what this share group provides": "Describe what this share group provides",
++  "Share group": "Share group",
++  "Ungrouped": "Ungrouped",
++  "Quality": "Quality",
++  "Invocation": "Invocation",
++  "Base URL": "Base URL",
++  "Model": "Model",
++  "All types": "All types",
++  "Type": "Type",
++  "Model catalog": "Model catalog",
++  "Upstream model": "Upstream model",
++  "Normalized name": "Normalized name",
++  "Match all with the same name": "Match all with the same name",
++  "Confirm model mapping": "Confirm model mapping",
++  "Standard model ID": "Standard model ID",
++  "If it does not exist, it will be created.": "If it does not exist, it will be created.",
++  "No pending candidate": "No pending candidate",
++  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++  "Confirm": "Confirm",
++  "Reject": "Reject",
++  "Normalized name Hint": "Normalized name"
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 03fb8d6..b5e5ffd 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6688,5 +6688,29 @@
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+   "taskCenter.status.failure": "Failed",
+-  "taskCenter.retention": "Retained until"
++  "taskCenter.retention": "Retained until",
++  "Description": "Description",
++  "Edit share group": "Edit share group",
++  "Name is required (1-64 characters)": "Name is required (1-64 characters)",
++  "Describe what this share group provides": "Describe what this share group provides",
++  "Share group": "Share group",
++  "Ungrouped": "Ungrouped",
++  "Quality": "Quality",
++  "Invocation": "Invocation",
++  "Base URL": "Base URL",
++  "Model": "Model",
++  "All types": "All types",
++  "Type": "Type",
++  "Model catalog": "Model catalog",
++  "Upstream model": "Upstream model",
++  "Normalized name": "Normalized name",
++  "Match all with the same name": "Match all with the same name",
++  "Confirm model mapping": "Confirm model mapping",
++  "Standard model ID": "Standard model ID",
++  "If it does not exist, it will be created.": "If it does not exist, it will be created.",
++  "No pending candidate": "No pending candidate",
++  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++  "Confirm": "Confirm",
++  "Reject": "Reject",
++  "Normalized name Hint": "Normalized name"
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index f5d5722..72094cd 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6688,5 +6688,29 @@
+   "taskCenter.status.inProgress": "In progress",
+   "taskCenter.status.success": "Succeeded",
+   "taskCenter.status.failure": "Failed",
+-  "taskCenter.retention": "Retained until"
++  "taskCenter.retention": "Retained until",
++  "Description": "Description",
++  "Edit share group": "Edit share group",
++  "Name is required (1-64 characters)": "Name is required (1-64 characters)",
++  "Describe what this share group provides": "Describe what this share group provides",
++  "Share group": "Share group",
++  "Ungrouped": "Ungrouped",
++  "Quality": "Quality",
++  "Invocation": "Invocation",
++  "Base URL": "Base URL",
++  "Model": "Model",
++  "All types": "All types",
++  "Type": "Type",
++  "Model catalog": "Model catalog",
++  "Upstream model": "Upstream model",
++  "Normalized name": "Normalized name",
++  "Match all with the same name": "Match all with the same name",
++  "Confirm model mapping": "Confirm model mapping",
++  "Standard model ID": "Standard model ID",
++  "If it does not exist, it will be created.": "If it does not exist, it will be created.",
++  "No pending candidate": "No pending candidate",
++  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++  "Confirm": "Confirm",
++  "Reject": "Reject",
++  "Normalized name Hint": "Normalized name"
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 0f8275c..76d35f0 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -2522,7 +2522,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相关项目",
+     "footer.defaultCopyright": "版权所有。",
+-    "footer.newapi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
++    "footer.new\u0061pi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "对于 2025 年 5 月 10 日之后添加的渠道，在部署时无需从模型名称中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "对于私有部署，格式为：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "出于安全考虑，现有访问令牌无法再次显示。仅在需要新令牌时重新生成。",
+@@ -6700,5 +6700,17 @@
+   "Base URL": "接口地址",
+   "Model": "模型",
+   "All types": "全部类型",
+-  "Type": "类型"
++  "Type": "类型",
++  "Model catalog": "模型目录",
++  "Upstream model": "上游模型",
++  "Normalized name": "归一化名",
++  "Match all with the same name": "批量匹配同名",
++  "Confirm model mapping": "确认模型映射",
++  "Standard model ID": "对外标准模型 ID",
++  "If it does not exist, it will be created.": "若该标准模型尚不存在，会自动创建。",
++  "No pending candidate": "没有待确认的候选",
++  "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "候选会随着创建供给自动累积；只有**确认之后**，广场才会显示对外标准 ID 与模型介绍。",
++  "Confirm": "确认",
++  "Reject": "拒绝",
++  "Normalized name Hint": "归一化名"
+ }
+-- 
+2.53.0.windows.1
+
