@@ -66,7 +66,7 @@
 | 27 | Worker 重试、服务重启 ⇒ 统计不重复，待处理事件和任务可恢复 | ✅ 已有测试证据 | `TestCompleteAttemptIsIdempotent`、`TestReconcileReleasesStaleAttempts`、`TestReleaseIsIdempotentAndNeverNegative` |
 | 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ 部分覆盖（**本环境无法验**） | 窗口/分桶类断言已有（`TestAdjustWindowFloorsAtZero` 等）；但 `apigx_usage_events` **0 行、无写入方**（见 [015]）⇒ 事件级"重复/修订"路径**当前没有数据可验**，需先补写入方 |
 | 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ✅ 已有测试证据 | **新增** `TestAttemptIdempotencyKeyRejectsDuplicate`（同 `(request_id, attempt_index)` 重发被唯一约束拦下，只有一条记录；实测 PASS，日志可见 constraint failed）；另有 `TestCompleteAttemptIsIdempotent` |
-| 30 | 恶意地址或外部媒体链接 ⇒ 不能访问未允许的内部网络和元数据服务 | ⚠️ 部分覆盖 | `TestNormalizeUpstreamBaseURL`；验收脚本确有 SSRF 防护命中记录（回环上游被挡，属**预期**）；**缺**元数据服务（169.254.169.254）的显式断言 |
+| 30 | 恶意地址或外部媒体链接 ⇒ 不能访问未允许的内部网络和元数据服务 | ✅ 已有测试证据（**边界已写明**） | **重定向**与**受保护抓取**都过校验：`service/http_client.go` L44–L53 `checkRedirect` → `common.ValidateURLWithFetchSetting`；`ValidateSSRFProtectedFetchURL`（L71）用于媒体/结果抓取；用例 `TestSSRFProtectionRejectsLiteralPrivateAndReservedIPs`、`TestSSRFProtectionRejectsResolvedPrivateIP`、`TestSSRFProtectionAllowsPrivateIPWhenExplicitlyEnabled`（`common/ssrf_protection_test.go`）。开关 `EnableSSRFProtection` **默认 true**、`AllowPrivateIp` **默认 false**。**明示边界**：**首跳直连**上游 BaseURL **不校验** ⇒ 私网/回环上游被允许（本环境验收替身 `127.0.0.1:8100` 正依赖这一点）。取舍：自建/内网上游是合法场景；风险是"借平台网络位置探测内网"；如需收紧，用 `DomainList/IpList/AllowedPorts` 白名单或改走不依赖回环的验收替身 |
 | 31 | 数据库备份恢复和升级回滚 ⇒ 凭据、权限、价格版本和历史消耗可正确恢复 | ✅ 已有测试证据 | **T4.3 演练**（第 9 节）：`pg_dump -Fc` → 恢复到新库 → **12 项指纹逐项一致**（含凭据密文与指纹的 md5、权限、价格版本、历史消耗）；恢复库上**连续启动两次**均无错误、行数不变（**迁移幂等**）；配置改→重启生效→回滚→重启恢复原值。**升级回滚（回退旧二进制）未演练**，见第 9 节说明 |
 
 > 注：表中条目编号为本台账自编（计划书表格 30 行 + 我把"多 Key/指定渠道"等合并行拆开，故共 31 项）。
@@ -268,3 +268,34 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 ② `MarkAttemptAbandoned` 只对 `state = AttemptStateStarted` 生效，我原先猜 `1`（恰好等于 Started，未暴露问题）⇒ 一并改为常量；
 ③ 前一次取错误信息时我**只过滤了部分行**，把关键报错行滤掉了 ⇒ 改为输出完整尾段才看清原因。
 **剩余 ⚠️（8 项）**：#1（未闭合，用例已 Skip）、#3、#19（未实现）、#21、#22、#23、#28（无数据可验）、#30。
+---
+
+## 13. T4.5 第三批（#30 定案 + #22/#23 的精确理由）
+
+### 13.1 #30 内网与元数据地址（定案：主体已满足，边界写明）
+
+| 面 | 结论 |
+|---|---|
+| **重定向**到内网/元数据 | ✅ 被拦（`service/http_client.go` L44–L53） |
+| **外部媒体/结果抓取** | ✅ 走 `ValidateSSRFProtectedFetchURL` / `checkProtectedFetchRedirect` |
+| 校验器本身 | ✅ 已有 4 条用例（含"字面私网/保留地址"与"DNS 解析后为私网"两种） |
+| 开关 | `EnableSSRFProtection` 默认 **true**；`AllowPrivateIp` 默认 **false** |
+| **首跳直连上游 BaseURL** | ⚠️ **不校验**（有意保留：自建/内网上游属合法场景；本环境验收替身依赖回环地址） |
+
+**风险与建议**（不隐瞒）：不校验首跳意味着可用平台网络位置探测内网；若生产要收紧，
+可启用 `DomainList/IpList/AllowedPorts` 白名单，或让验收替身改用可解析的域名而不依赖回环。
+
+### 13.2 #22 长流 / 进程崩溃 ⇒ 槽位续租归还恢复（仍 ⚠️，理由具体）
+
+**机制**已被用例覆盖：`TestLeaseExpiryRecoversCapacity`（租约到期回收）、`TestRenewExtendsLease`（续租）、
+`TestReconcileReleasesStaleAttempts` + `TestReconcileIgnoresFreshAttempts`（对账释放遗弃尝试、放过新尝试）、
+`TestReleaseIsIdempotentAndNeverNegative`（归还不为负）。
+**未做**：真实"杀掉进程"演练 —— 需要构造**在途租约**并并发编排，本环境未搭这套编排 ⇒ 保持 ⚠️。
+
+### 13.3 #23 预留后转发器进入原生 Key 选择路径（仍 ⚠️，理由具体）
+
+**已有**：`TestApplyChannelPoolProjectsKeysIntoBaseChannel`（把 Key 池投影进底座多渠道配置）、
+`TestRecordKeyOutcomeDoesNotTouchBaseChannel`（Key 结果不回写底座渠道）、
+`apigx/relayhook/capacity_hook.go` 通过 `ContextKeyChannelMultiKeyIndex` → `ResolveKeyIdentity` 把底座索引映射回我们的 Key。
+**未做**：一条**端到端**断言"预留时确定的 Key 与最终出站使用的 Key 是同一把" —— 需要在真实中继路径上观测，
+本环境未闭环 ⇒ 保持 ⚠️。
