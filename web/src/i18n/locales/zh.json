@@ -6716,6 +6716,12 @@
     "Enter your registration invite code": "请输入注册邀请码",
     "Please enter the registration invite code": "请输入注册邀请码",
     "Registration Invite Required": "必须使用注册邀请码",
-    "Require a valid registration invite code to sign up": "注册时必须提交有效的注册邀请码"
+    "Require a valid registration invite code to sign up": "注册时必须提交有效的注册邀请码",
+    "Redeem an invite": "兑换邀请",
+    "Paste the invite code you received to unlock the shared resources.": "粘贴你收到的邀请码，即可解锁对应的分享资源。",
+    "Invite code": "邀请码",
+    "Invite redeemed. The shared resources are now visible.": "兑换成功，对应的分享资源现在可见了。",
+    "Open the model plaza": "打开模型广场",
+    "Invalid or already used invite code": "邀请码无效或已被使用"
   }
 }

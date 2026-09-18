@@ -6716,6 +6716,12 @@
     "Enter your registration invite code": "登録招待コードを入力",
     "Please enter the registration invite code": "登録招待コードを入力してください",
     "Registration Invite Required": "登録招待コードを必須にする",
-    "Require a valid registration invite code to sign up": "登録には有効な登録招待コードが必要です"
+    "Require a valid registration invite code to sign up": "登録には有効な登録招待コードが必要です",
+    "Redeem an invite": "招待を引き換える",
+    "Paste the invite code you received to unlock the shared resources.": "受け取った招待コードを貼り付けると、共有リソースが利用できます。",
+    "Invite code": "招待コード",
+    "Invite redeemed. The shared resources are now visible.": "引き換えが完了しました。共有リソースが表示されます。",
+    "Open the model plaza": "モデル広場を開く",
+    "Invalid or already used invite code": "招待コードが無効か、既に使用されています"
   }
 }

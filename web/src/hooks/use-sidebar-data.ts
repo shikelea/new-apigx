@@ -140,6 +140,11 @@ export function useSidebarData(): SidebarData {
             url: '/share',
             icon: Share2,
           },
+          {
+            title: t('Redeem an invite'),
+            url: '/access-invite',
+            icon: Ticket,
+          },
 
         ],
       },

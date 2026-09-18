@@ -6716,6 +6716,12 @@
     "Enter your registration invite code": "Nhập mã mời đăng ký của bạn",
     "Please enter the registration invite code": "Vui lòng nhập mã mời đăng ký",
     "Registration Invite Required": "Bắt buộc mã mời đăng ký",
-    "Require a valid registration invite code to sign up": "Yêu cầu mã mời đăng ký hợp lệ để đăng ký"
+    "Require a valid registration invite code to sign up": "Yêu cầu mã mời đăng ký hợp lệ để đăng ký",
+    "Redeem an invite": "Đổi mã mời",
+    "Paste the invite code you received to unlock the shared resources.": "Dán mã mời bạn nhận được để mở khóa tài nguyên chia sẻ.",
+    "Invite code": "Mã mời",
+    "Invite redeemed. The shared resources are now visible.": "Đổi thành công. Tài nguyên chia sẻ đã hiển thị.",
+    "Open the model plaza": "Mở chợ mô hình",
+    "Invalid or already used invite code": "Mã mời không hợp lệ hoặc đã được sử dụng"
   }
 }

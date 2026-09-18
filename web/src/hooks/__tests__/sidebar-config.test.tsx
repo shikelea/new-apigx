@@ -83,7 +83,15 @@ describe('security sidebar visibility', () => {
       result.current
         .find((group) => group.id === 'personal')
         ?.items.map((item) => item.title)
-    ).toEqual(['Wallet', 'Profile', 'Security & Access', 'share.title'])
+    // 二开新增「我的分享」与「兑换邀请」两条入口（都属个人分组），
+    // 本用例的原意（Security & Access 紧跟 Profile）仍然成立。
+    ).toEqual([
+      'Wallet',
+      'Profile',
+      'Security & Access',
+      'share.title',
+      'Redeem an invite',
+    ])
     expect(
       result.current
         .flatMap((group) => group.items)

@@ -6716,6 +6716,12 @@
     "Enter your registration invite code": "Enter your registration invite code",
     "Please enter the registration invite code": "Please enter the registration invite code",
     "Registration Invite Required": "Registration Invite Required",
-    "Require a valid registration invite code to sign up": "Require a valid registration invite code to sign up"
+    "Require a valid registration invite code to sign up": "Require a valid registration invite code to sign up",
+    "Redeem an invite": "Redeem an invite",
+    "Paste the invite code you received to unlock the shared resources.": "Paste the invite code you received to unlock the shared resources.",
+    "Invite code": "Invite code",
+    "Invite redeemed. The shared resources are now visible.": "Invite redeemed. The shared resources are now visible.",
+    "Open the model plaza": "Open the model plaza",
+    "Invalid or already used invite code": "Invalid or already used invite code"
   }
 }
