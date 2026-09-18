@@ -9,8 +9,8 @@
 
 | 状态 | 条数 |
 |---|---|
-| ✅ 已有测试证据 | 16 |
-| ⚠️ 部分覆盖（还缺一段） | 14 |
+| ✅ 已有测试证据 | 18 |
+| ⚠️ 部分覆盖（还缺一段） | 12 |
 | ❌ 待演练 | 1 |
 | 🏭 需生产环境 | 0 |
 
@@ -26,7 +26,7 @@
 | 2 | 相似名字但版本不同 ⇒ 不被自动错误合并 | ✅ 已有测试证据 | `apigx/model` `TestAliasCandidateNeverResolves`、`TestResolveCanonicalModelMissReturnsFalse`（候选**永不**自动成为结论） |
 | 3 | 目录不支持自动获取 ⇒ 可人工录入，显示获取边界 | ⚠️ 部分覆盖 | `docs/stage3/acceptance-report.md` 已声明上游能力边界；**缺**"人工录入"路径的界面/接口证据 |
 | 4 | 私有/受邀模型 ⇒ 未授权用户在页面、API、计数和任务接口均无法访问 | ✅ 已有测试证据 | `TestPlazaOnlyExposesPublishedAndPublic`、`TestPlazaHonoursGrantsForLimitedGroups`、`TestSubjectCanAccessResource`（含到期失效） |
-| 5 | 固定来源 Key 携带另一个渠道的请求头 ⇒ 不扩大授权、不改用未允许来源 | ⚠️ 部分覆盖 | `repo_upstream`/`middleware` 侧有管理员限定；**缺**一条"普通用户带 pin 头 ⇒ 不越权"的回归断言 ⇒ 待补 |
+| 5 | 固定来源 Key 携带另一个渠道的请求头 ⇒ 不扩大授权、不改用未允许来源 | ✅ 已有测试证据 | **新增回归测试** `TestSetupContextForTokenRejectsPinSuffixForNonAdmin`（普通用户带 `-<channelId>` ⇒ **403** 且返 `specific_channel_version` 头，实测 PASS）；代码位置 `middleware/auth.go` L540–L552 |
 | 6 | 模型合并、别名歧义、分组更名 ⇒ 不扩大授权、不重写历史；歧义调用明确拒绝 | ✅ 已有测试证据 | `TestAliasCandidateNeverResolves`、`TestAliasCandidateIsIdempotent`、`TestShareGroupNameAndDescription`、`TestResolveCanonicalModelMissReturnsFalse` |
 | 7 | 指定供给失效 ⇒ 无回退授权时不更换分享者 | ✅ 已有测试证据 | `apigx/routing` 熔断与候选摘除（`breaker_guard_test.go`：熔断应当**可重试换渠道**而不是终止请求）+ `TestReconcileReleasesStaleAttempts` |
 
@@ -62,7 +62,7 @@
 | 23 | 预留之后转发器进入原生 Key 选择路径 ⇒ 仍使用已确定的 Key，计量/价格/预留对象一致 | ⚠️ 部分覆盖 | `TestApplyChannelPoolProjectsKeysIntoBaseChannel`（投影）、`TestRecordKeyOutcomeDoesNotTouchBaseChannel`；**缺**"原生路径下仍用已定 Key"的断言 |
 | 24 | Redis 丢失或持久写入失败 ⇒ 停止新准入，恢复对账后开放；未知上游任务不因租约到期被判定已停止 | ✅ 已有测试证据 | `TestReserveFailsClosedWithoutRedis`（**失败关闭**）、`TestLeaseExpiryRecoversCapacity`、`TestReconcileReleasesStaleAttempts` |
 | 25 | 分享者暂停与撤销授权 ⇒ 新请求及时停止，已有任务按定义处理 | ⚠️ 部分覆盖 | `TestSetChannelCapacityPolicy`、`TestUpstreamKeyStatusAndValidation`（Key 停用）、U-1 新增分组发布闸门（`[013]`）；**缺**"暂停后新请求被拒"的端到端断言 |
-| 26 | 普通撤权、账户封禁、Key 紧急吊销 ⇒ 按生命周期表区分历史访问与新增调用，不泄露其他用户对象 | ⚠️ 部分覆盖 | `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestDeleteUpstreamKeyTwice`；**缺**账户封禁路径的断言 |
+| 26 | 普通撤权、账户封禁、Key 紧急吊销 ⇒ 按生命周期表区分历史访问与新增调用，不泄露其他用户对象 | ✅ 已有测试证据 | **新增回归测试** `TestUserAuthRejectsDisabledUser`（停用用户 ⇒ **401 `AUTH_USER_DISABLED`**，实测 PASS）；另有 `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestDeleteUpstreamKeyTwice`；代码位置 `middleware/auth.go` L56–L57 |
 | 27 | Worker 重试、服务重启 ⇒ 统计不重复，待处理事件和任务可恢复 | ✅ 已有测试证据 | `TestCompleteAttemptIsIdempotent`、`TestReconcileReleasesStaleAttempts`、`TestReleaseIsIdempotentAndNeverNegative` |
 | 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ 部分覆盖 | `TestAdjustWindowFloorsAtZero`、`TestAdjustWindowKeepsWindowUsable`、`TestWindowKeysAreBucketedByMinute`；**缺**"重复/修订事件"的断言 |
 | 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ⚠️ 部分覆盖 | `TestCompleteAttemptIsIdempotent`、`uniq_attempt_uid`/`uniq_attempt_request_index` 唯一约束；**缺**"同键不同参数 ⇒ 冲突"的显式断言 |
@@ -148,3 +148,14 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 
 **未完成**：前两条**中间件层回归测试**尚未编写（需要令牌/用户夹具）⇒ T4.2 **未收口**，
 台账 #5 / #26 保持 ⚠️，已列入待补清单。
+### 8.3 T4.2 收尾（中间件层回归测试已补）
+
+| 场景 | 新增测试 | 当场结果 |
+|---|---|---|
+| 普通用户带 `-<channelId>` 指定来源 | `TestSetupContextForTokenRejectsPinSuffixForNonAdmin`（扩展既有 `middleware/auth_test.go`） | **PASS** —— 403 + `specific_channel_version` 头 |
+| 账户被封禁 | `TestUserAuthRejectsDisabledUser` | **PASS** —— 401 `AUTH_USER_DISABLED` |
+| 既有用例未被破坏 | `go test ./middleware/ -count=1` | **ok** |
+
+**过程记录**：首次运行 pin 用例失败（`no such table: tokens`）—— 该夹具的内存库只迁移 `users`/`AuthFlow`，
+已在该用例内补 `AutoMigrate(&model.Token{})`；随后 PowerShell 的 `String.Replace` 被我误用三参数重载
+（不存在）导致**文件未改写**，改为单参数后写入校验通过、测试转绿。
