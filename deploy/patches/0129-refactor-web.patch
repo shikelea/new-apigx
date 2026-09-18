@@ -1,0 +1,346 @@
+From 150107f885022cb4bd5dcdda80acbba96d8a7f7c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 12:59:27 +0800
+Subject: [PATCH 129/129] =?UTF-8?q?refactor(web):=20=E3=80=8C=E5=B9=B3?=
+ =?UTF-8?q?=E5=8F=B0=E7=AE=A1=E7=90=86=E3=80=8D=E5=B9=B6=E5=85=A5=E7=B3=BB?=
+ =?UTF-8?q?=E7=BB=9F=E8=AE=BE=E7=BD=AE=EF=BC=88=E7=94=A8=E6=88=B7=E8=A6=81?=
+ =?UTF-8?q?=E6=B1=82=EF=BC=9A=E5=92=8C=E7=B3=BB=E7=BB=9F=E7=AE=A1=E7=90=86?=
+ =?UTF-8?q?=E7=BB=93=E5=90=88=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 新增 features/system-settings/operations/apigx-platform-section.tsx：把平台卡片作为**系统设置的一个分区**
+  渲染（与认证/计费/运维等分区并列）
+- 注册进 operations 分区表（id='apigx-platform'，标题『平台管理』）
+- apigx-platform/index.tsx：去掉 SectionPageLayout 整页外壳（独立路由已删，不再需要），
+  并移除随之不再使用的导入
+- 删除独立路由 routes/_authenticated/apigx-platform/index.tsx 与导航入口「平台管理」
+  （导航分类本就该在系统设置里，不再单列顶级入口）
+- i18n：7 个语言文件各补 1 条（APIGX Platform）
+**过程如实记录**：我复制许可证头时连带把原文件的 import 也带进了新文件（typecheck 立刻指出
+'RouteExplainCandidate' 不存在且未使用），已改为干净的头。
+检查: typecheck 0 错 / 改动文件 oxlint 0 错 / hooks+system-settings 用例 95/95 / build ✅
+---
+ web/src/features/apigx-platform/index.tsx     | 10 ++-------
+ .../operations/apigx-platform-section.tsx}    | 13 ++++++-----
+ .../operations/section-registry.tsx           |  6 +++++
+ web/src/hooks/use-sidebar-data.ts             |  6 -----
+ web/src/i18n/locales/en.json                  |  3 ++-
+ web/src/i18n/locales/fr.json                  |  3 ++-
+ web/src/i18n/locales/ja.json                  |  3 ++-
+ web/src/i18n/locales/ru.json                  |  3 ++-
+ web/src/i18n/locales/vi.json                  |  3 ++-
+ web/src/i18n/locales/zh-TW.json               |  3 ++-
+ web/src/i18n/locales/zh.json                  |  3 ++-
+ web/src/routeTree.gen.ts                      | 22 -------------------
+ 12 files changed, 30 insertions(+), 48 deletions(-)
+ rename web/src/{routes/_authenticated/apigx-platform/index.tsx => features/system-settings/operations/apigx-platform-section.tsx} (73%)
+
+diff --git a/web/src/features/apigx-platform/index.tsx b/web/src/features/apigx-platform/index.tsx
+index 544d08b..d3f60aa 100644
+--- a/web/src/features/apigx-platform/index.tsx
++++ b/web/src/features/apigx-platform/index.tsx
+@@ -22,7 +22,6 @@ import { useTranslation } from 'react-i18next'
+ 
+ import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
+ import { EmptyState } from '@/components/empty-state'
+-import { SectionPageLayout } from '@/components/layout'
+ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ import { Input } from '@/components/ui/input'
+@@ -135,10 +134,7 @@ export function ApigxPlatform() {
+   ]
+ 
+   return (
+-    <SectionPageLayout>
+-      <SectionPageLayout.Title>{t('apigxPlatform.title')}</SectionPageLayout.Title>
+-      <SectionPageLayout.Content>
+-        <div className='space-y-6'>
++    <div className='space-y-6'>
+           <Card>
+             <CardHeader>
+               <CardTitle>{t('apigxPlatform.priceRules')}</CardTitle>
+@@ -259,9 +255,7 @@ export function ApigxPlatform() {
+               ) : null}
+             </CardContent>
+           </Card>
+-        </div>
+-      </SectionPageLayout.Content>
+-    </SectionPageLayout>
++    </div>
+   )
+ }
+ /**
+diff --git a/web/src/routes/_authenticated/apigx-platform/index.tsx b/web/src/features/system-settings/operations/apigx-platform-section.tsx
+similarity index 73%
+rename from web/src/routes/_authenticated/apigx-platform/index.tsx
+rename to web/src/features/system-settings/operations/apigx-platform-section.tsx
+index 31c8e73..ae236c3 100644
+--- a/web/src/routes/_authenticated/apigx-platform/index.tsx
++++ b/web/src/features/system-settings/operations/apigx-platform-section.tsx
+@@ -15,10 +15,13 @@ You should have received a copy of the GNU Affero General Public License
+ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+-*/import { createFileRoute } from '@tanstack/react-router'
+-
++*/
+ import { ApigxPlatform } from '@/features/apigx-platform'
+ 
+-export const Route = createFileRoute('/_authenticated/apigx-platform/')({
+-  component: ApigxPlatform,
+-})
+\ No newline at end of file
++/**
++ * 平台管理（资源审核 / 模型映射 / 价格规则）—— 作为**系统设置的一个分区**，
++ * 与底座的认证、计费、运维等设置并列，不再单独占一个顶级入口。
++ */
++export function ApigxPlatformSection() {
++  return <ApigxPlatform />
++}
+diff --git a/web/src/features/system-settings/operations/section-registry.tsx b/web/src/features/system-settings/operations/section-registry.tsx
+index f9473a4..5f6be93 100644
+--- a/web/src/features/system-settings/operations/section-registry.tsx
++++ b/web/src/features/system-settings/operations/section-registry.tsx
+@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
++import { ApigxPlatformSection } from './apigx-platform-section'
+ import { SystemBehaviorSection } from '../general/system-behavior-section'
+ import { EmailSettingsSection } from '../integrations/email-settings-section'
+ import { MonitoringSettingsSection } from '../integrations/monitoring-settings-section'
+@@ -27,6 +28,11 @@ import type { OperationsSettings } from '../types'
+ import { createSectionRegistry } from '../utils/section-registry'
+ 
+ const OPERATIONS_SECTIONS = [
++  {
++    id: 'apigx-platform',
++    titleKey: 'APIGX Platform',
++    build: () => <ApigxPlatformSection />,
++  },
+   {
+     id: 'behavior',
+     titleKey: 'System Behavior',
+diff --git a/web/src/hooks/use-sidebar-data.ts b/web/src/hooks/use-sidebar-data.ts
+index 185c55b..ea9b9a5 100644
+--- a/web/src/hooks/use-sidebar-data.ts
++++ b/web/src/hooks/use-sidebar-data.ts
+@@ -24,7 +24,6 @@ import {
+   FileText,
+   FlaskConical,
+   Store,
+-  Settings2,
+   Share2,
+   Key,
+   LayoutDashboard,
+@@ -189,11 +188,6 @@ export function useSidebarData(): SidebarData {
+             icon: PlugZap,
+             requiredRole: ROLE.SUPER_ADMIN,
+           },
+-          {
+-            title: t('apigxPlatform.nav'),
+-            url: '/apigx-platform',
+-            icon: Settings2,
+-          },
+ 
+           {
+             title: t('System Settings'),
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 0ac2e72..225dc13 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6735,6 +6735,7 @@
+     "All share groups": "All share groups",
+     "Expand all": "Expand all",
+     "Length": "Length",
+-    "Select preset": "Select preset"
++    "Select preset": "Select preset",
++    "APIGX Platform": "APIGX Platform"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 7319260..d0a486e 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6735,6 +6735,7 @@
+     "All share groups": "Tous les groupes de partage",
+     "Expand all": "Tout développer",
+     "Length": "Longueur",
+-    "Select preset": "Choisir un préréglage"
++    "Select preset": "Choisir un préréglage",
++    "APIGX Platform": "Plateforme APIGX"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index c2a1b2e..a6a52dd 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6735,6 +6735,7 @@
+     "All share groups": "すべての共有グループ",
+     "Expand all": "すべて展開",
+     "Length": "長さ",
+-    "Select preset": "プリセットを選択"
++    "Select preset": "プリセットを選択",
++    "APIGX Platform": "APIGX プラットフォーム"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 68f02b8..def4e3d 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6735,6 +6735,7 @@
+     "All share groups": "Все группы общих ресурсов",
+     "Expand all": "Развернуть всё",
+     "Length": "Длина",
+-    "Select preset": "Выбрать шаблон"
++    "Select preset": "Выбрать шаблон",
++    "APIGX Platform": "Платформа APIGX"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 1eeff3a..d8ddf4e 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6735,6 +6735,7 @@
+     "All share groups": "Tất cả nhóm chia sẻ",
+     "Expand all": "Mở rộng tất cả",
+     "Length": "Độ dài",
+-    "Select preset": "Chọn mẫu đặt trước"
++    "Select preset": "Chọn mẫu đặt trước",
++    "APIGX Platform": "Nền tảng APIGX"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index c186305..412b365 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6735,6 +6735,7 @@
+     "All share groups": "全部分享分組",
+     "Expand all": "展開全部",
+     "Length": "長度",
+-    "Select preset": "選擇預設"
++    "Select preset": "選擇預設",
++    "APIGX Platform": "平台管理"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 93e5919..1782c34 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6735,6 +6735,7 @@
+     "All share groups": "全部分享分组",
+     "Expand all": "展开全部",
+     "Length": "长度",
+-    "Select preset": "选择预设"
++    "Select preset": "选择预设",
++    "APIGX Platform": "平台管理"
+   }
+ }
+diff --git a/web/src/routeTree.gen.ts b/web/src/routeTree.gen.ts
+index 3e0f06c..89562c2 100644
+--- a/web/src/routeTree.gen.ts
++++ b/web/src/routeTree.gen.ts
+@@ -35,7 +35,6 @@ import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
+ import { Route as SetupIndexRouteImport } from './routes/setup/index'
+ import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
+ import { Route as AuthenticatedAccessInviteIndexRouteImport } from './routes/_authenticated/access-invite/index'
+-import { Route as AuthenticatedApigxPlatformIndexRouteImport } from './routes/_authenticated/apigx-platform/index'
+ import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
+ import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
+ import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
+@@ -206,12 +205,6 @@ const AuthenticatedAccessInviteIndexRoute =
+     path: '/access-invite/',
+     getParentRoute: () => AuthenticatedRouteRoute,
+   } as any)
+-const AuthenticatedApigxPlatformIndexRoute =
+-  AuthenticatedApigxPlatformIndexRouteImport.update({
+-    id: '/apigx-platform/',
+-    path: '/apigx-platform/',
+-    getParentRoute: () => AuthenticatedRouteRoute,
+-  } as any)
+ const AuthenticatedChannelsIndexRoute =
+   AuthenticatedChannelsIndexRouteImport.update({
+     id: '/channels/',
+@@ -474,7 +467,6 @@ export interface FileRoutesByFullPath {
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/access-invite/': typeof AuthenticatedAccessInviteIndexRoute
+-  '/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
+   '/channels/': typeof AuthenticatedChannelsIndexRoute
+   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
+   '/keys/': typeof AuthenticatedKeysIndexRoute
+@@ -539,7 +531,6 @@ export interface FileRoutesByTo {
+   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/access-invite': typeof AuthenticatedAccessInviteIndexRoute
+-  '/apigx-platform': typeof AuthenticatedApigxPlatformIndexRoute
+   '/channels': typeof AuthenticatedChannelsIndexRoute
+   '/dashboard': typeof AuthenticatedDashboardIndexRoute
+   '/keys': typeof AuthenticatedKeysIndexRoute
+@@ -608,7 +599,6 @@ export interface FileRoutesById {
+   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
+   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
+   '/_authenticated/access-invite/': typeof AuthenticatedAccessInviteIndexRoute
+-  '/_authenticated/apigx-platform/': typeof AuthenticatedApigxPlatformIndexRoute
+   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
+   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
+   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
+@@ -676,7 +666,6 @@ export interface FileRouteTypes {
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
+     | '/access-invite/'
+-    | '/apigx-platform/'
+     | '/channels/'
+     | '/dashboard/'
+     | '/keys/'
+@@ -741,7 +730,6 @@ export interface FileRouteTypes {
+     | '/usage-logs/$section'
+     | '/usage-logs/audit'
+     | '/access-invite'
+-    | '/apigx-platform'
+     | '/channels'
+     | '/dashboard'
+     | '/keys'
+@@ -809,7 +797,6 @@ export interface FileRouteTypes {
+     | '/_authenticated/usage-logs/$section'
+     | '/_authenticated/usage-logs/audit'
+     | '/_authenticated/access-invite/'
+-    | '/_authenticated/apigx-platform/'
+     | '/_authenticated/channels/'
+     | '/_authenticated/dashboard/'
+     | '/_authenticated/keys/'
+@@ -1047,13 +1034,6 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedAccessInviteIndexRouteImport
+       parentRoute: typeof AuthenticatedRouteRoute
+     }
+-    '/_authenticated/apigx-platform/': {
+-      id: '/_authenticated/apigx-platform/'
+-      path: '/apigx-platform'
+-      fullPath: '/apigx-platform/'
+-      preLoaderRoute: typeof AuthenticatedApigxPlatformIndexRouteImport
+-      parentRoute: typeof AuthenticatedRouteRoute
+-    }
+     '/_authenticated/channels/': {
+       id: '/_authenticated/channels/'
+       path: '/channels'
+@@ -1424,7 +1404,6 @@ interface AuthenticatedRouteRouteChildren {
+   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
+   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
+   AuthenticatedAccessInviteIndexRoute: typeof AuthenticatedAccessInviteIndexRoute
+-  AuthenticatedApigxPlatformIndexRoute: typeof AuthenticatedApigxPlatformIndexRoute
+   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
+   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
+   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
+@@ -1455,7 +1434,6 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
+   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
+   AuthenticatedAccessInviteIndexRoute: AuthenticatedAccessInviteIndexRoute,
+-  AuthenticatedApigxPlatformIndexRoute: AuthenticatedApigxPlatformIndexRoute,
+   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
+   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
+   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,
+-- 
+2.53.0.windows.1
+

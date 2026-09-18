@@ -11,7 +11,7 @@
     "fetchMethod":  "git init -b apigx-base; git config http.https://github.com/.proxy http://127.0.0.1:7897; git remote add origin \u003cupstream\u003e; git fetch --depth 1 origin \u003ccommit\u003e; git checkout --detach FETCH_HEAD",
     "note":  "本地克隆被 .gitignore 排除；本文件是唯一权威锁定记录，重建或升级一律按此提交复现。阶段 0 后续需补：依赖清单、fork 与上游差异清单、许可与署名义务落实。",
     "forkBranch":  "apigx",
-    "forkHead":  "15b4e452c7fa633b94147495715ed316ca748b0c",
+    "forkHead":  "150107f885022cb4bd5dcdda80acbba96d8a7f7c",
     "forkPatches":  "deploy/patches/（git format-patch 导出，随工作区仓库入库）",
     "forkNote":  "我们的代码与相对上游的改动提交在底座仓库的 apigx 分支上（当前含 D-001..D-004）；new-api/ 目录本身被工作区仓库忽略（内含 .git，会被识别为内嵌仓库），因此用 deploy/patches/ 的补丁导出保证可追溯与可复现。"
 }
