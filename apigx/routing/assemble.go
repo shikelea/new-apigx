@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
@@ -89,6 +90,14 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
 		if breaker.State == BreakerOpen {
 			candidate.Allowed = false
 			candidate.ExcludeReason = ExcludeBreakerOpen
+			// 阶段 4「告警」：熔断打开时发一条**限频**运维告警（同一供给 10 分钟最多一次），
+			// 否则熔断期内每个请求都会走到这里，日志会被刷爆反而掩盖问题。
+			if claimBreakerAlertSlot(offering.ID, opts.Now) {
+				common.SysError(fmt.Sprintf(
+					"apigx alert: offering %s breaker OPEN — 候选已摘除，冷却结束前不会承接流量",
+					public[offering.ID].OfferingPublicID,
+				))
+			}
 		}
 
 		// 容量：读渠道策略给出的上限与当前占用（未配置上限则不施加约束）

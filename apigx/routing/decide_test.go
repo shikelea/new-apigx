@@ -600,3 +600,22 @@ func TestBreakerOpenRemovesCandidateWithSpecificReason(t *testing.T) {
 	}
 	assert.Equal(t, ExcludeBreakerOpen, reasons["off-61"], "解释必须说明是熔断，而不是笼统的未授权")
 }
+
+// TestBreakerAlertIsRateLimitedPerOffering 覆盖阶段 4 的「告警」要求：
+// 同一供给的熔断告警必须**限频**（避免刷屏），不同供给互不影响，间隔过后可再次告警。
+//
+// 注意：这里断言的是"是否该告警"这一**不变量**，不去断言日志文本
+// （new-api/AGENTS.md 明确反对 log-only 断言）。
+func TestBreakerAlertIsRateLimitedPerOffering(t *testing.T) {
+	resetBreakerAlertState()
+
+	const offeringA, offeringB int64 = 101, 202
+	now := int64(1700000000)
+
+	assert.True(t, claimBreakerAlertSlot(offeringA, now), "首次熔断应当告警")
+	assert.False(t, claimBreakerAlertSlot(offeringA, now+1), "间隔内不得重复告警")
+	assert.False(t, claimBreakerAlertSlot(offeringA, now+breakerAlertInterval-1), "差 1 秒仍不得告警")
+	assert.True(t, claimBreakerAlertSlot(offeringA, now+breakerAlertInterval), "间隔过后应当可以再次告警")
+	assert.True(t, claimBreakerAlertSlot(offeringB, now+1), "不同供给的限频互不影响")
+	assert.False(t, claimBreakerAlertSlot(0, now), "无有效供给 id 时不告警")
+}

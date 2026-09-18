@@ -334,3 +334,57 @@ func TestApplyWebSocketSubprotocolAuthorizationReadsRepeatedHeaders(t *testing.T
 	assert.True(t, applyWebSocketSubprotocolAuthorization(header))
 	assert.Equal(t, "Bearer sk-later-field", header.Get("Authorization"))
 }
+
+// TestSetupContextForTokenRejectsPinSuffixForNonAdmin 覆盖阶段 4 验收表第 5 行：
+// 「固定来源 Key 携带另一个渠道的请求头」必须是**不扩大授权**的 ——
+// `-<channelId>` 后缀只对管理员生效，普通用户直接 403 并留下 specific_channel_version 头。
+func TestSetupContextForTokenRejectsPinSuffixForNonAdmin(t *testing.T) {
+	setupDashboardAuthMiddlewareTest(t)
+	pat := "pin-nonadmin-pat"
+	user := createMiddlewarePATUser(t, "pin-nonadmin-user", pat)
+
+	// 该夹具的内存库只迁移了 users/AuthFlow ⇒ 这里补 tokens 表（否则 "no such table: tokens"）
+	require.NoError(t, model.DB.AutoMigrate(&model.Token{}))
+
+	token := &model.Token{
+		UserId:       user.Id,
+		Key:          "pin-nonadmin-token-key",
+		Status:       common.TokenStatusEnabled,
+		Name:         "pin-check",
+		CreatedTime:  common.GetTimestamp(),
+		AccessedTime: common.GetTimestamp(),
+		ExpiredTime:  -1,
+	}
+	require.NoError(t, model.DB.Create(token).Error)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
+
+	err := SetupContextForToken(c, token, "stable-key", "123")
+	require.Error(t, err, "普通用户带指定渠道后缀必须被拒绝（不扩大授权）")
+	assert.Equal(t, http.StatusForbidden, recorder.Code)
+	assert.NotEmpty(t, recorder.Header().Get("specific_channel_version"))
+}
+
+// TestUserAuthRejectsDisabledUser 覆盖阶段 4 验收表第 26 行的账户封禁路径：
+// 用户被停用后，其平台令牌必须被拒（401），而不是继续可用。
+func TestUserAuthRejectsDisabledUser(t *testing.T) {
+	setupDashboardAuthMiddlewareTest(t)
+	pat := "disabled-user-pat"
+	user := createMiddlewarePATUser(t, "disabled-user", pat)
+	require.NoError(t, model.DB.Model(user).Update("status", common.UserStatusDisabled).Error)
+
+	router := gin.New()
+	router.GET("/protected", UserAuth(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"id": c.GetInt("id")})
+	})
+	request := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	request.Header.Set("Authorization", "Bearer "+pat)
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusUnauthorized, response.Code)
+	assert.Contains(t, response.Body.String(), "AUTH_USER_DISABLED")
+}
