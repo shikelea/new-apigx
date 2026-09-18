@@ -1231,6 +1231,12 @@ func (h *handler) publishOffering(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
+	// 关键：供给发布后，必须让**底座的渠道**真正能服务这个模型 ——
+	// 自助建的底座渠道是直接 insert 的（没有走底座的建能力步骤），若不补这一步，
+	// 该渠道 models 为空、abilities 为 0 ⇒ 底座分配器永远返回 model_not_found。
+	if err := h.syncBaseChannelServesModel(id); err != nil {
+		common.SysError("apigx api: sync base channel abilities failed: " + err.Error())
+	}
 	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
 }
 
@@ -2152,4 +2158,55 @@ func (h *handler) summarizeOwnerUsage(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"group_by": string(groupBy), "items": rows})
+}
+
+// syncBaseChannelServesModel 让"绑定到该供给所属分享渠道"的底座渠道真正能服务该模型。
+//
+// 背景（实测发现的产品缺陷）：U-1 的「分享者自建渠道」由平台**直接插入**底座 channels 行，
+// 因此**绕过了底座的建能力步骤**（底座在建/改渠道后会调用 Channel.AddAbilities）。
+// 结果：这类渠道 models 为空、abilities 为 0，底座分配器对该模型永远返回 model_not_found。
+//
+// 修法（与底座自己的姿势一致）：把该模型并入底座渠道的 models，然后重建能力。
+// 只动 models 与能力，不触碰上游地址与凭据。
+func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
+	var offering apigxmodel.ModelOffering
+	if err := h.db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
+		return err
+	}
+	var shareChannel apigxmodel.Channel
+	if err := h.db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
+		return err
+	}
+	if shareChannel.BaseChannelID <= 0 || offering.UpstreamModelID == "" {
+		return nil
+	}
+
+	var base basemodel.Channel
+	if err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
+		return err
+	}
+
+	models := strings.Split(base.Models, ",")
+	exists := false
+	for _, m := range models {
+		if strings.TrimSpace(m) == offering.UpstreamModelID {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		merged := append(models, offering.UpstreamModelID)
+		joined := strings.Join(merged, ",")
+		if err := h.db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
+			Update("models", joined).Error; err != nil {
+			return err
+		}
+		base.Models = joined
+	}
+
+	// 重建能力（底座建渠道后的同一姿势）
+	if err := base.AddAbilities(h.db); err != nil {
+		return err
+	}
+	return nil
 }
