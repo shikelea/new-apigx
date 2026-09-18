@@ -1,0 +1,340 @@
+From 2a508cb2f2b2696c0f2326fabb3534a8c7718761 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 15:57:04 +0800
+Subject: [PATCH 144/144] =?UTF-8?q?feat(usage):=20U-3=20=E6=94=B6=E5=8F=A3?=
+ =?UTF-8?q?=20=E2=80=94=E2=80=94=20=E5=88=86=E4=BA=AB=E8=80=85=E6=B6=88?=
+ =?UTF-8?q?=E8=80=97=E5=8D=A1=EF=BC=88=E6=8C=89=E6=B8=A0=E9=81=93=20/=20?=
+ =?UTF-8?q?=E6=8C=89=20Key=20/=20=E6=8C=89=E6=A8=A1=E5=9E=8B=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+后端上一轮已完成并实测；本轮补前端并收口。
+- share/api.ts：getUsageSummary
+- share/components/usage-summary-card.tsx：三维度切换（按渠道/按 Key/按模型）+ 表格
+  （来源 · 请求数 · 成功 · 失败 · 未完成 · 输出 token · 平均首字延迟）
+- share/index.tsx：挂到「我的分享」；i18n 7 语各补 9 条
+
+**名称空值处理（诚实口径）**：查询数据库确认，确有 attempt 的 upstream_key_id=0 / upstream_model_id=''
+（异步任务创建等路径未记录）⇒ 界面显示「未记录」，**不编造名字**、也不隐藏。这是数据缺口，已在剩余风险中记录。
+**金额不显示**：attempts 表没有费用字段，接口不臆造金额（要看金额需另接底座 logs 口径）。
+检查: typecheck 0 错 / oxlint 0 错 / 用例 13/13 / build ✅ / 接口真实数据实测 ✅ / 产物哈希随改动变化 ✅
+---
+ web/src/features/share/api.ts                 | 22 +++++
+ .../share/components/usage-summary-card.tsx   | 99 +++++++++++++++++++
+ web/src/features/share/index.tsx              |  2 +
+ web/src/i18n/locales/en.json                  | 11 ++-
+ web/src/i18n/locales/fr.json                  | 11 ++-
+ web/src/i18n/locales/ja.json                  | 11 ++-
+ web/src/i18n/locales/ru.json                  | 11 ++-
+ web/src/i18n/locales/vi.json                  | 11 ++-
+ web/src/i18n/locales/zh-TW.json               | 11 ++-
+ web/src/i18n/locales/zh.json                  | 11 ++-
+ 10 files changed, 193 insertions(+), 7 deletions(-)
+ create mode 100644 web/src/features/share/components/usage-summary-card.tsx
+
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index b1faa5b..5d14c95 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -133,3 +133,25 @@ export async function deleteUpstreamKey(keyId: number): Promise<{ success: boole
+   const res = await api.delete('/api/apigx/upstream-keys/' + keyId)
+   return res.data
+ }
++
++// U-3：分享者视角的消耗汇总（按渠道 / 按 Key / 按模型）。
++// 口径由后端保证：success=HTTP 2xx、failed=非 2xx、unfinished=无状态码，三者相加=attempts；
++// **不返回金额**（attempts 表没有费用字段，后端不臆造）。
++export interface UsageSummaryItem {
++  group_id?: number
++  name: string
++  attempts: number
++  success: number
++  failed: number
++  unfinished: number
++  output_tokens: number
++  ttft_ms_sum: number
++  ttft_samples: number
++}
++
++export async function getUsageSummary(
++  groupBy: 'channel' | 'key' | 'model'
++): Promise<{ success: boolean; data?: { group_by: string; items: UsageSummaryItem[] } }> {
++  const res = await api.get('/api/apigx/usage/summary', { params: { group_by: groupBy } })
++  return res.data
++}
+diff --git a/web/src/features/share/components/usage-summary-card.tsx b/web/src/features/share/components/usage-summary-card.tsx
+new file mode 100644
+index 0000000..abd913a
+--- /dev/null
++++ b/web/src/features/share/components/usage-summary-card.tsx
+@@ -0,0 +1,99 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useQuery } from '@tanstack/react-query'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import { EmptyState } from '@/components/empty-state'
++import { Button } from '@/components/ui/button'
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++
++import { getUsageSummary, type UsageSummaryItem } from '../api'
++
++/**
++ * 分享者视角的消耗（U-3，计划书 §4「Key 池策略及单 Key 消耗」+ 分享者维度统计）。
++ *
++ * 三个维度都看自己的量：按渠道 / 按上游 Key / 按模型。
++ * 名称为空时显示「未记录」—— 确有 attempt 未记录 key/model（异步任务创建等路径），
++ * 这是数据事实，界面上不隐藏、也不编一个名字。
++ */
++export function UsageSummaryCard() {
++  const { t } = useTranslation()
++  const [groupBy, setGroupBy] = useState<'channel' | 'key' | 'model'>('channel')
++
++  const query = useQuery({
++    queryKey: ['apigx-usage-summary', groupBy],
++    queryFn: () => getUsageSummary(groupBy),
++  })
++
++  const items = query.data?.data?.items ?? []
++
++  const label = (item: UsageSummaryItem) =>
++    item.name !== '' ? item.name : t('Not recorded')
++
++  const avgTtft = (item: UsageSummaryItem) =>
++    item.ttft_samples > 0 ? Math.round(item.ttft_ms_sum / item.ttft_samples) : 0
++
++  const columns: StaticDataTableColumn<UsageSummaryItem>[] = [
++    { id: 'name', header: t('Source'), cell: (row) => label(row) },
++    { id: 'attempts', header: t('Requests'), cell: (row) => String(row.attempts) },
++    { id: 'success', header: t('Succeeded'), cell: (row) => String(row.success) },
++    { id: 'failed', header: t('Failed'), cell: (row) => String(row.failed) },
++    { id: 'unfinished', header: t('Unfinished'), cell: (row) => String(row.unfinished) },
++    { id: 'tokens', header: t('Output tokens'), cell: (row) => String(row.output_tokens) },
++    { id: 'ttft', header: t('Avg first token (ms)'), cell: (row) => String(avgTtft(row)) },
++  ]
++
++  const GROUP_BY: { key: typeof groupBy; labelKey: string }[] = [
++    { key: 'channel', labelKey: 'By channel' },
++    { key: 'key', labelKey: 'By key' },
++    { key: 'model', labelKey: 'By model' },
++  ]
++
++  return (
++    <Card>
++      <CardHeader>
++        <CardTitle>{t('My consumption')}</CardTitle>
++      </CardHeader>
++      <CardContent className='space-y-4'>
++        <p className='text-muted-foreground text-sm'>
++          {t('How much your shared channels were used. Amounts are not shown here yet.')}
++        </p>
++        <div className='flex gap-2'>
++          {GROUP_BY.map((item) => (
++            <Button
++              key={item.key}
++              variant={groupBy === item.key ? 'default' : 'outline'}
++              size='sm'
++              onClick={() => setGroupBy(item.key)}
++            >
++              {t(item.labelKey)}
++            </Button>
++          ))}
++        </div>
++        {items.length === 0 ? (
++          <EmptyState title={t('No consumption recorded yet')} />
++        ) : (
++          <StaticDataTable columns={columns} data={items} getRowKey={(row) => String(row.group_id ?? 0) + row.name} />
++        )}
++      </CardContent>
++    </Card>
++  )
++}
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index 2fb8c3e..f3c5cd0 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -31,6 +31,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ 
+ import { deleteShareChannel, deleteShareGroup, getShareChannels, getShareGroups } from './api'
+ import { AccessInviteCard } from '@/features/access/components/invite-card'
++import { UsageSummaryCard } from './components/usage-summary-card'
+ import { ChannelCreateDialog } from './components/channel-create-dialog'
+ import { GroupCreateDialog } from './components/group-create-dialog'
+ import { GroupEditDialog } from './components/group-edit-dialog'
+@@ -199,6 +200,7 @@ export function MyShares() {
+           </Card>
+         </div>
+           <AccessInviteCard groups={groups} />
++        <UsageSummaryCard />
+       <ConfirmDialog
+         open={deletingGroup !== null}
+         onOpenChange={(next) => {
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 1a3dabe..d6f2851 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6766,6 +6766,15 @@
+     "Pending review": "Pending review",
+     "Suspended": "Suspended",
+     "Retired": "Retired",
+-    "Draft": "Draft"
++    "Draft": "Draft",
++    "My consumption": "My consumption",
++    "By channel": "By channel",
++    "By key": "By key",
++    "By model": "By model",
++    "Succeeded": "Succeeded",
++    "Unfinished": "Unfinished",
++    "Avg first token (ms)": "Avg first token (ms)",
++    "How much your shared channels were used. Amounts are not shown here yet.": "How much your shared channels were used. Amounts are not shown here yet.",
++    "No consumption recorded yet": "No consumption recorded yet"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 4bf46a4..b12dca4 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6766,6 +6766,15 @@
+     "Pending review": "En attente de validation",
+     "Suspended": "Suspendu",
+     "Retired": "Retiré",
+-    "Draft": "Brouillon"
++    "Draft": "Brouillon",
++    "My consumption": "Ma consommation",
++    "By channel": "Par canal",
++    "By key": "Par clé",
++    "By model": "Par modèle",
++    "Succeeded": "Réussies",
++    "Unfinished": "Inachevées",
++    "Avg first token (ms)": "Premier token moyen (ms)",
++    "How much your shared channels were used. Amounts are not shown here yet.": "L'utilisation de vos canaux partagés. Les montants ne sont pas encore affichés.",
++    "No consumption recorded yet": "Aucune consommation enregistrée"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index b9599c8..1f736ed 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6766,6 +6766,15 @@
+     "Pending review": "審査待ち",
+     "Suspended": "停止中",
+     "Retired": "廃止",
+-    "Draft": "下書き"
++    "Draft": "下書き",
++    "My consumption": "自分の消費",
++    "By channel": "チャネル別",
++    "By key": "キー別",
++    "By model": "モデル別",
++    "Succeeded": "成功",
++    "Unfinished": "未完了",
++    "Avg first token (ms)": "平均初回トークン(ms)",
++    "How much your shared channels were used. Amounts are not shown here yet.": "共有チャネルがどれだけ使われたか。金額はまだ表示しません。",
++    "No consumption recorded yet": "まだ消費記録がありません"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 105566d..88a092c 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6766,6 +6766,15 @@
+     "Pending review": "На проверке",
+     "Suspended": "Приостановлено",
+     "Retired": "Выведено",
+-    "Draft": "Черновик"
++    "Draft": "Черновик",
++    "My consumption": "Моё потребление",
++    "By channel": "По каналу",
++    "By key": "По ключу",
++    "By model": "По модели",
++    "Succeeded": "Успешно",
++    "Unfinished": "Не завершено",
++    "Avg first token (ms)": "Среднее время до первого токена (мс)",
++    "How much your shared channels were used. Amounts are not shown here yet.": "Насколько использовались ваши общие каналы. Суммы пока не показываются.",
++    "No consumption recorded yet": "Потребления пока не зафиксировано"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 6d36007..373d21e 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6766,6 +6766,15 @@
+     "Pending review": "Chờ duyệt",
+     "Suspended": "Tạm dừng",
+     "Retired": "Ngừng sử dụng",
+-    "Draft": "Bản nháp"
++    "Draft": "Bản nháp",
++    "My consumption": "Mức tiêu thụ của tôi",
++    "By channel": "Theo kênh",
++    "By key": "Theo khóa",
++    "By model": "Theo mô hình",
++    "Succeeded": "Thành công",
++    "Unfinished": "Chưa xong",
++    "Avg first token (ms)": "Token đầu trung bình (ms)",
++    "How much your shared channels were used. Amounts are not shown here yet.": "Mức sử dụng các kênh bạn chia sẻ. Số tiền chưa được hiển thị.",
++    "No consumption recorded yet": "Chưa có ghi nhận tiêu thụ"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 8d15b66..b6eee5c 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6766,6 +6766,15 @@
+     "Pending review": "待審核",
+     "Suspended": "已暫停",
+     "Retired": "已退役",
+-    "Draft": "草稿"
++    "Draft": "草稿",
++    "My consumption": "我的消耗",
++    "By channel": "按管道",
++    "By key": "按金鑰",
++    "By model": "按模型",
++    "Succeeded": "成功",
++    "Unfinished": "未完成",
++    "Avg first token (ms)": "平均首字延遲(ms)",
++    "How much your shared channels were used. Amounts are not shown here yet.": "你分享的管道被用了多少。這裡暫不顯示金額。",
++    "No consumption recorded yet": "還沒有消耗記錄"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index e7dea5b..6f25c4f 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6766,6 +6766,15 @@
+     "Pending review": "待审核",
+     "Suspended": "已暂停",
+     "Retired": "已退役",
+-    "Draft": "草稿"
++    "Draft": "草稿",
++    "My consumption": "我的消耗",
++    "By channel": "按渠道",
++    "By key": "按 Key",
++    "By model": "按模型",
++    "Succeeded": "成功",
++    "Unfinished": "未完成",
++    "Avg first token (ms)": "平均首字延迟(ms)",
++    "How much your shared channels were used. Amounts are not shown here yet.": "你分享的渠道被用了多少。这里暂不显示金额。",
++    "No consumption recorded yet": "还没有消耗记录"
+   }
+ }
+-- 
+2.53.0.windows.1
+

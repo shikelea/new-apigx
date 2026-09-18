@@ -10,9 +10,33 @@
 
 ## 当前任务
 [进行中] 阶段 3 收口 → 阶段 4 交付（计划见 `TASK_LOG.md` **顶部**，含验收标准与任务清单 T3.9 / U-1 / U-2 / U-3 / T4.1–T4.6）。
-- 进度：**3/10 项完成**（T3.9 [012]；U-1 [013]；**U-2 已完成** [014]）；首轮完成 **§3 规划入档** 与 **T3.9 盘点**（结论：我们**没有**阶段 3 的能力矩阵/验收报告，只有 `docs/stage0/protocol-matrix.md`；下一步新建 `docs/stage3/acceptance-report.md` 逐行给结论）
+- 进度：**4/10 项完成**（T3.9 [012]；U-1 [013]；U-2 [014]；**U-3 已完成** [015]）；首轮完成 **§3 规划入档** 与 **T3.9 盘点**（结论：我们**没有**阶段 3 的能力矩阵/验收报告，只有 `docs/stage0/protocol-matrix.md`；下一步新建 `docs/stage3/acceptance-report.md` 逐行给结论）
 - 用户提出的 3 条问题（U-1 渠道流程 / U-2 邀请界面合并 / U-3 分享者消耗视图）**已记录**，并已进入本轮计划；其中 U-1/U-2 的待澄清点由我拍板（决定已写入 TASK_LOG）
 - 如实保留的未验证项：语音**上传时长**（平台不解码音频）
+### [015] 2026-09-18 分享者视角的消耗视图（U-3）
+
+**做了什么**：补上"看不到我分享的具体消耗"。**换了数据源**（原定表不可用）后，
+后端按**渠道 / 上游 Key / 模型**三个维度聚合分享者自己的调用，前端在「我的分享」加消耗卡。
+
+**涉及模块**：apigx/model、apigx/api、前端 share、i18n
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `docs/stage3/…`（无） | — | — |
+| `apigx/model/repo_attempt.go` | 仓储 | 新增 `SummarizeOwnerAttempts`（渠道/Key）、`SummarizeOwnerAttemptsByModel`（模型，字符串聚合）、`FillOwnerUsageNames`；归属由「渠道 → owner_user_id」子查询推出 |
+| `apigx/api/share.go` | 接口 | 既有 `usage` 路由组新增 `GET /api/apigx/usage/summary?group_by=channel|key|model`（只返回自己的量） |
+| `web/src/features/share/api.ts` | 前端 | `getUsageSummary` |
+| `web/src/features/share/components/usage-summary-card.tsx` | 前端 | 消耗卡：三维度切换 + 请求/成功/失败/未完成/输出 token/平均 TTFT；名称空时显示「未记录」 |
+| `web/src/features/share/index.tsx`、i18n | 前端 | 挂载消耗卡；7 语各补 9 条 |
+
+**验证**：`go build` ✅；`apigx/model` + `apigx/api` 用例 ✅；接口**真实数据实测**：
+`group_by=channel` → 200 且尝试/成功数正确，`key`/`model` → 200；
+前端 typecheck 0 错 / oxlint 0 错 / 用例 13/13 / build ✅；网关产物哈希随改动变化 ✅
+**剩余风险**：① **金额未显示** —— attempts 表没有费用字段，接口**不臆造**金额；若要看金额需另接底座 logs 口径；
+② 部分 attempt 的 `upstream_key_id=0` / `upstream_model_id=''`（异步任务创建等路径未记录）⇒
+界面如实显示「未记录」而**不编名字**；这是**数据缺口**，值得后续单独排查；
+③ `apigx_usage_events`（0 行、无写入方）仍是一处**未启用的 schema**，要么补写入方、要么明确废弃
 ### [014] 2026-09-18 邀请码「发放/管理」与「兑换」合并为一个界面（U-2）
 
 **做了什么**：按用户要求把两处合并 —— 「我的分享」的邀请卡（发放/列表/撤销）与独立的「兑换邀请」页面。
