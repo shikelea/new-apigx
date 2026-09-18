@@ -41,8 +41,10 @@ type PlazaItem struct {
 	Insufficient             bool
 	Stale                    bool
 	// GroupPublicID/GroupName 用于广场按"分享分组"组织（我们的模式）。
-	GroupPublicID    string
-	GroupName        string
+	GroupPublicID string
+	GroupName     string
+	// GroupDescription 供"分享分组页（访客视角）"显示介绍（不可信文本，渲染前转义）
+	GroupDescription string
 	OfferingPublicID string
 	UpstreamModelID  string
 	ChannelPublicID  string
@@ -128,20 +130,21 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 	}
 
 	type row struct {
-		ID              int64
-		GroupPublicID   string
-		GroupName       string
-		PublicID        string
-		UpstreamModelID string
-		ChannelPublicID string
-		OwnerUserID     int64
-		Capabilities    string
-		UpdatedAt       int64
+		ID               int64
+		GroupPublicID    string
+		GroupName        string
+		GroupDescription string
+		PublicID         string
+		UpstreamModelID  string
+		ChannelPublicID  string
+		OwnerUserID      int64
+		Capabilities     string
+		UpdatedAt        int64
 	}
 	var rows []row
 	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
-		"g.public_id AS group_public_id, g.name AS group_name, " +
+		"g.public_id AS group_public_id, g.name AS group_name, g.description AS group_description, " +
 		"o.capabilities AS capabilities, o.updated_at AS updated_at").
 		Order("o.updated_at DESC, o.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error
 	if err != nil {
@@ -184,6 +187,7 @@ func ListPlazaItems(db *gorm.DB, limit, offset int) ([]PlazaItem, int64, error) 
 			ChannelPublicID:          r.ChannelPublicID,
 			GroupPublicID:            r.GroupPublicID,
 			GroupName:                r.GroupName,
+			GroupDescription:         r.GroupDescription,
 			OwnerUserID:              r.OwnerUserID,
 			Capabilities:             effective,
 			UnverifiedCapabilities:   unverified,

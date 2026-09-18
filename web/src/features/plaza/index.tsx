@@ -104,7 +104,15 @@ export function Plaza() {
           <div className='space-y-8'>
             {groups.map((group) => (
               <section key={group.key} className='space-y-3'>
-                <h2 className='text-sm font-medium'>{group.name === '' ? t('Ungrouped') : group.name}</h2>
+                <h2 className='text-sm font-medium'>
+                  {group.key === '' ? (
+                    t('Ungrouped')
+                  ) : (
+                    <Link to='/plaza/group/$groupPublicId' params={{ groupPublicId: group.key }} className='hover:underline'>
+                      {group.name === '' ? t('Ungrouped') : group.name}
+                    </Link>
+                  )}
+                </h2>
                 <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
                   {group.cards.map((card) => (
               <Card key={card.model}>

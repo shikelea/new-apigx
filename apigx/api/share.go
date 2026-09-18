@@ -1322,6 +1322,7 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 		"latency_ms_p50":              item.LatencyMsP50,
 		"insufficient":                item.Insufficient,
 		"stale":                       item.Stale,
+		"group_description":           item.GroupDescription,
 		"group_public_id":             item.GroupPublicID,
 		"group_name":                  item.GroupName,
 		"model":                       item.UpstreamModelID,

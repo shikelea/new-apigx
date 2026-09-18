@@ -33,6 +33,8 @@ export interface PlazaOfferingItem {
   /** 分享分组对外 ID 与名称（广场按"分享分组"组织） */
   group_public_id?: string
   group_name?: string
+  /** 分组介绍（不可信文本，按纯文本渲染） */
+  group_description?: string
   /** 分享渠道对外 ID */
   channel_public_id: string
   /** 分享者用户 ID */

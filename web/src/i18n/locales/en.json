@@ -6712,5 +6712,8 @@
   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
   "Confirm": "Confirm",
   "Reject": "Reject",
-  "Normalized name Hint": "Normalized name"
+  "Normalized name Hint": "Normalized name",
+  "Visible resources": "Visible resources",
+  "No visible resource in this group": "No visible resource in this group",
+  "Provider": "Provider"
 }

@@ -6712,5 +6712,8 @@
   "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "候选会随着创建供给自动累积；只有**确认之后**，广场才会显示对外标准 ID 与模型介绍。",
   "Confirm": "确认",
   "Reject": "拒绝",
-  "Normalized name Hint": "归一化名"
+  "Normalized name Hint": "归一化名",
+  "Visible resources": "可见资源",
+  "No visible resource in this group": "该分组下没有你可访问的资源",
+  "Provider": "分享者"
 }
