@@ -6775,6 +6775,11 @@
     "Unfinished": "Unfinished",
     "Avg first token (ms)": "Avg first token (ms)",
     "How much your shared channels were used. Amounts are not shown here yet.": "How much your shared channels were used. Amounts are not shown here yet.",
-    "No consumption recorded yet": "No consumption recorded yet"
+    "No consumption recorded yet": "No consumption recorded yet",
+    "Could not fetch the model list from the upstream": "Could not fetch the model list from the upstream",
+    "Some upstreams do not expose a model list. Add the model name manually below.": "Some upstreams do not expose a model list. Add the model name manually below.",
+    "Manual entry": "Manual entry",
+    "Type an upstream model ID and import it as a draft offering.": "Type an upstream model ID and import it as a draft offering.",
+    "Import this model": "Import this model"
   }
 }

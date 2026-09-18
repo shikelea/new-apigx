@@ -6775,6 +6775,11 @@
     "Unfinished": "Не завершено",
     "Avg first token (ms)": "Среднее время до первого токена (мс)",
     "How much your shared channels were used. Amounts are not shown here yet.": "Насколько использовались ваши общие каналы. Суммы пока не показываются.",
-    "No consumption recorded yet": "Потребления пока не зафиксировано"
+    "No consumption recorded yet": "Потребления пока не зафиксировано",
+    "Could not fetch the model list from the upstream": "Не удалось получить список моделей от вышестоящего сервиса",
+    "Some upstreams do not expose a model list. Add the model name manually below.": "Некоторые сервисы не отдают список моделей. Укажите название вручную ниже.",
+    "Manual entry": "Ручной ввод",
+    "Type an upstream model ID and import it as a draft offering.": "Укажите ID модели вышестоящего сервиса, чтобы импортировать её как черновик.",
+    "Import this model": "Импортировать эту модель"
   }
 }

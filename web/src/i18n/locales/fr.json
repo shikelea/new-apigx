@@ -6775,6 +6775,11 @@
     "Unfinished": "Inachevées",
     "Avg first token (ms)": "Premier token moyen (ms)",
     "How much your shared channels were used. Amounts are not shown here yet.": "L'utilisation de vos canaux partagés. Les montants ne sont pas encore affichés.",
-    "No consumption recorded yet": "Aucune consommation enregistrée"
+    "No consumption recorded yet": "Aucune consommation enregistrée",
+    "Could not fetch the model list from the upstream": "Impossible de récupérer la liste des modèles depuis l'amont",
+    "Some upstreams do not expose a model list. Add the model name manually below.": "Certains amonts n'exposent pas de liste de modèles. Ajoutez le nom manuellement ci-dessous.",
+    "Manual entry": "Saisie manuelle",
+    "Type an upstream model ID and import it as a draft offering.": "Saisissez un ID de modèle amont pour l'importer comme offre brouillon.",
+    "Import this model": "Importer ce modèle"
   }
 }

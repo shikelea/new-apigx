@@ -6775,6 +6775,11 @@
     "Unfinished": "未完了",
     "Avg first token (ms)": "平均初回トークン(ms)",
     "How much your shared channels were used. Amounts are not shown here yet.": "共有チャネルがどれだけ使われたか。金額はまだ表示しません。",
-    "No consumption recorded yet": "まだ消費記録がありません"
+    "No consumption recorded yet": "まだ消費記録がありません",
+    "Could not fetch the model list from the upstream": "上流からモデル一覧を取得できませんでした",
+    "Some upstreams do not expose a model list. Add the model name manually below.": "上流によってはモデル一覧を公開していません。下にモデル名を手入力してください。",
+    "Manual entry": "手動入力",
+    "Type an upstream model ID and import it as a draft offering.": "上流モデル ID を入力すると、下書き供給として取り込めます。",
+    "Import this model": "このモデルを取り込む"
   }
 }

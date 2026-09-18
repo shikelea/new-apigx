@@ -6775,6 +6775,11 @@
     "Unfinished": "Chưa xong",
     "Avg first token (ms)": "Token đầu trung bình (ms)",
     "How much your shared channels were used. Amounts are not shown here yet.": "Mức sử dụng các kênh bạn chia sẻ. Số tiền chưa được hiển thị.",
-    "No consumption recorded yet": "Chưa có ghi nhận tiêu thụ"
+    "No consumption recorded yet": "Chưa có ghi nhận tiêu thụ",
+    "Could not fetch the model list from the upstream": "Không lấy được danh sách mô hình từ thượng nguồn",
+    "Some upstreams do not expose a model list. Add the model name manually below.": "Một số thượng nguồn không cung cấp danh sách mô hình. Hãy nhập tên mô hình bên dưới.",
+    "Manual entry": "Nhập thủ công",
+    "Type an upstream model ID and import it as a draft offering.": "Nhập ID mô hình thượng nguồn để nhập thành bản nháp.",
+    "Import this model": "Nhập mô hình này"
   }
 }

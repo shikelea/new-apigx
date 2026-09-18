@@ -24,6 +24,8 @@ import { Dialog } from '@/components/dialog'
 import { EmptyState } from '@/components/empty-state'
 import { LoadingState } from '@/components/loading-state'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 
 import { createOffering, fetchUpstreamModels } from '../api'
@@ -42,6 +44,8 @@ export function ModelImportDialog(props: {
 }) {
   const { t } = useTranslation()
   const [picked, setPicked] = useState<Record<string, boolean>>({})
+  // 人工录入（上游不支持下自动获取时的出路）：直接填模型名建供给
+  const [manualModel, setManualModel] = useState('')
 
   // 只预览（import=false），不落任何数据
   const query = useQuery({
@@ -64,6 +68,16 @@ export function ModelImportDialog(props: {
     },
     onSuccess: () => {
       setPicked({})
+      props.onOpenChange(false)
+      props.onSaved()
+    },
+  })
+
+  // 人工录入：与勾选导入走同一个接口，只是模型名由人填
+  const createOne = useMutation({
+    mutationFn: () => createOffering(props.channelId, manualModel.trim()),
+    onSuccess: () => {
+      setManualModel('')
       props.onOpenChange(false)
       props.onSaved()
     },
@@ -96,9 +110,43 @@ export function ModelImportDialog(props: {
           {t('These models were reported by the upstream. Import the ones you want to share.')}
         </p>
         {query.isPending ? <LoadingState /> : null}
-        {!query.isPending && models.length === 0 ? (
+        {/* 抓取**失败**与"上游没返回模型"是两件事：失败必须显示真实原因（获取边界），不能混为一谈 */}
+        {query.isError ? (
+          <div className='space-y-2 rounded-md border border-dashed p-3'>
+            <p className='text-sm font-medium'>{t('Could not fetch the model list from the upstream')}</p>
+            <p className='text-muted-foreground text-xs'>
+              {t('Reason')}: {String((query.error as Error)?.message ?? '')}
+            </p>
+            <p className='text-muted-foreground text-xs'>
+              {t('Some upstreams do not expose a model list. Add the model name manually below.')}
+            </p>
+          </div>
+        ) : null}
+        {!query.isPending && !query.isError && models.length === 0 ? (
           <EmptyState title={t('No model reported by the upstream')} />
         ) : null}
+        <div className='space-y-2 border-t pt-3'>
+          <Label htmlFor='manual-model'>{t('Manual entry')}</Label>
+          <p className='text-muted-foreground text-xs'>
+            {t('Type an upstream model ID and import it as a draft offering.')}
+          </p>
+          <div className='flex items-end gap-2'>
+            <Input
+              id='manual-model'
+              value={manualModel}
+              placeholder='model-id'
+              onChange={(event) => setManualModel(event.target.value)}
+            />
+            <Button
+              variant='outline'
+              disabled={manualModel.trim() === '' || createOne.isPending}
+              onClick={() => createOne.mutate()}
+            >
+              {t('Import this model')}
+            </Button>
+          </div>
+        </div>
+
         <div className='max-h-80 space-y-1 overflow-y-auto'>
           {models.map((model) => (
             <div key={model} className='flex items-center justify-between gap-3 rounded-md border px-3 py-2'>

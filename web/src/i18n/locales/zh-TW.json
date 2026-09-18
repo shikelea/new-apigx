@@ -6775,6 +6775,11 @@
     "Unfinished": "未完成",
     "Avg first token (ms)": "平均首字延遲(ms)",
     "How much your shared channels were used. Amounts are not shown here yet.": "你分享的管道被用了多少。這裡暫不顯示金額。",
-    "No consumption recorded yet": "還沒有消耗記錄"
+    "No consumption recorded yet": "還沒有消耗記錄",
+    "Could not fetch the model list from the upstream": "無法從上游取得模型清單",
+    "Some upstreams do not expose a model list. Add the model name manually below.": "有些上游不提供模型清單介面，請在下方手動填寫模型名稱。",
+    "Manual entry": "手動輸入",
+    "Type an upstream model ID and import it as a draft offering.": "填寫上游模型 ID，即可作為草稿供給匯入。",
+    "Import this model": "匯入該模型"
   }
 }
