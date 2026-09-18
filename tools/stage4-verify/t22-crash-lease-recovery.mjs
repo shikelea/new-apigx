@@ -98,7 +98,7 @@ const waitPort = async (port, tries = 90) => {
     // 必须挑上游是替身的渠道：v2 挑到真实厂商渠道 ⇒ 注入 hang 完全无效
     if (!String(ch.base_url ?? "").includes("8100")) continue
     const offs = await get(B + '/api/apigx/channels/' + ch.id + '/offerings', auth)
-    if ((offs.json?.data?.items ?? []).some((o) => o.upstream_model_id === 'glm-5.3-flash' && o.status === 2)) { target = ch; break }
+    if ((offs.json?.data?.items ?? []).some((o) => o.upstream_model_id === 'stub/model-x-202609' && o.status === 2)) { target = ch; break }
   }
   if (!target) { console.log('❌ 没有"上游指向替身(8100)且已发布 glm-5.3-flash"的渠道 —— 无法做本演练'); process.exit(2) }
   console.log('  渠道 #' + target.id + ' ' + target.name)
@@ -115,7 +115,7 @@ const waitPort = async (port, tries = 90) => {
   const pk = 'Bearer ' + k.json.data.key
 
   console.log('=== 2) 请求 A（挂住）===')
-  const aPromise = post(B + '/v1/chat/completions', { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hold' }], max_tokens: 4 }, pk, 150000)
+  const aPromise = post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'hold' }], max_tokens: 4 }, pk, 150000)
   await sleep(5000)
 
   console.log('=== 3) **确证**请求 A 真的占住了槽位（查 Redis 租约）===')
@@ -133,7 +133,7 @@ const waitPort = async (port, tries = 90) => {
   }
 
   console.log('=== 4) 请求 B（有租约时才能期望 429）===')
-  const b = await post(B + '/v1/chat/completions', { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'second' }], max_tokens: 4 }, pk)
+  const b = await post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'second' }], max_tokens: 4 }, pk)
   console.log('  请求 B ->', b.status, b.status === 429 ? '✓ 并发控制生效' : JSON.stringify(b.json ?? b.text).slice(0, 160))
 
   console.log('=== 5) 真实杀掉网关进程 ===')
@@ -152,12 +152,12 @@ const waitPort = async (port, tries = 90) => {
   const afterCount = afterArr ? Number(afterArr[1]) : 0;
   console.log('  崩溃后租约仍在 =', afterCount > 0 ? '是（说明不是"凭空可用"）' : '否（已过期或未被持有）')
 
-  const c = await post(B + '/v1/chat/completions', { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'after-restart' }], max_tokens: 4 }, pk)
+  const c = await post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'after-restart' }], max_tokens: 4 }, pk)
   console.log('  重启后立刻请求 ->', c.status)
 
   console.log('=== 7) 等租约 TTL（90s + 余量）后自动恢复 ===')
   await sleep(100000)
-  const d = await post(B + '/v1/chat/completions', { model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'after-ttl' }], max_tokens: 4 }, pk)
+  const d = await post(B + '/v1/chat/completions', { model: 'stub/model-x-202609', messages: [{ role: 'user', content: 'after-ttl' }], max_tokens: 4 }, pk)
   console.log('  TTL 之后 ->', d.status)
 
   console.log('=== 8) 收尾（用**新登录态**，v1 在这里 401 过）===')

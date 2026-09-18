@@ -1,0 +1,108 @@
+From 1b80e26a5b3577d5a4dc5bdafd188424d4156494 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 17:31:57 +0800
+Subject: [PATCH 153/153] =?UTF-8?q?fix(share):=20=E4=BF=AE=E6=8E=89?=
+ =?UTF-8?q?=E4=BA=A7=E5=93=81=E7=BA=A7=E7=BC=BA=E9=99=B7=20=E2=80=94?=
+ =?UTF-8?q?=E2=80=94=20U-1=20=E8=87=AA=E5=8A=A9=E5=BB=BA=E7=9A=84=E6=B8=A0?=
+ =?UTF-8?q?=E9=81=93**=E6=B0=B8=E8=BF=9C=E4=B8=8D=E5=8F=AF=E8=B7=AF?=
+ =?UTF-8?q?=E7=94=B1**=EF=BC=88=E8=83=BD=E5=8A=9B=E6=9C=AA=E5=BB=BA?=
+ =?UTF-8?q?=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**怎么发现的**：为让 #22 演练的"唯一槽位被占住"成立，我把目标换成**只有替身渠道提供**的模型，
+请求报 `503 model_not_found: No available channel for model stub/model-x-202609 under group default`。
+
+**查库对照（决定性）**：
+- 验收脚本建的替身渠道（122/123/124）：底座渠道侧 **1 条能力**；
+- **U-1 自助建的渠道 143**：底座渠道 164 `models` **为空**、能力行 **0** —— 但已有 2 条已发布供给。
+
+**根因**：脚本走**底座自己的建渠道接口**（底座顺手建能力）；而 U-1 的分享者自建渠道由平台**直接插入**
+底座 `channels` 行 ⇒ **绕过了底座的建能力步骤**（底座在建/改渠道后调用 `Channel.AddAbilities`，
+见 `controller/channel.go:472`）⇒ 这类渠道 `models` 空、`abilities` 0 ⇒ **永远 `model_not_found`**。
+
+**修法（对齐底座姿势）**：新增 `syncBaseChannelServesModel(offeringID)`，在**供给发布成功后**调用：
+把该模型并入绑定底座渠道的 `models`，随后 `base.AddAbilities(h.db)` 重建能力；只动 `models` 与能力，
+不触碰上游地址与凭据。
+
+检查：`go build` ✅；`apigx/api` 整包用例 ✅。**端到端（发布后即可路由）留待下一轮实测**。
+---
+ apigx/api/share.go | 57 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 6eaab17..1dfa57a 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -1231,6 +1231,12 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
++	// 关键：供给发布后，必须让**底座的渠道**真正能服务这个模型 ——
++	// 自助建的底座渠道是直接 insert 的（没有走底座的建能力步骤），若不补这一步，
++	// 该渠道 models 为空、abilities 为 0 ⇒ 底座分配器永远返回 model_not_found。
++	if err := h.syncBaseChannelServesModel(id); err != nil {
++		common.SysError("apigx api: sync base channel abilities failed: " + err.Error())
++	}
+ 	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
+ }
+ 
+@@ -2153,3 +2159,54 @@ func (h *handler) summarizeOwnerUsage(c *gin.Context) {
+ 	}
+ 	ok(c, gin.H{"group_by": string(groupBy), "items": rows})
+ }
++
++// syncBaseChannelServesModel 让"绑定到该供给所属分享渠道"的底座渠道真正能服务该模型。
++//
++// 背景（实测发现的产品缺陷）：U-1 的「分享者自建渠道」由平台**直接插入**底座 channels 行，
++// 因此**绕过了底座的建能力步骤**（底座在建/改渠道后会调用 Channel.AddAbilities）。
++// 结果：这类渠道 models 为空、abilities 为 0，底座分配器对该模型永远返回 model_not_found。
++//
++// 修法（与底座自己的姿势一致）：把该模型并入底座渠道的 models，然后重建能力。
++// 只动 models 与能力，不触碰上游地址与凭据。
++func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
++	var offering apigxmodel.ModelOffering
++	if err := h.db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
++		return err
++	}
++	var shareChannel apigxmodel.Channel
++	if err := h.db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
++		return err
++	}
++	if shareChannel.BaseChannelID <= 0 || offering.UpstreamModelID == "" {
++		return nil
++	}
++
++	var base basemodel.Channel
++	if err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
++		return err
++	}
++
++	models := strings.Split(base.Models, ",")
++	exists := false
++	for _, m := range models {
++		if strings.TrimSpace(m) == offering.UpstreamModelID {
++			exists = true
++			break
++		}
++	}
++	if !exists {
++		merged := append(models, offering.UpstreamModelID)
++		joined := strings.Join(merged, ",")
++		if err := h.db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
++			Update("models", joined).Error; err != nil {
++			return err
++		}
++		base.Models = joined
++	}
++
++	// 重建能力（底座建渠道后的同一姿势）
++	if err := base.AddAbilities(h.db); err != nil {
++		return err
++	}
++	return nil
++}
+-- 
+2.53.0.windows.1
+
