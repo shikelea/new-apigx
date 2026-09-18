@@ -1,0 +1,358 @@
+From 697a6e791c318d426955f25251775498c07b4748 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 11:22:53 +0800
+Subject: [PATCH 112/112] =?UTF-8?q?feat(pricing):=20=E6=8A=8A=E5=88=86?=
+ =?UTF-8?q?=E4=BA=AB=E6=9D=A5=E6=BA=90=E6=8E=A5=E8=BF=9B=E5=BA=95=E5=BA=A7?=
+ =?UTF-8?q?=E7=9A=84=E6=A8=A1=E5=9E=8B=E5=B9=BF=E5=9C=BA=EF=BC=88=E6=A8=A1?=
+ =?UTF-8?q?=E5=9E=8B=E5=8D=A1=E7=89=87=E6=98=BE=E7=A4=BA=E6=9D=A5=E6=BA=90?=
+ =?UTF-8?q?=E6=95=B0=E4=B8=8E=E5=88=86=E4=BA=AB=E5=88=86=E7=BB=84=EF=BC=8C?=
+ =?UTF-8?q?=E6=9C=89=E6=95=B0=E6=8D=AE=E6=89=8D=E6=B8=B2=E6=9F=93=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- lib/apigx-sources.ts: 纯函数按模型聚合广场条目（来源数/分组名/质量是否全样本不足/标准模型 ID）+ 用例 5 条
+- hooks/use-apigx-model-sources.ts: 取 /api/apigx/plaza；/pricing 是公开页，未登录静默降级为空（不弹错、不显示空壳）
+- model-card / model-card-grid / pricing index: 沿用底座既有的 perf 透传模式，新增可选 sources（无数据不渲染）
+- 遵守 web/AGENTS.md §3.2：不用嵌套三元（先算好文案变量）
+注: 底座工具栏的「分组」是**计费分组/倍率**，与我们的「分享分组」不同名不同义，未混用（分享分组筛选下一步加）
+---
+ .../pricing/__tests__/apigx-sources.test.ts   | 75 +++++++++++++++++++
+ .../pricing/components/model-card-grid.tsx    |  4 +
+ .../pricing/components/model-card.tsx         | 14 ++++
+ .../pricing/hooks/use-apigx-model-sources.ts  | 56 ++++++++++++++
+ web/src/features/pricing/index.tsx            |  5 ++
+ web/src/features/pricing/lib/apigx-sources.ts | 71 ++++++++++++++++++
+ 6 files changed, 225 insertions(+)
+ create mode 100644 web/src/features/pricing/__tests__/apigx-sources.test.ts
+ create mode 100644 web/src/features/pricing/hooks/use-apigx-model-sources.ts
+ create mode 100644 web/src/features/pricing/lib/apigx-sources.ts
+
+diff --git a/web/src/features/pricing/__tests__/apigx-sources.test.ts b/web/src/features/pricing/__tests__/apigx-sources.test.ts
+new file mode 100644
+index 0000000..840bef0
+--- /dev/null
++++ b/web/src/features/pricing/__tests__/apigx-sources.test.ts
+@@ -0,0 +1,75 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { describe, expect, it } from 'vitest'
++
++import type { PlazaOfferingItem } from '@/features/plaza/types'
++
++import { shareGroupOptions, summarizeModelSources } from '../lib/apigx-sources'
++
++const item = (over: Partial<PlazaOfferingItem> & { model: string }): PlazaOfferingItem =>
++  ({ offering_public_id: over.model + '-o', ...over }) as PlazaOfferingItem
++
++describe('模型广场：分享来源聚合', () => {
++  it('同一模型的多个来源被汇总，分组名去重且排序', () => {
++    const map = summarizeModelSources([
++      item({ model: 'm1', group_name: 'B组' }),
++      item({ model: 'm1', group_name: 'A组' }),
++      item({ model: 'm1', group_name: 'B组' }),
++      item({ model: 'm2', group_name: 'A组' }),
++    ])
++    expect(map.get('m1')?.sourceCount).toBe(3)
++    expect(map.get('m1')?.groupNames).toEqual(['A组', 'B组'])
++    expect(map.get('m2')?.sourceCount).toBe(1)
++  })
++
++  it('空模型名被忽略（不产生无意义的条目）', () => {
++    const map = summarizeModelSources([item({ model: '' }), item({ model: 'm1' })])
++    expect([...map.keys()]).toEqual(['m1'])
++  })
++
++  it('"全部样本不足"只在确实拿到质量字段时为真（不拿缺数据冒充质量差）', () => {
++    const withQuality = summarizeModelSources([
++      item({ model: 'm1', sample_count: 3, insufficient: true }),
++      item({ model: 'm1', sample_count: 0, insufficient: true }),
++    ])
++    expect(withQuality.get('m1')?.allInsufficient).toBe(true)
++
++    const withoutQuality = summarizeModelSources([item({ model: 'm1' })])
++    expect(withoutQuality.get('m1')?.allInsufficient).toBe(false)
++  })
++
++  it('已确认的标准模型 ID 会被带出（§8.2 对外标准 ID）', () => {
++    const map = summarizeModelSources([
++      item({ model: 'm1' }),
++      item({ model: 'm1', canonical_model_id: 'standard-1' }),
++    ])
++    expect(map.get('m1')?.canonicalModelID).toBe('standard-1')
++  })
++
++  it('分享分组选项去重排序，空名不进入选项', () => {
++    const options = shareGroupOptions([
++      item({ model: 'm1', group_name: 'B组' }),
++      item({ model: 'm2', group_name: 'A组' }),
++      item({ model: 'm3', group_name: 'B组' }),
++      item({ model: 'm4' }),
++    ])
++    expect(options).toEqual(['A组', 'B组'])
++  })
++})
+diff --git a/web/src/features/pricing/components/model-card-grid.tsx b/web/src/features/pricing/components/model-card-grid.tsx
+index 1d86d2d..97238be 100644
+--- a/web/src/features/pricing/components/model-card-grid.tsx
++++ b/web/src/features/pricing/components/model-card-grid.tsx
+@@ -27,6 +27,7 @@ import { requireServerSuccess } from '@/lib/server-error-message'
+ 
+ import { DEFAULT_PRICING_PAGE_SIZE, DEFAULT_TOKEN_UNIT } from '../constants'
+ import type { PricingModel, TokenUnit } from '../types'
++import type { ModelSourcesSummary } from '../lib/apigx-sources'
+ import { ModelCard } from './model-card'
+ import type { ModelPerfBadgeData } from './model-perf-badge'
+ 
+@@ -38,6 +39,8 @@ export interface ModelCardGridProps {
+   tokenUnit?: TokenUnit
+   showRechargePrice?: boolean
+   selectedGroup?: string
++  /** 模型名 -> 分享来源汇总 */
++  sourcesByModel?: Map<string, ModelSourcesSummary>
+ }
+ 
+ export function ModelCardGrid(props: ModelCardGridProps) {
+@@ -85,6 +88,7 @@ export function ModelCardGrid(props: ModelCardGridProps) {
+             showRechargePrice={props.showRechargePrice}
+             selectedGroup={props.selectedGroup}
+             perf={perfMap.get(model.model_name || '')}
++            sources={props.sourcesByModel?.get(model.model_name || '')}
+             onClick={() => props.onModelClick(model.model_name || '')}
+           />
+         ))}
+diff --git a/web/src/features/pricing/components/model-card.tsx b/web/src/features/pricing/components/model-card.tsx
+index c20c90d..9a6b9e0 100644
+--- a/web/src/features/pricing/components/model-card.tsx
++++ b/web/src/features/pricing/components/model-card.tsx
+@@ -40,6 +40,7 @@ import { parseTags } from '../lib/filters'
+ import { isTokenBasedModel } from '../lib/model-helpers'
+ import { formatPrice, formatRequestPrice } from '../lib/price'
+ import { taskPriceLabel, taskUsageUnitLabel } from '../lib/task-price-display'
++import type { ModelSourcesSummary } from '../lib/apigx-sources'
+ import type { PricingModel, PriceType, TokenUnit } from '../types'
+ import { ModelBillingModeBadge } from './model-billing-mode-badge'
+ import { ModelPerfBadge, type ModelPerfBadgeData } from './model-perf-badge'
+@@ -52,6 +53,8 @@ export interface ModelCardProps {
+   tokenUnit?: TokenUnit
+   showRechargePrice?: boolean
+   selectedGroup?: string
++  /** 分享来源汇总（来自我们的广场）；没有数据时不渲染任何东西 */
++  sources?: ModelSourcesSummary
+   perf?: ModelPerfBadgeData
+ }
+ 
+@@ -70,6 +73,14 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
+   const modelIcon = modelIconKey ? getLobeIcon(modelIconKey, 28) : null
+   const initial = props.model.model_name?.charAt(0).toUpperCase() || '?'
+   const isUnconfiguredTaskUsage = isUnconfiguredTaskUsageModel(props.model)
++  // 分享来源文案（有数据才算；避免嵌套三元，见 web/AGENTS.md §3.2）
++  let sourcesLabel = ''
++  if (props.sources) {
++    sourcesLabel = t('Share sources') + ': ' + props.sources.sourceCount
++    if (props.sources.groupNames.length > 0) {
++      sourcesLabel = sourcesLabel + ' · ' + props.sources.groupNames.join(', ')
++    }
++  }
+   const billingTime = useBillingTime(props.model.billing_expr)
+   const currency = useSystemConfigStore((state) => state.config.currency)
+   const dynamicPriceOptions = useMemo(
+@@ -386,6 +397,9 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
+           perf={props.perf}
+           className='border-border/60 border-t pt-2'
+         >
++          {sourcesLabel ? (
++            <span className='text-muted-foreground truncate text-xs'>{sourcesLabel}</span>
++          ) : null}
+           <Button variant='ghost' size='sm' onClick={props.onClick}>
+             {t('Details')}
+             <ChevronRight aria-hidden className='size-3.5' />
+diff --git a/web/src/features/pricing/hooks/use-apigx-model-sources.ts b/web/src/features/pricing/hooks/use-apigx-model-sources.ts
+new file mode 100644
+index 0000000..fe9c6f0
+--- /dev/null
++++ b/web/src/features/pricing/hooks/use-apigx-model-sources.ts
+@@ -0,0 +1,56 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { useQuery } from '@tanstack/react-query'
++import { useMemo } from 'react'
++
++import { getPlaza } from '@/features/plaza/api'
++
++import { shareGroupOptions, summarizeModelSources, type ModelSourcesSummary } from '../lib/apigx-sources'
++
++/**
++ * 拉取"分享来源"数据（我们的广场），供底座模型广场展示与筛选。
++ *
++ * 注意：`/pricing` 是**公开页**，未登录访客调用我们的广场接口会拿到 401。
++ * 这里**静默降级**为"没有分享来源数据" ⇒ 界面照常工作，只是不显示这一块
++ * （不弹错误、不显示空壳文案 —— 没有数据就不显示，避免无意义的东西）。
++ */
++export function useApigxModelSources() {
++  const query = useQuery({
++    queryKey: ['apigx-plaza', 'for-pricing'],
++    queryFn: async () => {
++      const result = await getPlaza({ page: 1, page_size: 100 })
++      return result.data?.items ?? []
++    },
++    staleTime: 5 * 60 * 1000,
++    retry: false,
++  })
++
++  const items = query.data ?? []
++
++  return {
++    isLoading: query.isLoading,
++    /** 模型名 -> 分享来源汇总 */
++    byModel: useMemo<Map<string, ModelSourcesSummary>>(() => summarizeModelSources(items), [items]),
++    /** 分享分组可选项 */
++    groupOptions: useMemo<string[]>(() => shareGroupOptions(items), [items]),
++    /** 是否拿到了数据（用于决定"显示不显示"这一块） */
++    hasData: items.length > 0,
++  }
++}
+diff --git a/web/src/features/pricing/index.tsx b/web/src/features/pricing/index.tsx
+index f34d68d..43b4a28 100644
+--- a/web/src/features/pricing/index.tsx
++++ b/web/src/features/pricing/index.tsx
+@@ -34,6 +34,7 @@ import {
+ } from './components'
+ import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
+ import { useFilters } from './hooks/use-filters'
++import { useApigxModelSources } from './hooks/use-apigx-model-sources'
+ import { usePricingData } from './hooks/use-pricing-data'
+ 
+ export function Pricing() {
+@@ -54,6 +55,9 @@ export function Pricing() {
+     usdExchangeRate,
+   } = usePricingData()
+ 
++  // 我们的分享来源（公开页访客拿不到时静默为空，界面照常工作）
++  const { byModel: sourcesByModel } = useApigxModelSources()
++
+   const {
+     searchInput,
+     sortBy,
+@@ -124,6 +128,7 @@ export function Pricing() {
+     if (viewMode === VIEW_MODES.CARD) {
+       return (
+         <ModelCardGrid
++          sourcesByModel={sourcesByModel}
+           models={filteredModels}
+           onModelClick={handleModelClick}
+           priceRate={priceRate}
+diff --git a/web/src/features/pricing/lib/apigx-sources.ts b/web/src/features/pricing/lib/apigx-sources.ts
+new file mode 100644
+index 0000000..47c47ec
+--- /dev/null
++++ b/web/src/features/pricing/lib/apigx-sources.ts
+@@ -0,0 +1,71 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import type { PlazaOfferingItem } from '@/features/plaza/types'
++
++/**
++ * 广场（分享来源）聚合：把 `/api/apigx/plaza` 的条目按**模型名**汇总，
++ * 供底座的模型广场（`/pricing`）展示"这个模型有几处分享来源、属于哪些分享分组、质量如何"。
++ *
++ * 纯函数，便于单测；不做任何请求。
++ */
++export interface ModelSourcesSummary {
++  /** 分享来源条数（有几条已发布供给在提供这个模型） */
++  sourceCount: number
++  /** 提供该模型的分享分组名（去重、排序） */
++  groupNames: string[]
++  /** 是否全部样本不足（质量不可判定）—— 只有真拿到质量字段时才表达 */
++  allInsufficient: boolean
++  /** 是否有已确认的标准模型 ID（§8.2：对外标准 ID） */
++  canonicalModelID?: string
++}
++
++export function summarizeModelSources(items: PlazaOfferingItem[]): Map<string, ModelSourcesSummary> {
++  const byModel = new Map<string, PlazaOfferingItem[]>()
++  for (const item of items) {
++    if (!item.model) {
++      continue
++    }
++    const list = byModel.get(item.model)
++    if (list) {
++      list.push(item)
++    } else {
++      byModel.set(item.model, [item])
++    }
++  }
++
++  const out = new Map<string, ModelSourcesSummary>()
++  for (const [model, list] of byModel) {
++    const groupNames = [...new Set(list.map((item) => item.group_name ?? '').filter((name) => name !== ''))].sort()
++    const withQuality = list.filter((item) => typeof item.sample_count === 'number')
++    out.set(model, {
++      sourceCount: list.length,
++      groupNames,
++      // 只有确实拿过质量字段、且全部样本不足时才为真（不拿"没数据"冒充"质量差"）
++      allInsufficient: withQuality.length > 0 && withQuality.every((item) => item.insufficient === true),
++      canonicalModelID: list.find((item) => item.canonical_model_id)?.canonical_model_id,
++    })
++  }
++  return out
++}
++
++/** 分享分组的可选项（供篩选使用）；空值表示"全部"。 */
++export function shareGroupOptions(items: PlazaOfferingItem[]): string[] {
++  return [...new Set(items.map((item) => item.group_name ?? '').filter((name) => name !== ''))].sort()
++}
+-- 
+2.53.0.windows.1
+
