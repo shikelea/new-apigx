@@ -83,14 +83,13 @@ describe('security sidebar visibility', () => {
       result.current
         .find((group) => group.id === 'personal')
         ?.items.map((item) => item.title)
-    // 二开新增「我的分享」与「兑换邀请」两条入口（都属个人分组），
+    // 二开新增「我的分享」入口（属个人分组）；「兑换邀请」已按 U-2 合并进「我的分享」页，不再是独立导航项。
     // 本用例的原意（Security & Access 紧跟 Profile）仍然成立。
     ).toEqual([
       'Wallet',
       'Profile',
       'Security & Access',
       'share.title',
-      'Redeem an invite',
     ])
     expect(
       result.current

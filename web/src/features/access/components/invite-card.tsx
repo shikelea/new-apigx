@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -32,6 +33,7 @@ import { Label } from '@/components/ui/label'
 
 import type { ShareGroup } from '@/features/share/types'
 
+import { redeemAccessInvite } from '@/features/access-invite/api'
 import { createAccessInvite, listAccessInvites, revokeAccessInvite, type AccessInvite } from '../api'
 
 /**
@@ -59,6 +61,17 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
   const [days, setDays] = useState('7')
   const [issuedToken, setIssuedToken] = useState('')
   const [revoking, setRevoking] = useState<AccessInvite | null>(null)
+
+  // 兑换（U-2：与发放同一界面）。用别人的邀请码换取可见性，属于使用者动作。
+  const [redeemToken, setRedeemToken] = useState('')
+  const [redeemDone, setRedeemDone] = useState(false)
+  const redeem = useMutation({
+    mutationFn: () => redeemAccessInvite(redeemToken),
+    onSuccess: (res) => {
+      setRedeemDone(res.success !== false)
+      if (res.success !== false) setRedeemToken('')
+    },
+  })
 
   const query = useQuery({ queryKey: ['apigx-access-invites'], queryFn: () => listAccessInvites() })
 
@@ -176,6 +189,44 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
           <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.id} />
         )}
 
+        {/* U-2：兑换与发放合并为同一界面（原来是一个独立页面） */}
+        <div className='space-y-2 border-t pt-4'>
+          <p className='text-sm font-medium'>{t('Redeem an invite')}</p>
+          <p className='text-muted-foreground text-sm'>
+            {t('Paste the invite code you received to unlock the shared resources.')}
+          </p>
+          <div className='flex items-end gap-2'>
+            <div className='flex-1 space-y-2'>
+              <Label htmlFor='access-invite-redeem'>{t('Invite code')}</Label>
+              <Input
+                id='access-invite-redeem'
+                value={redeemToken}
+                autoComplete='off'
+                onChange={(event) => {
+                  setRedeemToken(event.target.value)
+                  setRedeemDone(false)
+                }}
+              />
+            </div>
+            <Button
+              disabled={redeemToken.trim() === '' || redeem.isPending}
+              onClick={() => redeem.mutate()}
+            >
+              {t('Redeem')}
+            </Button>
+          </div>
+          {redeemDone ? (
+            <p className='text-sm text-emerald-600'>
+              {t('Invite redeemed. The shared resources are now visible.')}{' '}
+              <Link to='/pricing' className='underline'>
+                {t('Open the model plaza')}
+              </Link>
+            </p>
+          ) : null}
+          {redeem.isError || redeem.data?.success === false ? (
+            <p className='text-destructive text-sm'>{t('Invalid or already used invite code')}</p>
+          ) : null}
+        </div>
         <ConfirmDialog
           open={revoking !== null}
           onOpenChange={(next) => {
