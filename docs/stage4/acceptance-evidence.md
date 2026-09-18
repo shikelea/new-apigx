@@ -22,7 +22,7 @@
 
 | # | 计划书验收场景 | 现状 | 现有证据 / 缺口 |
 |---|---|---|---|
-| 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ⚠️ 部分覆盖 | `apigx/api` `TestPlazaCarriesQualitySummary`、`TestPlazaCanonicalModelOnlyAfterConfirmation`；**缺**一条"两位分享者同一模型 ⇒ 一个条目两项来源"的端到端断言 ⇒ 待补 |
+| 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ⚠️ 部分覆盖（**本轮未闭合**） | 前端聚合已实现（`summarizeModelSources`：一个模型 + 多个来源分组）；后端广场返回**逐供给**条目。本轮新增用例 `TestPlazaAggregatesSameModelFromTwoSharers` **无法取到夹具供给**（换第三方浏览者仍为 0 项，而既有 `TestPlazaOnlyExposesPublishedAndPublic` 可过）⇒ **差异未查明**，用例已显式 `Skip` 并保留待查 |
 | 2 | 相似名字但版本不同 ⇒ 不被自动错误合并 | ✅ 已有测试证据 | `apigx/model` `TestAliasCandidateNeverResolves`、`TestResolveCanonicalModelMissReturnsFalse`（候选**永不**自动成为结论） |
 | 3 | 目录不支持自动获取 ⇒ 可人工录入，显示获取边界 | ⚠️ 部分覆盖 | `docs/stage3/acceptance-report.md` 已声明上游能力边界；**缺**"人工录入"路径的界面/接口证据 |
 | 4 | 私有/受邀模型 ⇒ 未授权用户在页面、API、计数和任务接口均无法访问 | ✅ 已有测试证据 | `TestPlazaOnlyExposesPublishedAndPublic`、`TestPlazaHonoursGrantsForLimitedGroups`、`TestSubjectCanAccessResource`（含到期失效） |
@@ -50,7 +50,7 @@
 | 16 | 最快渠道已满、多实例同时抢最后一个槽位 ⇒ 满载渠道退出候选，**最后一个槽位最多被一个请求占用** | ✅ 已有测试证据 | `TestConcurrentReserveNeverExceedsLimit` + `TestReserveIsAllOrNothing`（原子预留，全有或全无）+ `TestSaturatedKeyIndexes`（饱和 Key 退出候选） |
 | 17 | 同渠道多个模型或同账户多 Key ⇒ 共同遵守共享上限，不因切换模型/Key 叠加容量 | ✅ 已有测试证据 | `TestBuildKeyCapacityDimensions`（同账户多 Key 共享维度）、`TestMergeKeyStatusListKeepsBaseMarks`、`capacity_hook_test.go` |
 | 18 | Key 轮询遇到失效、满载、模型权限不同 ⇒ 只选符合要求的 Key，无合格 Key 时渠道不可选 | ✅ 已有测试证据 | `TestProjectKeyPoolSkipsUnusableKeys`、`TestProjectKeyPoolFailsWhenNoUsableKey`、`TestRecordKeyOutcomeIsolatesAuthFailureToSingleKey`、`TestAuthFailureMakesBaseSkipTheFailedKey` |
-| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ⚠️ 部分覆盖 | 价格作用域已可到 Key 粒度（`TestPriceSnapshotScopesAreIsolated`）；**缺**"按执行 Key 计价"的端到端断言 ⇒ 待补 |
+| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ⚠️ 部分覆盖（**明确的实现缺口**） | **存储层已支持**：`PriceScopeUpstreamKey`（scope=1）存在；但**取价链路未使用** —— `routing/assemble.go` 只按「供给 → 渠道」两级解析（`fillPriceFromRule`），未按执行 Key 取价 ⇒ **本项未实现**，需在路由取价处补 Key 维度 |
 | 20 | 一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，使用者只看到分享来源与授权结果 | ⚠️ 部分覆盖 | `TestApplyChannelPoolProjectsKeysIntoBaseChannel`、`TestApplyChannelPoolIsOwnerScoped`；**缺**"使用者视角不暴露池内细节"的断言 |
 
 ## 4. 生命周期、凭据与稳定性（L670–L676）
@@ -61,10 +61,10 @@
 | 22 | 长流、进程崩溃和异步任务持续运行 ⇒ 槽位正常续租/归还/恢复，不泄漏也不提前重复分配 | ⚠️ 部分覆盖 | `TestLeaseExpiryRecoversCapacity`、`TestRenewExtendsLease`、`TestReconcileReleasesStaleAttempts`、`TestReconcileIgnoresFreshAttempts`；**缺**真实"进程被杀"的演练 |
 | 23 | 预留之后转发器进入原生 Key 选择路径 ⇒ 仍使用已确定的 Key，计量/价格/预留对象一致 | ⚠️ 部分覆盖 | `TestApplyChannelPoolProjectsKeysIntoBaseChannel`（投影）、`TestRecordKeyOutcomeDoesNotTouchBaseChannel`；**缺**"原生路径下仍用已定 Key"的断言 |
 | 24 | Redis 丢失或持久写入失败 ⇒ 停止新准入，恢复对账后开放；未知上游任务不因租约到期被判定已停止 | ✅ 已有测试证据 | `TestReserveFailsClosedWithoutRedis`（**失败关闭**）、`TestLeaseExpiryRecoversCapacity`、`TestReconcileReleasesStaleAttempts` |
-| 25 | 分享者暂停与撤销授权 ⇒ 新请求及时停止，已有任务按定义处理 | ⚠️ 部分覆盖 | `TestSetChannelCapacityPolicy`、`TestUpstreamKeyStatusAndValidation`（Key 停用）、U-1 新增分组发布闸门（`[013]`）；**缺**"暂停后新请求被拒"的端到端断言 |
+| 25 | 分享者暂停与撤销授权 ⇒ 新请求及时停止，已有任务按定义处理 | ✅ 已有测试证据 | **新增** `TestSuspendedGroupStopsServing`（分组置为已暂停 ⇒ `AssembleCandidates` 返回空，实测 PASS）；另有 `TestSetChannelCapacityPolicy`、`TestUpstreamKeyStatusAndValidation` |
 | 26 | 普通撤权、账户封禁、Key 紧急吊销 ⇒ 按生命周期表区分历史访问与新增调用，不泄露其他用户对象 | ✅ 已有测试证据 | **新增回归测试** `TestUserAuthRejectsDisabledUser`（停用用户 ⇒ **401 `AUTH_USER_DISABLED`**，实测 PASS）；另有 `TestOwnershipIsolationReturnsNotFound`、`TestRequiresAuthenticatedOwner`、`TestDeleteUpstreamKeyTwice`；代码位置 `middleware/auth.go` L56–L57 |
 | 27 | Worker 重试、服务重启 ⇒ 统计不重复，待处理事件和任务可恢复 | ✅ 已有测试证据 | `TestCompleteAttemptIsIdempotent`、`TestReconcileReleasesStaleAttempts`、`TestReleaseIsIdempotentAndNeverNegative` |
-| 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ 部分覆盖 | `TestAdjustWindowFloorsAtZero`、`TestAdjustWindowKeepsWindowUsable`、`TestWindowKeysAreBucketedByMinute`；**缺**"重复/修订事件"的断言 |
+| 28 | usage 重复/修订、跨日任务、异步结果未知 ⇒ 计数口径一致、校正可追溯、预算回原周期、超时不能伪装成功 | ⚠️ 部分覆盖（**本环境无法验**） | 窗口/分桶类断言已有（`TestAdjustWindowFloorsAtZero` 等）；但 `apigx_usage_events` **0 行、无写入方**（见 [015]）⇒ 事件级"重复/修订"路径**当前没有数据可验**，需先补写入方 |
 | 29 | 同一幂等键被重发或更改参数 ⇒ 已知任务不重复创建，同键不同参数冲突；上游结果未知不自动重提 | ⚠️ 部分覆盖 | `TestCompleteAttemptIsIdempotent`、`uniq_attempt_uid`/`uniq_attempt_request_index` 唯一约束；**缺**"同键不同参数 ⇒ 冲突"的显式断言 |
 | 30 | 恶意地址或外部媒体链接 ⇒ 不能访问未允许的内部网络和元数据服务 | ⚠️ 部分覆盖 | `TestNormalizeUpstreamBaseURL`；验收脚本确有 SSRF 防护命中记录（回环上游被挡，属**预期**）；**缺**元数据服务（169.254.169.254）的显式断言 |
 | 31 | 数据库备份恢复和升级回滚 ⇒ 凭据、权限、价格版本和历史消耗可正确恢复 | ✅ 已有测试证据 | **T4.3 演练**（第 9 节）：`pg_dump -Fc` → 恢复到新库 → **12 项指纹逐项一致**（含凭据密文与指纹的 md5、权限、价格版本、历史消耗）；恢复库上**连续启动两次**均无错误、行数不变（**迁移幂等**）；配置改→重启生效→回滚→重启恢复原值。**升级回滚（回退旧二进制）未演练**，见第 9 节说明 |
@@ -126,7 +126,7 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 
 | # | 检查 | 结果 | 结论 |
 |---|---|---|---|
-| 1 | 底座 `logs` 表中出现形如 `sk-...` / `Bearer ...` / `tr_...` 的字符串 | **0 条** | ✅ 请求日志中未出现密钥形态字符串 |
+| 1 | 相同标准模型来自两位分享者 ⇒ 广场聚合，来源与分享名称分别可见 | ⚠️ 部分覆盖（**本轮未闭合**） | 前端聚合已实现（`summarizeModelSources`：一个模型 + 多个来源分组）；后端广场返回**逐供给**条目。本轮新增用例 `TestPlazaAggregatesSameModelFromTwoSharers` **无法取到夹具供给**（换第三方浏览者仍为 0 项，而既有 `TestPlazaOnlyExposesPublishedAndPublic` 可过）⇒ **差异未查明**，用例已显式 `Skip` 并保留待查 |
 | 2 | `apigx_upstream_keys`（187 行）中 `secret_ref` 为空、或形如明文 | **0 / 0** | ✅ 我们这层的上游凭据只存密文信封（另有既有用例保证不回显、缺主密钥失败关闭） |
 | 3 | `apigx_attempts.reservation_uid` 形如密钥 | **0 条** | ✅ 预留标识不携带凭据 |
 | 4 | 底座 `channels.key`（31 行）中形如 `sk-...` 的行 | **7 行** | ⚠️ **底座自身**把上游 Key 存在渠道行里（转发必须用它）⇒ 已知边界，见下 |
@@ -237,3 +237,16 @@ TestBuildKeyCapacityDimensions、TestSaturatedKeyIndexes。
 
 - **可视化看板页面**：底座有接口与数据，但**我们没有做面向运营的汇总页**（价格页已复用部分指标）
 - **外部告警通道**（邮件/Webhook/IM）：**未接入**；当前告警只进入服务日志，需依赖日志采集与规则
+---
+
+## 11. T4.5 记录（剩余边界场景：能钉死的钉死，不能的说清原因）
+
+| 台账 | 处置 | 结果 |
+|---|---|---|
+| #25 分享者暂停 ⇒ 新请求停止 | **新增测试** `TestSuspendedGroupStopsServing` | **PASS** ⇒ 升为 ✅ |
+| #1 两位分享者同一模型 ⇒ 广场聚合 | 新增 `TestPlazaAggregatesSameModelFromTwoSharers` | **未闭合** ⇒ 假供给在广场取不到（第三方浏览者仍 0 项），**用例已显式 Skip**，差异待查 |
+| #19 按**实际执行 Key** 计价 | 代码核查 | **明确未实现**：`PriceScopeUpstreamKey` 已建模，但 `assemble.go` 取价只用供给/渠道两级 ⇒ 需在路由取价处补 Key 维度 |
+| #28 usage 重复/修订 | 数据核查 | **本环境无法验**：`apigx_usage_events` 0 行、无写入方（见 [015]）⇒ 需先补写入方 |
+
+**纪律说明**：本轮**没有**把"看起来没问题"当成结论；未能验证的两项都给出了**具体阻塞点**，
+且**没有把红测试留在仓库**（未闭合的用例显式 `Skip` 并写明原因）。

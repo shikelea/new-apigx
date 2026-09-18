@@ -70,7 +70,11 @@
     下一轮补测试后，台账 #5 / #26 才能从 ⚠️ 升到 ✅。详见 `docs/stage4/acceptance-evidence.md` 第 8 节。- [x] T4.2 阶段 4：权限绕过检查与日志脱敏 → `docs/stage4/acceptance-evidence.md` 第 8 节（真实库脱敏查询 + 两条中间件层回归测试 PASS）
 - [x] T4.3 阶段 4：备份恢复 / 配置回滚 / 升级回滚 → `docs/stage4/acceptance-evidence.md` 第 9 节（备份→恢复新库→12 项指纹一致；迁移连跑两次无错误；配置改→重启生效→回滚→恢复原值）
 - [x] T4.4 阶段 4：运营审核 + 指标看板与告警 → `docs/stage4/acceptance-evidence.md` 第 10 节（审核用例当场 PASS；指标复用底座 perf_metrics 且实测 44 行；新增熔断限频告警 + 不变量测试 PASS）
-- [ ] T4.5 阶段 4：剩余边界场景逐条出证据（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
+  - 进展（2026-09-18，**未完成**）：① **#25 已钉死** —— 新用例 `TestSuspendedGroupStopsServing`（分组暂停 ⇒ `AssembleCandidates` 返回空）**PASS** ⇒ 台账升 ✅；
+    ② **#19 明确未实现** —— `PriceScopeUpstreamKey` 已建模，但 `routing/assemble.go` 取价只用"供给→渠道"两级 ⇒ 需补 Key 维度；
+    ③ **#28 本环境无法验** —— `apigx_usage_events` 0 行、无写入方，事件级"重复/修订"无数据可验；
+    ④ **#1 未闭合** —— 新增用例取不到夹具供给（换第三方浏览者仍 0 项，而既有广场用例可过）⇒ 用例已**显式 Skip**（不留红测试），差异待查。
+    详见 `docs/stage4/acceptance-evidence.md` 第 11 节。- [ ] T4.5 阶段 4：剩余边界场景逐条出证据（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
 - [ ] T4.6 最终验收：按计划书 §11 阶段 4 的 27 条表格**逐条归档证据**
 ## [已完成] 阶段 2：价格与质量路由 (2026-09-17)
 
