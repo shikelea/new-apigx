@@ -1,0 +1,465 @@
+From 79df9c451ff92c47bc7de7ad63e635da4f3e0963 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 13:06:38 +0800
+Subject: [PATCH 131/131] =?UTF-8?q?feat(share):=20=E3=80=8C=E6=96=B0?=
+ =?UTF-8?q?=E5=BB=BA=E6=B8=A0=E9=81=93=E3=80=8D=E5=89=8D=E7=AB=AF=E5=BC=B9?=
+ =?UTF-8?q?=E7=AA=97=20+=20=E7=AB=AF=E5=88=B0=E7=AB=AF=E8=B7=91=E9=80=9A?=
+ =?UTF-8?q?=EF=BC=88=C2=A74=20=E6=B8=A0=E9=81=93=20CRUD=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**端到端实测（后端，已通过）**：
+  配方建渠道 -> 200（id=143）
+  Key 池 -> 200 且 1 条（分享者自己的 Key，密文存储）
+  同步模型 -> 200 且发现上游模型：stub/model-x-202609、stub/model-y-202609、stub/embed-small
+  ⇒ 平台代建的底座渠道确实在用**分享者自己的 Key** 连上游
+
+**前端**：
+- share/api.ts：createShareChannel（POST /api/apigx/channels，只传配方）
+- components/channel-create-dialog.tsx：分享分组 / 名称 / 协议（OpenAI·Anthropic·Gemini）/
+  上游地址 / **你的上游 Key**（密码框 + "以密文存储、之后不再显示"提示）
+- share/index.tsx：渠道卡片标题行加「新建渠道」按钮；保存后同时刷新渠道与分组查询
+- i18n：7 个语言文件各 6 条（写入 translation）
+
+**过程如实记录**：后端第一版把"登记 Key"放在**渠道创建之前**，而 CreateUpstreamKey 要求
+channel_id>0 ⇒ 端到端立刻 400；已拆成两步（先建渠道、后登记 Key）并复测通过。
+前端 onSaved 我误写成不存在的 refresh（分组弹窗用的是内联回调），typecheck 指出后改为内联回调。
+检查: typecheck 0 错 / 改动文件 oxlint 0 错 / 用例 13/13 / build ✅ / 端到端 3/3 ✅
+---
+ apigx/api/share.go                            |  28 +++-
+ web/src/features/share/api.ts                 |  17 +++
+ .../components/channel-create-dialog.tsx      | 141 ++++++++++++++++++
+ web/src/features/share/index.tsx              |  19 ++-
+ web/src/i18n/locales/en.json                  |   8 +-
+ web/src/i18n/locales/fr.json                  |   8 +-
+ web/src/i18n/locales/ja.json                  |   8 +-
+ web/src/i18n/locales/ru.json                  |   8 +-
+ web/src/i18n/locales/vi.json                  |   8 +-
+ web/src/i18n/locales/zh-TW.json               |   8 +-
+ web/src/i18n/locales/zh.json                  |   8 +-
+ 11 files changed, 247 insertions(+), 14 deletions(-)
+ create mode 100644 web/src/features/share/components/channel-create-dialog.tsx
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 01bf22f..d2fdf11 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -322,6 +322,9 @@ func (h *handler) createChannel(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+ 		return
+ 	}
++	// 自建渠道时随附的上游 Key：**渠道创建成功后**才登记（CreateUpstreamKey 要求 channel_id>0）
++	var selfServeKey string
++
+ 	channel := &apigxmodel.Channel{
+ 		OwnerUserID:  owner,
+ 		ShareGroupID: req.ShareGroupID,
+@@ -339,7 +342,8 @@ func (h *handler) createChannel(c *gin.Context) {
+ 	}
+ 	// 「分享者自建渠道」：未指定 base_channel_id 时，平台按配方代建一条底座渠道并绑定。
+ 	if channel.BaseChannelID <= 0 {
+-		if recipeErr := h.provisionBaseChannelForShareChannel(channel, strings.TrimSpace(req.UpstreamKey)); recipeErr != nil {
++		selfServeKey = strings.TrimSpace(req.UpstreamKey)
++		if recipeErr := h.provisionBaseChannelForShareChannel(channel, selfServeKey); recipeErr != nil {
+ 			failFromRepo(c, recipeErr)
+ 			return
+ 		}
+@@ -349,6 +353,12 @@ func (h *handler) createChannel(c *gin.Context) {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
++	if selfServeKey != "" {
++		if keyErr := h.registerSelfServeUpstreamKey(owner, channel.ID, selfServeKey); keyErr != nil {
++			failFromRepo(c, keyErr)
++			return
++		}
++	}
+ 	ok(c, gin.H{"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name, "key_pool_mode": channel.KeyPoolMode})
+ }
+ 
+@@ -1985,9 +1995,15 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
+ 	}
+ 	channel.BaseChannelID = int64(base.Id)
+ 
+-	// 同时把 Key 登记进我们的 Key 池（分享者之后可管理权重/冷却）。
+-	// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
+-	// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
++	return nil
++}
++
++// registerSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 登记进 Key 池。
++//
++// **必须在分享渠道创建之后调用** —— CreateUpstreamKey 要求 channel_id > 0；
++// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
++// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
++func (h *handler) registerSelfServeUpstreamKey(ownerUserID, shareChannelID int64, upstreamKey string) error {
+ 	envelope, encErr := secretbox.Encrypt(upstreamKey)
+ 	if encErr != nil {
+ 		common.SysError("apigx api: refuse to store upstream key: " + encErr.Error())
+@@ -1998,8 +2014,8 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
+ 		common.SysError("apigx api: fingerprint failed: " + fpErr.Error())
+ 		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
+ 	}
+-	return apigxmodel.CreateUpstreamKey(h.db, channel.OwnerUserID, &apigxmodel.UpstreamKey{
+-		ChannelID:         channel.ID,
++	return apigxmodel.CreateUpstreamKey(h.db, ownerUserID, &apigxmodel.UpstreamKey{
++		ChannelID:         shareChannelID,
+ 		StableKeyID:       upstreamKeyStableID(upstreamKey),
+ 		Name:              "default",
+ 		SecretRef:         envelope,
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 1f7e816..8e6d7c0 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -25,6 +25,23 @@ export async function getShareGroups(): Promise<ShareGroupListResponse> {
+   return res.data
+ }
+ 
++/**
++ * 新建分享渠道（§4「渠道 CRUD」）。
++ * 只传配方（名称/协议/上游地址/自己的上游 Key）—— 平台会**代建底座渠道**并绑定，
++ * 分享者不需要知道管理员侧的渠道 ID。
++ */
++export async function createShareChannel(input: {
++  share_group_id: number
++  name: string
++  protocol: string
++  base_url: string
++  upstream_key: string
++  key_pool_mode?: number
++}): Promise<{ success: boolean; data?: { id: number; public_id: string } }> {
++  const res = await api.post('/api/apigx/channels', input)
++  return res.data
++}
++
+ export async function getShareChannels(): Promise<ShareChannelListResponse> {
+   const res = await api.get('/api/apigx/channels')
+   return res.data
+diff --git a/web/src/features/share/components/channel-create-dialog.tsx b/web/src/features/share/components/channel-create-dialog.tsx
+new file mode 100644
+index 0000000..10a62cb
+--- /dev/null
++++ b/web/src/features/share/components/channel-create-dialog.tsx
+@@ -0,0 +1,141 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useMutation } from '@tanstack/react-query'
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++
++import { Dialog } from '@/components/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++
++import { createShareChannel } from '../api'
++import type { ShareGroup } from '../types'
++
++/**
++ * 新建分享渠道（§4「渠道 CRUD」）。
++ *
++ * 只需填配方：名称 / 协议 / 上游地址 / **自己的上游 Key** —— 平台代建底座渠道并绑定，
++ * 分享者不必（也不应该）知道管理员侧的渠道 ID。
++ */
++export function ChannelCreateDialog(props: {
++  groups: ShareGroup[]
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  onSaved: () => void
++}) {
++  const { t } = useTranslation()
++  const [groupId, setGroupId] = useState('')
++  const [name, setName] = useState('')
++  const [protocol, setProtocol] = useState('openai')
++  const [baseUrl, setBaseUrl] = useState('')
++  const [upstreamKey, setUpstreamKey] = useState('')
++
++  const create = useMutation({
++    mutationFn: () =>
++      createShareChannel({
++        share_group_id: Number(groupId),
++        name: name.trim(),
++        protocol,
++        base_url: baseUrl.trim(),
++        upstream_key: upstreamKey.trim(),
++      }),
++    onSuccess: () => {
++      setName('')
++      setBaseUrl('')
++      setUpstreamKey('')
++      props.onOpenChange(false)
++      props.onSaved()
++    },
++  })
++
++  const missing =
++    groupId === '' || name.trim() === '' || baseUrl.trim() === '' || upstreamKey.trim() === ''
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('New share channel')}
++      contentClassName='sm:max-w-lg'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button disabled={missing || create.isPending} onClick={() => create.mutate()}>
++            {t('Create')}
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-4'>
++        <div className='space-y-2'>
++          <Label>{t('Share group')}</Label>
++          <select
++            className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
++            value={groupId}
++            onChange={(event) => setGroupId(event.target.value)}
++          >
++            <option value=''>{t('Select a share group')}</option>
++            {props.groups.map((group) => (
++              <option key={group.id} value={String(group.id)}>
++                {group.name}
++              </option>
++            ))}
++          </select>
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Name')}</Label>
++          <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} />
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Protocol')}</Label>
++          <select
++            className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
++            value={protocol}
++            onChange={(event) => setProtocol(event.target.value)}
++          >
++            <option value='openai'>OpenAI</option>
++            <option value='anthropic'>Anthropic</option>
++            <option value='gemini'>Gemini</option>
++          </select>
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Upstream address')}</Label>
++          <Input
++            placeholder='https://api.example.com'
++            value={baseUrl}
++            onChange={(event) => setBaseUrl(event.target.value)}
++          />
++        </div>
++        <div className='space-y-2'>
++          <Label>{t('Your upstream key')}</Label>
++          <Input
++            type='password'
++            autoComplete='off'
++            value={upstreamKey}
++            onChange={(event) => setUpstreamKey(event.target.value)}
++          />
++          <p className='text-muted-foreground text-xs'>{t('It is stored encrypted and never shown again.')}</p>
++        </div>
++      </div>
++    </Dialog>
++  )
++}
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index abc3638..93b3bb3 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ 
+ import { getShareChannels, getShareGroups } from './api'
++import { ChannelCreateDialog } from './components/channel-create-dialog'
+ import { GroupCreateDialog } from './components/group-create-dialog'
+ import { GroupEditDialog } from './components/group-edit-dialog'
+ import { healthLabelKey, keyPoolModeLabelKey, visibilityLabelKey } from './lib/labels'
+@@ -40,6 +41,7 @@ export function MyShares() {
+   const queryClient = useQueryClient()
+   const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
+   const [creatingGroup, setCreatingGroup] = useState(false)
++  const [creatingChannel, setCreatingChannel] = useState(false)
+ 
+   const groupsQuery = useQuery({ queryKey: ['apigx-share-groups'], queryFn: getShareGroups })
+   const channelsQuery = useQuery({ queryKey: ['apigx-share-channels'], queryFn: getShareChannels })
+@@ -134,7 +136,12 @@ export function MyShares() {
+ 
+           <Card>
+             <CardHeader>
+-              <CardTitle>{t('share.channels')}</CardTitle>
++              <div className='flex items-center justify-between gap-3'>
++          <CardTitle>{t('share.channels')}</CardTitle>
++            <Button size='sm' onClick={() => setCreatingChannel(true)}>
++              {t('New share channel')}
++            </Button>
++          </div>
+             </CardHeader>
+             <CardContent>
+               {channels.length === 0 ? (
+@@ -145,6 +152,16 @@ export function MyShares() {
+             </CardContent>
+           </Card>
+         </div>
++        <ChannelCreateDialog
++          groups={groups}
++          open={creatingChannel}
++          onOpenChange={setCreatingChannel}
++          onSaved={() => {
++            // 新建渠道会同时影响渠道列表（以及分组下的渠道数）
++            void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
++            void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
++          }}
++        />
+         <GroupCreateDialog
+           open={creatingGroup}
+           onOpenChange={setCreatingGroup}
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 225dc13..f5c09fd 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6736,6 +6736,12 @@
+     "Expand all": "Expand all",
+     "Length": "Length",
+     "Select preset": "Select preset",
+-    "APIGX Platform": "APIGX Platform"
++    "APIGX Platform": "APIGX Platform",
++    "New share channel": "New share channel",
++    "Protocol": "Protocol",
++    "Upstream address": "Upstream address",
++    "Your upstream key": "Your upstream key",
++    "It is stored encrypted and never shown again.": "It is stored encrypted and never shown again.",
++    "Select a share group": "Select a share group"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index d0a486e..3f853c7 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6736,6 +6736,12 @@
+     "Expand all": "Tout développer",
+     "Length": "Longueur",
+     "Select preset": "Choisir un préréglage",
+-    "APIGX Platform": "Plateforme APIGX"
++    "APIGX Platform": "Plateforme APIGX",
++    "New share channel": "Nouveau canal de partage",
++    "Protocol": "Protocole",
++    "Upstream address": "Adresse de l'amont",
++    "Your upstream key": "Votre clé amont",
++    "It is stored encrypted and never shown again.": "Elle est stockée chiffrée et ne sera plus affichée.",
++    "Select a share group": "Choisir un groupe de partage"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index a6a52dd..8c7c452 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6736,6 +6736,12 @@
+     "Expand all": "すべて展開",
+     "Length": "長さ",
+     "Select preset": "プリセットを選択",
+-    "APIGX Platform": "APIGX プラットフォーム"
++    "APIGX Platform": "APIGX プラットフォーム",
++    "New share channel": "共有チャネルを作成",
++    "Protocol": "プロトコル",
++    "Upstream address": "上流アドレス",
++    "Your upstream key": "上流キー",
++    "It is stored encrypted and never shown again.": "暗号化して保存され、再表示されません。",
++    "Select a share group": "共有グループを選択"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index def4e3d..4b332e7 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6736,6 +6736,12 @@
+     "Expand all": "Развернуть всё",
+     "Length": "Длина",
+     "Select preset": "Выбрать шаблон",
+-    "APIGX Platform": "Платформа APIGX"
++    "APIGX Platform": "Платформа APIGX",
++    "New share channel": "Новый общий канал",
++    "Protocol": "Протокол",
++    "Upstream address": "Адрес вышестоящего сервиса",
++    "Your upstream key": "Ваш ключ вышестоящего сервиса",
++    "It is stored encrypted and never shown again.": "Хранится в зашифрованном виде и больше не отображается.",
++    "Select a share group": "Выберите группу общих ресурсов"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index d8ddf4e..c51742b 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6736,6 +6736,12 @@
+     "Expand all": "Mở rộng tất cả",
+     "Length": "Độ dài",
+     "Select preset": "Chọn mẫu đặt trước",
+-    "APIGX Platform": "Nền tảng APIGX"
++    "APIGX Platform": "Nền tảng APIGX",
++    "New share channel": "Kênh chia sẻ mới",
++    "Protocol": "Giao thức",
++    "Upstream address": "Địa chỉ thượng nguồn",
++    "Your upstream key": "Khóa thượng nguồn của bạn",
++    "It is stored encrypted and never shown again.": "Được lưu mã hóa và không hiển thị lại.",
++    "Select a share group": "Chọn nhóm chia sẻ"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 412b365..f97b4a5 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6736,6 +6736,12 @@
+     "Expand all": "展開全部",
+     "Length": "長度",
+     "Select preset": "選擇預設",
+-    "APIGX Platform": "平台管理"
++    "APIGX Platform": "平台管理",
++    "New share channel": "新增分享管道",
++    "Protocol": "協定",
++    "Upstream address": "上游位址",
++    "Your upstream key": "你的上游金鑰",
++    "It is stored encrypted and never shown again.": "將以密文儲存，之後不再顯示。",
++    "Select a share group": "選擇分享分組"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 1782c34..76c5139 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6736,6 +6736,12 @@
+     "Expand all": "展开全部",
+     "Length": "长度",
+     "Select preset": "选择预设",
+-    "APIGX Platform": "平台管理"
++    "APIGX Platform": "平台管理",
++    "New share channel": "新建分享渠道",
++    "Protocol": "协议",
++    "Upstream address": "上游地址",
++    "Your upstream key": "你的上游 Key",
++    "It is stored encrypted and never shown again.": "将以密文存储，之后不再显示。",
++    "Select a share group": "选择分享分组"
+   }
+ }
+-- 
+2.53.0.windows.1
+
