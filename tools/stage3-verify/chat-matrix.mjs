@@ -125,8 +125,18 @@ async function main() {
   if (PHASE === 'setup' || PHASE === 'all') {
     if (!UPSTREAM_KEY) throw new Error('缺少 APIGX_REAL_UPSTREAM_KEY（密钥只从环境变量读取）');
     const seeded = {};
-    for (const [tag, model] of [['chat', CHAT_MODEL], ['anthropic', ANTHROPIC_MODEL], ['responses', RESPONSES_MODEL], ['tool', TOOL_MODEL]]) {
-      seeded[tag] = await seedOffering(root, model, stamp, 'T31底座-' + model.replace(/[^\W]/g, '_') + '-' + stamp);
+    // 按模型去重：默认 CHAT_MODEL 与 TOOL_MODEL 是同一个模型，重复种子会撞 offerings 的唯一约束。
+      const byModel = new Map();
+      for (const [tag, model] of [['chat', CHAT_MODEL], ['anthropic', ANTHROPIC_MODEL], ['responses', RESPONSES_MODEL], ['tool', TOOL_MODEL]]) {
+      const existing = byModel.get(model);
+      if (existing) {
+        seeded[tag] = existing;
+        info(`复用供给 ${tag}: ${model}（与已建的同名模型共用一份）`);
+        continue;
+      }
+      const created = await seedOffering(root, model, stamp, 'T31底座-' + model.replace(/[^\W]/g, '_') + '-' + stamp);
+      byModel.set(model, created);
+      seeded[tag] = created;
       info(`已建供给 ${tag}: ${model}`);
     }
     fs.mkdirSync(STATE_DIR, { recursive: true });

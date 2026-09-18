@@ -1,0 +1,97 @@
+From 7fff55e34060fb1df657792ebf31da62d229f75c Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 15:36:30 +0800
+Subject: [PATCH 139/139] =?UTF-8?q?fix+feat(U-1):=20=E4=BF=AE=E9=AA=8C?=
+ =?UTF-8?q?=E6=94=B6=E8=84=9A=E6=9C=AC=20setup=20=E5=B0=BE=E9=83=A8?=
+ =?UTF-8?q?=E5=BC=82=E5=B8=B8=20+=20=E6=96=B0=E5=BB=BA=E6=B8=A0=E9=81=93?=
+ =?UTF-8?q?=E5=90=8E=E7=9A=84=E5=89=8D=E7=AB=AF=E5=90=91=E5=AF=BC?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+**① 修脚本异常（上一轮如实记录的缺陷）**
+根因：`CHAT_MODEL` 与 `TOOL_MODEL` 默认是**同一个模型**（glm-5.3-flash），setup 为同一模型建了两次供给，
+第二次撞 `apigx_model_offerings` 的 (offering_key_hash, alive_flag) 唯一约束 ⇒ 返回体没有 `data` ⇒
+`Cannot read properties of undefined (reading 'id')`。
+修法：**按模型去重**，重复 tag 复用同一份供给（同一模型本就该复用，而不是造第二条）。
+复跑：`--phase setup` **clean exit 0**，打印 4 行（含「复用供给 tool」）；`--phase verify` **5/5** 通过。
+
+**② 前端向导（U-1 缺的"选模型"环节）**
+- `share/index.tsx`：新建渠道成功后**自动跳转到该渠道详情页** —— 那里的「选择模型」就是向导第二步，
+  免得"建完就以为已经就绪"（实际模型没导入时供给仍是草稿，不会对外服务）
+- `channel-create-dialog.tsx`：`onSaved` 带上新建渠道 id（`onSuccess` 接收返回值）
+
+检查: typecheck 0 错 / oxlint 0 错 / share 用例通过 / build ✅ / 网关产物与 dist 一致 ✅
+---
+ .../features/share/components/channel-create-dialog.tsx  | 6 +++---
+ web/src/features/share/index.tsx                         | 9 ++++++++-
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/web/src/features/share/components/channel-create-dialog.tsx b/web/src/features/share/components/channel-create-dialog.tsx
+index 10a62cb..941f355 100644
+--- a/web/src/features/share/components/channel-create-dialog.tsx
++++ b/web/src/features/share/components/channel-create-dialog.tsx
+@@ -38,7 +38,7 @@ export function ChannelCreateDialog(props: {
+   groups: ShareGroup[]
+   open: boolean
+   onOpenChange: (open: boolean) => void
+-  onSaved: () => void
++  onSaved: (createdId?: number) => void
+ }) {
+   const { t } = useTranslation()
+   const [groupId, setGroupId] = useState('')
+@@ -56,12 +56,12 @@ export function ChannelCreateDialog(props: {
+         base_url: baseUrl.trim(),
+         upstream_key: upstreamKey.trim(),
+       }),
+-    onSuccess: () => {
++    onSuccess: (res) => {
+       setName('')
+       setBaseUrl('')
+       setUpstreamKey('')
+       props.onOpenChange(false)
+-      props.onSaved()
++      props.onSaved(res.data?.id)
+     },
+   })
+ 
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index 49b0826..027b201 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
++import { useNavigate } from '@tanstack/react-router'
+ import { useState } from 'react'
+ import { Link } from '@tanstack/react-router'
+ import { useTranslation } from 'react-i18next'
+@@ -43,6 +44,7 @@ export function MyShares() {
+   const queryClient = useQueryClient()
+   const [editingGroup, setEditingGroup] = useState<ShareGroup | null>(null)
+   const [creatingGroup, setCreatingGroup] = useState(false)
++  const navigate = useNavigate()
+   const [creatingChannel, setCreatingChannel] = useState(false)
+   const [deletingGroup, setDeletingGroup] = useState<ShareGroup | null>(null)
+   const [deletingChannel, setDeletingChannel] = useState<ShareChannel | null>(null)
+@@ -220,10 +222,15 @@ export function MyShares() {
+           groups={groups}
+           open={creatingChannel}
+           onOpenChange={setCreatingChannel}
+-          onSaved={() => {
++          onSaved={(createdId) => {
+             // 新建渠道会同时影响渠道列表（以及分组下的渠道数）
+             void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
+             void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
++            // U-1 向导：渠道建好只是第一步 —— 直接把人带到渠道详情页的「选择模型」，
++            // 免得"建完就以为已经就绪"（模型没导入 = 供给是草稿，不会对外服务）。
++            if (createdId) {
++              void navigate({ to: '/share/$channelId', params: { channelId: String(createdId) } })
++            }
+           }}
+         />
+         <GroupCreateDialog
+-- 
+2.53.0.windows.1
+
