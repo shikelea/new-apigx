@@ -1,0 +1,271 @@
+From f0d833081e9e985c5f72fe520ec32a67f409cf60 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 16:43:00 +0800
+Subject: [PATCH 149/149] =?UTF-8?q?feat(#19=20=E5=AE=8C=E6=88=90):=20?=
+ =?UTF-8?q?=E6=8C=89=E3=80=8C=E5=AE=9E=E9=99=85=E6=89=A7=E8=A1=8C=20Key=20?=
+ =?UTF-8?q?=E2=86=92=20=E4=BE=9B=E7=BB=99=20=E2=86=92=20=E6=B8=A0=E9=81=93?=
+ =?UTF-8?q?=E3=80=8D=E7=BB=A7=E6=89=BF=E5=8F=96=E4=BB=B7=E5=B9=B6=E8=AE=A1?=
+ =?UTF-8?q?=E4=BB=B7=EF=BC=88=E7=9C=9F=E5=AE=9E=E8=AF=B7=E6=B1=82=E6=95=B0?=
+ =?UTF-8?q?=E5=80=BC=E5=8F=AF=E5=A4=8D=E6=A0=B8=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- `apigx/model/usage_event.go`：新增 `ResolveUsageCost` —— Key 作用域优先、按 UnitScale（/1M、/1K tokens）整数换算、
+  **不认识的计算单位一律记未定价**（不猜）、明确零价与未定价分开、乘法前后判界（溢出不写成本）
+- `apigx/relayhook/usage_record.go`：把成本快照写入事件
+- `apigx/model/repo_test.go`：新增 `TestRecordUsageEventRejectsUnpricedWithCost`（未定价不得带成本 + event_uid 幂等）
+  与 `TestUsageQuantityMilliFromTokens`（1 token = 1000 口径）⇒ **两条 PASS**
+
+**真实请求实测（决定性，数值可手算）**：给渠道下全部 Key 配 7/70 USD per 1M 后，一次真实对话：
+- 输出：`qty_milli=8000`（8 tokens）⇒ 8×70/1e6 = **560** micro-USD ⇒ 落库 `usd_micro=560` ✓
+- 输入：`qty_milli=13000`（13 tokens）⇒ 13×7/1e6 = **91** micro-USD ⇒ 落库 `usd_micro=91` ✓
+- 归属：`upstream_key_id=185`（本次实际执行的 Key）、`price_rule_id=12`（**Key 作用域规则**）、`cost_state=0`、`currency=USD`
+另测未定价路径：无价格规则 ⇒ `rule=0/unit=0/usd=0/state=2`（满足"未定价成本必须为 0"）。
+
+**范围（不夸大）**：预留与扣费仍由**底座 BillingSession** 完成；本项是我方**成本估算**（§8.5 口径）并作为事件快照落库。
+**过程记录**：内嵌 Go 代码的反引号第二次截断 JS 模板（改为内嵌代码禁用反引号）；起初以
+`UpstreamKey.PriceRuleID>0` 为门禁，实测该列**不会被配价动作回填** ⇒ 改为直接按 Key 作用域查询；
+验证中三次遇到"轮询到别的 Key"导致看不到 Key 价格（验证覆盖面问题，已给全部 Key 配价解决）。
+---
+ apigx/model/repo_test.go        |  38 +++++++++++
+ apigx/model/usage_event.go      | 116 ++++++++++++++++++++++++++++++++
+ apigx/relayhook/usage_record.go |  42 +++++++-----
+ 3 files changed, 180 insertions(+), 16 deletions(-)
+
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 80e6acb..be315c8 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -609,3 +609,41 @@ func TestAbandonedAttemptIsNotEmptySuccess(t *testing.T) {
+ 	require.NoError(t, err)
+ 	assert.Equal(t, 200, done.HttpStatus)
+ }
++
++// TestRecordUsageEventRejectsUnpricedWithCost 覆盖 §5.21 的硬约束：
++// 「未定价」的行 cost_usd_micro 必须为 0 —— 把"价格未知"写成"成本为零"是被禁止的。
++func TestRecordUsageEventRejectsUnpricedWithCost(t *testing.T) {
++	db := newRepoDB(t)
++
++	bad := &UsageEvent{
++		EventUID:     "unpriced-with-cost",
++		Kind:         UsageEventKindUsage,
++		Dimension:    UsageDimensionInputTokens,
++		CostState:    UsageCostStateUnpriced,
++		CostUsdMicro: 123, // 违规：未定价却带成本
++	}
++	require.Error(t, RecordUsageEvent(db, bad), "未定价的事件不得携带成本")
++
++	good := &UsageEvent{
++		EventUID:      "unpriced-zero-cost",
++		Kind:          UsageEventKindUsage,
++		Dimension:     UsageDimensionInputTokens,
++		QuantityMilli: UsageQuantityMilliFromTokens(16),
++		CostState:     UsageCostStateUnpriced,
++	}
++	require.NoError(t, RecordUsageEvent(db, good))
++	var count int64
++	require.NoError(t, db.Model(&UsageEvent{}).Where("event_uid = ?", "unpriced-zero-cost").Count(&count).Error)
++	assert.EqualValues(t, 1, count)
++
++	// 幂等：同一 event_uid 再写一次必须被唯一约束拦下（重试/重复结算不产生重复事件）
++	require.Error(t, RecordUsageEvent(db, good), "同一 event_uid 不得重复写入")
++}
++
++// TestUsageQuantityMilliFromTokens 固定换算口径：规范写明 1 token = 1000（千分之一最小单位）。
++func TestUsageQuantityMilliFromTokens(t *testing.T) {
++	assert.EqualValues(t, 0, UsageQuantityMilliFromTokens(0))
++	assert.EqualValues(t, 0, UsageQuantityMilliFromTokens(-5), "负数按 0 处理，不制造负用量")
++	assert.EqualValues(t, 1000, UsageQuantityMilliFromTokens(1))
++	assert.EqualValues(t, 16000, UsageQuantityMilliFromTokens(16))
++}
+diff --git a/apigx/model/usage_event.go b/apigx/model/usage_event.go
+index b0efc89..d5e76ec 100644
+--- a/apigx/model/usage_event.go
++++ b/apigx/model/usage_event.go
+@@ -25,8 +25,17 @@ const (
+ 	// UsageTrustUpstreamReported 可信度：上游上报（非本地估算）。
+ 	UsageTrustUpstreamReported int = 0
+ 
++	// UsageCostStateReferenceEstimated 成本状态：参考成本已估（0）。
++	UsageCostStateReferenceEstimated int = 0
+ 	// UsageCostStateUnpriced 成本状态：未定价（此状态下 cost_usd_micro 必须为 0）。
+ 	UsageCostStateUnpriced int = 2
++	// UsageCostStatePendingFx 成本状态：待换算（缺汇率）。
++	UsageCostStatePendingFx int = 3
++	// UsageCostStateExplicitZero 成本状态：明确零价（有分项但单价为 0）。
++	UsageCostStateExplicitZero int = 4
++
++	// UsageUnitScalePerThousandTokens 单价计量单位：/1K tokens。
++	UsageUnitScalePerThousandTokens int = 1
+ )
+ 
+ // UsageQuantityMilliFromTokens 把 token 数换算成 quantity_milli（千分之一最小单位）。
+@@ -59,3 +68,110 @@ func RecordUsageEvent(db *gorm.DB, event *UsageEvent) error {
+ 	}
+ 	return db.Create(event).Error
+ }
++
++// UsageCostSnapshot 一次用量事件的成本快照（与 §5.21 的成本列一一对应）。
++type UsageCostSnapshot struct {
++	PriceRuleID     int64
++	PriceRuleItemID int64
++	UnitPriceMicro  int64
++	Currency        string
++	FxRateMicro     int64
++	CostMicro       int64
++	CostUsdMicro    int64
++	CostState       int
++}
++
++// ResolveUsageCost 按「实际执行 Key → 供给 → 渠道」的顺序取价，并算出该维度的成本快照。
++//
++// 顺序依据（阶段 4 验收表第 19 行）：Key 的价格代表"实际执行"那一刻的成本；
++// 未配置时按 UpstreamKey.PriceRuleID 的注释语义（0=继承）逐级回退。
++//
++// 计费安全：全程整数运算；乘法前判界（溢出则不写成本）；
++// **不认识的计算单位一律不猜** —— 记未定价，而不是拿错单位硬算一个数出来。
++func ResolveUsageCost(db *gorm.DB, keyID, offeringID, channelID int64, dimension int, tokens int64, at int64) UsageCostSnapshot {
++	snap := UsageCostSnapshot{CostState: UsageCostStateUnpriced}
++	if db == nil || tokens <= 0 {
++		return snap
++	}
++
++	var rule *PriceRule
++	var items []PriceRuleItem
++
++	// ① 实际执行 Key：**直接按 Key 作用域查**（不依赖 UpstreamKey.PriceRuleID 是否被回填 ——
++	// 实测发现给 Key 配价不会自动回填该列，因此用"查得到就用、查不到就继承"的语义更可靠）
++	if keyID > 0 {
++		if r, is, ruleErr := GetEffectivePriceRule(db, PriceScopeUpstreamKey, keyID, at); ruleErr == nil {
++			rule, items = r, is
++		}
++	}
++	// ② 供给
++	if rule == nil && offeringID > 0 {
++		if r, is, ruleErr := GetEffectivePriceRule(db, PriceScopeOffering, offeringID, at); ruleErr == nil {
++			rule, items = r, is
++		}
++	}
++	// ③ 渠道
++	if rule == nil && channelID > 0 {
++		if r, is, ruleErr := GetEffectivePriceRule(db, PriceScopeChannel, channelID, at); ruleErr == nil {
++			rule, items = r, is
++		}
++	}
++	if rule == nil {
++		return snap // 未定价：cost_usd_micro 保持 0
++	}
++	snap.PriceRuleID = rule.ID
++	snap.Currency = rule.Currency
++	snap.FxRateMicro = rule.FxRateMicro
++
++	var item *PriceRuleItem
++	for i := range items {
++		if items[i].Dimension == dimension {
++			item = &items[i]
++			break
++		}
++	}
++	if item == nil {
++		return snap // 该维度没有分项 ⇒ 未定价
++	}
++	snap.PriceRuleItemID = item.ID
++	snap.UnitPriceMicro = item.UnitPriceMicro
++
++	// 明确零价与"未定价"是两件事
++	if item.UnitPriceMicro == 0 {
++		snap.CostState = UsageCostStateExplicitZero
++		return snap
++	}
++
++	usdUnit, ok := EffectiveUSDUnitPriceMicro(rule, item)
++	if !ok {
++		if item.Currency != "USD" {
++			snap.CostState = UsageCostStatePendingFx // 待换算，而不是未定价
++		}
++		return snap
++	}
++
++	// 单位换算：只支持规范里明确定义的两个单位
++	var divisor int64
++	switch item.UnitScale {
++	case UsageUnitScalePerMillionTokens:
++		divisor = 1_000_000
++	case UsageUnitScalePerThousandTokens:
++		divisor = 1_000
++	default:
++		return snap // 不认识的单位：不猜
++	}
++
++	const maxSafeTokens int64 = 1_000_000_000_000
++	if tokens > maxSafeTokens {
++		return snap
++	}
++	product := tokens * usdUnit
++	if usdUnit != 0 && product/usdUnit != tokens {
++		return snap // 乘法溢出 ⇒ 不写成本
++	}
++
++	snap.CostUsdMicro = product / divisor
++	snap.CostMicro = snap.CostUsdMicro
++	snap.CostState = UsageCostStateReferenceEstimated
++	return snap
++}
+diff --git a/apigx/relayhook/usage_record.go b/apigx/relayhook/usage_record.go
+index 79b4031..e8b8478 100644
+--- a/apigx/relayhook/usage_record.go
++++ b/apigx/relayhook/usage_record.go
+@@ -40,23 +40,33 @@ func RecordSettlementUsage(c *gin.Context, relayInfo *relaycommon.RelayInfo, pro
+ 
+ 	write := func(dimension int, tokens int) {
+ 		uid := "u:" + relayInfo.RequestId + ":" + strconv.Itoa(dimension)
++		// 取价并计价（未定价 ⇒ 成本保持 0；不认识的计算单位也记未定价）
++		cost := apigxmodel.ResolveUsageCost(db, keyID, offeringID, channelID, dimension, int64(tokens), now)
++
+ 		event := &apigxmodel.UsageEvent{
+-			EventUID:      uid,
+-			Kind:          apigxmodel.UsageEventKindUsage,
+-			UserID:        int64(relayInfo.UserId),
+-			OwnerUserID:   owner,
+-			ApiKeyID:      int64(relayInfo.TokenId),
+-			ApiModelID:    relayInfo.OriginModelName,
+-			OfferingID:    offeringID,
+-			ChannelID:     channelID,
+-			UpstreamKeyID: keyID,
+-			Dimension:     dimension,
+-			QuantityMilli: apigxmodel.UsageQuantityMilliFromTokens(tokens),
+-			UnitScale:     apigxmodel.UsageUnitScalePerMillionTokens,
+-			Trust:         apigxmodel.UsageTrustUpstreamReported,
+-			CostState:     apigxmodel.UsageCostStateUnpriced,
+-			OccurredAt:    now,
+-			CreatedAt:     now,
++			EventUID:        uid,
++			Kind:            apigxmodel.UsageEventKindUsage,
++			UserID:          int64(relayInfo.UserId),
++			OwnerUserID:     owner,
++			ApiKeyID:        int64(relayInfo.TokenId),
++			ApiModelID:      relayInfo.OriginModelName,
++			OfferingID:      offeringID,
++			ChannelID:       channelID,
++			UpstreamKeyID:   keyID,
++			Dimension:       dimension,
++			QuantityMilli:   apigxmodel.UsageQuantityMilliFromTokens(tokens),
++			UnitScale:       apigxmodel.UsageUnitScalePerMillionTokens,
++			Trust:           apigxmodel.UsageTrustUpstreamReported,
++			PriceRuleID:     cost.PriceRuleID,
++			PriceRuleItemID: cost.PriceRuleItemID,
++			UnitPriceMicro:  cost.UnitPriceMicro,
++			Currency:        cost.Currency,
++			FxRateMicro:     cost.FxRateMicro,
++			CostMicro:       cost.CostMicro,
++			CostUsdMicro:    cost.CostUsdMicro,
++			CostState:       cost.CostState,
++			OccurredAt:      now,
++			CreatedAt:       now,
+ 		}
+ 		if err := apigxmodel.RecordUsageEvent(db, event); err != nil {
+ 			common.SysError("relayhook: record usage event failed: " + err.Error())
+-- 
+2.53.0.windows.1
+

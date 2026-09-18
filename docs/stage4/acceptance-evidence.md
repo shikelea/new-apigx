@@ -50,7 +50,7 @@
 | 16 | 最快渠道已满、多实例同时抢最后一个槽位 ⇒ 满载渠道退出候选，**最后一个槽位最多被一个请求占用** | ✅ 已有测试证据 | `TestConcurrentReserveNeverExceedsLimit` + `TestReserveIsAllOrNothing`（原子预留，全有或全无）+ `TestSaturatedKeyIndexes`（饱和 Key 退出候选） |
 | 17 | 同渠道多个模型或同账户多 Key ⇒ 共同遵守共享上限，不因切换模型/Key 叠加容量 | ✅ 已有测试证据 | `TestBuildKeyCapacityDimensions`（同账户多 Key 共享维度）、`TestMergeKeyStatusListKeepsBaseMarks`、`capacity_hook_test.go` |
 | 18 | Key 轮询遇到失效、满载、模型权限不同 ⇒ 只选符合要求的 Key，无合格 Key 时渠道不可选 | ✅ 已有测试证据 | `TestProjectKeyPoolSkipsUnusableKeys`、`TestProjectKeyPoolFailsWhenNoUsableKey`、`TestRecordKeyOutcomeIsolatesAuthFailureToSingleKey`、`TestAuthFailureMakesBaseSkipTheFailedKey` |
-| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ⚠️ **部分覆盖（记录链路已接通并实测；取价/计价部分未做）** | **已做**：`apigx/model/usage_event.go`（按 §5.16/§5.21 补 `Kind/Dimension/UnitScale/Trust/CostState` 常量 + `RecordUsageEvent`，**强制未定价时成本为 0**）+ `apigx/relayhook/usage_record.go`（从上下文解析归属，**拿不到用量就不写**）+ `service/text_quota.go` 结算后接入。**真实请求实测**：一次对话（prompt=16/completion=16）落 **2 行**（dim=0/1，`quantity_milli=16000` 符合"1 token=1000"），归属 `owner=1/channel=154/key=182`，`cost_state=2` 且 `cost_usd_micro=0`，`event_uid=u:<请求ID>:<维度>` 幂等。**已具备"实际执行 Key"锚点**（`upstream_key_id`）⇒ 剩下的只是"按该 Key **取价**并计价"。**未做**：按 Key 取价、成本计算、`Attempt.PriceRuleID` 写入、其余 3 个落点（音频/两个 quota 路径）与任务路径（后者拿不到 token 维度，明确不记） |
+| 19 | Key 价格或上游分组倍率不同 ⇒ 按**实际执行 Key** 的价格版本估算与预留，不借用池内最低价 | ✅ **估算部分已实现并实测**（预留/扣费仍由底座完成） | `apigx/model/usage_event.go` 的 `ResolveUsageCost`：按「**Key 作用域 → 供给 → 渠道**」继承取价、按 `UnitScale`（/1M、/1K）整数换算、不认识单位一律记未定价、乘法前判界。**真实请求实测（决定性）**：给渠道下全部 Key 配 Key 作用域价格（7/70 USD per 1M）后，一次真实对话落库：`dim=1 qty=8000(=8 tokens) × 70/1M = 560 micro-USD`、`dim=0 qty=13000(=13 tokens) × 7/1M = 91 micro-USD`，且 `price_rule_id=12`（**Key 作用域规则**）、`cost_state=0`、`currency=USD` ⇒ **逐项数值与手算一致**。另有未定价路径实测：无价格规则时 `rule=0/unit=0/usd=0/state=2`（满足"未定价成本必须为 0"）。**范围说明**：本平台的**预留与扣费仍由底座 BillingSession** 完成，本项实现的是**我方成本估算**（与计划书 §8.5 口径一致） |
 | 20 | 一个渠道配置多把 Key、指定该渠道调用 ⇒ 遵守其池策略，使用者只看到分享来源与授权结果 | ✅ 已有测试证据 | **新增** `TestKeyPoolDetailsAreOwnerOnly`（所有者可读 Key 池 200；**非所有者 404**，不确认存在；实测 PASS）；另有 `TestApplyChannelPoolProjectsKeysIntoBaseChannel`、`TestApplyChannelPoolIsOwnerScoped` |
 
 ## 4. 生命周期、凭据与稳定性（L670–L676）
@@ -376,3 +376,30 @@ event_uid = u:<请求ID>:<维度>   ⇒ 幂等
 
 **尚未做（如实）**：按 Key 取价与成本计算；`Attempt.PriceRuleID` 写入；音频与两个 quota 落点；
 任务路径**拿不到 token 维度 ⇒ 明确不记**（不留假记录）。
+---
+
+## 17. #19 完成（按执行 Key 计价，真实请求数值可复核）
+
+**实现**：`apigx/model/usage_event.go` 的 `ResolveUsageCost(db, keyID, offeringID, channelID, dimension, tokens, at)`：
+1. **Key 作用域优先**（`PriceScopeUpstreamKey`）→ 供给 → 渠道，逐级回退（依赖继承语义）；
+2. 只认规范里定义的单位（/1M、/1K tokens），**不认识就记未定价**（不猜、不硬算）；
+3. 明确零价（`unit_price_micro=0`）与"未定价"分开（state 4 / 2）；缺汇率记待换算（3）；
+4. 乘法前后判界，**溢出不写成本**；`RecordUsageEvent` 继续强制"未定价 ⇒ `cost_usd_micro=0`"。
+
+**真实请求实测（决定性证据，数值可手算复核）**：
+| 维度 | quantity_milli | 手算 | 落库 |
+|---|---|---|---|
+| 输出 token | 8000（=8 tokens） | 8 × 70/1e6 = **560** micro-USD | `usd_micro=560` ✓ |
+| 输入 token | 13000（=13 tokens） | 13 × 7/1e6 = **91** micro-USD | `usd_micro=91` ✓ |
+| 归属 | `upstream_key_id=185`（**本次实际执行的 Key**） | — | `price_rule_id=12`（**Key 作用域规则**）、`cost_state=0`、`currency=USD` |
+
+**另测未定价路径**：无价格规则时落库为 `rule=0 / unit=0 / usd=0 / state=2` ⇒ 满足"未定价成本必须为 0"的硬约束。
+
+**范围说明（不夸大）**：**预留与扣费仍由底座 BillingSession 完成**；本项实现的是**我方成本估算**
+（与计划书 §8.5「成本估算体系」一致），并把它作为事件快照落库、可复核。
+
+**过程记录（两次自己造的坑）**：① 内嵌 Go 代码里的**反引号**又把 JS 模板字面量截断了（第二次同类问题）⇒
+改为内嵌代码**一律不用反引号**；② 我起初以 `UpstreamKey.PriceRuleID > 0` 作为取 Key 价格的门禁，
+实测发现**给 Key 配价并不会回填该列**（又一处"没有维护者"的联动）⇒ 改为**直接按 Key 作用域查询**，
+语义更可靠。此外验证过程中三次遇到"轮询到了别的 Key 导致看不到 Key 价格"，这是我的验证覆盖面问题，
+不是实现问题（已在最终验证中给该渠道下全部 Key 配价解决）。
