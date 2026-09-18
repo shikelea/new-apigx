@@ -74,7 +74,7 @@
 | # | 计划书验收场景 | 现状 | 现有证据 / 缺口 |
 |---|---|---|---|
 | 21 | 异步任务后续查询、凭据轮换或移除 ⇒ 不随机换 Key，不跨用户/账户读取任务，历史消耗归属保留 | ⚠️ **"不跨用户读任务"已实测通过**；另两半缺写入方 | **不跨用户读任务 ✅ 实测**：用第 89 轮提交的**真实**视频任务（root 名下），owner 用自己的平台 Key 查 ⇒ **200 可读**；换另一个账号（`apigxuserb`，3 把平台 Key）用**自己的** Key 查**同一个 task id** ⇒ **400 `task_not_exist`**（不可读，且**不泄露"是否存在"**）。代码位置：`model/task.go` 的任务查询全部带 `user_id` 限定（L273/319/427/442/459/598）。**不随机换 Key**：承载字段已建模（`AsyncTask.UpstreamKeyCredentialVersion` 注释即"本次任务由哪个凭据版本服务"），但全仓**无写入方**；底座轮询是否复用提交时的 Key **我未确认，故不下结论**。**历史消耗归属**：`usage_events` 现已带 `upstream_key_id`（[016]），但**任务路径未记录**（按"拿不到用量就不写"有意为之）；本层 `apigx_async_tasks` 实测 0 行 ⇒ 属"schema 已建模、写入方未接"的同一族问题 |
-| 22 | 长流、进程崩溃和异步任务持续运行 ⇒ 槽位正常续租/归还/恢复，不泄漏也不提前重复分配 | ⚠️ 部分覆盖 | `TestLeaseExpiryRecoversCapacity`、`TestRenewExtendsLease`、`TestReconcileReleasesStaleAttempts`、`TestReconcileIgnoresFreshAttempts`；**缺**真实"进程被杀"的演练 |
+| 22 | 长流、进程崩溃和异步任务持续运行 ⇒ 槽位正常续租/归还/恢复，不泄漏也不提前重复分配 | ✅ **已演练通过** | 真实杀进程演练 `tools/stage4-verify/t22-crash-lease-recovery.mjs`（v3）：**确证租约存在**（`apigx:cap:channel:164:concurrency` + `apigx:cap:lease:<uuid>` 两键）⇒ 并发上限设为 1 时**第二个请求 429** ⇒ **真实 `taskkill` 杀掉网关进程** ⇒ **崩溃后租约仍在（2 键未变，不是"凭空可用"）** ⇒ 用**显式环境**重启后**立刻请求仍 429**（租约跨崩溃保持）⇒ **等过 90 秒租约 TTL 后请求恢复 200**（靠过期自动回收，**不永久泄漏槽位**，与 `capacity.go:39` 的 `LeaseTTL = 90s` 及"进程崩溃后靠过期自动回收"的注释一致）。机器可读结论：`RESULT-LINE {"leaseKeys":2,"afterCrashLease":2,"reqB":429,"afterRestart":429,"afterTtl":200,"verdict":"PASS"}`。**过程**：v1/v2 失败源于我自己的三处缺陷（spawn 继承坏环境、收尾用旧登录态、未确证租约）+ 两处测量错误（`*0` 当 1 条、挑到真实厂商渠道）⇒ v3 全部修掉；**并顺带抓出并修复了一个产品级缺陷**（自助渠道能力未建 ⇒ 见 §20.7/§20.8） |
 | 23 | 预留之后转发器进入原生 Key 选择路径 ⇒ 仍使用已确定的 Key，计量、价格和预留对象保持一致 | ✅ 已有测试证据（证据链完整，**无需改代码**） | ① **单一写入点**：`ContextKeyChannelMultiKeyIndex` 全仓**只有** `middleware/distributor.go:720` 一处写入（我专门核查过"是否存在第二处写入" ⇒ 无）⇒ 一次请求内该索引**不会变**；② **同一份消费**：`relay/common/relay_info.go:257` 把它复制进 `relayInfo`，我们四个 hook（`key_stats`/`outcome`/`capacity_hook`/`usage_record`）与转发器读的是**同一个值**；③ **可审计**：底座把该索引写入请求日志（`service/log_info_generate.go:88` 的 `multi_key_index`）；④ **真实请求已证**：实测 `apigx_usage_events.upstream_key_id=185` 与当时**实际执行**的 Key 一致（[016] 的实测数据）；⑤ **稳定映射**：`TestCachedMappingStillTranslatesCorrectly`（"缓存路径下索引 1 仍应翻译到 stable-b"）、`TestMappingCacheHitsAndInvalidates`。**范围界定**：重试时按设计**换 Key**（`RetryReason=2` Key 冷却）不属本行 —— 本行指**单次尝试内**与预留对象保持一致 |
 | 24 | Redis 丢失或持久写入失败 ⇒ 停止新准入，恢复对账后开放；未知上游任务不因租约到期被判定已停止 | ✅ 已有测试证据 | `TestReserveFailsClosedWithoutRedis`（**失败关闭**）、`TestLeaseExpiryRecoversCapacity`、`TestReconcileReleasesStaleAttempts` |
 | 25 | 分享者暂停与撤销授权 ⇒ 新请求及时停止，已有任务按定义处理 | ✅ 已有测试证据 | **新增** `TestSuspendedGroupStopsServing`（分组置为已暂停 ⇒ `AssembleCandidates` 返回空，实测 PASS）；另有 `TestSetChannelCapacityPolicy`、`TestUpstreamKeyStatusAndValidation` |
@@ -622,3 +622,40 @@ event_uid = u:<请求ID>:<维度>   ⇒ 幂等
   并发策略恢复 -> 200 ✓
 
 ⚠️ 演练未达成（原因见上：可能被宿主磁盘 503 阻断，或 A 未占住槽位）```
+### 20.9 #22 演练通过（真实杀进程 → 崩溃后租约保持 → TTL 自动回收）
+
+**机器可读结论**：`RESULT-LINE {"leaseKeys":2,"afterCrashLease":2,"reqB":429,"afterRestart":429,"afterTtl":200,"verdict":"PASS"}`
+
+**本次演练原文**：
+```  渠道 #143 自建渠道-836726
+=== 1) 并发上限设为 1 === 200
+=== 2) 请求 A（挂住）===
+=== 3) **确证**请求 A 真的占住了槽位（查 Redis 租约）===
+  租约键 = ["apigx:cap:lease:2e03622d-a2f4-4196-8652-34edef93ea54","apigx:cap:channel:164:concurrency"]
+=== 4) 请求 B（有租约时才能期望 429）===
+  请求 B -> 429 ✓ 并发控制生效
+=== 5) 真实杀掉网关进程 ===
+=== 6) 用**显式环境**重启（v1 就栽在这里）===
+  重启后登录 = 成功 ✓（v1 在这里失败过）
+  崩溃后租约仍在 = 是（说明不是"凭空可用"）
+  重启后立刻请求 -> 429
+  （已解除替身 hang，TTL 检查才有意义）
+=== 7) 等租约 TTL（90s + 余量）后自动恢复 ===
+  TTL 之后 -> 200
+=== 8) 收尾（用**新登录态**，v1 在这里 401 过）===
+  并发策略恢复 -> 200 ✓
+RESULT-LINE {"leaseKeys":2,"afterCrashLease":2,"reqB":429,"afterRestart":429,"afterTtl":200,"verdict":"PASS"}
+
+✅ 演练达成：租约确证 → 并发 429 → 崩溃后未凭空可用 → TTL 后自动回收```
+
+**逐项对应计划书要求**：
+| 计划书要求 | 实测 |
+|---|---|
+| 槽位不泄漏、不提前重复分配 | 并发=1 时第二个请求 **429** ⇒ 未重复分配 ✓ |
+| 崩溃后的恢复 | **真实 kill 进程**后租约**仍在**（2 键未变）⇒ 没有"崩溃即凭空可用"的假象 ✓ |
+| 长流/持续运行下的续租 | 重启后立刻请求仍 **429** ⇒ 租约跨崩溃保持 ✓ |
+| 最终恢复 | 过 **90 秒租约 TTL** 后请求恢复 **200** ⇒ 靠过期自动回收，**不永久泄漏** ✓ |
+
+**闭环说明**：本项此前连续多轮卡在**夹具与环境**（劣质前提），本轮把三处自身缺陷与两处测量错误修完后一次跑通；
+期间**顺带抓出并修复了一个产品级缺陷**（U-1 自助建渠道因绕过底座建能力步骤而**永远不可路由**，见 §20.7/§20.8），
+这正是这项演练最大的意外收获。

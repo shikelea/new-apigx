@@ -144,7 +144,13 @@
     而 **U-1 自助建的渠道能力为 0**、`models` 为空 ⇒ 根因是**自助路径直接 insert 底座 channels 行，绕过了底座的
     建能力步骤**（底座在建/改渠道后会调 `Channel.AddAbilities`）⇒ **这类渠道永远不可路由**。
     已修：新增 `syncBaseChannelServesModel`，在**供给发布后**把模型并入底座渠道 `models` 并重建能力；
-    `go build` ✅、`apigx/api` 整包 ✅（端到端留待下一轮）。- [x] T4.5 阶段 4：剩余边界场景逐条出证据 → `docs/stage4/acceptance-evidence.md`（计划书 **31 行全部有结论**：✅28 / ⚠️3 / ❌0；3 项未闭合各自的阻塞条件写在文件顶部「0. 结论总览」）（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
+    `go build` ✅、`apigx/api` 整包 ✅（端到端留待下一轮）。  - 补充（2026-09-18 第十七批，**#22 演练通过**）：链路上有两处前置修补 —— ① **修掉产品级缺陷**：U-1 自助建渠道
+    直接 insert 底座 channels 行、绕过了底座的建能力步骤 ⇒ `models` 空、能力 0、**永远 model_not_found**；
+    已在**供给发布后**同步模型并入 `models` 并重建能力（对照验证：修复后发布的 `stub/model-y-202609` 可路由 200，
+    修复前发布的 `stub/model-x-202609` 仍 503 ⇒ 反证）；② **修掉我自己的工具缺陷**：node 直连 RESP 读租约不可信、
+    `redis-cli --scan` 在本机 PowerShell 输出被吞 ⇒ 改为 PowerShell 跑 `redis-cli KEYS` 写文件再由 node 读。
+    随后 v3 演练一次跑通：`RESULT-LINE {"leaseKeys":2,"afterCrashLease":2,"reqB":429,"afterRestart":429,"afterTtl":200,"verdict":"PASS"}`
+    ⇒ 租约确证 → 并发 429 → **真实杀进程后租约仍在** → 重启后仍 429 → **TTL 90s 后恢复 200**。- [x] T4.5 阶段 4：剩余边界场景逐条出证据 → `docs/stage4/acceptance-evidence.md`（计划书 **31 行全部有结论**：✅28 / ⚠️3 / ❌0；3 项未闭合各自的阻塞条件写在文件顶部「0. 结论总览」）（Redis 丢失、幂等键重发、恶意地址与外部媒体链接、异步任务归属等）
 - [x] T4.6 最终验收：按计划书 §11 阶段 4 的 27 条表格**逐条归档证据** → 同上（表实为 **31 行**；顶部给出状态总览、未闭合项与阻塞条件归类）
 ## [已完成] 阶段 2：价格与质量路由 (2026-09-17)
 

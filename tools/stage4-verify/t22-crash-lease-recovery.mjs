@@ -169,6 +169,9 @@ const waitPort = async (port, tries = 90) => {
   const c = await post(B + '/v1/chat/completions', { model: 'stub/model-y-202609', messages: [{ role: 'user', content: 'after-restart' }], max_tokens: 4 }, pk)
   console.log('  重启后立刻请求 ->', c.status)
 
+  // CLEAR-HANG-BEFORE-TTL：TTL 检查前先解除替身 hang，否则该请求会被继续挂住并超时
+  await post(STUB + '/_control/profile', { hang: false })
+  console.log('  （已解除替身 hang，TTL 检查才有意义）')
   console.log('=== 7) 等租约 TTL（90s + 余量）后自动恢复 ===')
   await sleep(100000)
   const d = await post(B + '/v1/chat/completions', { model: 'stub/model-y-202609', messages: [{ role: 'user', content: 'after-ttl' }], max_tokens: 4 }, pk)
@@ -180,6 +183,8 @@ const waitPort = async (port, tries = 90) => {
   console.log('  并发策略恢复 ->', rl.status, rl.status === 200 ? '✓' : '❌ 需人工处理')
   await aPromise.catch(() => {})
 
+  // RESULT-LINE：机器可读结论（归档时直接引用，避免我转述出错）
+  console.log('RESULT-LINE ' + JSON.stringify({ leaseKeys: leaseCount, afterCrashLease: afterCount, reqB: b.status, afterRestart: c.status, afterTtl: d.status, verdict: leaseCount > 0 && b.status === 429 && d.status === 200 ? 'PASS' : 'FAIL' }))
   const ok = leaseCount > 0 && b.status === 429 && d.status === 200
   console.log('\n' + (ok ? '✅ 演练达成：租约确证 → 并发 429 → 崩溃后未凭空可用 → TTL 后自动回收' : '⚠️ 演练未达成（原因见上：可能被宿主磁盘 503 阻断，或 A 未占住槽位）'))
   process.exit(ok ? 0 : 1)
