@@ -1,0 +1,39 @@
+From 570052d23488cb8b8247b17613ec847c6c72d62e Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 15:39:14 +0800
+Subject: [PATCH 140/140] =?UTF-8?q?fix(share):=20=E5=90=88=E5=B9=B6?=
+ =?UTF-8?q?=E9=87=8D=E5=A4=8D=E5=AF=BC=E5=85=A5=EF=BC=88=E6=88=91=E4=B8=8A?=
+ =?UTF-8?q?=E4=B8=80=E6=8F=90=E4=BA=A4=E5=BC=95=E5=85=A5=EF=BC=89+=20?=
+ =?UTF-8?q?=C2=A75=20=E8=AE=B0=E5=BD=95=20PowerShell=20=E5=BC=95=E5=8F=B7?=
+ =?UTF-8?q?=E7=BA=A6=E5=AE=9A?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 上一提交为加 useNavigate 又写了一行 from '@tanstack/react-router'，而该文件已有 Link 来自同包
+  ⇒ oxlint 报 no-duplicate-imports；已合并为 `import { Link, useNavigate } from '@tanstack/react-router'`
+- CODE_STYLE.md 追加「在 PowerShell 里执行 Node 片段」约定：一律用 write 工具落 .mjs 再执行，
+  不要在 node -e 内联里嵌双引号（本会话已因此踩坑三次，其中一次导致整段脚本未执行、差点误判补丁已生效）
+检查: oxlint 0 错 / typecheck 0 错 / build ✅ / 网关产物与 dist 一致 ✅
+---
+ web/src/features/share/index.tsx | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/web/src/features/share/index.tsx b/web/src/features/share/index.tsx
+index 027b201..a64aeb5 100644
+--- a/web/src/features/share/index.tsx
++++ b/web/src/features/share/index.tsx
+@@ -16,9 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+-import { useNavigate } from '@tanstack/react-router'
+ import { useState } from 'react'
+-import { Link } from '@tanstack/react-router'
++import { Link, useNavigate } from '@tanstack/react-router'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { ConfirmDialog } from '@/components/confirm-dialog'
+-- 
+2.53.0.windows.1
+
