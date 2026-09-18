@@ -1,0 +1,49 @@
+From ba25a7d064404a25029e30066e2f6d1bca98c9d0 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Fri, 18 Sep 2026 10:41:41 +0800
+Subject: [PATCH 108/108] =?UTF-8?q?fix(access):=20=E6=A0=B8=E9=94=80?=
+ =?UTF-8?q?=E9=99=90=E5=AE=9A=20invite=5Ftype=20=E2=80=94=E2=80=94=20?=
+ =?UTF-8?q?=E5=A0=B5=E4=BD=8F=E6=B3=A8=E5=86=8C=E9=82=80=E8=AF=B7=E8=A2=AB?=
+ =?UTF-8?q?=E5=BD=93=E6=88=90=E8=B5=84=E6=BA=90=E9=82=80=E8=AF=B7=E6=A0=B8?=
+ =?UTF-8?q?=E9=94=80=E7=9A=84=E8=B7=A8=E7=B1=BB=E5=9E=8B=E6=BC=8F=E6=B4=9E?=
+ =?UTF-8?q?=EF=BC=88=C2=A710.1=20=E8=A6=81=E6=B1=82=E4=B8=A4=E7=B1=BB?=
+ =?UTF-8?q?=E6=A0=A1=E9=AA=8C=E7=8B=AC=E7=AB=8B=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ apigx/model/repo_access.go | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/apigx/model/repo_access.go b/apigx/model/repo_access.go
+index 205dd6a..4d083bb 100644
+--- a/apigx/model/repo_access.go
++++ b/apigx/model/repo_access.go
+@@ -153,9 +153,12 @@ func RedeemAccessInvite(db *gorm.DB, token string, redeemerUserID int64) (*Grant
+ 	var invite Invite
+ 	err := db.Transaction(func(tx *gorm.DB) error {
+ 		// 先按条件原子抢占（次数与状态一起判定）
++		// 必须**限定邀请类型**：§10.1 要求两类邀请校验逻辑独立。
++		// 不限定的话，注册类邀请（target_scope_type=0）会被当成资源邀请核销，
++		// 生成 resource_id=0 的垃圾授权 —— 这是跨类型漏洞。
+ 		res := tx.Model(&Invite{}).
+-			Where("token_hash = ? AND status = ? AND (expires_at = 0 OR expires_at > ?) AND (max_uses = 0 OR used_count < max_uses)",
+-				hashInviteToken(token), InviteStatusActive, now).
++			Where("token_hash = ? AND invite_type = ? AND status = ? AND (expires_at = 0 OR expires_at > ?) AND (max_uses = 0 OR used_count < max_uses)",
++				hashInviteToken(token), InviteTypeAccess, InviteStatusActive, now).
+ 			Updates(map[string]any{
+ 				"used_count": gorm.Expr("used_count + 1"),
+ 				"updated_at": now,
+@@ -167,7 +170,7 @@ func RedeemAccessInvite(db *gorm.DB, token string, redeemerUserID int64) (*Grant
+ 			// 不存在 / 已撤销 / 已过期 / 已用尽 —— 一律同一结果
+ 			return ErrNotFound
+ 		}
+-		if err := tx.Where("token_hash = ?", hashInviteToken(token)).First(&invite).Error; err != nil {
++		if err := tx.Where("token_hash = ? AND invite_type = ?", hashInviteToken(token), InviteTypeAccess).First(&invite).Error; err != nil {
+ 			return err
+ 		}
+ 
+-- 
+2.53.0.windows.1
+
