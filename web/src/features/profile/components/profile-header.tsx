@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Activity, BarChart3, WalletCards } from 'lucide-react'
+import { Activity, BarChart3 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { StatusBadge } from '@/components/status-badge'
@@ -88,16 +88,9 @@ export function ProfileHeader({ profile, loading }: ProfileHeaderProps) {
     label: string
     value: string
     description: string
-    icon: typeof WalletCards
+    icon: typeof Activity
     tone: IconBadgeTone
   }[] = [
-    {
-      label: t('Current Balance'),
-      value: formatQuota(profile.quota),
-      description: t('Remaining quota'),
-      icon: WalletCards,
-      tone: 'success',
-    },
     {
       label: t('Total Usage'),
       value: formatQuota(profile.used_quota),
