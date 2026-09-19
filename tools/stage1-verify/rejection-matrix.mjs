@@ -4,7 +4,7 @@
 // 逐条验证四类拒绝的状态码与"不泄露"性质，并对照底座旧接口的已知偏离：
 //   A. 未认证            → 401
 //   B. 越权/不存在        → 404，且**与不存在的响应逐字节一致**（不泄露存在性）
-//   C. 来源不允许         → 403（**不是**上游 500；这是本轮修掉的语义错误）
+//   C. 来源不允许         → 503 + 统一文案（不区分不存在、未发布、未授权或范围不符）
 //   D. 容量超限           → 429 + Retry-After
 //   E. 泄露扫描：上述所有拒绝响应都不得包含内部 id、上游地址、凭据、堆栈
 //
@@ -15,6 +15,7 @@ const argv = process.argv.slice(2);
 const argOf = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const BASE = argOf('--base', 'http://127.0.0.1:3000');
 const STUB = argOf('--stub', 'http://127.0.0.1:8100');
+const SOURCE_DENIAL = 'no available source for the requested model';
 
 async function call(url, { method = 'GET', body, auth } = {}) {
   const h = { accept: 'application/json' };
@@ -64,8 +65,13 @@ async function makeChannel(auth, stamp, model, ownerAuth, shareGroupName) {
     if (!base) await new Promise((r) => setTimeout(r, 2000));
   }
   if (!base?.id) throw new Error('查不到底座渠道');
-  const g = await call(`${BASE}/api/apigx/share-groups`, { method: 'POST', auth: ownerAuth, body: { name: shareGroupName } });
-  if (g.status !== 200) throw new Error('建分组失败：' + g.text.slice(0, 120));
+  const g = await call(`${BASE}/api/apigx/share-groups`, {
+    method: 'POST', auth: ownerAuth,
+    body: { name: shareGroupName, default_visibility: 1 },
+  });
+  if (g.status !== 200 || g.json?.data?.publish_status !== 2) {
+    throw new Error('建已发布受限分组失败：' + g.text.slice(0, 120));
+  }
   const ch = await call(`${BASE}/api/apigx/channels`, {
     method: 'POST', auth: ownerAuth,
     body: { share_group_id: g.json.data.id, base_channel_id: base.id, name: 'REJ渠道-' + stamp, protocol: 'openai', base_url: 'http://127.0.0.1:8100' },
@@ -76,8 +82,30 @@ async function makeChannel(auth, stamp, model, ownerAuth, shareGroupName) {
     method: 'POST', auth: ownerAuth, body: { stable_key_id: 'rej-' + stamp, name: 'rej', key: 'sk-rej-' + stamp },
   });
   if (k.status !== 200) throw new Error('加 Key 失败：' + k.text.slice(0, 120));
-  await call(`${BASE}/api/apigx/channels/${shareChannelId}/apply`, { method: 'POST', auth: ownerAuth });
-  return { baseChannelId: base.id, shareChannelId };
+  const applied = await call(`${BASE}/api/apigx/channels/${shareChannelId}/apply`, { method: 'POST', auth: ownerAuth });
+  if (applied.status !== 200) throw new Error('应用分享渠道失败：' + applied.text.slice(0, 120));
+
+  const offering = await call(`${BASE}/api/apigx/channels/${shareChannelId}/offerings`, {
+    method: 'POST', auth: ownerAuth, body: { upstream_model_id: model },
+  });
+  if (offering.status !== 200) throw new Error('建 Offering 失败：' + offering.text.slice(0, 120));
+  const offeringId = offering.json.data.id;
+  const priced = await call(`${BASE}/api/apigx/price-rules`, {
+    method: 'PUT', auth,
+    body: {
+      scope_type: 0,
+      scope_id: offeringId,
+      input_usd_per_million: 1,
+      output_usd_per_million: 2,
+      lock: true,
+    },
+  });
+  if (priced.status !== 200) throw new Error('Offering 配价失败：' + priced.text.slice(0, 120));
+  const submitted = await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: ownerAuth });
+  if (submitted.status !== 200) throw new Error('提交 Offering 失败：' + submitted.text.slice(0, 120));
+  const published = await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, { method: 'POST', auth });
+  if (published.status !== 200) throw new Error('发布 Offering 失败：' + published.text.slice(0, 120));
+  return { baseChannelId: base.id, shareChannelId, offeringId };
 }
 
 async function main() {
@@ -103,8 +131,9 @@ async function main() {
   check('B 与「不存在」逐字节一致（不泄露存在性）', other.text === missing.text,
     `越权=${other.text.slice(0, 40)} 不存在=${missing.text.slice(0, 40)}`);
 
-  // ---- C. 来源不允许 → 403（且不是上游 500）----
-  // 模型只由 root 的渠道提供；把 root 的平台 Key 限制为「只允许 B」，不可回退 → 必须 403
+  // ---- C. 来源不允许 → 统一 503 ----
+  // 模型只由 root 的已发布分享资源提供；把 root 的平台 Key 限制为「只允许 B」后，
+  // 必须返回不泄露具体原因的统一 503。
   const tokens = await call(`${BASE}/api/token/`, { auth: root.auth });
   const items = tokens.json?.data?.items ?? [];
   const vt = (Array.isArray(items) ? items : []).find((t) => t?.name === 'apigx-stage0-verify') ?? (Array.isArray(items) ? items : [])[0];
@@ -112,29 +141,32 @@ async function main() {
   const platformKey = keyRes.json?.data?.key;
   const setPrefs = (body) => call(`${BASE}/api/apigx/platform-keys/${vt.id}/preferences`, { method: 'PUT', auth: root.auth, body });
 
-  await setPrefs({ scope_mode: 1, allowed_owner_user_ids: [userB.userId], allow_fallback: false });
-
   // 新建渠道的模型→渠道路由能力缓存在网关内存里，默认 60s 才同步。
-  // 不等它可路由，请求会得到底座自己的 `model_not_found 503`——那是"没有渠道"，
-  // 而不是我们要验证的"准入拒绝"，测试会因为错误的原因失败/通过。
+  // 先在默认范围下拿到真实 200，证明后续 503 来自准入拒绝，而不是模型尚未可路由。
+  await setPrefs({ scope_mode: 0, allow_fallback: true });
   let routable = false;
   for (let i = 0; i < 24 && !routable; i++) {
     const probe = await call(`${BASE}/v1/chat/completions`, {
       method: 'POST', auth: 'Bearer ' + platformKey,
       body: { model: 'stub/rej-' + stamp, messages: [{ role: 'user', content: 'warm' }] },
     });
-    if (!probe.text.includes('model_not_found')) { routable = true; break; }
+    if (probe.status === 200) { routable = true; break; }
+    if (!probe.text.includes('model_not_found')) {
+      throw new Error(`模型预热失败：HTTP ${probe.status} ${probe.text.slice(0, 120)}`);
+    }
     await new Promise((r) => setTimeout(r, 5000));
   }
-  if (!routable) throw new Error('等待模型可路由超时（网关始终 model_not_found）');
+  if (!routable) throw new Error('等待已发布 Offering 可路由超时（网关始终 model_not_found）');
   dim('模型已进入网关路由缓存');
+
+  await setPrefs({ scope_mode: 1, allowed_owner_user_ids: [userB.userId], allow_fallback: false });
 
   const denied = recorded('C', await call(`${BASE}/v1/chat/completions`, {
     method: 'POST', auth: 'Bearer ' + platformKey,
     body: { model: 'stub/rej-' + stamp, messages: [{ role: 'user', content: 'x' }] },
   }));
   info(`C 来源不允许 → HTTP ${denied.status} ${denied.text.slice(0, 110)}`);
-  check('C 来源不允许 → 403（语义正确，不再是上游 500）', denied.status === 403, `HTTP ${denied.status}`);
+  check('C 来源不允许 → 统一 503', denied.status === 503 && denied.text.includes(SOURCE_DENIAL), `HTTP ${denied.status}`);
 
   // ---- D. 容量超限 → 429 + Retry-After ----
   await setPrefs({ scope_mode: 0, allow_fallback: true }); // 复原来源限制，避免干扰容量判定

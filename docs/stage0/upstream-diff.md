@@ -13,12 +13,12 @@
 ## 当前统计
 
 - 基线提交：`69a50029819a26c53e6babd276d49cfe2f8880ad`
-- 当前 fork 提交：`f21afa8d41e5ac1629571e084ff030cfc0ebcbbc`
-- 相对基线提交数：**157** 个
-- 变化文件：**198** 个（新增 **125**，修改上游已有文件 **73**）
-- 行数变化：新增 **27,644** 行，删除 **126** 行
+- 当前 fork 提交：`7784cb260bb61e11e0ee6d21bc7cff231982217d`
+- 相对基线提交数：**158** 个
+- 变化文件：**205** 个（新增 **125**，修改上游已有文件 **80**）
+- 行数变化：新增 **28,435** 行，删除 **131** 行
 - 未跟踪文件：**0** 个
-- 核对时间：2026-09-18（`git diff --name-status/--shortstat`；接手审查）
+- 核对时间：2026-09-19（`git diff --name-status/--shortstat`；阶段 B1 收口）
 
 > 2026-09-18 接手审查纠正：本节此前仍写“修改上游文件 0 个”，那只是阶段 0 早期快照，已经与当前 fork 不符。完整风险与整改顺序见 `docs/TAKEOVER_AUDIT.md`。
 
@@ -33,7 +33,8 @@
 | D-029 | `new-api/main.go` + `apigx/startup/**` | 新增校验器 + 接线 | `InitResources` 在数据库、Redis、选项和日志库完成初始化后、后台任务启动前执行 APIGX 配置一致性检查；共享模式强制 usage-only、来源守卫、容量、Key/质量统计、熔断、策略路由、TPM 调整、Redis、64 位十六进制主密钥和 MySQL InnoDB | 接手整改阶段 A：避免共享平台在关键保护开关缺失或互相矛盾时仍带病启动；通用 New API 默认配置保持兼容 | 低到中：`main.go` 新增一个失败关闭的启动点；上游升级时需确认资源初始化顺序仍保持“依赖已就绪、后台任务未启动” | 2026-09-18 | 已实施并实测 MyISAM 拒绝 / InnoDB 接受 |
 | D-030 | `new-api/common/redis.go`、`model/{token_cache,user_auth_cache,user_session}.go` | 兼容修复 | Go Pipeline 的 map 写入改为逐字段 `HSET`；Lua 多字段写入改用 `HMSET`，保留原事务、TTL、认证栅栏与会话版本语义 | 本地锁定环境使用 Redis 3.0.504；Redis 4 才支持多组 field/value 的 `HSET`，原实现持续报 `Wrong number of args` 并导致登录后缓存接口异常 | 中：触及底座缓存公共路径；已用真实 Redis 完成登录、用户信息、令牌接口和全仓回归，升级 Redis 后仍兼容 | 2026-09-18 | 已实施 |
 | D-031 | `new-api/service/channel_affinity_*_test.go`、`controller/{access_token_audit,security_enrollment}_test.go` | 测试隔离修复 | 亲和缓存夹具改用进程内原子序列；SQLite 使用 WAL + 有界 busy timeout；捕获并关闭每次 `InitDB/InitLogDB` 新建的连接，避免全局句柄覆盖后泄漏 | 接手整改阶段 A：Windows 下纳秒时钟键碰撞、SQLite 文件占用和并发写锁令整包/全仓测试不可信 | 低：只改测试；SQLite 并发用例各 20 次、service/controller 整包与全仓通过 | 2026-09-18 | 已实施 |
-| D-032 | `new-api/relay/channel/api_request_getbody_test.go` | 测试契约修复 | HTTP/2 不可重放请求的负例不再绑定 Go/Windows socket 内部错误文案，继续断言请求失败、无响应、服务端仅收到一次流且请求体完整 | 同一不可重试场景在 Windows 上可能先暴露连接强制断开；原文案断言 50 次中失败 4 次，但业务不变量始终成立 | 低：只收敛既有测试到可观察契约；定向 100 次和整包、全仓均通过 | 2026-09-18 | 已实施 |
+| D-032 | `new-api/relay/channel/api_request_getbody_test.go` | 测试契约与服务端夹具修复 | HTTP/2 不可重放请求的负例不再绑定 Go/Windows socket 内部错误文案；GOAWAY 重放夹具先半关闭写端并排空对端数据，使客户端先观察到优雅 GOAWAY，再继续断言请求失败/重放次数与请求体等可观察契约 | Windows 在未读取 SETTINGS ACK 时全关闭连接会把 GOAWAY 转成 `WSAECONNRESET`，令测试随机错过预期重放路径；这是夹具时序问题，不改变生产请求逻辑 | 低：只改测试；不可重放负例定向 100 次、GOAWAY 重放 20 次、整包与全仓均通过 | 2026-09-19 | 已实施 |
+| D-033 | `new-api/{middleware/distributor.go,dto/channel_constraints.go,model/channel_constraint.go,relay/**,controller/{task,video_proxy}.go}` + `new-api/apigx/{model,relayhook,routing}/**` | 统一资源授权与出站复验 | 新增按 owner、公开、有效 Grant、资源存活/发布状态计算的授权快照；把平台 Key 模型白名单、固定 Offering、允许分享者与资源 ACL 求交，并在固定来源、自动/策略、亲和、随机、重试、任务原渠道、Midjourney、Responses WebSocket 和历史任务上游代理路径统一过滤与出站前复验；已撤销 Grant 不再可见，已停用/删除的 APIGX 渠道仍保留受管理身份，拒绝统一为 503 | 接手审查 P0：此前非公开、已撤权或已停用的分享资源可经底座候选、历史 channel ID 或旁路入口继续出站；计划书要求所有选路入口共享一条授权链且授权先于质量、容量与 Key 选择 | **中高**：触及底座分发、任务和 WebSocket 高频路径；已用身份矩阵、受影响包、全仓、本地 PostgreSQL+Redis+真实网关/本地替身闭环验证，仍需后续真实第三方上游与生产多实例验证 | 2026-09-19 | 已实施 |
 | D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
 | D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
 | D-009 | `new-api/middleware/distributor.go` | 必须修改 | 在 `SetupContextForSelectedChannel` 之后、`c.Next()` 之前插入容量钩子：`relayhook.Acquire` 取租约、`defer lease.Release()` 在下游全部结束后释放；满载 429、账本不可用 503。另加 1 行 import | T1.7 第二部分；计划书 §9.2（共享容量控制必须贯穿请求生命周期） | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。改动本身是「新增一个可开关的调用」，默认关闭时行为不变 | 2026-09-16 | 已实施（默认关闭，`APIGX_CAPACITY_ENABLED`） |

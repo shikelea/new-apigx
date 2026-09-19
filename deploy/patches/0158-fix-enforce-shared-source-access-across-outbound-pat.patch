@@ -1,0 +1,1542 @@
+From 7784cb260bb61e11e0ee6d21bc7cff231982217d Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sat, 19 Sep 2026 10:39:40 +0800
+Subject: [PATCH 158/158] fix: enforce shared source access across outbound
+ paths
+
+---
+ apigx/model/repo_access.go                | 140 +++++++++-
+ apigx/model/repo_access_test.go           |  83 ++++++
+ apigx/model/repo_plaza.go                 |   1 +
+ apigx/relayhook/breaker_guard_test.go     | 176 +++++++++++++
+ apigx/relayhook/route_strategy.go         |  45 ++--
+ apigx/relayhook/source_guard.go           | 307 ++++++++++++++++------
+ apigx/routing/assemble.go                 |   9 +
+ apigx/routing/decide_test.go              |  30 +++
+ controller/responses_websocket_test.go    |   7 +-
+ controller/task.go                        |  50 ++++
+ controller/video_proxy.go                 |   3 +
+ dto/channel_constraints.go                |   5 +
+ middleware/distributor.go                 |  68 +++--
+ model/channel_constraint.go               |   4 +
+ model/channel_constraint_test.go          |  19 ++
+ relay/channel/api_request_getbody_test.go |  12 +-
+ relay/mjproxy_handler.go                  |   8 +
+ relay/relay_task.go                       |  30 ++-
+ relay/responses_websocket.go              |  29 ++
+ 19 files changed, 906 insertions(+), 120 deletions(-)
+
+diff --git a/apigx/model/repo_access.go b/apigx/model/repo_access.go
+index 0fdbd6c..2fa33ca 100644
+--- a/apigx/model/repo_access.go
++++ b/apigx/model/repo_access.go
+@@ -33,6 +33,29 @@ import (
+ 	"gorm.io/gorm/clause"
+ )
+ 
++// OfferingAccessResource 是出站授权所需的最小资源快照。
++//
++// 它刻意只包含权限判定需要的字段，不把上游地址、凭据或内部配置带进路由层。
++// BaseChannelID 用于把 APIGX 分享渠道映射回 New API 的实际候选渠道。
++type OfferingAccessResource struct {
++	OfferingID      int64
++	ShareChannelID  int64
++	BaseChannelID   int64
++	OwnerUserID     int64
++	ShareGroupID    int64
++	GroupVisibility int
++}
++
++// SourceAccessSnapshot 是某个调用主体针对一个模型的授权快照。
++// ManagedBaseChannelIDs 包含 APIGX 曾创建过的全部底座渠道；Allowed* 只包含当前仍可路由且有权访问的资源。
++// 两者做差即可在候选阶段排除草稿、暂停、删除或无权访问的分享渠道，同时不影响管理员自建渠道。
++type SourceAccessSnapshot struct {
++	ManagedBaseChannelIDs []int
++	AllowedBaseChannelIDs []int
++	AllowedOfferingIDs    map[int64]struct{}
++	AllowedResources      []OfferingAccessResource
++}
++
+ // 访问控制：邀请与授权（计划书 §4「访问控制：公开、邀请兑换、指定用户、仅自己；访问撤销与到期」、
+ // §5「邀请准入」、§10.1「注册邀请码与资源访问邀请码使用独立类型和校验逻辑」）。
+ //
+@@ -271,7 +294,7 @@ func SubjectCanAccessResource(db *gorm.DB, subjectType int, subjectID int64, res
+ 
+ 	var count int64
+ 	if err := db.Model(&Grant{}).
+-		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND (expires_at = 0 OR expires_at > ?)",
++		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND revoked_at = 0 AND (expires_at = 0 OR expires_at > ?)",
+ 			subjectType, subjectID, resourceType, resourceID, now).
+ 		Count(&count).Error; err != nil {
+ 		return false, err
+@@ -299,7 +322,7 @@ func GrantExistsForResource(db *gorm.DB, subjectType int, subjectID int64, resou
+ 	}
+ 	var count int64
+ 	if err := db.Model(&Grant{}).
+-		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND (expires_at = 0 OR expires_at > ?)",
++		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND revoked_at = 0 AND (expires_at = 0 OR expires_at > ?)",
+ 			subjectType, subjectID, resourceType, resourceID, now).
+ 		Count(&count).Error; err != nil {
+ 		return false, err
+@@ -307,6 +330,119 @@ func GrantExistsForResource(db *gorm.DB, subjectType int, subjectID int64, resou
+ 	return count > 0, nil
+ }
+ 
++// ResolveSourceAccessSnapshot 统一计算一个用户/平台 Key 对某模型的分享来源访问范围。
++//
++// 判定顺序固定为：资源存活且已发布 → owner / 公开 / 分组 Grant / Offering Grant。
++// 平台 Key 的固定来源、允许分享者与允许模型属于调用凭证约束，由 relayhook 在本结果上继续求交。
++// 这里一次性读取 Grant，避免对每条供给做 N+1 查询。
++func ResolveSourceAccessSnapshot(db *gorm.DB, viewerUserID, platformKeyID int64, upstreamModelID string, now int64) (SourceAccessSnapshot, error) {
++	snapshot := SourceAccessSnapshot{AllowedOfferingIDs: map[int64]struct{}{}}
++	if db == nil {
++		return snapshot, errors.New("apigxmodel: nil db")
++	}
++	if viewerUserID <= 0 {
++		return snapshot, nil
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++
++	// 用 Unscoped 读取历史映射：只要某个底座渠道曾由 APIGX 创建，它就不能在分享资源
++	// 被暂停或软删后伪装成普通管理员渠道绕过 ACL。
++	var managedBaseIDs64 []int64
++	if err := db.Unscoped().Model(&Channel{}).
++		Where("base_channel_id > 0").Distinct("base_channel_id").
++		Pluck("base_channel_id", &managedBaseIDs64).Error; err != nil {
++		return snapshot, err
++	}
++	managedSeen := make(map[int]struct{}, len(managedBaseIDs64))
++	for _, id := range managedBaseIDs64 {
++		if id <= 0 {
++			continue
++		}
++		baseID := int(id)
++		if _, exists := managedSeen[baseID]; exists {
++			continue
++		}
++		managedSeen[baseID] = struct{}{}
++		snapshot.ManagedBaseChannelIDs = append(snapshot.ManagedBaseChannelIDs, baseID)
++	}
++	if strings.TrimSpace(upstreamModelID) == "" {
++		return snapshot, nil
++	}
++
++	offeringTable := ModelOffering{}.TableName()
++	channelTable := Channel{}.TableName()
++	groupTable := ShareGroup{}.TableName()
++	var resources []OfferingAccessResource
++	err := db.Table(offeringTable+" AS o").
++		Select("o.id AS offering_id, o.channel_id AS share_channel_id, c.base_channel_id AS base_channel_id, "+
++			"c.owner_user_id AS owner_user_id, g.id AS share_group_id, g.default_visibility AS group_visibility").
++		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
++		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
++		Where("o.upstream_model_id = ? AND o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ? AND g.publish_status = ?",
++			upstreamModelID, OfferingStatusPublished, AliveFlagAlive, ShareGroupPublishPublished).
++		Order("o.id ASC").Scan(&resources).Error
++	if err != nil {
++		return snapshot, err
++	}
++	if len(resources) == 0 {
++		return snapshot, nil
++	}
++
++	groupIDs := make([]int64, 0, len(resources))
++	offeringIDs := make([]int64, 0, len(resources))
++	for _, resource := range resources {
++		groupIDs = append(groupIDs, resource.ShareGroupID)
++		offeringIDs = append(offeringIDs, resource.OfferingID)
++	}
++
++	granted := map[string]struct{}{}
++	subjectSQL := "(subject_type = ? AND subject_id = ?)"
++	subjectArgs := []any{GrantSubjectUser, viewerUserID}
++	if platformKeyID > 0 {
++		subjectSQL = "(" + subjectSQL + " OR (subject_type = ? AND subject_id = ?))"
++		subjectArgs = append(subjectArgs, GrantSubjectAPIKey, platformKeyID)
++	}
++	var grants []Grant
++	grantQuery := db.Model(&Grant{}).
++		Where(subjectSQL, subjectArgs...).
++		Where("revoked_at = 0 AND (expires_at = 0 OR expires_at > ?)", now).
++		Where("(resource_type = ? AND resource_id IN ?) OR (resource_type = ? AND resource_id IN ?)",
++			GrantResourceGroup, groupIDs, GrantResourceOffering, offeringIDs)
++	if err := grantQuery.Find(&grants).Error; err != nil {
++		return snapshot, err
++	}
++	for _, grant := range grants {
++		granted[fmt.Sprintf("%d:%d", grant.ResourceType, grant.ResourceID)] = struct{}{}
++	}
++
++	allowedBaseSeen := map[int]struct{}{}
++	for _, resource := range resources {
++		allowed := resource.OwnerUserID == viewerUserID || resource.GroupVisibility == ShareGroupVisibilityPublic
++		if !allowed {
++			_, groupGranted := granted[fmt.Sprintf("%d:%d", GrantResourceGroup, resource.ShareGroupID)]
++			_, offeringGranted := granted[fmt.Sprintf("%d:%d", GrantResourceOffering, resource.OfferingID)]
++			allowed = groupGranted || offeringGranted
++		}
++		if !allowed {
++			continue
++		}
++		snapshot.AllowedOfferingIDs[resource.OfferingID] = struct{}{}
++		snapshot.AllowedResources = append(snapshot.AllowedResources, resource)
++		baseID := int(resource.BaseChannelID)
++		if baseID <= 0 {
++			continue
++		}
++		if _, exists := allowedBaseSeen[baseID]; exists {
++			continue
++		}
++		allowedBaseSeen[baseID] = struct{}{}
++		snapshot.AllowedBaseChannelIDs = append(snapshot.AllowedBaseChannelIDs, baseID)
++	}
++	return snapshot, nil
++}
++
+ // randomInviteToken 生成一次性邀请码明文（base64url，无填充）。
+ //
+ // 两个调用方：资源访问邀请（CreateAccessInvite）与注册邀请（CreateRegistrationInvite）——
+diff --git a/apigx/model/repo_access_test.go b/apigx/model/repo_access_test.go
+index db9c12a..23aa3e2 100644
+--- a/apigx/model/repo_access_test.go
++++ b/apigx/model/repo_access_test.go
+@@ -171,6 +171,89 @@ func TestSubjectCanAccessResource(t *testing.T) {
+ 	ok, err = SubjectCanAccessResource(db, GrantSubjectUser, invited, GrantResourceGroup, groupID, 5000)
+ 	require.NoError(t, err)
+ 	assert.False(t, ok, "授权到期后不可访问")
++
++	// 授权显式撤销后也不可访问（不能只看 expires_at）。
++	require.NoError(t, db.Model(&Grant{}).Where("subject_id = ?", invited).
++		Updates(map[string]any{"expires_at": 0, "revoked_at": 4000}).Error)
++	ok, err = SubjectCanAccessResource(db, GrantSubjectUser, invited, GrantResourceGroup, groupID, 3000)
++	require.NoError(t, err)
++	assert.False(t, ok, "授权撤销后不可访问")
++}
++
++func TestResolveSourceAccessSnapshotIdentityMatrix(t *testing.T) {
++	const ownerA, ownerB, viewer, stranger int64 = 9751, 9752, 9753, 9754
++	db := newRepoDB(t)
++
++	type seeded struct {
++		group    *ShareGroup
++		channel  *Channel
++		offering *ModelOffering
++	}
++	seed := func(owner int64, visibility int, baseID int64, name string) seeded {
++		t.Helper()
++		group := &ShareGroup{
++			OwnerUserID: owner, Name: name, DefaultVisibility: visibility,
++			PublishStatus: ShareGroupPublishPublished,
++		}
++		require.NoError(t, CreateShareGroup(db, group))
++		channel := &Channel{
++			OwnerUserID: owner, ShareGroupID: group.ID, Name: name + "渠道", BaseChannelID: baseID,
++		}
++		require.NoError(t, CreateChannel(db, channel))
++		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "acl-model"}
++		require.NoError(t, CreateModelOffering(db, owner, offering))
++		require.NoError(t, db.Model(&ModelOffering{}).Where("id = ?", offering.ID).
++			Update("status", OfferingStatusPublished).Error)
++		return seeded{group: group, channel: channel, offering: offering}
++	}
++
++	public := seed(ownerA, ShareGroupVisibilityPublic, 91001, "公开")
++	private := seed(ownerA, ShareGroupVisibilityPrivate, 91002, "私有")
++	limited := seed(ownerB, ShareGroupVisibilityLimited, 91003, "受限")
++	suspended := seed(ownerB, ShareGroupVisibilityPublic, 91004, "暂停")
++	require.NoError(t, SetShareGroupPublishStatus(db, suspended.group.ID, ShareGroupPublishSuspended))
++
++	allowedIDs := func(snapshot SourceAccessSnapshot) map[int64]bool {
++		result := map[int64]bool{}
++		for id := range snapshot.AllowedOfferingIDs {
++			result[id] = true
++		}
++		return result
++	}
++
++	ownerSnapshot, err := ResolveSourceAccessSnapshot(db, ownerA, 0, "acl-model", 10_000)
++	require.NoError(t, err)
++	assert.Equal(t, map[int64]bool{public.offering.ID: true, private.offering.ID: true}, allowedIDs(ownerSnapshot))
++	assert.Len(t, ownerSnapshot.ManagedBaseChannelIDs, 4, "暂停资源仍是 APIGX 管理渠道，必须留在 deny 集合中")
++
++	strangerSnapshot, err := ResolveSourceAccessSnapshot(db, stranger, 0, "acl-model", 10_000)
++	require.NoError(t, err)
++	assert.Equal(t, map[int64]bool{public.offering.ID: true}, allowedIDs(strangerSnapshot))
++
++	groupGrant, err := CreateGrantForUser(db, ownerB, GrantResourceGroup, limited.group.ID, viewer, 0)
++	require.NoError(t, err)
++	viewerSnapshot, err := ResolveSourceAccessSnapshot(db, viewer, 0, "acl-model", 10_000)
++	require.NoError(t, err)
++	assert.Equal(t, map[int64]bool{public.offering.ID: true, limited.offering.ID: true}, allowedIDs(viewerSnapshot))
++
++	// 撤销分组授权，再授予单个 Offering：粒度必须准确，且 revoked_at 必须实时生效。
++	require.NoError(t, db.Model(&Grant{}).Where("id = ?", groupGrant.ID).Update("revoked_at", 9_000).Error)
++	_, err = CreateGrantForUser(db, ownerA, GrantResourceOffering, private.offering.ID, viewer, 20_000)
++	require.NoError(t, err)
++	viewerSnapshot, err = ResolveSourceAccessSnapshot(db, viewer, 0, "acl-model", 10_000)
++	require.NoError(t, err)
++	assert.Equal(t, map[int64]bool{public.offering.ID: true, private.offering.ID: true}, allowedIDs(viewerSnapshot))
++
++	// 平台 Key 也可作为授权主体；用户本身没有这条私有资源授权。
++	const platformKeyID int64 = 88001
++	require.NoError(t, db.Create(&Grant{
++		SubjectType: GrantSubjectAPIKey, SubjectID: platformKeyID,
++		ResourceType: GrantResourceOffering, ResourceID: private.offering.ID,
++		GrantedByUserID: ownerA, CreatedAt: 1, UpdatedAt: 1,
++	}).Error)
++	keySnapshot, err := ResolveSourceAccessSnapshot(db, stranger, platformKeyID, "acl-model", 10_000)
++	require.NoError(t, err)
++	assert.Equal(t, map[int64]bool{public.offering.ID: true, private.offering.ID: true}, allowedIDs(keySnapshot))
+ }
+ 
+ // 注册邀请（§5 邀请准入）：**补偿回补**必须真的把名额还回去，且类型不得串用（§10.1）。
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index d228e63..b53f6d3 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -119,6 +119,7 @@ func plazaVisibilityPredicate(viewerUserID int64) (string, []any) {
+ 	condition := "(g.default_visibility = ?" +
+ 		" OR EXISTS (SELECT 1 FROM " + grantTable + " AS gr" +
+ 		" WHERE gr.subject_type = ? AND gr.subject_id = ?" +
++		" AND gr.revoked_at = 0" +
+ 		" AND (gr.expires_at = 0 OR gr.expires_at > ?)" +
+ 		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))" +
+ 		// 闸门（U-1）：公开/受邀**之外**，分组本身还必须处于「已发布」。
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+index 211f980..74de862 100644
+--- a/apigx/relayhook/breaker_guard_test.go
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -8,8 +8,10 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
+ 	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/relaykit/types"
+ 	"github.com/gin-gonic/gin"
+@@ -191,6 +193,180 @@ func TestBreakerGuardSkipsNonShareChannels(t *testing.T) {
+ 	assert.Nil(t, CheckBreakerAllows(c, env.baseChannelID, ""), "缺模型名不熔断")
+ }
+ 
++// 出站 ACL 身份矩阵：owner / 公开 / 分组授权 / Offering 授权可用；无权、撤销、到期不可用。
++// 同时验证平台 Key 的允许 owner、固定 Offering 与模型白名单会在候选阶段形成 allow-list，
++// 且最终守卫对管理员渠道也不允许借道。
++func TestSourceAccessGuardIdentityAndPlatformKeyMatrix(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	previousDB := channelpool.CurrentDB()
++	channelpool.SetDBProvider(func() *gorm.DB { return env.db })
++	t.Cleanup(func() {
++		channelpool.SetDBProvider(func() *gorm.DB { return previousDB })
++		ResetPreferenceCacheForTest()
++	})
++	SetSourceGuardEnabled(true)
++	t.Cleanup(func() { SetSourceGuardEnabled(true) })
++
++	const owner, viewer, tokenID int64 = 991001, 991002, 77001
++	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", env.shareChannel.ShareGroupID).
++		Updates(map[string]any{
++			"default_visibility": apigxmodel.ShareGroupVisibilityPrivate,
++			"publish_status":     apigxmodel.ShareGroupPublishPublished,
++		}).Error)
++	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", env.offeringID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
++
++	newIdentityContext := func(userID int64) *gin.Context {
++		c := env.newContext(t)
++		common.SetContextKey(c, constant.ContextKeyUserId, int(userID))
++		common.SetContextKey(c, constant.ContextKeyTokenId, int(tokenID))
++		return c
++	}
++
++	// 私有资源：陌生人候选阶段被排除，最终守卫返回统一错误；owner 可用。
++	viewerCtx := newIdentityContext(viewer)
++	ids, allowList, apply, err := SourceAccessChannelFilter(viewerCtx, "breaker-model")
++	require.NoError(t, err)
++	assert.True(t, apply)
++	assert.False(t, allowList)
++	assert.ElementsMatch(t, []int{env.baseChannelID}, ids)
++	denied := CheckSourceAllowed(viewerCtx, env.baseChannelID, "breaker-model")
++	require.NotNil(t, denied)
++	assert.Equal(t, http.StatusServiceUnavailable, denied.StatusCode)
++	assert.Equal(t, "no available source for the requested model", denied.Error())
++	require.NotNil(t, CheckSourceAllowedForUser(viewer, env.baseChannelID, "breaker-model"),
++		"signed historical-task paths must re-check the task owner without a token context")
++
++	ownerCtx := newIdentityContext(owner)
++	_, _, apply, err = SourceAccessChannelFilter(ownerCtx, "breaker-model")
++	require.NoError(t, err)
++	assert.False(t, apply)
++	assert.Nil(t, CheckSourceAllowed(ownerCtx, env.baseChannelID, "breaker-model"))
++	assert.Nil(t, CheckSourceAllowedForUser(owner, env.baseChannelID, "breaker-model"))
++
++	// 分组授权生效；撤销后立即失效。
++	groupGrant, err := apigxmodel.CreateGrantForUser(env.db, owner, apigxmodel.GrantResourceGroup,
++		env.shareChannel.ShareGroupID, viewer, 0)
++	require.NoError(t, err)
++	assert.Nil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID, "breaker-model"))
++	require.NoError(t, env.db.Model(&apigxmodel.Grant{}).Where("id = ?", groupGrant.ID).
++		Update("revoked_at", common.GetTimestamp()).Error)
++	require.NotNil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID, "breaker-model"))
++
++	// Offering 授权生效；到期后立即失效。
++	offeringGrant, err := apigxmodel.CreateGrantForUser(env.db, owner, apigxmodel.GrantResourceOffering,
++		env.offeringID, viewer, common.GetTimestamp()+3600)
++	require.NoError(t, err)
++	assert.Nil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID, "breaker-model"))
++	require.NoError(t, env.db.Model(&apigxmodel.Grant{}).Where("id = ?", offeringGrant.ID).
++		Update("expires_at", 1).Error)
++	require.NotNil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID, "breaker-model"))
++
++	// 公开资源对普通调用者可用。
++	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", env.shareChannel.ShareGroupID).
++		Update("default_visibility", apigxmodel.ShareGroupVisibilityPublic).Error)
++	assert.Nil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID, "breaker-model"))
++
++	// 允许 owner 模式会形成分享渠道 allow-list，并禁止借道普通管理员渠道。
++	_, err = apigxmodel.UpsertAPIKeyPreferences(env.db, viewer, tokenID, func(key *apigxmodel.APIKey) error {
++		key.ScopeMode = apigxmodel.ScopeModeAllowedOwners
++		key.AllowFallback = false
++		return key.SetAllowedOwnerIDs([]int64{owner})
++	})
++	require.NoError(t, err)
++	ResetPreferenceCacheForTest()
++	ids, allowList, apply, err = SourceAccessChannelFilter(viewerCtx, "breaker-model")
++	require.NoError(t, err)
++	assert.True(t, apply)
++	assert.True(t, allowList)
++	assert.ElementsMatch(t, []int{env.baseChannelID}, ids)
++	require.NotNil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID+999, "breaker-model"))
++
++	// 固定 Offering 精确到供给：同一渠道上的另一条供给不能被当作固定来源。
++	otherOffering := &apigxmodel.ModelOffering{ChannelID: env.shareChannel.ID, UpstreamModelID: "another-model"}
++	require.NoError(t, apigxmodel.CreateModelOffering(env.db, owner, otherOffering))
++	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", otherOffering.ID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
++	_, err = apigxmodel.UpsertAPIKeyPreferences(env.db, viewer, tokenID, func(key *apigxmodel.APIKey) error {
++		key.ScopeMode = apigxmodel.ScopeModePinned
++		key.PinnedOfferingID = otherOffering.ID
++		key.AllowedModelIDs = ""
++		return nil
++	})
++	require.NoError(t, err)
++	ResetPreferenceCacheForTest()
++	ids, allowList, apply, err = SourceAccessChannelFilter(viewerCtx, "breaker-model")
++	require.NoError(t, err)
++	assert.True(t, apply)
++	assert.True(t, allowList)
++	assert.Empty(t, ids)
++
++	// 模型白名单不匹配时同样得到明确的空 allow-list。
++	_, err = apigxmodel.UpsertAPIKeyPreferences(env.db, viewer, tokenID, func(key *apigxmodel.APIKey) error {
++		key.ScopeMode = apigxmodel.ScopeModePinned
++		key.PinnedOfferingID = env.offeringID
++		key.AllowedModelIDs = `["another-model"]`
++		return nil
++	})
++	require.NoError(t, err)
++	ResetPreferenceCacheForTest()
++	ids, allowList, apply, err = SourceAccessChannelFilter(viewerCtx, "breaker-model")
++	require.NoError(t, err)
++	assert.True(t, apply)
++	assert.True(t, allowList)
++	assert.Empty(t, ids)
++	require.NotNil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID, "breaker-model"))
++	// 两个用户可以在各自测试库或租户上下文中出现相同 token ID；偏好缓存必须同时按
++	// user/token 隔离，owner 不能继承 viewer 的模型白名单拒绝。
++	assert.Nil(t, CheckSourceAllowed(ownerCtx, env.baseChannelID, "breaker-model"))
++}
++
++func TestSourceAccessGuardDatabaseFailureMode(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	previousDB := channelpool.CurrentDB()
++	channelpool.SetDBProvider(func() *gorm.DB { return env.db })
++	t.Cleanup(func() {
++		channelpool.SetDBProvider(func() *gorm.DB { return previousDB })
++		ResetPreferenceCacheForTest()
++	})
++	SetSourceGuardEnabled(true)
++	t.Cleanup(func() { SetSourceGuardEnabled(true) })
++
++	sqlDB, err := env.db.DB()
++	require.NoError(t, err)
++	require.NoError(t, sqlDB.Close())
++
++	newContext := func() *gin.Context {
++		c := env.newContext(t)
++		common.SetContextKey(c, constant.ContextKeyUserId, 991002)
++		common.SetContextKey(c, constant.ContextKeyTokenId, 77001)
++		return c
++	}
++
++	t.Run("generic New API remains lazy", func(t *testing.T) {
++		t.Setenv("APIGX_SHARED_MODE", "false")
++		ResetPreferenceCacheForTest()
++		ids, allowList, apply, err := SourceAccessChannelFilter(newContext(), "breaker-model")
++		require.NoError(t, err)
++		assert.Empty(t, ids)
++		assert.False(t, allowList)
++		assert.False(t, apply)
++		assert.Nil(t, CheckSourceAllowed(newContext(), env.baseChannelID, "breaker-model"))
++		assert.Nil(t, CheckSourceAllowedForUser(991002, env.baseChannelID, "breaker-model"))
++	})
++
++	t.Run("shared mode fails closed", func(t *testing.T) {
++		t.Setenv("APIGX_SHARED_MODE", "true")
++		ResetPreferenceCacheForTest()
++		_, _, _, err := SourceAccessChannelFilter(newContext(), "breaker-model")
++		require.Error(t, err)
++		denied := CheckSourceAllowed(newContext(), env.baseChannelID, "breaker-model")
++		require.NotNil(t, denied)
++		assert.Equal(t, http.StatusServiceUnavailable, denied.StatusCode)
++		require.NotNil(t, CheckSourceAllowedForUser(991002, env.baseChannelID, "breaker-model"))
++	})
++}
++
+ // ---- 熔断的"改道"：标记渠道为不可选（T2.10 修法） ----
+ 
+ // 打开时把该渠道**所有** Key 标为不可用（底座会跳过并换渠道）；恢复时**只回收我们自己的标记**。
+diff --git a/apigx/relayhook/route_strategy.go b/apigx/relayhook/route_strategy.go
+index 4a3e1ff..8b63ae7 100644
+--- a/apigx/relayhook/route_strategy.go
++++ b/apigx/relayhook/route_strategy.go
+@@ -1,6 +1,7 @@
+ package relayhook
+ 
+ import (
++	"fmt"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -64,56 +65,70 @@ func routeStrategyFilterEnabled() bool {
+ //
+ // 返回 ok=false 表示**不要加限定**（未开启、未配置策略、策略为 auto、或算不出候选）——
+ // 宁可退回底座默认选路，也不要因为算不出来就把请求打成"没有合格渠道"。
+-func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, bool) {
++func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, bool, error) {
+ 	if !routeStrategyFilterEnabled() || c == nil || strings.TrimSpace(modelName) == "" {
+-		return nil, false
++		return nil, false, nil
+ 	}
+ 	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
+ 	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
+ 	if tokenID <= 0 || userID <= 0 {
+-		return nil, false
++		return nil, false, nil
+ 	}
+ 	db := channelpool.CurrentDB()
+ 	if db == nil {
+-		return nil, false
++		return nil, false, nil
++	}
++	key, found, err := loadPreferences(db, int64(userID), int64(tokenID))
++	if err != nil {
++		_, err = handleSourceAccessDBError(err)
++		return nil, false, err
+ 	}
+-	key, found := loadPreferences(db, int64(userID), int64(tokenID))
+ 	if !found || key == nil {
+-		return nil, false
++		return nil, false, nil
+ 	}
+ 	strategy, ok := parseRouteStrategy(key.DefaultRouteMode)
+ 	if !ok {
+-		return nil, false // 空/auto/无法识别：不加限定
++		return nil, false, nil // 空/auto/无法识别：不加限定
++	}
++	allowedOfferingIDs, accessActive, err := AllowedOfferingIDsForRequest(c, modelName)
++	if err != nil {
++		return nil, false, err
++	}
++	if !accessActive {
++		allowedOfferingIDs = nil
+ 	}
+ 
+-	cacheKey := modelName + "|" + key.DefaultRouteMode
++	// ACL 因主体而异，策略缓存必须至少隔离 user/token；最终候选过滤和出站守卫仍会实时复验。
++	cacheKey := fmt.Sprintf("%s|%s|%d|%d", modelName, key.DefaultRouteMode, userID, tokenID)
+ 	now := time.Now()
+ 	routeStrategyCacheMu.RLock()
+ 	cached, exists := routeStrategyCache[cacheKey]
+ 	routeStrategyCacheMu.RUnlock()
+ 	if exists && now.Before(cached.expiresAt) {
+ 		if len(cached.channelIDs) == 0 {
+-			return nil, false
++			return nil, false, nil
+ 		}
+-		return cached.channelIDs, true
++		return cached.channelIDs, true, nil
+ 	}
+ 
+-	channelIDs := computeEligibleBaseChannels(db, modelName, strategy)
++	channelIDs := computeEligibleBaseChannels(db, modelName, strategy, allowedOfferingIDs)
+ 	routeStrategyCacheMu.Lock()
+ 	routeStrategyCache[cacheKey] = cachedStrategyChannels{channelIDs: channelIDs, expiresAt: now.Add(routeStrategyCacheTTL)}
+ 	routeStrategyCacheMu.Unlock()
+ 	if len(channelIDs) == 0 {
+-		return nil, false
++		return nil, false, nil
+ 	}
+-	return channelIDs, true
++	return channelIDs, true, nil
+ }
+ 
+ // computeEligibleBaseChannels 算出"最优名次那一档"对应的底座渠道 ID。
+ //
+ // 与解释接口、应用接口**共用同一套候选装配与熔断口径**，避免出现
+ // "解释里它在候选里、实际选路却不考虑它"这类不一致。
+-func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing.Strategy) []int {
+-	candidates, _, err := routing.AssembleCandidates(db, capacity.New(common.RDB), modelName, routing.AssembleOptions{})
++func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing.Strategy, allowedOfferingIDs map[int64]struct{}) []int {
++	candidates, _, err := routing.AssembleCandidates(db, capacity.New(common.RDB), modelName, routing.AssembleOptions{
++		AllowedOfferingIDs: allowedOfferingIDs,
++	})
+ 	if err != nil || len(candidates) == 0 {
+ 		return nil
+ 	}
+diff --git a/apigx/relayhook/source_guard.go b/apigx/relayhook/source_guard.go
+index 7794f87..8fc578e 100644
+--- a/apigx/relayhook/source_guard.go
++++ b/apigx/relayhook/source_guard.go
+@@ -16,20 +16,27 @@ import (
+ 	"gorm.io/gorm"
+ )
+ 
+-// 平台 Key 的「允许来源」准入（T1.10 执行侧）。
++// 分享资源 ACL 与平台 Key 来源范围的统一执行侧守卫。
+ //
+-// 语义：
+-//   - 平台 Key 没有配置偏好、或范围模式不是「允许来源」→ 放行（默认行为不变）；
+-//   - 选中的渠道**不是**本平台的分享渠道（例如管理员自建）→ 拒绝：限制了来源的 Key
+-//     只应当使用分享渠道，宁可拒绝也不要悄悄绕开限制；
+-//   - 渠道所属分享者**不在允许列表**时：
+-//   - `AllowFallback=true` → 返回**可重试**错误，交给底座既有的重试机制**重新选择**渠道
+-//     （复用底座的重选，不自己写候选循环，见 docs/stage0/upstream-diff.md D-016）；
+-//   - `AllowFallback=false` → 直接拒绝（不可回退）。
+-//
+-// 开关默认开启，但**只有配置了「允许来源」偏好的 Key 才会被影响**，因此对既有行为是惰性的。
++// 每次请求都先按 owner、公开、有效 Grant 与资源发布状态得到可用 Offering，再与平台 Key
++// 的模型白名单、固定 Offering 或允许分享者范围求交。普通 New API 管理员渠道仍沿用底座规则；
++// 只有平台 Key 显式要求分享来源时才禁止借道它们。所有拒绝统一返回“无可用来源”，避免泄露
++// 资源是否存在、是否私有、是否暂停以及授权为何失效。
+ var sourceGuardEnabled = common.GetEnvOrDefaultBool("APIGX_SOURCE_GUARD_ENABLED", true)
+ 
++const requestSourceAccessContextKey = "apigx_request_source_access"
++
++type requestSourceAccess struct {
++	active             bool
++	modelName          string
++	key                *apigxmodel.APIKey
++	managedBaseIDs     map[int]struct{}
++	allowedBaseIDs     map[int]struct{}
++	allowedOfferingIDs map[int64]struct{}
++	requireShareSource bool
++	denyAll            bool
++}
++
+ // SetSourceGuardEnabled 运行期开关（供测试与将来的后台配置使用）。
+ func SetSourceGuardEnabled(on bool) { sourceGuardEnabled = on }
+ 
+@@ -44,126 +51,264 @@ type cachedPreferences struct {
+ 	expiresAt time.Time
+ }
+ 
++type preferenceCacheKey struct {
++	userID  int64
++	tokenID int64
++}
++
+ var (
+ 	prefCacheMu sync.RWMutex
+-	prefCache   = map[int64]cachedPreferences{} // key = 平台 Key（底座令牌）ID
++	prefCache   = map[preferenceCacheKey]cachedPreferences{}
+ )
+ 
+ // loadPreferences 读取某令牌的 APIGX 偏好（带短 TTL 缓存：准入在每个请求上都要判断）。
+-func loadPreferences(db *gorm.DB, userID, tokenID int64) (*apigxmodel.APIKey, bool) {
++// 数据库错误必须向上传播且不能写入“未配置”缓存，否则数据库短暂故障恢复后会在 TTL 内
++// 把受限平台 Key 当作默认 Key，形成来源范围放宽。
++func loadPreferences(db *gorm.DB, userID, tokenID int64) (*apigxmodel.APIKey, bool, error) {
+ 	if db == nil || tokenID <= 0 || userID <= 0 {
+-		return nil, false
++		return nil, false, nil
+ 	}
+ 	now := time.Now()
++	cacheKey := preferenceCacheKey{userID: userID, tokenID: tokenID}
+ 	prefCacheMu.RLock()
+-	if cached, ok := prefCache[tokenID]; ok && now.Before(cached.expiresAt) {
++	if cached, ok := prefCache[cacheKey]; ok && now.Before(cached.expiresAt) {
+ 		prefCacheMu.RUnlock()
+-		return cached.key, cached.found
++		return cached.key, cached.found, nil
+ 	}
+ 	prefCacheMu.RUnlock()
+ 
+ 	key, err := apigxmodel.GetAPIKeyByToken(db, userID, tokenID)
+-	found := err == nil
+-	if !found && !errors.Is(err, apigxmodel.ErrNotFound) {
+-		common.SysError("relayhook: load platform key preferences failed: " + err.Error())
++	if err != nil && !errors.Is(err, apigxmodel.ErrNotFound) {
++		return nil, false, err
+ 	}
++	found := err == nil
+ 
+ 	prefCacheMu.Lock()
+-	prefCache[tokenID] = cachedPreferences{key: key, found: found, expiresAt: now.Add(preferenceCacheTTL)}
++	prefCache[cacheKey] = cachedPreferences{key: key, found: found, expiresAt: now.Add(preferenceCacheTTL)}
+ 	prefCacheMu.Unlock()
+-	return key, found
++	return key, found, nil
+ }
+ 
+ // InvalidatePreferenceCache 丢弃某令牌的偏好缓存（偏好变更后调用，否则最长一个 TTL 才生效）。
+ func InvalidatePreferenceCache(tokenID int64) {
+ 	prefCacheMu.Lock()
+-	delete(prefCache, tokenID)
++	for key := range prefCache {
++		if key.tokenID == tokenID {
++			delete(prefCache, key)
++		}
++	}
+ 	prefCacheMu.Unlock()
+ }
+ 
+ // ResetPreferenceCacheForTest 清空全部偏好缓存（仅测试使用）。
+ func ResetPreferenceCacheForTest() {
+ 	prefCacheMu.Lock()
+-	prefCache = map[int64]cachedPreferences{}
++	prefCache = map[preferenceCacheKey]cachedPreferences{}
+ 	prefCacheMu.Unlock()
+ }
+ 
+-// CheckSourceAllowed 判断当前请求所选渠道/模型是否被该平台 Key 的偏好允许。
+-//
+-// 依次判定三件事：
+-//  1. **允许模型**：Key 配了允许模型列表时，请求的模型必须在列表内；
+-//  2. **固定来源**：范围模式为「固定来源」时，选中的渠道必须正是被固定的那条供给所属渠道；
+-//  3. **允许来源**：Key 限定来源时，选中渠道的分享者必须在允许列表内。
+-//
+-// 返回 nil 表示放行；否则返回应当抛给底座重试/中止流程的错误。
+-// 「可回退」时返回**可重试**错误让底座重选渠道；不可回退时直接写出 403 并中止上下文。
+-func CheckSourceAllowed(c *gin.Context, channelID int, modelName string) *types.NewAPIError {
+-	if !sourceGuardEnabled || c == nil || channelID <= 0 {
+-		return nil
++func emptyRequestSourceAccess() requestSourceAccess {
++	return requestSourceAccess{
++		managedBaseIDs:     map[int]struct{}{},
++		allowedBaseIDs:     map[int]struct{}{},
++		allowedOfferingIDs: map[int64]struct{}{},
+ 	}
+-	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
+-	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
+-	if tokenID <= 0 || userID <= 0 {
+-		// 没有平台 Key 上下文（例如内部调用）：不施加限制
+-		return nil
++}
++
++// resolveSourceAccessForIdentity 计算指定用户与可选平台 Key 的最终来源范围。
++// key=nil 用于历史任务内容等没有原令牌上下文、但仍需按任务所有者实时复验资源 ACL 的路径。
++func resolveSourceAccessForIdentity(db *gorm.DB, userID int64, key *apigxmodel.APIKey, modelName string) (requestSourceAccess, error) {
++	result := emptyRequestSourceAccess()
++	if db == nil || userID <= 0 {
++		return result, nil
++	}
++	platformKeyID := int64(0)
++	if key != nil {
++		result.key = key
++		platformKeyID = key.ID
++	}
++	snapshot, err := apigxmodel.ResolveSourceAccessSnapshot(db, userID, platformKeyID, modelName, 0)
++	if err != nil {
++		return result, err
++	}
++	result.active = true
++	result.modelName = modelName
++	for _, baseID := range snapshot.ManagedBaseChannelIDs {
++		result.managedBaseIDs[baseID] = struct{}{}
+ 	}
+ 
+-	db := channelpool.CurrentDB()
+-	key, found := loadPreferences(db, int64(userID), int64(tokenID))
+-	if !found || key == nil {
+-		return nil
++	if key != nil {
++		if allowedModels := key.AllowedModels(); len(allowedModels) > 0 && !slices.Contains(allowedModels, modelName) {
++			result.denyAll = true
++		}
++		result.requireShareSource = key.ScopeMode == apigxmodel.ScopeModePinned || key.ScopeMode == apigxmodel.ScopeModeAllowedOwners
+ 	}
+ 
+-	// ① 允许模型
+-	if allowedModels := key.AllowedModels(); len(allowedModels) > 0 && modelName != "" {
+-		if !slices.Contains(allowedModels, modelName) {
+-			return denyOrRetry(c, key, "model_not_allowed",
+-				"this API key is not allowed to use the requested model")
++	for _, resource := range snapshot.AllowedResources {
++		if result.denyAll {
++			continue
++		}
++		if key != nil && key.ScopeMode == apigxmodel.ScopeModePinned && resource.OfferingID != key.PinnedOfferingID {
++			continue
++		}
++		if key != nil && key.ScopeMode == apigxmodel.ScopeModeAllowedOwners {
++			allowed, _ := key.AllowsOwner(resource.OwnerUserID)
++			if !allowed {
++				continue
++			}
++		}
++		result.allowedOfferingIDs[resource.OfferingID] = struct{}{}
++		if resource.BaseChannelID > 0 {
++			result.allowedBaseIDs[int(resource.BaseChannelID)] = struct{}{}
+ 		}
+ 	}
++	return result, nil
++}
++
++// resolveRequestSourceAccess 先计算资源 ACL，再与平台 Key 的模型/固定供给/允许分享者范围求交。
++// 该结果用于候选过滤；选中渠道后 CheckSourceAllowed 会重新读取一次，作为出站前最终守卫。
++func resolveRequestSourceAccess(c *gin.Context, modelName string) (requestSourceAccess, error) {
++	result := emptyRequestSourceAccess()
++	if !sourceGuardEnabled || c == nil {
++		return result, nil
++	}
++	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
++	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
++	if userID <= 0 || tokenID <= 0 {
++		// 内部调用没有调用主体，保持 New API 原行为；对外路由均应由鉴权中间件填入二者。
++		return result, nil
++	}
++	db := channelpool.CurrentDB()
++	if db == nil {
++		// 普通 New API 模式可以不初始化 APIGX；共享模式启动自检会强制要求数据库与本守卫。
++		// 因此 nil 表示功能未启用，而不是一次运行中的数据库故障。
++		return result, nil
++	}
++	key, found, err := loadPreferences(db, int64(userID), int64(tokenID))
++	if err != nil {
++		return handleSourceAccessDBError(err)
++	}
++	if !found {
++		key = nil
++	}
++	access, err := resolveSourceAccessForIdentity(db, int64(userID), key, modelName)
++	if err != nil {
++		return handleSourceAccessDBError(err)
++	}
++	return access, nil
++}
++
++// handleSourceAccessDBError keeps an ordinary New API deployment compatible when no usable
++// APIGX schema is attached (including lightweight test fixtures). Formal shared-resource mode
++// is fail-closed: startup requires the feature set and every runtime database error is returned.
++func handleSourceAccessDBError(err error) (requestSourceAccess, error) {
++	if common.GetEnvOrDefaultBool("APIGX_SHARED_MODE", false) {
++		return emptyRequestSourceAccess(), err
++	}
++	return emptyRequestSourceAccess(), nil
++}
+ 
+-	// ② 固定来源
+-	if key.ScopeMode == apigxmodel.ScopeModePinned {
+-		pinnedChannelID, ok := channelpool.ShareChannelIDByOffering(db, key.PinnedOfferingID)
+-		if !ok {
+-			common.SysLog("apigx source guard: pinned offering is not available")
+-			return denyOrRetry(c, key, "pinned_source_unavailable", "the pinned source is not available")
++// SourceAccessChannelFilter 返回应在亲和、随机选择、重试和 pin 校验前加入的请求级过滤器。
++// allowList=true 时 ids 是唯一允许集合（平台 Key 显式限定分享来源）；否则 ids 是应排除的 APIGX 渠道。
++func SourceAccessChannelFilter(c *gin.Context, modelName string) (ids []int, allowList bool, apply bool, err error) {
++	access, err := resolveRequestSourceAccess(c, modelName)
++	if err != nil || !access.active {
++		return nil, false, false, err
++	}
++	c.Set(requestSourceAccessContextKey, access)
++	if access.denyAll || access.requireShareSource {
++		ids = make([]int, 0, len(access.allowedBaseIDs))
++		for id := range access.allowedBaseIDs {
++			ids = append(ids, id)
+ 		}
+-		if selectedID, isOurChannel := channelpool.ShareChannelIDByBase(db, channelID); !isOurChannel || selectedID != pinnedChannelID {
+-			return denyOrRetry(c, key, "pinned_source_mismatch", "the selected source is not the pinned one")
++		return ids, true, true, nil
++	}
++	for id := range access.managedBaseIDs {
++		if _, allowed := access.allowedBaseIDs[id]; !allowed {
++			ids = append(ids, id)
+ 		}
+ 	}
++	return ids, false, len(ids) > 0, nil
++}
+ 
+-	// ③ 允许来源
+-	if key.ScopeMode == apigxmodel.ScopeModeAllowedOwners {
+-		ownerID, isOurChannel := channelpool.ShareChannelOwnerByBase(db, channelID)
+-		if isOurChannel {
+-			if allowed, _ := key.AllowsOwner(ownerID); allowed {
+-				return nil
++// AllowedOfferingIDsForRequest 返回已经通过资源 ACL 与平台 Key 范围求交的供给集合。
++// 路由策略必须在读取质量、价格与容量之前使用它，避免让无权资源进入评分阶段。
++func AllowedOfferingIDsForRequest(c *gin.Context, modelName string) (map[int64]struct{}, bool, error) {
++	if c != nil {
++		if raw, ok := c.Get(requestSourceAccessContextKey); ok {
++			if access, valid := raw.(requestSourceAccess); valid && access.active && access.modelName == modelName {
++				return access.allowedOfferingIDs, true, nil
+ 			}
+-		} else {
+-			// 不是分享渠道：限制来源的 Key 不得借道管理员自建渠道
+-			common.SysLog("apigx source guard: key restricts sources but selected channel is not a share channel")
+ 		}
+-		return denyOrRetry(c, key, "source_not_allowed",
+-			"this API key is not allowed to use the selected source")
++	}
++	access, err := resolveRequestSourceAccess(c, modelName)
++	if err != nil || !access.active {
++		return nil, false, err
++	}
++	if c != nil {
++		c.Set(requestSourceAccessContextKey, access)
++	}
++	return access.allowedOfferingIDs, true, nil
++}
++
++// CheckSourceAllowed 是选中渠道后的最终守卫。它与候选过滤共用同一决策，防止固定 channel ID、
++// origin-task pin、WebSocket、失败重试或未来入口绕开候选阶段。
++func CheckSourceAllowed(c *gin.Context, channelID int, modelName string) *types.NewAPIError {
++	if !sourceGuardEnabled || c == nil || channelID <= 0 {
++		return nil
++	}
++	access, err := resolveRequestSourceAccess(c, modelName)
++	if err != nil {
++		return types.NewErrorWithStatusCode(err, types.ErrorCodeChannelNoAvailableKey,
++			http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++	}
++	if !access.active {
++		return nil
++	}
++	return checkResolvedSourceAllowed(access, channelID)
++}
++
++// CheckSourceAllowedForUser 为没有原平台 Key 上下文的历史任务出站路径复验资源 ACL。
++// 它只使用任务所属用户，不臆造原令牌范围；普通 New API 渠道继续放行。
++func CheckSourceAllowedForUser(userID int64, channelID int, modelName string) *types.NewAPIError {
++	if !sourceGuardEnabled || userID <= 0 || channelID <= 0 {
++		return nil
++	}
++	db := channelpool.CurrentDB()
++	if db == nil {
++		return nil
++	}
++	access, err := resolveSourceAccessForIdentity(db, userID, nil, modelName)
++	if err != nil {
++		if !common.GetEnvOrDefaultBool("APIGX_SHARED_MODE", false) {
++			return nil
++		}
++		return types.NewErrorWithStatusCode(err, types.ErrorCodeChannelNoAvailableKey,
++			http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++	}
++	return checkResolvedSourceAllowed(access, channelID)
++}
++
++func checkResolvedSourceAllowed(access requestSourceAccess, channelID int) *types.NewAPIError {
++	if !access.active {
++		return nil
++	}
++	_, managed := access.managedBaseIDs[channelID]
++	_, allowed := access.allowedBaseIDs[channelID]
++	if access.denyAll || (managed && !allowed) || (!managed && access.requireShareSource) {
++		return denyOrRetry(access.key)
+ 	}
+ 	return nil
+ }
+ 
+ // denyOrRetry 按「是否允许回退」决定拒绝方式。
+ //
+-// 可回退：返回可重试错误（**不中止上下文**），让底座重新选择渠道；
+-// 不可回退：直接写出 403 并中止上下文——因为 `Distribute` 调用
+-// `SetupContextForSelectedChannel` 时**忽略返回值**，只返回错误阻止不了请求继续
+-// （容量钩子有效正是因为它直接 abort）。
+-func denyOrRetry(c *gin.Context, key *apigxmodel.APIKey, code string, message string) *types.NewAPIError {
+-	if key.AllowFallback {
+-		return types.NewErrorWithStatusCode(errors.New(message+", retry with another channel"),
+-			types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden, types.ErrOptionWithNoRecordErrorLog())
+-	}
+-	abortJSON(c, http.StatusForbidden, code, message)
+-	return types.NewErrorWithStatusCode(errors.New(message),
+-		types.ErrorCodeChannelNoAvailableKey, http.StatusForbidden,
+-		types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
++// 所有 ACL 拒绝都使用同一个对外结果，不区分资源不存在、未发布、私有、授权过期或 Key 范围不符。
++func denyOrRetry(key *apigxmodel.APIKey) *types.NewAPIError {
++	options := []types.NewAPIErrorOptions{types.ErrOptionWithNoRecordErrorLog()}
++	if key != nil && !key.AllowFallback {
++		options = append(options, types.ErrOptionWithSkipRetry())
++	}
++	return types.NewErrorWithStatusCode(errors.New("no available source for the requested model"),
++		types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, options...)
+ }
+diff --git a/apigx/routing/assemble.go b/apigx/routing/assemble.go
+index 2a0ed3a..9229135 100644
+--- a/apigx/routing/assemble.go
++++ b/apigx/routing/assemble.go
+@@ -26,6 +26,9 @@ type AssembleOptions struct {
+ 	Now int64
+ 	// Breaker 是熔断阈值（T2.8）；零值取 `DefaultBreakerConfig`。
+ 	Breaker BreakerConfig
++	// AllowedOfferingIDs 是调用主体已通过 ACL 与平台 Key 范围求交的供给集合。
++	// nil 表示调用方没有施加权限过滤；非 nil 的空 map 表示明确没有任何授权供给。
++	AllowedOfferingIDs map[int64]struct{}
+ }
+ 
+ // AssembleCandidates 为某模型装配候选集。
+@@ -53,6 +56,12 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
+ 
+ 	for i := range offerings {
+ 		offering := &offerings[i]
++		// 授权必须先于价格、质量、容量与熔断读取；无权资源不进入评分，也不进入解释输出。
++		if opts.AllowedOfferingIDs != nil {
++			if _, allowed := opts.AllowedOfferingIDs[offering.ID]; !allowed {
++				continue
++			}
++		}
+ 		var shareChannel apigxmodel.Channel
+ 		if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
+ 			continue // 渠道已不可用：不进入候选（也不会出现在解释里）
+diff --git a/apigx/routing/decide_test.go b/apigx/routing/decide_test.go
+index 35bbdbb..3ba08c7 100644
+--- a/apigx/routing/decide_test.go
++++ b/apigx/routing/decide_test.go
+@@ -344,6 +344,36 @@ func TestApplyRankingGivesTiedCandidatesEqualWeight(t *testing.T) {
+ 	assert.Equal(t, channelA.GetWeight(), channelB.GetWeight(), "同分应同权重")
+ }
+ 
++func TestAssembleCandidatesAppliesACLBeforeQualityAndCapacity(t *testing.T) {
++	env := newRoutingTestEnv(t)
++	allowed := env.seedChannelWithOffering(t, 1, "gpt-acl")
++	denied := env.seedChannelWithOffering(t, 2, "gpt-acl")
++	for _, seeded := range []seededChannel{allowed, denied} {
++		require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", seeded.OfferingID).
++			Update("status", apigxmodel.OfferingStatusPublished).Error)
++		var channel apigxmodel.Channel
++		require.NoError(t, env.db.Where("id = ?", seeded.ShareChannelID).First(&channel).Error)
++		require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", channel.ShareGroupID).
++			Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
++	}
++
++	candidates, public, err := AssembleCandidates(env.db, nil, "gpt-acl", AssembleOptions{
++		AllowedOfferingIDs: map[int64]struct{}{allowed.OfferingID: {}},
++	})
++	require.NoError(t, err)
++	require.Len(t, candidates, 1)
++	assert.Equal(t, allowed.OfferingID, candidates[0].OfferingID)
++	assert.Contains(t, public, allowed.OfferingID)
++	assert.NotContains(t, public, denied.OfferingID, "无权供给不得进入质量/容量装配或解释输出")
++
++	candidates, public, err = AssembleCandidates(env.db, nil, "gpt-acl", AssembleOptions{
++		AllowedOfferingIDs: map[int64]struct{}{},
++	})
++	require.NoError(t, err)
++	assert.Empty(t, candidates)
++	assert.Empty(t, public)
++}
++
+ // ---- fixture（投影测试需要真实库 + 我们的分享渠道） ----
+ 
+ type routingTestEnv struct {
+diff --git a/controller/responses_websocket_test.go b/controller/responses_websocket_test.go
+index 2db5229..1d2ee6e 100644
+--- a/controller/responses_websocket_test.go
++++ b/controller/responses_websocket_test.go
+@@ -637,7 +637,12 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
+ 	rejection := readResponsesWSTestEvent(t, fixture.client)
+ 	assert.Equal(t, "error", rejection["type"])
+ 	assert.Equal(t, float64(http.StatusBadRequest), rejection["status"])
+-	assert.Equal(t, 2990, <-preConsumed, "the rejected request reserved quota before contacting upstream")
++	select {
++	case remaining := <-preConsumed:
++		assert.Equal(t, 2990, remaining, "the rejected request reserved quota before contacting upstream")
++	case <-time.After(3 * time.Second):
++		t.Fatal("upstream did not observe the reserved quota before rejecting the request")
++	}
+ 	deadline := time.NewTimer(3 * time.Second)
+ 	defer deadline.Stop()
+ 	for {
+diff --git a/controller/task.go b/controller/task.go
+index c514bdb..7ede326 100644
+--- a/controller/task.go
++++ b/controller/task.go
+@@ -8,6 +8,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/dto"
+@@ -230,6 +231,49 @@ func legacyVideoAvailable(task *model.Task) bool {
+ 	}
+ }
+ 
++func taskSourceModelName(task *model.Task) string {
++	if task == nil {
++		return ""
++	}
++	if name := strings.TrimSpace(task.Properties.OriginModelName); name != "" {
++		return name
++	}
++	if name := strings.TrimSpace(task.Properties.UpstreamModelName); name != "" {
++		return name
++	}
++	var data struct {
++		Model string `json:"model"`
++	}
++	if err := common.Unmarshal(task.Data, &data); err == nil {
++		return strings.TrimSpace(data.Model)
++	}
++	return ""
++}
++
++// checkTaskArtifactSourceAllowed is called only before an artifact path contacts the
++// historical upstream channel. Locally persisted artifacts remain available to the task
++// owner; revoking a share grant stops further credentialed/proxied upstream access.
++func checkTaskArtifactSourceAllowed(c *gin.Context, task *model.Task) bool {
++	if task == nil {
++		return false
++	}
++	modelName := taskSourceModelName(task)
++	if middleware.IsTaskArtifactAccess(c) {
++		// A signed capability has no bearer token context. Bind the real-time ACL check
++		// to the task owner while deliberately omitting token preference constraints.
++		if accessErr := relayhook.CheckSourceAllowedForUser(int64(task.UserId), task.ChannelId, modelName); accessErr != nil {
++			writeTaskArtifactError(c, http.StatusServiceUnavailable, "no_available_source", "No available source for the requested model")
++			return false
++		}
++		return true
++	}
++	if accessErr := relayhook.CheckSourceAllowed(c, task.ChannelId, modelName); accessErr != nil {
++		writeTaskArtifactError(c, http.StatusServiceUnavailable, "no_available_source", "No available source for the requested model")
++		return false
++	}
++	return true
++}
++
+ func getTaskForArtifactRequest(c *gin.Context, taskID string) (*model.Task, bool, error) {
+ 	if middleware.IsTaskArtifactAccess(c) {
+ 		task, exists, err := model.GetUniqueByOnlyTaskId(taskID)
+@@ -300,6 +344,9 @@ func TaskArtifactContent(c *gin.Context) {
+ 			writeTaskArtifactError(c, http.StatusNotFound, "artifact_not_found", "Task or artifact not found")
+ 			return
+ 		}
++		if !checkTaskArtifactSourceAllowed(c, task) {
++			return
++		}
+ 		descriptor := &relaychannel.TaskContentRequest{
+ 			URL:            task.GetResultURL(),
+ 			Method:         c.Request.Method,
+@@ -331,6 +378,9 @@ func TaskArtifactContent(c *gin.Context) {
+ 		_ = artifactStore.Serve(c, task, ref)
+ 		return
+ 	}
++	if !checkTaskArtifactSourceAllowed(c, task) {
++		return
++	}
+ 
+ 	adaptor, err := initTaskArtifactAdaptor(task)
+ 	if err != nil {
+diff --git a/controller/video_proxy.go b/controller/video_proxy.go
+index 230d2bd..26fc0be 100644
+--- a/controller/video_proxy.go
++++ b/controller/video_proxy.go
+@@ -81,6 +81,9 @@ func VideoProxy(c *gin.Context) {
+ 			fmt.Sprintf("Task is not completed yet, current status: %s", task.Status))
+ 		return
+ 	}
++	if !checkTaskArtifactSourceAllowed(c, task) {
++		return
++	}
+ 
+ 	var descriptor *relaychannel.TaskContentRequest
+ 	if taskHasPluginExecution(task) {
+diff --git a/dto/channel_constraints.go b/dto/channel_constraints.go
+index b34795a..ef072f3 100644
+--- a/dto/channel_constraints.go
++++ b/dto/channel_constraints.go
+@@ -39,6 +39,9 @@ const (
+ 	FilterRequestPath        ChannelFilterKind = "request_path"
+ 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
+ 	FilterResponsesWebSocket ChannelFilterKind = "responses_websocket"
++	// FilterDeniedChannelIds 排除列出的渠道 ID。APIGX 用它在不影响管理员自建渠道的前提下，
++	// 从亲和、随机选择和失败重试中移除调用者无权访问的分享渠道。
++	FilterDeniedChannelIds ChannelFilterKind = "denied_channel_ids"
+ 	// FilterAllowedChannelIds 只保留列出的渠道 ID。用于**请求级**的候选限定：
+ 	// 调用方（例如 APIGX 的路由策略）已经算好"本次该用哪些渠道"，这里只表达结果，
+ 	// 不把排序逻辑塞进选择器（台账 D-020）。
+@@ -54,6 +57,8 @@ type ChannelFilter struct {
+ 	// AllowedChannelIds 仅当 Kind == FilterAllowedChannelIds 时使用；**空列表表示不允许任何渠道**
+ 	// （与"没有这个过滤器"是两回事：前者是明确的"没有合格候选"）。
+ 	AllowedChannelIds []int
++	// DeniedChannelIds 仅当 Kind == FilterDeniedChannelIds 时使用。
++	DeniedChannelIds []int
+ }
+ 
+ type ChannelConstraints struct {
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index fe681dd..0049d0f 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -52,10 +52,33 @@ func Distribute() func(c *gin.Context) {
+ 		if !enforceTokenModelLimit(c, modelRequest.Model) {
+ 			return
+ 		}
++		// APIGX 资源 ACL 是硬限制：在 pin、亲和、随机选择与策略评分之前排除无权来源。
++		// 普通管理员渠道不受分享 ACL 影响；平台 Key 显式限定分享来源时改用 allow-list。
++		accessChannels, accessAllowList, applyAccessFilter, accessErr := relayhook.SourceAccessChannelFilter(c, modelRequest.Model)
++		if accessErr != nil {
++			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "no available source for the requested model", types.ErrorCodeChannelNoAvailableKey)
++			return
++		}
++		if applyAccessFilter {
++			if accessAllowList && len(accessChannels) == 0 {
++				abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "no available source for the requested model", types.ErrorCodeChannelNoAvailableKey)
++				return
++			}
++			filter := taskdto.ChannelFilter{Kind: taskdto.FilterDeniedChannelIds, DeniedChannelIds: accessChannels}
++			if accessAllowList {
++				filter = taskdto.ChannelFilter{Kind: taskdto.FilterAllowedChannelIds, AllowedChannelIds: accessChannels}
++			}
++			constraints.AddFilter(filter)
++		}
+ 		// APIGX 默认路由策略（T2.7 用户侧）：按调用者平台 Key 的策略算出**合格渠道集合**，
+ 		// 作为请求级过滤器交给底座——复用底座既有的候选过滤机制，不改写选择器。
+ 		// 策略为空/auto 或算不出候选时**不加限定**（宁可退回默认选路）。
+-		if allowedChannels, ok := relayhook.EligibleBaseChannelsForStrategy(c, modelRequest.Model); ok {
++		allowedChannels, strategyOK, strategyErr := relayhook.EligibleBaseChannelsForStrategy(c, modelRequest.Model)
++		if strategyErr != nil {
++			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "no available source for the requested model", types.ErrorCodeChannelNoAvailableKey)
++			return
++		}
++		if strategyOK {
+ 			constraints.AddFilter(taskdto.ChannelFilter{
+ 				Kind:              taskdto.FilterAllowedChannelIds,
+ 				AllowedChannelIds: allowedChannels,
+@@ -85,6 +108,14 @@ func Distribute() func(c *gin.Context) {
+ 				}
+ 				return
+ 			}
++			if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelRequest.Model); sourceErr != nil {
++				status := sourceErr.StatusCode
++				if status <= 0 {
++					status = http.StatusServiceUnavailable
++				}
++				abortWithOpenAiMessage(c, status, sourceErr.Error(), sourceErr.GetErrorCode())
++				return
++			}
+ 			if ok, kind := model.ChannelSatisfiesFilters(channel, modelRequest.Model, constraints.Filters); !ok {
+ 				if kind == taskdto.FilterTaskPluginIdentity {
+ 					logTaskPluginChannelDecision(c, channel, modelRequest.Model, "channel_rejected", "identity_mismatch")
+@@ -192,12 +223,19 @@ func Distribute() func(c *gin.Context) {
+ 			}
+ 		}
+ 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+-		// APIGX 共享容量控制（T1.7）：渠道选定后按共享账本预留并发槽位。
+-		// 位置很关键：在 c.Next() 之前注册 defer，因此释放发生在下游（含流式响应）
+-		// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
+-		// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
+ 		if channel != nil {
++			if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil {
++				status := setupErr.StatusCode
++				if status <= 0 {
++					status = http.StatusServiceUnavailable
++				}
++				abortWithOpenAiMessage(c, status, setupErr.Error(), setupErr.GetErrorCode())
++				return
++			}
++			// APIGX 共享容量控制（T1.7）：渠道选定后按共享账本预留并发槽位。
++			// 位置很关键：在 c.Next() 之前注册 defer，因此释放发生在下游（含流式响应）
++			// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
++			// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
+ 			// 容量租约由 SetupContextForSelectedChannel **按每次尝试**获取（底座的失败重试
+ 			// 会重新选渠道并再次经过那里），这里只负责在请求全部结束后释放最后一次的租约。
+ 			defer relayhook.ReleaseFromContext(c)
+@@ -662,6 +700,10 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 			types.ErrOptionWithSkipRetry(),
+ 		)
+ 	}
++	// 资源授权先于任何上游 Key 选择、容量预留和质量守卫；无权请求不得触碰凭据池。
++	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
++		return sourceErr
++	}
+ 	if candidate, matched := pinnedEndpointCandidateForChannel(c, channel, expectedPlugin); matched {
+ 		if value, exists := c.Get(jsplugin.ContextKeyPinnedEndpoint); exists {
+ 			if pinned, ok := value.(jsplugin.PinnedEndpoint); ok && candidate.Plugin != nil && candidate.Plugin != pinned.Plugin {
+@@ -748,21 +790,11 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 	case constant.ChannelTypeCoze:
+ 		c.Set("bot_id", channel.Other)
+ 	}
+-	// APIGX 的准入与容量预留放在**函数末尾**，必须在渠道 Key 与 BaseURL 都已写入上下文之后：
+-	// 这些检查可能**提前返回**（例如来源被拒但允许回退时返回可重试错误），
+-	// 若放在中间就会留下"半成品上下文"——BaseURL/ChannelKey 未设置，
+-	// 而 `Distribute` 调用本函数时**忽略返回值**，请求照旧发出去，
+-	// 结果上游 URL 为空、报 `unsupported protocol scheme` 的 500。
+-	// 放在末尾可保证：无论这里返回成功还是错误，上下文都是完整可用的。
+-	//
+-	// 位置说明：本函数是**每次尝试（含每次重试）**都会经过的点，因此容量预留
+-	// 天然"按当次选中的渠道与凭据"进行，也借用了底座既有的重选机制。
++	// 容量预留与熔断守卫放在函数末尾；此时渠道 Key 与 BaseURL 已完整写入上下文。
++	// 本函数每次尝试（含重试）都会经过，因此预留天然绑定当次渠道与实际 Key。
+ 	if !relayhook.AcquireForAttempt(c, channel.Id) {
+ 		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+ 	}
+-	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
+-		return sourceErr
+-	}
+ 	// 熔断生效（T2.8）：该供给处于"熔断打开"时返回**可重试**错误，
+ 	// 由底座的重选机制换一条渠道——不自己写候选循环，也不永久禁用渠道。
+ 	if breakerErr := relayhook.CheckBreakerAllows(c, channel.Id, modelName); breakerErr != nil {
+diff --git a/model/channel_constraint.go b/model/channel_constraint.go
+index 1c95d76..8de86cb 100644
+--- a/model/channel_constraint.go
++++ b/model/channel_constraint.go
+@@ -11,6 +11,8 @@ var filterEvalOrder = []dto.ChannelFilterKind{
+ 	dto.FilterRequestPath,
+ 	dto.FilterTaskPluginIdentity,
+ 	dto.FilterResponsesWebSocket,
++	// ACL 是硬限制，必须在路由策略给出的 allow-list 之前求交。
++	dto.FilterDeniedChannelIds,
+ 	// 放在最后：它是最"具体"的限定（调用方已经算好可用渠道集合），
+ 	// 放在最后能让前面的过滤器先给出更精确的归因原因。
+ 	dto.FilterAllowedChannelIds,
+@@ -109,6 +111,8 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
+ 		return filter.TaskPluginKey == "" || slices.Contains(filter.TaskPluginChannelTypes, ch.Type)
+ 	case dto.FilterResponsesWebSocket:
+ 		return (ch.Type == constant.ChannelTypeOpenAI || ch.Type == constant.ChannelTypeCodex) && ch.GetSetting().ResponsesWebSocketEnabled
++	case dto.FilterDeniedChannelIds:
++		return !slices.Contains(filter.DeniedChannelIds, ch.Id)
+ 	case dto.FilterAllowedChannelIds:
+ 		// **空列表表示"不允许任何渠道"**（明确的"没有合格候选"），
+ 		// 而不是"没有这个限定"——调用方要表达"没算出来"就不该加这个过滤器。
+diff --git a/model/channel_constraint_test.go b/model/channel_constraint_test.go
+index 3afe6d4..1305498 100644
+--- a/model/channel_constraint_test.go
++++ b/model/channel_constraint_test.go
+@@ -145,6 +145,25 @@ func TestFilterCandidateIDs(t *testing.T) {
+ 			wantKept:  []int{},
+ 			wantEmpty: dto.FilterRequestPath,
+ 		},
++		{
++			name:      "ACL deny-list removes only managed unauthorized channel",
++			ids:       []int{900003, 900004, 900005},
++			modelName: "acl-model",
++			filters: []dto.ChannelFilter{{
++				Kind: dto.FilterDeniedChannelIds, DeniedChannelIds: []int{900004, 900005},
++			}},
++			wantKept: []int{900003},
++		},
++		{
++			name:      "ACL deny-list reports its own reason when it empties candidates",
++			ids:       []int{900004},
++			modelName: "acl-model",
++			filters: []dto.ChannelFilter{{
++				Kind: dto.FilterDeniedChannelIds, DeniedChannelIds: []int{900004},
++			}},
++			wantKept:  []int{},
++			wantEmpty: dto.FilterDeniedChannelIds,
++		},
+ 	}
+ 
+ 	channelSyncLock.Lock()
+diff --git a/relay/channel/api_request_getbody_test.go b/relay/channel/api_request_getbody_test.go
+index 83cbd7d..c010800 100644
+--- a/relay/channel/api_request_getbody_test.go
++++ b/relay/channel/api_request_getbody_test.go
+@@ -416,11 +416,21 @@ func runGoAwayAfterFirstRequestServer(ln net.Listener) <-chan h2ServerResult {
+ 
+ 			if attempt == 0 {
+ 				err = framer.WriteGoAway(0, http2.ErrCodeNo, nil)
+-				conn.Close()
+ 				if err != nil {
++					conn.Close()
+ 					res.err = err
+ 					return
+ 				}
++				// A full close while the client's SETTINGS acknowledgement is still
++				// unread is translated into WSAECONNRESET on Windows. Half-close the
++				// server's write side and drain the peer instead, so the client first
++				// observes the graceful GOAWAY and can replay the request.
++				if tcpConn, ok := conn.(*net.TCPConn); ok {
++					_ = tcpConn.CloseWrite()
++					_ = tcpConn.SetReadDeadline(time.Now().Add(time.Second))
++					_, _ = io.Copy(io.Discard, tcpConn)
++				}
++				conn.Close()
+ 				continue
+ 			}
+ 
+diff --git a/relay/mjproxy_handler.go b/relay/mjproxy_handler.go
+index 6525a6f..f867b70 100644
+--- a/relay/mjproxy_handler.go
++++ b/relay/mjproxy_handler.go
+@@ -11,6 +11,7 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/dto"
+@@ -312,6 +313,10 @@ func RelayMidjourneyTaskImageSeed(c *gin.Context) *dto.MidjourneyResponse {
+ 	if channel.Status != common.ChannelStatusEnabled {
+ 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "该任务所属渠道已被禁用")
+ 	}
++	modelName := service.CovertMjpActionToModelName(originTask.Action)
++	if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); accessErr != nil {
++		return service.MidjourneyErrorWrapper(constant.MjRequestError, "no_available_source")
++	}
+ 	c.Set("channel_id", originTask.ChannelId)
+ 	c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", channel.Key))
+ 
+@@ -486,6 +491,9 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
+ 			if channel.Status != common.ChannelStatusEnabled {
+ 				return service.MidjourneyErrorWrapper(constant.MjRequestError, "该任务所属渠道已被禁用")
+ 			}
++			if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, relayInfo.OriginModelName); accessErr != nil {
++				return service.MidjourneyErrorWrapper(constant.MjRequestError, "no_available_source")
++			}
+ 			c.Set("base_url", channel.GetBaseURL())
+ 			c.Set("channel_id", originTask.ChannelId)
+ 			c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", channel.Key))
+diff --git a/relay/relay_task.go b/relay/relay_task.go
+index 29890f8..6cc973c 100644
+--- a/relay/relay_task.go
++++ b/relay/relay_task.go
+@@ -9,6 +9,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/dto"
+@@ -95,6 +96,12 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
+ 	if ch.Status != common.ChannelStatusEnabled {
+ 		return service.TaskErrorWrapperLocal(errors.New("the channel of the origin task is disabled"), "task_channel_disable", http.StatusBadRequest)
+ 	}
++	// 旧式 remix/continuation 在 Distribute 之后才从任务记录恢复原渠道，不能依赖候选过滤。
++	// 出站前按当前调用者与当前授权实时复验；授权撤销后历史 channel_id 不得继续放行。
++	if accessErr := relayhook.CheckSourceAllowed(c, ch.Id, info.OriginModelName); accessErr != nil {
++		return service.TaskErrorWrapperLocal(errors.New("no available source for the requested model"),
++			"no_available_source", http.StatusServiceUnavailable)
++	}
+ 	info.LockedChannel = ch
+ 
+ 	if originTask.ChannelId != info.ChannelId {
+@@ -182,6 +189,10 @@ func ApplyChannelPin(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError
+ 	if ch.Status != common.ChannelStatusEnabled {
+ 		return service.TaskErrorWrapperLocal(errors.New("the channel of the origin task is disabled"), "origin_task_channel_disabled", http.StatusBadRequest)
+ 	}
++	if accessErr := relayhook.CheckSourceAllowed(c, ch.Id, info.OriginModelName); accessErr != nil {
++		return service.TaskErrorWrapperLocal(errors.New("no available source for the requested model"),
++			"no_available_source", http.StatusServiceUnavailable)
++	}
+ 	info.LockedChannel = ch
+ 	return nil
+ }
+@@ -483,7 +494,7 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
+ 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.RequestURI, "/v1/videos/")
+ 
+ 	// Gemini/Vertex 支持实时查询：用户 fetch 时直接从上游拉取最新状态
+-	if realtimeResp := tryRealtimeFetch(originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
++	if realtimeResp := tryRealtimeFetch(c, originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
+ 		respBody = realtimeResp
+ 		return
+ 	}
+@@ -522,7 +533,22 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
+ // tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex 任务状态。
+ // 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
+ // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
+-func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
++func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) []byte {
++	modelName := strings.TrimSpace(task.Properties.OriginModelName)
++	if modelName == "" {
++		modelName = strings.TrimSpace(task.Properties.UpstreamModelName)
++	}
++	if modelName == "" {
++		var taskData map[string]any
++		_ = common.Unmarshal(task.Data, &taskData)
++		modelName, _ = taskData["model"].(string)
++	}
++	// This fast path bypasses normal distribution and reuses the task's historical
++	// channel credential. Re-check the current caller before contacting upstream;
++	// denial falls back to the durable local task snapshot without revealing why.
++	if relayhook.CheckSourceAllowed(c, task.ChannelId, modelName) != nil {
++		return nil
++	}
+ 	channelModel, err := model.GetChannelById(task.ChannelId, true)
+ 	if err != nil {
+ 		return nil
+diff --git a/relay/responses_websocket.go b/relay/responses_websocket.go
+index 612609c..6d0a8f4 100644
+--- a/relay/responses_websocket.go
++++ b/relay/responses_websocket.go
+@@ -13,6 +13,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	appconstant "github.com/QuantumNous/new-api/constant"
+ 	appdto "github.com/QuantumNous/new-api/dto"
+@@ -427,6 +428,11 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
+ 	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
+ 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
+ 	}
++	// WebSocket 连接可跨多个 response.create 事件存活；每个事件都按当前授权和模型复验，
++	// 不能因为握手时曾获准就永久沿用已撤销的分享来源。
++	if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, model); accessErr != nil {
++		return accessErr
++	}
+ 	keyEnabled := channel.Key == s.lockedKey
+ 	if channel.ChannelInfo.IsMultiKey {
+ 		keys := channel.GetKeys()
+@@ -831,6 +837,26 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
+ 	}) {
+ 		constraints.AddFilter(appdto.ChannelFilter{Kind: appdto.FilterResponsesWebSocket})
+ 	}
++	accessChannels, accessAllowList, applyAccessFilter, accessErr := relayhook.SourceAccessChannelFilter(c, modelName)
++	if accessErr != nil {
++		return nil, types.NewErrorWithStatusCode(errors.New("no available source for the requested model"),
++			types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
++	}
++	if applyAccessFilter {
++		filter := appdto.ChannelFilter{Kind: appdto.FilterDeniedChannelIds, DeniedChannelIds: accessChannels}
++		if accessAllowList {
++			filter = appdto.ChannelFilter{Kind: appdto.FilterAllowedChannelIds, AllowedChannelIds: accessChannels}
++		}
++		constraints.AddFilter(filter)
++	}
++	strategyChannels, strategyOK, strategyErr := relayhook.EligibleBaseChannelsForStrategy(c, modelName)
++	if strategyErr != nil {
++		return nil, types.NewErrorWithStatusCode(errors.New("no available source for the requested model"),
++			types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
++	}
++	if strategyOK {
++		constraints.AddFilter(appdto.ChannelFilter{Kind: appdto.FilterAllowedChannelIds, AllowedChannelIds: strategyChannels})
++	}
+ 	if pin, found, overridden := constraints.ResolvedPin(); found {
+ 		for _, lost := range overridden {
+ 			logger.LogWarn(c, fmt.Sprintf("channel pin overridden: winning_source=%s winning_channel_id=%d overridden_source=%s overridden_channel_id=%d", pin.Source, pin.ChannelId, lost.Source, lost.ChannelId))
+@@ -842,6 +868,9 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
+ 		if channel.Status != common.ChannelStatusEnabled {
+ 			return nil, types.NewErrorWithStatusCode(errors.New("specified channel is disabled"), types.ErrorCodeGetChannelFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+ 		}
++		if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); accessErr != nil {
++			return nil, accessErr
++		}
+ 		if ok, kind := appmodel.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
+ 			return nil, types.NewErrorWithStatusCode(errors.New("specified channel does not satisfy request constraints"), types.ErrorCode(kind), http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+ 		}
+-- 
+2.53.0.windows.1
+

@@ -1,5 +1,25 @@
 # 任务清单
 
+## [已完成] 接手整改阶段 B1：统一出站 ACL（2026-09-18）
+
+**本轮目标**：把公开、邀请码/指定用户、仅自己三种可见性与平台 Key 来源范围收口为一个服务端授权决策，并覆盖固定来源、自动路由、亲和缓存、失败重试和异步任务原渠道锁定，关闭非公开资源可被底座直接选中的 P0 绕过。
+**验收标准**：① 未授权身份在所有出站入口都不能命中资源；② owner、明确授权用户与公开访问保持可用；③ 授权先于容量和质量排序；④ 重试不得扩大授权集合；⑤ 拒绝结果不泄露资源是否存在；⑥ ACL 身份矩阵、受影响包与全仓回归通过。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 授权决策 | `new-api/apigx/model/repo_access*.go`、`new-api/apigx/relayhook/source_guard.go` | 修改/重构 | 统一 owner、公开、Grant、平台 Key 约束与资源状态判断 |
+| 同步出站 | `new-api/middleware/distributor.go`、`new-api/apigx/routing/**` | 修改 | 固定来源、自动、亲和与重试共用已授权候选集 |
+| 异步任务 | `new-api/apigx/relayhook/async_task.go`、任务原渠道路径 | 修改 | 锁定来源前复用同一授权判断，不因历史 channel ID 绕过 |
+| 回归验证 | 既有 `*_test.go` | 修改 | 扩展一个集中身份/入口矩阵，避免分层重复测试 |
+
+**任务清单**：
+- [x] B1.1 画出所有出站选择入口和现有 ACL/平台 Key 数据流，确定唯一授权输入输出 → `apigx/model/repo_access.go` + `apigx/relayhook/source_guard.go`
+- [x] B1.2 实现统一授权决策并接入同步固定来源、自动、亲和和重试 → `middleware/distributor.go`、`apigx/relayhook/route_strategy.go`、`model/channel_constraint.go`
+- [x] B1.3 接入异步任务原渠道锁定，保证任务查询/重试不扩大权限 → `relay/{relay_task,mjproxy_handler,responses_websocket}.go`、`controller/{task,video_proxy}.go`
+- [x] B1.4 完成 owner/公开/指定/邀请/无权身份矩阵与越权回归 → ACL 单测、撤销/到期用例、`source-allowlist.mjs` 5/5、`rejection-matrix.mjs` 10/10
+- [x] B1.5 运行受影响包、全仓与真实网关闭环，更新补丁链和项目状态并提交 → 受影响包与 `go test ./... -count=1 -timeout=10m` 全过；本地 PostgreSQL+Redis+真实网关/本地替身闭环通过；fork `7784cb2`、158 补丁重建 tree 一致
+
 ## [已完成] 接手整改阶段 A：恢复可信工程基线（2026-09-18）
 
 **本轮目标**：先消除验收假绿和 Windows 测试隔离问题，再建立可审查的 APIGX 配置基线与启动自检，为后续 ACL、审核和渠道生命周期整改提供可信反馈。

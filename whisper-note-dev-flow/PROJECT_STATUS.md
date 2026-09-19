@@ -4,16 +4,36 @@
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
 ## 当前阶段
-**阶段 A 可信工程基线已完成，进入阶段 B 的 P0 权限与资源生命周期整改。**
+**阶段 B1 统一出站 ACL 已完成，进入阶段 B2 跨 owner 审核整改。**
 
-验收脚本假绿、Windows 测试隔离、共享模式配置和启动自检已修复；仍有资源 ACL 绕过、默认 `auto` 未使用质量路由、管理员无法跨 owner 审核、渠道创建/删除生命周期不完整四项业务 P0。旧阶段 4 的“31/31”“全部通过”结论仍是历史记录；业务 P0 全部关闭并重新验收前，项目**不可上线**。前端继续后置到阶段 A-D 后端语义冻结之后。
+统一授权决策已覆盖固定来源、自动/策略、亲和、随机、重试、任务原渠道、Midjourney、Responses WebSocket 和历史任务上游代理；仍有默认 `auto` 未使用质量路由、管理员无法跨 owner 审核、渠道创建补偿及删除/停用生命周期不完整三项业务 P0。旧阶段 4 的“31/31”“全部通过”结论仍是历史记录；业务 P0 全部关闭并重新验收前，项目**不可上线**。前端继续后置到阶段 A-D 后端语义冻结之后。
 
 ## 当前任务
-[已完成] 接手整改阶段 A：恢复可信工程基线。
-- 五个验收脚本的断言失败均返回 1，基础设施异常返回 2；TPM 已形成 Redis 自动核对闭环。
-- 根模块全仓回归、独立 `relaykit` 构建、三库 fresh/upgrade 矩阵全部通过。
-- 正式共享模式会在接流量前检查关键开关、Redis、加密主密钥和 MySQL InnoDB。
-- 下一开发批次：阶段 B 统一出站 ACL → 跨 owner 审核 → 渠道创建补偿与删除停用。
+[已完成] 接手整改阶段 B1：统一出站 ACL。
+- owner、公开、有效 Grant、平台 Key 范围与资源发布状态已收口为同一授权决策。
+- 授权发生在质量读取、容量预留和上游 Key 选择之前；旁路入口在出站前再次复验。
+- 本地业务闭环 15/15、受影响包与全仓回归通过，第 158 个补丁可从锁定基线完整重建。
+- 下一开发批次：阶段 B2 跨 owner 审核，再处理渠道创建补偿与删除/停用生命周期。
+
+### [025] 2026-09-19 接手整改阶段 B1：统一出站 ACL
+
+**做了什么**：将分享资源 owner、公开可见性、有效分组/Offering/平台 Key Grant、资源存活与发布状态、平台 Key 模型/分享者/固定 Offering 范围收口为统一授权决策；在候选、策略评分前过滤，并在固定来源、重试、异步任务、Midjourney、Responses WebSocket 和历史任务上游代理出站前复验。
+
+**涉及模块**：访问仓储、来源守卫、路由候选、底座分发、异步任务、WebSocket、历史产物代理、验收脚本、补丁交付
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `new-api/apigx/model/repo_access.go`、`repo_plaza.go` | 授权 | 统一资源快照；排除已撤销/到期 Grant，只纳入存活且已发布的资源；保留历史受管理渠道集合 |
+| `new-api/apigx/relayhook/{source_guard,route_strategy}.go`、`routing/assemble.go` | 路由 | ACL 与平台 Key 范围求交；策略缓存按 user/token 隔离；授权过滤先于质量和容量装配 |
+| `new-api/middleware/distributor.go`、`dto/channel_constraints.go`、`model/channel_constraint.go` | 分发 | 增加请求级 deny/allow 过滤，空允许集合直接统一拒绝；最终守卫先于 Key 选择和容量预留 |
+| `new-api/relay/{relay_task,mjproxy_handler,responses_websocket}.go`、`controller/{task,video_proxy}.go` | 旁路 | 原渠道、任务重试、MJ、每次 WebSocket 请求、上游任务/产物代理均实时复验；本地产物仍允许任务所有者读取 |
+| `tools/stage1-verify/{source-allowlist,rejection-matrix}.mjs` | 验收 | 创建完整已发布 Offering，验证 Grant/平台 Key 求交、撤销、回退、容量和拒绝脱敏 |
+| `deploy/patches/0158-*`、`deploy/base.lock.json`、`docs/stage0/upstream-diff.md` | 交付 | 更新 fork HEAD、差异统计、B1 台账与可重建补丁链 |
+
+**验证**：ACL/策略直接影响包提交后联合回归 ✅；`go test ./... -count=1 -timeout=10m` ✅；`relaykit` 在 `GOWORK=off` 下独立构建 ✅；视频路由 10 次、HTTP/2 GOAWAY 20 次 ✅；`source-allowlist.mjs` 5/5、`rejection-matrix.mjs` 10/10 ✅；158 个补丁从锁定基线顺序应用后的 tree `b19c708d79b97d392b2882a2d8f700e0c8ced1c6` 与 fork HEAD 完全一致。
+
+**剩余风险**：本地网关闭环使用 PostgreSQL、Redis 与本地替身，不能作为真实第三方上游或生产多实例证明；B2 跨 owner 审核、B3 渠道生命周期和默认 `auto` 质量路由仍未完成，当前不可上线。
 
 ### [024] 2026-09-18 接手整改阶段 A：可信工程基线
 
