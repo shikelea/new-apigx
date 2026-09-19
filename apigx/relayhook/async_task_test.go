@@ -106,6 +106,33 @@ func TestAsyncTaskCapabilityUsesProtocolEvidence(t *testing.T) {
 		"unknown plugin capabilities must remain unknown rather than being mislabeled as video")
 }
 
+func TestFillAsyncTaskAttributionFreezesModelIdentity(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "model-attribution.db")), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	require.NoError(t, db.AutoMigrate(apigxmodel.AllModels()...))
+
+	canonical := &apigxmodel.CanonicalModel{APIModelID: "canonical-video", ModalityType: 7, Status: 1}
+	require.NoError(t, db.Create(canonical).Error)
+	offering := &apigxmodel.ModelOffering{
+		PublicID: "offer-model-snapshot", CanonicalModelID: canonical.ID,
+		UpstreamModelID: "vendor-video", OfferingKeyHash: "model-snapshot", Status: 2,
+	}
+	require.NoError(t, db.Create(offering).Error)
+	task := &apigxmodel.AsyncTask{OfferingID: offering.ID}
+
+	fillAsyncTaskAttribution(db, &relaycommon.RelayInfo{OriginModelName: "client-video-alias"}, task)
+
+	assert.EqualValues(t, canonical.ID, task.CanonicalModelID)
+	assert.Equal(t, "client-video-alias", task.ApiModelID)
+
+	task.ApiModelID = ""
+	fillAsyncTaskAttribution(db, &relaycommon.RelayInfo{}, task)
+	assert.Equal(t, canonical.APIModelID, task.ApiModelID)
+}
+
 func TestRecordAsyncTaskSnapshotQueuesRepairAndKeepsLease(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "record-repair.db")), &gorm.Config{})
 	require.NoError(t, err)

@@ -52,6 +52,15 @@ func Distribute() func(c *gin.Context) {
 		if !enforceTokenModelLimit(c, modelRequest.Model) {
 			return
 		}
+		// Status reads and other non-routing operations do not start a new upstream
+		// request, so they must not run source selection or quality routing again.
+		// The handlers that can still contact an upstream (task cancellation and
+		// artifact proxying) perform their own live source authorization checks.
+		if !shouldSelectChannel {
+			common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+			c.Next()
+			return
+		}
 		// APIGX 资源 ACL 是硬限制：在 pin、亲和、随机选择与策略评分之前排除无权来源。
 		// 普通管理员渠道不受分享 ACL 影响；平台 Key 显式限定分享来源时改用 allow-list。
 		accessChannels, accessAllowList, applyAccessFilter, accessErr := relayhook.SourceAccessChannelFilter(c, modelRequest.Model)

@@ -19,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
 	basemodel "github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -180,6 +181,91 @@ func (e *testEnv) createChannel(t *testing.T, userID, groupID, baseChannelID int
 	id, ok := data["id"].(float64)
 	require.True(t, ok)
 	return int64(id)
+}
+
+func TestOwnerUsageSummaryUsesUsageEventsAndBoundsQueries(t *testing.T) {
+	env := newTestEnv(t, true)
+	const (
+		owner int64 = 10901
+		other int64 = 10902
+		now   int64 = 1_800_200_000
+	)
+	groupID := env.createGroup(t, owner, "用量汇总组")
+	channelID := env.createChannel(t, owner, groupID, nextBaseChannelID())
+	key := &apigxmodel.UpstreamKey{
+		ChannelID:   channelID,
+		StableKeyID: "usage-api-key",
+		Name:        "统计 Key",
+		Status:      apigxmodel.UpstreamKeyStatusEnabled,
+	}
+	require.NoError(t, env.db.Create(key).Error)
+	request := &apigxmodel.Request{RequestUID: "usage-api-request", ApiModelID: "usage-api-model", CreatedAt: now}
+	require.NoError(t, env.db.Create(request).Error)
+	require.NoError(t, env.db.Create(&apigxmodel.Attempt{
+		AttemptUID:        "usage-api-attempt",
+		RequestID:         request.ID,
+		SelectedChannelID: channelID,
+		UpstreamKeyID:     key.ID,
+		State:             apigxmodel.AttemptStateSucceeded,
+		HttpStatus:        http.StatusOK,
+		StartedAt:         now,
+		TtftMs:            75,
+	}).Error)
+	require.NoError(t, apigxmodel.RecordUsageEvent(env.db, &apigxmodel.UsageEvent{
+		EventUID:      "usage-api-event",
+		Kind:          apigxmodel.UsageEventKindUsage,
+		OwnerUserID:   owner,
+		ApiModelID:    "usage-api-model",
+		ChannelID:     channelID,
+		UpstreamKeyID: key.ID,
+		Capability:    apigxmodel.CapabilityImageGeneration,
+		Dimension:     apigxmodel.UsageDimensionImageCount,
+		QuantityMilli: 2_000,
+		UnitScale:     apigxmodel.UsageUnitScalePerImage,
+		Trust:         apigxmodel.UsageTrustLocalEstimated,
+		CostState:     apigxmodel.UsageCostStateReferenceEstimated,
+		CostUsdMicro:  3_500,
+		OccurredAt:    now,
+		CreatedAt:     now,
+	}))
+
+	path := "/api/usage/summary?group_by=channel&start=" + strconv.FormatInt(now-10, 10) +
+		"&end=" + strconv.FormatInt(now+10, 10) + "&page=1&page_size=1"
+	rec, body := env.do(t, http.MethodGet, path, owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, ok := body["data"].(map[string]any)
+	require.True(t, ok, rec.Body.String())
+	assert.Equal(t, float64(1), data["page"])
+	assert.Equal(t, float64(1), data["page_size"])
+	assert.Equal(t, false, data["has_more"])
+	items, ok := data["items"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	item, ok := items[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, float64(1), item["request_count"])
+	assert.Equal(t, float64(1), item["attempt_count"])
+	assert.Equal(t, float64(3500), item["estimated_cost_usd_micro"])
+	assert.Equal(t, float64(0), item["unpriced_event_count"])
+	usage, ok := item["usage"].([]any)
+	require.True(t, ok)
+	require.Len(t, usage, 1)
+	usageItem, ok := usage[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "image", usageItem["unit"])
+	assert.Equal(t, float64(2000), usageItem["quantity_milli"])
+
+	// 归属由登录身份强制，其他用户看不到 owner 的渠道、Key 或用量。
+	rec, body = env.do(t, http.MethodGet, path, other, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	otherData, _ := body["data"].(map[string]any)
+	otherItems, _ := otherData["items"].([]any)
+	assert.Empty(t, otherItems)
+
+	rec, _ = env.do(t, http.MethodGet, "/api/usage/summary?start=bad", owner, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec, _ = env.do(t, http.MethodGet, "/api/usage/summary?start=1&end=9000000", owner, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "单次超过 90 天必须拒绝")
 }
 
 func TestShareGroupLifecycle(t *testing.T) {
@@ -1407,6 +1493,71 @@ func TestPriceRuleEndpointsEnforceAcceptanceInvariants(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":5000000}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestChannelPriceMatchPreviewAndConfirmUseServerCandidates(t *testing.T) {
+	oldModels := ratio_setting.ModelRatio2JSONString()
+	oldCompletions := ratio_setting.CompletionRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"apigx-api-match-flat":1}`))
+	require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"apigx-api-match-flat":4}`))
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(oldModels))
+		require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(oldCompletions))
+	})
+	env := newTestEnv(t, true)
+	const owner, other int64 = 8951, 8952
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "价格匹配底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "价格匹配组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	createOffering := func(modelID string) int64 {
+		t.Helper()
+		rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+			`{"upstream_model_id":"`+modelID+`"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return int64(body["data"].(map[string]any)["id"].(float64))
+	}
+	flatOffering := createOffering("apigx-api-match-flat")
+	expressionOffering := createOffering("gpt-6-astra")
+	_ = createOffering("not-a-priced-model")
+
+	path := "/api/channels/" + strconv.FormatInt(channelID, 10) + "/price-match/preview"
+	rec, body := env.doWithRole(t, http.MethodPost, path, owner, "", common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data := body["data"].(map[string]any)
+	candidates := data["candidates"].([]any)
+	require.Len(t, candidates, 3)
+	var flatToken string
+	for _, raw := range candidates {
+		candidate := raw.(map[string]any)
+		offeringID := int64(candidate["offering_id"].(float64))
+		switch offeringID {
+		case flatOffering:
+			assert.Equal(t, "matched", candidate["status"])
+			assert.Equal(t, true, candidate["confirmable"])
+			flatToken, _ = candidate["candidate_token"].(string)
+		case expressionOffering:
+			assert.Equal(t, "expression_requires_manual", candidate["status"])
+			assert.Equal(t, false, candidate["confirmable"])
+			assert.NotEmpty(t, candidate["expression_hash"])
+		}
+	}
+	require.NotEmpty(t, flatToken)
+
+	confirmPath := "/api/channels/" + strconv.FormatInt(channelID, 10) + "/price-match/confirm"
+	confirmBody := `{"selections":[{"offering_id":` + strconv.FormatInt(flatOffering, 10) +
+		`,"candidate_token":"` + flatToken + `"}]}`
+	rec, body = env.doWithRole(t, http.MethodPost, confirmPath, owner, confirmBody, common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.EqualValues(t, 1, body["data"].(map[string]any)["applied"])
+
+	rec, _ = env.doWithRole(t, http.MethodPost, path, other, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "他人不得预览渠道的价格候选")
+	rec, _ = env.doWithRole(t, http.MethodPost, confirmPath, other, confirmBody, common.RoleCommonUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "他人不得确认渠道的价格候选")
 }
 
 // 能力矩阵：**支持范围必须可机读**，且"未取得真实凭据"的项不得标成 supported

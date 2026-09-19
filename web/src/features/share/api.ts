@@ -135,23 +135,60 @@ export async function deleteUpstreamKey(keyId: number): Promise<{ success: boole
 }
 
 // U-3：分享者视角的消耗汇总（按渠道 / 按 Key / 按模型）。
-// 口径由后端保证：success=HTTP 2xx、failed=非 2xx、unfinished=无状态码，三者相加=attempts；
-// **不返回金额**（attempts 表没有费用字段，后端不臆造）。
+// Attempt 只提供请求质量；实际数量与成本来自 UsageEvent，不把未知价格伪装成零成本。
+export interface UsageSummaryQuantity {
+  capability: number
+  dimension: number
+  unit: 'token' | 'image' | 'second' | 'request' | 'character' | 'document' | 'unknown'
+  quantity_milli: number
+  upstream_reported_milli: number
+  local_estimated_milli: number
+  unknown_event_count: number
+  unavailable_event_count: number
+}
+
 export interface UsageSummaryItem {
   group_id?: number
+  group_key: string
   name: string
-  attempts: number
-  success: number
-  failed: number
-  unfinished: number
-  output_tokens: number
+  request_count: number
+  attempt_count: number
+  retry_count: number
+  succeeded_attempt_count: number
+  failed_attempt_count: number
+  unfinished_attempt_count: number
   ttft_ms_sum: number
   ttft_samples: number
+  estimated_cost_usd_micro: number
+  estimated_cost_event_count: number
+  pending_fx_event_count: number
+  unpriced_event_count: number
+  explicit_zero_event_count: number
+  usage: UsageSummaryQuantity[]
+}
+
+export interface UsageSummaryData {
+  group_by: 'channel' | 'key' | 'model'
+  start: number
+  end: number
+  page: number
+  page_size: number
+  has_more: boolean
+  items: UsageSummaryItem[]
 }
 
 export async function getUsageSummary(
-  groupBy: 'channel' | 'key' | 'model'
-): Promise<{ success: boolean; data?: { group_by: string; items: UsageSummaryItem[] } }> {
-  const res = await api.get('/api/apigx/usage/summary', { params: { group_by: groupBy } })
+  groupBy: 'channel' | 'key' | 'model',
+  options: { start: number; end: number; page: number; pageSize: number }
+): Promise<{ success: boolean; data?: UsageSummaryData }> {
+  const res = await api.get('/api/apigx/usage/summary', {
+    params: {
+      group_by: groupBy,
+      start: options.start,
+      end: options.end,
+      page: options.page,
+      page_size: options.pageSize,
+    },
+  })
   return res.data
 }

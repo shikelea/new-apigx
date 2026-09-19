@@ -114,6 +114,9 @@ func CreatePriceRuleSnapshot(db *gorm.DB, rule *PriceRule, items []PriceRuleItem
 		if items[i].UnitPriceMicro < 0 || items[i].UsdUnitPriceMicro < 0 {
 			return fmt.Errorf("%w: negative price is not allowed", ErrInvalidArgument)
 		}
+		if !usageUnitMatchesDimension(items[i].Dimension, items[i].UnitScale) {
+			return fmt.Errorf("%w: incompatible price dimension %d and unit %d", ErrInvalidArgument, items[i].Dimension, items[i].UnitScale)
+		}
 	}
 
 	var maxVersion int64

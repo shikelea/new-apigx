@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -180,6 +181,14 @@ type RelayInfo struct {
 	TieredBillingSnapshot *billingexpr.BillingSnapshot
 	BillingRequestInput   *billingexpr.RequestInput
 	BillingImageCount     *int
+	// APIGXImageUsageReported distinguishes real upstream image-token usage
+	// from the legacy one-token fallback added by relay/image_handler.go.
+	APIGXImageUsageReported bool
+	// APIGX audio durations are measured independently from token conversion.
+	// A zero value means the duration was unavailable and must not be inferred
+	// from locally estimated billing tokens.
+	APIGXInputAudioDurationMilli  int64
+	APIGXOutputAudioDurationMilli int64
 	// ImageRequestCount is the effective quantity sent on the current attempt;
 	// ImageQuotaBeforeGroup is the frozen legacy estimate before request ratios.
 	ImageRequestCount     int
@@ -221,10 +230,29 @@ func (info *RelayInfo) UpdateImageCount(count int64) {
 	if info.PriceData.UsePrice {
 		info.PriceData.AddOtherRatio("n", float64(count))
 	}
-	if info.TieredBillingSnapshot != nil && info.TieredBillingSnapshot.EstimatedImageCount != nil {
-		n := int(count)
-		info.BillingImageCount = &n
+	n := int(count)
+	info.BillingImageCount = &n
+}
+
+func (info *RelayInfo) SetAPIGXInputAudioDuration(seconds float64) {
+	if info == nil {
+		return
 	}
+	info.APIGXInputAudioDurationMilli = apigxDurationMilli(seconds)
+}
+
+func (info *RelayInfo) SetAPIGXOutputAudioDuration(seconds float64) {
+	if info == nil {
+		return
+	}
+	info.APIGXOutputAudioDurationMilli = apigxDurationMilli(seconds)
+}
+
+func apigxDurationMilli(seconds float64) int64 {
+	if seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds > float64(math.MaxInt64)/1000 {
+		return 0
+	}
+	return int64(math.Round(seconds * 1000))
 }
 
 func (info *RelayInfo) RequestedImageCount() int {

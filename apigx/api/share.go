@@ -68,6 +68,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
 		channels.POST("/:id/offerings", h.createOffering)
 		channels.GET("/:id/offerings", h.listOfferings)
+		channels.POST("/:id/price-match/preview", h.previewChannelPriceMatch)
+		channels.POST("/:id/price-match/confirm", h.confirmChannelPriceMatch)
 		channels.POST("/:id/fetch-models", h.fetchUpstreamModels)
 	}
 
@@ -2002,6 +2004,80 @@ func (h *handler) syncChannelPrice(c *gin.Context) {
 	})
 }
 
+// previewChannelPriceMatch reads New API's active local pricing for every model
+// in one owned channel. It is read-only and never accepts client-supplied prices.
+func (h *handler) previewChannelPriceMatch(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	channelID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	candidates, err := price.PreviewChannelMatches(h.db, owner, channelID)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	matched := 0
+	requiresManual := 0
+	for i := range candidates {
+		switch candidates[i].Status {
+		case price.MatchStatusMatched, price.MatchStatusUnchanged:
+			matched++
+		case price.MatchStatusExpressionRequiresManual:
+			requiresManual++
+		}
+	}
+	ok(c, gin.H{
+		"channel_id": channelID, "candidates": candidates,
+		"matched": matched, "requires_manual": requiresManual,
+	})
+}
+
+// confirmChannelPriceMatch confirms opaque candidate tokens from a prior
+// preview. The server re-reads local pricing and rejects stale candidates.
+func (h *handler) confirmChannelPriceMatch(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	channelID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req struct {
+		Selections []struct {
+			OfferingID     int64  `json:"offering_id"`
+			CandidateToken string `json:"candidate_token"`
+		} `json:"selections"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Selections) == 0 {
+		fail(c, http.StatusBadRequest, "invalid_body", "selections is required")
+		return
+	}
+	selections := make([]price.MatchSelection, 0, len(req.Selections))
+	for _, item := range req.Selections {
+		selections = append(selections, price.MatchSelection{
+			OfferingID: item.OfferingID, CandidateToken: item.CandidateToken,
+		})
+	}
+	report, err := price.ConfirmChannelMatches(h.db, owner, channelID, selections)
+	if err != nil {
+		if errors.Is(err, price.ErrPriceCandidateChanged) {
+			fail(c, http.StatusConflict, "price_candidate_changed", "price candidate changed; preview again")
+			return
+		}
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{
+		"channel_id": channelID, "applied": report.Applied,
+		"pending": report.Pending, "skipped": report.Skipped, "notes": report.Notes,
+	})
+}
+
 // applyBreakerToCandidates 按熔断结果把"打开"的候选置为不可用（含具体原因）。
 //
 // 抽成共用函数的原因：`route-explain` 与 `route-apply` 必须用**同一套口径**，
@@ -2352,10 +2428,15 @@ func upstreamKeyStableID(key string) string {
 	return "apigx-" + hex.EncodeToString(sum[:8])
 }
 
+const (
+	ownerUsageDefaultWindowSeconds = int64(30 * 24 * 60 * 60)
+	ownerUsageMaximumWindowSeconds = int64(90 * 24 * 60 * 60)
+)
+
 // summarizeOwnerUsage 返回**当前分享者自己**的消耗汇总（U-3）。
 //
-// 只认自己：归属由"渠道 → owner_user_id"推出，绝不返回别人的量。
-// 金额不在此输出 —— attempts 表没有费用字段，不臆造。
+// Attempt 只提供请求、重试与延迟；实际数量和成本来自不可变 UsageEvent 快照。
+// 默认查询最近 30 天，单次最多 90 天且结果分页，避免统计页触发无界聚合。
 func (h *handler) summarizeOwnerUsage(c *gin.Context) {
 	owner, valid := h.ownerID(c)
 	if !valid {
@@ -2363,39 +2444,71 @@ func (h *handler) summarizeOwnerUsage(c *gin.Context) {
 	}
 
 	groupBy := apigxmodel.OwnerUsageGroupBy(c.DefaultQuery("group_by", "channel"))
-	start := int64(0)
-	if raw := c.Query("start"); raw != "" {
-		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
-			start = parsed
-		}
+	end, queryOK := parseOwnerUsageInt64(c, "end", common.GetTimestamp())
+	if !queryOK {
+		return
 	}
-	end := int64(0)
-	if raw := c.Query("end"); raw != "" {
-		if parsed, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil {
-			end = parsed
-		}
+	start, queryOK := parseOwnerUsageInt64(c, "start", end-ownerUsageDefaultWindowSeconds)
+	if !queryOK {
+		return
 	}
-
-	if groupBy == apigxmodel.OwnerUsageByModel {
-		rows, err := apigxmodel.SummarizeOwnerAttemptsByModel(h.db, owner, start, end)
-		if err != nil {
-			failFromRepo(c, err)
-			return
-		}
-		ok(c, gin.H{"group_by": string(groupBy), "items": rows})
+	page, queryOK := parseOwnerUsageInt(c, "page", 1)
+	if !queryOK {
+		return
+	}
+	pageSize, queryOK := parseOwnerUsageInt(c, "page_size", 20)
+	if !queryOK {
+		return
+	}
+	if start <= 0 || end <= 0 || start > end || end-start > ownerUsageMaximumWindowSeconds {
+		fail(c, http.StatusBadRequest, "invalid_argument", "usage time range must be positive, ordered, and no longer than 90 days")
+		return
+	}
+	if page <= 0 || pageSize <= 0 || pageSize > 100 {
+		fail(c, http.StatusBadRequest, "invalid_argument", "page must be positive and page_size must be between 1 and 100")
 		return
 	}
 
-	rows, err := apigxmodel.SummarizeOwnerAttempts(h.db, owner, groupBy, start, end)
+	items, hasMore, err := apigxmodel.SummarizeOwnerUsage(h.db, owner, groupBy, start, end, page, pageSize)
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	if err = apigxmodel.FillOwnerUsageNames(h.db, owner, groupBy, rows); err != nil {
-		failFromRepo(c, err)
-		return
+	ok(c, gin.H{
+		"group_by":  string(groupBy),
+		"start":     start,
+		"end":       end,
+		"page":      page,
+		"page_size": pageSize,
+		"has_more":  hasMore,
+		"items":     items,
+	})
+}
+
+func parseOwnerUsageInt64(c *gin.Context, name string, fallback int64) (int64, bool) {
+	raw := c.Query(name)
+	if raw == "" {
+		return fallback, true
 	}
-	ok(c, gin.H{"group_by": string(groupBy), "items": rows})
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid_argument", "invalid "+name)
+		return 0, false
+	}
+	return parsed, true
+}
+
+func parseOwnerUsageInt(c *gin.Context, name string, fallback int) (int, bool) {
+	raw := c.Query(name)
+	if raw == "" {
+		return fallback, true
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid_argument", "invalid "+name)
+		return 0, false
+	}
+	return parsed, true
 }
 
 // syncBaseChannelServesModel 让"绑定到该供给所属分享渠道"的底座渠道真正能服务该模型。

@@ -110,6 +110,7 @@ func TestImageCacheUsageAcrossResponseFormats(t *testing.T) {
 				assert.Equal(t, 300, usage.PromptTokensDetails.CachedTokens)
 				require.NotNil(t, usage.PromptTokensDetails.CachedTokensDetails)
 				assert.Equal(t, 200, *usage.PromptTokensDetails.CachedTokensDetails.ImageTokens)
+				assert.True(t, info.APIGXImageUsageReported)
 				assert.Contains(t, recorder.Body.String(), `"cached_tokens_details":{"text_tokens":100,"image_tokens":200}`)
 			})
 		}
@@ -181,6 +182,7 @@ func TestOpenaiImageStreamHandlerForwardsSSEAndUsage(t *testing.T) {
 	require.Equal(t, 7, usage.TotalTokens)
 	require.Equal(t, 2, usage.PromptTokensDetails.ImageTokens)
 	require.Equal(t, 1, usage.PromptTokensDetails.TextTokens)
+	require.True(t, info.APIGXImageUsageReported)
 	require.Contains(t, recorder.Body.String(), `event: image_generation.partial_image`)
 	require.Contains(t, recorder.Body.String(), `data: {"type":"image_generation.partial_image","b64_json":"partial"}`)
 	require.Contains(t, recorder.Body.String(), `data: {"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7,"input_tokens_details":{"image_tokens":2,"text_tokens":1}}}`)

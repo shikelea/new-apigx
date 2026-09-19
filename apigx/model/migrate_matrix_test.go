@@ -38,6 +38,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertOfferingReviewDialect(t, db)
 		assertQualityRoutingDialect(t, db)
 		assertStageCAsyncTaskDialect(t, db)
+		assertStageDUsageSummaryDialect(t, db)
 	})
 
 	t.Run("postgres", func(t *testing.T) {
@@ -64,6 +65,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertOfferingReviewDialect(t, db)
 		assertQualityRoutingDialect(t, db)
 		assertStageCAsyncTaskDialect(t, db)
+		assertStageDUsageSummaryDialect(t, db)
 
 		// 存储引擎必须是 InnoDB。这不是洁癖：
 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
@@ -89,6 +91,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	assertOfferingReviewDialect(t, db)
 	assertQualityRoutingDialect(t, db)
 	assertStageCAsyncTaskDialect(t, db)
+	assertStageDUsageSummaryDialect(t, db)
 }
 
 var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
@@ -247,6 +250,77 @@ func assertStageCAsyncTaskDialect(t *testing.T, db *gorm.DB) {
 		return errRollbackStageCAsyncTaskMatrix
 	})
 	require.ErrorIs(t, err, errRollbackStageCAsyncTaskMatrix)
+}
+
+var errRollbackStageDUsageSummaryMatrix = errors.New("rollback stage d usage summary matrix fixture")
+
+// assertStageDUsageSummaryDialect 覆盖 D4 新依赖的跨方言聚合：COUNT DISTINCT/CASE、
+// 最新校正替换、成本状态分列与渠道/Key/模型三个分组必须在三种数据库上语义一致。
+func assertStageDUsageSummaryDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const (
+			owner int64 = 9_840_001
+			now   int64 = 1_800_300_000
+		)
+		group := &ShareGroup{OwnerUserID: owner, Name: "stage-d-matrix"}
+		require.NoError(t, CreateShareGroup(tx, group))
+		channel := &Channel{
+			OwnerUserID: owner, ShareGroupID: group.ID, Name: "stage-d-matrix",
+			BaseChannelID: 9_840_001,
+		}
+		require.NoError(t, CreateChannel(tx, channel))
+		key := &UpstreamKey{
+			ChannelID: channel.ID, StableKeyID: "stage-d-key", Name: "stage-d-key",
+			SecretRef: "stage-d-ciphertext", SecretFingerprint: "stage-d-fingerprint",
+			Status: UpstreamKeyStatusEnabled,
+		}
+		require.NoError(t, CreateUpstreamKey(tx, owner, key))
+		request := &Request{RequestUID: "stage-d-request", ApiModelID: "stage-d-model", CreatedAt: now}
+		require.NoError(t, tx.Create(request).Error)
+		for index, status := range []int{429, 200} {
+			require.NoError(t, tx.Create(&Attempt{
+				AttemptUID: "stage-d-attempt-" + string(rune('0'+index)), RequestID: request.ID,
+				AttemptIndex: index, SelectedChannelID: channel.ID, UpstreamKeyID: key.ID,
+				State: AttemptStateSucceeded, HttpStatus: status, StartedAt: now + int64(index), TtftMs: 50,
+			}).Error)
+		}
+		original := &UsageEvent{
+			EventUID: "stage-d-usage", Kind: UsageEventKindUsage, OwnerUserID: owner,
+			ApiModelID: "stage-d-model", ChannelID: channel.ID, UpstreamKeyID: key.ID,
+			Capability: CapabilityChat, Dimension: UsageDimensionInputTokens,
+			QuantityMilli: 100_000, UnitScale: UsageUnitScalePerMillionTokens,
+			Trust: UsageTrustLocalEstimated, CostState: UsageCostStateReferenceEstimated,
+			CostUsdMicro: 100, OccurredAt: now, CreatedAt: now,
+		}
+		require.NoError(t, RecordUsageEvent(tx, original))
+		require.NoError(t, AppendUsageCorrection(tx, original.ID, &UsageEvent{
+			EventUID: "stage-d-correction", QuantityMilli: 120_000,
+			Trust: UsageTrustUpstreamReported, CostState: UsageCostStateReferenceEstimated, CostUsdMicro: 120,
+		}))
+		require.NoError(t, RecordUsageEvent(tx, &UsageEvent{
+			EventUID: "stage-d-unpriced", Kind: UsageEventKindUsage, OwnerUserID: owner,
+			ApiModelID: "stage-d-model", ChannelID: channel.ID, UpstreamKeyID: key.ID,
+			Capability: CapabilityChat, Dimension: UsageDimensionOutputTokens,
+			QuantityMilli: 10_000, UnitScale: UsageUnitScalePerMillionTokens,
+			Trust: UsageTrustUpstreamReported, CostState: UsageCostStateUnpriced,
+			OccurredAt: now, CreatedAt: now,
+		}))
+
+		for _, groupBy := range []OwnerUsageGroupBy{OwnerUsageByChannel, OwnerUsageByKey, OwnerUsageByModel} {
+			items, hasMore, summaryErr := SummarizeOwnerUsage(tx, owner, groupBy, now-1, now+2, 1, 20)
+			require.NoError(t, summaryErr)
+			require.False(t, hasMore)
+			require.Len(t, items, 1)
+			assert.EqualValues(t, 1, items[0].RequestCount)
+			assert.EqualValues(t, 2, items[0].AttemptCount)
+			assert.EqualValues(t, 1, items[0].RetryCount)
+			assert.EqualValues(t, 120, items[0].EstimatedCostUSDMicro)
+			assert.EqualValues(t, 1, items[0].UnpricedEventCount)
+		}
+		return errRollbackStageDUsageSummaryMatrix
+	})
+	require.ErrorIs(t, err, errRollbackStageDUsageSummaryMatrix)
 }
 
 // informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，

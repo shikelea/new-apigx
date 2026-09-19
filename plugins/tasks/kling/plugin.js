@@ -19,13 +19,18 @@ export const meta = {
       unit: "credit",
       description: { en: "Kling credit unit price", zh: "可灵资源包单位单价" },
     },
+    seconds: {
+      type: "number",
+      unit: "second",
+      description: { en: "Generated video duration", zh: "生成视频时长" },
+    },
   },
   usageExamples: [
-    { label: "v1 std 5s", facts: { units: 1 } },
-    { label: "v1 pro 5s", facts: { units: 3.5 } },
-    { label: "v1-6 std 5s", facts: { units: 2 } },
-    { label: "v1-6 pro 10s", facts: { units: 7 } },
-    { label: "v2-master pro 5s", facts: { units: 10 } },
+    { label: "v1 std 5s", facts: { units: 1, seconds: 5 } },
+    { label: "v1 pro 5s", facts: { units: 3.5, seconds: 5 } },
+    { label: "v1-6 std 5s", facts: { units: 2, seconds: 5 } },
+    { label: "v1-6 pro 10s", facts: { units: 7, seconds: 10 } },
+    { label: "v2-master pro 5s", facts: { units: 10, seconds: 5 } },
   ],
   protocols: [{ name: "openai_responses", supports: ["stream", "sync", "background"] }, "openai_video"],
   routes: [
@@ -269,7 +274,7 @@ export function extractUsage(ctx) {
   const model = submitModel(ctx, req);
   const duration = outboundDuration(req);
   const mode = outboundMode(req, model);
-  return { units: estimateUnits(model, mode, duration) };
+  return { units: estimateUnits(model, mode, duration), seconds: duration };
 }
 
 export function buildQueryRequest(ctx) {
@@ -339,17 +344,22 @@ export function buildContentRequest(ctx) {
 
 export function extractUsageOnComplete(_task, _taskResult, body) {
   const data = (body && body.data) || {};
+  const facts = {};
   if (
-    !Object.prototype.hasOwnProperty.call(data, "final_unit_deduction") ||
-    data.final_unit_deduction === undefined ||
-    data.final_unit_deduction === null ||
-    data.final_unit_deduction === ""
+    Object.prototype.hasOwnProperty.call(data, "final_unit_deduction") &&
+    data.final_unit_deduction !== undefined &&
+    data.final_unit_deduction !== null &&
+    data.final_unit_deduction !== ""
   ) {
-    return null;
+    const units = Number.parseFloat(data.final_unit_deduction);
+    if (Number.isFinite(units)) facts.units = units;
   }
-  const units = Number.parseFloat(data.final_unit_deduction);
-  if (!Number.isFinite(units)) return null;
-  return { units: units };
+  const videos = data.task_result && Array.isArray(data.task_result.videos) ? data.task_result.videos : [];
+  if (videos.length && videos[0] && Object.prototype.hasOwnProperty.call(videos[0], "duration")) {
+    const seconds = Number.parseFloat(videos[0].duration);
+    if (Number.isFinite(seconds)) facts.seconds = seconds;
+  }
+  return Object.keys(facts).length ? facts : null;
 }
 
 export const protocols = {

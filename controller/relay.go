@@ -651,6 +651,18 @@ func executeTaskSubmissionWith(
 	// #21：结算成功后写入我们自己的**任务归属快照**（只追加记录，不触碰扣费）
 	relayhook.RecordAsyncTaskSnapshot(c, relayInfo, int64(task.ID), task.TaskID, task.Action,
 		string(task.Status), task.StartTime, task.FinishTime)
+	if task.Status == model.TaskStatusSuccess {
+		var usageFacts map[string]any
+		if result.Immediate != nil {
+			usageFacts = result.Immediate.UsageFacts
+		}
+		if snap := relayInfo.TieredBillingSnapshot; snap != nil && len(snap.UsageFacts) > 0 {
+			usageFacts = snap.UsageFacts
+		}
+		if err := relayhook.RecordAsyncTaskUsage(int64(task.ID), usageFacts); err != nil {
+			logger.LogWarn(c, fmt.Sprintf("记录 APIGX 即时任务用量失败: %v", err))
+		}
+	}
 	diagnostics.complete(task, result.Quota)
 
 	return &taskSubmissionOutcome{Result: result, Task: task, RelayInfo: relayInfo}, nil

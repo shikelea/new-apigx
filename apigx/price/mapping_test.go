@@ -3,10 +3,13 @@ package price
 import (
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -335,4 +338,102 @@ func TestNormalizeToCanonicalUnit(t *testing.T) {
 	normalized, err = NormalizeToCanonicalUnit(600_000, UnitScalePerMinute)
 	require.NoError(t, err)
 	assert.EqualValues(t, 10_000, normalized)
+}
+
+func TestPreviewAndConfirmChannelMatchesUseServerLocalPricing(t *testing.T) {
+	setPriceTestRatios(t, map[string]float64{"apigx-match-flat": 1}, map[string]float64{"apigx-match-flat": 4})
+	db := newPriceTestDB(t)
+	const owner int64 = 7601
+	channel := seedShareChannel(t, db, owner, "价格匹配渠道")
+	flatOffering := seedOffering(t, db, owner, channel, "apigx-match-flat")
+	expressionOffering := seedOffering(t, db, owner, channel, "gpt-6-astra")
+	unknownOffering := seedOffering(t, db, owner, channel, "not-a-priced-model")
+
+	preview, err := PreviewChannelMatches(db, owner, channel)
+	require.NoError(t, err)
+	require.Len(t, preview, 3)
+	byOffering := make(map[int64]MatchCandidate, len(preview))
+	for i := range preview {
+		byOffering[preview[i].OfferingID] = preview[i]
+	}
+
+	flat := byOffering[flatOffering]
+	assert.Equal(t, MatchStatusMatched, flat.Status)
+	assert.True(t, flat.Confirmable)
+	assert.NotEmpty(t, flat.CandidateToken)
+	assert.Equal(t, MatchKindExact, flat.MatchKind)
+	assert.NotEmpty(t, flat.Dimensions)
+	for _, dimension := range flat.Dimensions {
+		assert.Positive(t, dimension.UnitPriceMicro)
+		assert.Equal(t, "USD", dimension.Currency)
+	}
+
+	expression := byOffering[expressionOffering]
+	assert.Equal(t, MatchStatusExpressionRequiresManual, expression.Status)
+	assert.False(t, expression.Confirmable, "动态表达式不能被压成一个样例平面价")
+	assert.NotEmpty(t, expression.ExpressionHash)
+	assert.NotEmpty(t, expression.Expression)
+
+	unknown := byOffering[unknownOffering]
+	assert.Equal(t, MatchStatusNotFound, unknown.Status)
+	assert.False(t, unknown.Confirmable)
+	assert.Empty(t, unknown.CandidateToken)
+
+	report, err := ConfirmChannelMatches(db, owner, channel, []MatchSelection{{
+		OfferingID: flatOffering, CandidateToken: flat.CandidateToken,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, report.Applied)
+	rule, items, err := apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeOffering, flatOffering, 0)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.PriceRuleSourceBuiltinPreset, rule.Source)
+	assert.Contains(t, rule.SourceRef, "new-api/")
+	assert.NotEmpty(t, items)
+
+	preview, err = PreviewChannelMatches(db, owner, channel)
+	require.NoError(t, err)
+	for i := range preview {
+		if preview[i].OfferingID == flatOffering {
+			assert.Equal(t, MatchStatusUnchanged, preview[i].Status)
+			assert.False(t, preview[i].Confirmable, "相同候选不得重复制造版本")
+		}
+	}
+}
+
+func TestConfirmChannelMatchesRejectsStaleAndUnauthorizedCandidates(t *testing.T) {
+	setPriceTestRatios(t, map[string]float64{"apigx-match-stale": 0.5}, map[string]float64{"apigx-match-stale": 2})
+	db := newPriceTestDB(t)
+	const ownerA, ownerB int64 = 7701, 7702
+	channel := seedShareChannel(t, db, ownerA, "候选校验渠道")
+	offering := seedOffering(t, db, ownerA, channel, "apigx-match-stale")
+	preview, err := PreviewChannelMatches(db, ownerA, channel)
+	require.NoError(t, err)
+	require.Len(t, preview, 1)
+	require.True(t, preview[0].Confirmable)
+
+	_, err = ConfirmChannelMatches(db, ownerA, channel, []MatchSelection{{
+		OfferingID: offering, CandidateToken: strings.Repeat("0", 64),
+	}})
+	assert.ErrorIs(t, err, ErrPriceCandidateChanged)
+	_, _, err = apigxmodel.GetEffectivePriceRule(db, apigxmodel.PriceScopeOffering, offering, 0)
+	assert.ErrorIs(t, err, apigxmodel.ErrNoPriceRule, "失效候选不得产生任何版本")
+
+	_, err = PreviewChannelMatches(db, ownerB, channel)
+	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
+}
+
+func setPriceTestRatios(t *testing.T, models, completions map[string]float64) {
+	t.Helper()
+	oldModels := ratio_setting.ModelRatio2JSONString()
+	oldCompletions := ratio_setting.CompletionRatio2JSONString()
+	modelJSON, err := common.Marshal(models)
+	require.NoError(t, err)
+	completionJSON, err := common.Marshal(completions)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(modelJSON)))
+	require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(string(completionJSON)))
+	t.Cleanup(func() {
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(oldModels))
+		require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(oldCompletions))
+	})
 }

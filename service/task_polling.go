@@ -703,6 +703,15 @@ func truncateBase64(s string) string {
 //
 // 表达式求值失败会保留预扣额度，因此也视为已接管，避免错误全退。
 func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) bool {
+	var apigxUsageFacts map[string]any
+	if task != nil && taskResult != nil && task.Status == model.TaskStatusSuccess {
+		apigxUsageFacts = taskResult.UsageFacts
+		defer func() {
+			if err := relayhook.RecordAsyncTaskUsage(int64(task.ID), apigxUsageFacts); err != nil {
+				logger.LogWarn(ctx, fmt.Sprintf("记录 APIGX 任务用量失败: %v", err))
+			}
+		}()
+	}
 	if bc := task.PrivateData.BillingContext; bc != nil && bc.TieredSnapshot != nil {
 		// 用量表达式结算只适用于成功任务；失败任务由调用方全额退款。
 		if task.Status == model.TaskStatusFailure {
@@ -717,6 +726,7 @@ func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor
 			logger.LogWarn(ctx, fmt.Sprintf("任务 %s 表达式结算额度发生饱和: %+v", task.TaskID, result.Clamp))
 		}
 		bc.TieredSnapshot.UsageFacts = usageFacts
+		apigxUsageFacts = usageFacts
 		bc.TieredSnapshot.EstimatedTier = result.MatchedTier
 		RecalculateTaskQuota(ctx, task, result.ActualQuotaAfterGroup, "任务用量表达式结算", result.Clamp)
 		return true

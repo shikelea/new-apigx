@@ -52,8 +52,8 @@ func RecordAsyncTaskSnapshot(
 		return
 	}
 
-	owner, channelID, offeringID, keyID := resolveUsageAttribution(db, c)
-	if channelID <= 0 {
+	attribution := resolveUsageAttribution(db, c, relayInfo)
+	if attribution.channelID <= 0 {
 		// This is a regular New API channel. Creating a zero-attribution APIGX
 		// snapshot would make later polling treat the task as managed and fail its
 		// credential lookup, so unmanaged tasks deliberately stay on the base path.
@@ -61,26 +61,30 @@ func RecordAsyncTaskSnapshot(
 	}
 	now := common.GetTimestamp()
 	snapshot := &apigxmodel.AsyncTask{
-		PublicTaskID:   "apigx_" + strconv.FormatInt(baseTaskID, 10),
-		BaseTaskID:     baseTaskID,
-		UpstreamTaskID: upstreamTaskID,
-		UserID:         int64(relayInfo.UserId),
-		BaseTokenID:    int64(relayInfo.TokenId),
-		OfferingID:     offeringID,
-		ChannelID:      channelID,
-		UpstreamKeyID:  keyID,
-		OwnerUserID:    owner,
-		Action:         action,
-		Capability:     asyncTaskCapability(relayInfo, action),
-		Status:         asyncStatusFromBase(baseStatus),
-		SubmitAt:       now,
-		StartAt:        startAt,
-		FinishAt:       finishAt,
-		TimeoutAt:      now + int64(common.GetEnvOrDefault("APIGX_ASYNC_TASK_TIMEOUT_SECONDS", 86400)),
-		BillingSettled: true,
-		ReservationUID: leaseIDFromContext(c),
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		PublicTaskID:      "apigx_" + strconv.FormatInt(baseTaskID, 10),
+		BaseTaskID:        baseTaskID,
+		UpstreamTaskID:    upstreamTaskID,
+		UserID:            int64(relayInfo.UserId),
+		BaseTokenID:       int64(relayInfo.TokenId),
+		ApiKeyID:          attribution.apiKeyID,
+		CanonicalModelID:  attribution.canonicalModelID,
+		ApiModelID:        strings.TrimSpace(relayInfo.OriginModelName),
+		OfferingID:        attribution.offeringID,
+		ChannelID:         attribution.channelID,
+		UpstreamKeyID:     attribution.upstreamKeyID,
+		UpstreamAccountID: attribution.upstreamAccountID,
+		OwnerUserID:       attribution.ownerUserID,
+		Action:            action,
+		Capability:        asyncTaskCapability(relayInfo, action),
+		Status:            asyncStatusFromBase(baseStatus),
+		SubmitAt:          now,
+		StartAt:           startAt,
+		FinishAt:          finishAt,
+		TimeoutAt:         now + int64(common.GetEnvOrDefault("APIGX_ASYNC_TASK_TIMEOUT_SECONDS", 86400)),
+		BillingSettled:    true,
+		ReservationUID:    leaseIDFromContext(c),
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	fillAsyncTaskAttribution(db, relayInfo, snapshot)
 	stored, _, err := apigxmodel.CreateAsyncTaskSnapshot(db, snapshot)
@@ -145,12 +149,24 @@ func fillAsyncTaskAttribution(db *gorm.DB, relayInfo *relaycommon.RelayInfo, tas
 	if task.OfferingID > 0 {
 		var offering apigxmodel.ModelOffering
 		if db.Unscoped().Where("id = ?", task.OfferingID).First(&offering).Error == nil {
+			if task.CanonicalModelID == 0 {
+				task.CanonicalModelID = offering.CanonicalModelID
+			}
 			if task.PriceRuleID == 0 {
 				task.PriceRuleID = offering.PriceRuleID
 			}
 			if task.CapacityPolicyID == 0 {
 				task.CapacityPolicyID = offering.CapacityPolicyID
 			}
+		}
+	}
+	if task.ApiModelID == "" {
+		task.ApiModelID = strings.TrimSpace(relayInfo.OriginModelName)
+	}
+	if task.ApiModelID == "" && task.CanonicalModelID > 0 {
+		var canonical apigxmodel.CanonicalModel
+		if db.Unscoped().Where("id = ?", task.CanonicalModelID).First(&canonical).Error == nil {
+			task.ApiModelID = canonical.APIModelID
 		}
 	}
 	if task.UserID > 0 && task.BaseTokenID > 0 {
@@ -164,11 +180,9 @@ func fillAsyncTaskAttribution(db *gorm.DB, relayInfo *relaycommon.RelayInfo, tas
 			task.PolicyVersion = policy.PolicyVersion
 		}
 	}
-	if task.PriceRuleID > 0 {
-		var rule apigxmodel.PriceRule
-		if db.Where("id = ?", task.PriceRuleID).First(&rule).Error == nil {
-			task.FxRateMicro = rule.FxRateMicro
-		}
+	if rule, _ := apigxmodel.ResolveUsagePriceRule(db, task.UpstreamKeyID, task.OfferingID, task.ChannelID, common.GetTimestamp()); rule != nil {
+		task.PriceRuleID = rule.ID
+		task.FxRateMicro = rule.FxRateMicro
 	}
 	task.GrantVersion = resolveAsyncTaskGrantVersion(db, task)
 }
@@ -212,26 +226,26 @@ func asyncTaskCapability(relayInfo *relaycommon.RelayInfo, action string) int {
 	}
 	switch relayInfo.RelayMode {
 	case relayconstant.RelayModeVideoSubmit, relayconstant.RelayModeMidjourneyVideo:
-		return 8
+		return apigxmodel.CapabilityVideo
 	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeMidjourneyImagine:
-		return 3
+		return apigxmodel.CapabilityImageGeneration
 	case relayconstant.RelayModeImagesEdits, relayconstant.RelayModeMidjourneyEdits:
-		return 4
+		return apigxmodel.CapabilityImageEdit
 	case relayconstant.RelayModeAudioTranscription, relayconstant.RelayModeAudioTranslation:
-		return 5
+		return apigxmodel.CapabilityAudioRecognition
 	case relayconstant.RelayModeAudioSpeech:
-		return 6
+		return apigxmodel.CapabilityAudioGeneration
 	}
 	identity := strings.ToLower(strings.Join([]string{relayInfo.RequestURLPath, action}, " "))
 	switch {
 	case strings.Contains(identity, "video"):
-		return 8
+		return apigxmodel.CapabilityVideo
 	case strings.Contains(identity, "image"), strings.Contains(identity, "midjourney"), strings.Contains(identity, "/mj"):
-		return 3
+		return apigxmodel.CapabilityImageGeneration
 	case strings.Contains(identity, "audio"), strings.Contains(identity, "music"), strings.Contains(identity, "suno"):
-		return 6
+		return apigxmodel.CapabilityAudioGeneration
 	default:
-		return 0
+		return apigxmodel.CapabilityUnknown
 	}
 }
 

@@ -61,6 +61,29 @@ func TestMigrateIsIdempotentOnSQLite(t *testing.T) {
 	assert.Len(t, second, ExpectedTableCount)
 }
 
+// TestMigrateAddsUsageCapabilityToExistingRows reproduces the real upgrade
+// path: Stage C already has immutable usage rows, while Stage D adds their
+// capability classification. Existing evidence must be preserved and safely
+// classified as unknown instead of making startup fail on a NOT NULL column.
+func TestMigrateAddsUsageCapabilityToExistingRows(t *testing.T) {
+	db := newSQLiteDB(t)
+	require.NoError(t, Migrate(db))
+	require.NoError(t, db.Create(&UsageEvent{
+		EventUID:   "legacy-usage-before-capability",
+		Currency:   "USD",
+		OccurredAt: 1_800_400_000,
+		CreatedAt:  1_800_400_000,
+	}).Error)
+	require.NoError(t, db.Migrator().DropColumn(&UsageEvent{}, "Capability"))
+	require.False(t, db.Migrator().HasColumn(&UsageEvent{}, "Capability"))
+
+	require.NoError(t, Migrate(db))
+	require.True(t, db.Migrator().HasColumn(&UsageEvent{}, "Capability"))
+	var event UsageEvent
+	require.NoError(t, db.Where("event_uid = ?", "legacy-usage-before-capability").First(&event).Error)
+	assert.Equal(t, CapabilityUnknown, event.Capability)
+}
+
 // TestMigrateRejectsNilDB 保证误用（例如迁移前 DB 未初始化）会明确报错。
 func TestMigrateRejectsNilDB(t *testing.T) {
 	require.Error(t, Migrate(nil))

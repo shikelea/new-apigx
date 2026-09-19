@@ -49,6 +49,9 @@ func OpenaiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 
 	normalizeOpenAIUsage(&usageResp.Usage)
 	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)
+	if service.ValidUsage(&usageResp.Usage) {
+		info.APIGXImageUsageReported = true
+	}
 	return &usageResp.Usage, nil
 }
 
@@ -117,6 +120,7 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 			normalizeOpenAIUsage(&chunk.Usage)
 			if service.ValidUsage(&chunk.Usage) {
 				usage = &chunk.Usage
+				info.APIGXImageUsageReported = true
 			}
 			if chunk.Type == "image_generation.completed" || chunk.Type == "image_edit.completed" {
 				completedImages++
@@ -235,6 +239,9 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	}
 	normalizeOpenAIUsage(&usageResp.Usage)
 	applyUsagePostProcessing(info, &usageResp.Usage, responseBody)
+	if service.ValidUsage(&usageResp.Usage) {
+		info.APIGXImageUsageReported = true
+	}
 
 	imageCount := gjson.GetBytes(responseBody, "data.#").Int()
 	info.UpdateImageCount(imageCount)
