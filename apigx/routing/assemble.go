@@ -26,6 +26,9 @@ type AssembleOptions struct {
 	Now int64
 	// Breaker 是熔断阈值（T2.8）；零值取 `DefaultBreakerConfig`。
 	Breaker BreakerConfig
+	// AllowedOfferingIDs 是调用主体已通过 ACL 与平台 Key 范围求交的供给集合。
+	// nil 表示调用方没有施加权限过滤；非 nil 的空 map 表示明确没有任何授权供给。
+	AllowedOfferingIDs map[int64]struct{}
 }
 
 // AssembleCandidates 为某模型装配候选集。
@@ -53,6 +56,12 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
 
 	for i := range offerings {
 		offering := &offerings[i]
+		// 授权必须先于价格、质量、容量与熔断读取；无权资源不进入评分，也不进入解释输出。
+		if opts.AllowedOfferingIDs != nil {
+			if _, allowed := opts.AllowedOfferingIDs[offering.ID]; !allowed {
+				continue
+			}
+		}
 		var shareChannel apigxmodel.Channel
 		if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
 			continue // 渠道已不可用：不进入候选（也不会出现在解释里）

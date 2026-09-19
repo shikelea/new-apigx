@@ -52,10 +52,33 @@ func Distribute() func(c *gin.Context) {
 		if !enforceTokenModelLimit(c, modelRequest.Model) {
 			return
 		}
+		// APIGX 资源 ACL 是硬限制：在 pin、亲和、随机选择与策略评分之前排除无权来源。
+		// 普通管理员渠道不受分享 ACL 影响；平台 Key 显式限定分享来源时改用 allow-list。
+		accessChannels, accessAllowList, applyAccessFilter, accessErr := relayhook.SourceAccessChannelFilter(c, modelRequest.Model)
+		if accessErr != nil {
+			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "no available source for the requested model", types.ErrorCodeChannelNoAvailableKey)
+			return
+		}
+		if applyAccessFilter {
+			if accessAllowList && len(accessChannels) == 0 {
+				abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "no available source for the requested model", types.ErrorCodeChannelNoAvailableKey)
+				return
+			}
+			filter := taskdto.ChannelFilter{Kind: taskdto.FilterDeniedChannelIds, DeniedChannelIds: accessChannels}
+			if accessAllowList {
+				filter = taskdto.ChannelFilter{Kind: taskdto.FilterAllowedChannelIds, AllowedChannelIds: accessChannels}
+			}
+			constraints.AddFilter(filter)
+		}
 		// APIGX 默认路由策略（T2.7 用户侧）：按调用者平台 Key 的策略算出**合格渠道集合**，
 		// 作为请求级过滤器交给底座——复用底座既有的候选过滤机制，不改写选择器。
 		// 策略为空/auto 或算不出候选时**不加限定**（宁可退回默认选路）。
-		if allowedChannels, ok := relayhook.EligibleBaseChannelsForStrategy(c, modelRequest.Model); ok {
+		allowedChannels, strategyOK, strategyErr := relayhook.EligibleBaseChannelsForStrategy(c, modelRequest.Model)
+		if strategyErr != nil {
+			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "no available source for the requested model", types.ErrorCodeChannelNoAvailableKey)
+			return
+		}
+		if strategyOK {
 			constraints.AddFilter(taskdto.ChannelFilter{
 				Kind:              taskdto.FilterAllowedChannelIds,
 				AllowedChannelIds: allowedChannels,
@@ -83,6 +106,14 @@ func Distribute() func(c *gin.Context) {
 				} else {
 					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
 				}
+				return
+			}
+			if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelRequest.Model); sourceErr != nil {
+				status := sourceErr.StatusCode
+				if status <= 0 {
+					status = http.StatusServiceUnavailable
+				}
+				abortWithOpenAiMessage(c, status, sourceErr.Error(), sourceErr.GetErrorCode())
 				return
 			}
 			if ok, kind := model.ChannelSatisfiesFilters(channel, modelRequest.Model, constraints.Filters); !ok {
@@ -192,12 +223,19 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
-		// APIGX 共享容量控制（T1.7）：渠道选定后按共享账本预留并发槽位。
-		// 位置很关键：在 c.Next() 之前注册 defer，因此释放发生在下游（含流式响应）
-		// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
-		// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
 		if channel != nil {
+			if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil {
+				status := setupErr.StatusCode
+				if status <= 0 {
+					status = http.StatusServiceUnavailable
+				}
+				abortWithOpenAiMessage(c, status, setupErr.Error(), setupErr.GetErrorCode())
+				return
+			}
+			// APIGX 共享容量控制（T1.7）：渠道选定后按共享账本预留并发槽位。
+			// 位置很关键：在 c.Next() 之前注册 defer，因此释放发生在下游（含流式响应）
+			// 全部结束之后；且该处同时覆盖 pin（指定来源）与非 pin 两条路径。
+			// 满载返回 429、账本不可用返回 503（拒绝准入而非放行）。默认关闭。
 			// 容量租约由 SetupContextForSelectedChannel **按每次尝试**获取（底座的失败重试
 			// 会重新选渠道并再次经过那里），这里只负责在请求全部结束后释放最后一次的租约。
 			defer relayhook.ReleaseFromContext(c)
@@ -662,6 +700,10 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 			types.ErrOptionWithSkipRetry(),
 		)
 	}
+	// 资源授权先于任何上游 Key 选择、容量预留和质量守卫；无权请求不得触碰凭据池。
+	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
+		return sourceErr
+	}
 	if candidate, matched := pinnedEndpointCandidateForChannel(c, channel, expectedPlugin); matched {
 		if value, exists := c.Get(jsplugin.ContextKeyPinnedEndpoint); exists {
 			if pinned, ok := value.(jsplugin.PinnedEndpoint); ok && candidate.Plugin != nil && candidate.Plugin != pinned.Plugin {
@@ -748,20 +790,10 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	case constant.ChannelTypeCoze:
 		c.Set("bot_id", channel.Other)
 	}
-	// APIGX 的准入与容量预留放在**函数末尾**，必须在渠道 Key 与 BaseURL 都已写入上下文之后：
-	// 这些检查可能**提前返回**（例如来源被拒但允许回退时返回可重试错误），
-	// 若放在中间就会留下"半成品上下文"——BaseURL/ChannelKey 未设置，
-	// 而 `Distribute` 调用本函数时**忽略返回值**，请求照旧发出去，
-	// 结果上游 URL 为空、报 `unsupported protocol scheme` 的 500。
-	// 放在末尾可保证：无论这里返回成功还是错误，上下文都是完整可用的。
-	//
-	// 位置说明：本函数是**每次尝试（含每次重试）**都会经过的点，因此容量预留
-	// 天然"按当次选中的渠道与凭据"进行，也借用了底座既有的重选机制。
+	// 容量预留与熔断守卫放在函数末尾；此时渠道 Key 与 BaseURL 已完整写入上下文。
+	// 本函数每次尝试（含重试）都会经过，因此预留天然绑定当次渠道与实际 Key。
 	if !relayhook.AcquireForAttempt(c, channel.Id) {
 		return types.NewError(errors.New("capacity exceeded for selected channel"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
-	}
-	if sourceErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); sourceErr != nil {
-		return sourceErr
 	}
 	// 熔断生效（T2.8）：该供给处于"熔断打开"时返回**可重试**错误，
 	// 由底座的重选机制换一条渠道——不自己写候选循环，也不永久禁用渠道。

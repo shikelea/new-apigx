@@ -1,6 +1,7 @@
 package relayhook
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -64,56 +65,70 @@ func routeStrategyFilterEnabled() bool {
 //
 // 返回 ok=false 表示**不要加限定**（未开启、未配置策略、策略为 auto、或算不出候选）——
 // 宁可退回底座默认选路，也不要因为算不出来就把请求打成"没有合格渠道"。
-func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, bool) {
+func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, bool, error) {
 	if !routeStrategyFilterEnabled() || c == nil || strings.TrimSpace(modelName) == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	tokenID := common.GetContextKeyInt(c, constant.ContextKeyTokenId)
 	userID := common.GetContextKeyInt(c, constant.ContextKeyUserId)
 	if tokenID <= 0 || userID <= 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	db := channelpool.CurrentDB()
 	if db == nil {
-		return nil, false
+		return nil, false, nil
 	}
-	key, found := loadPreferences(db, int64(userID), int64(tokenID))
+	key, found, err := loadPreferences(db, int64(userID), int64(tokenID))
+	if err != nil {
+		_, err = handleSourceAccessDBError(err)
+		return nil, false, err
+	}
 	if !found || key == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	strategy, ok := parseRouteStrategy(key.DefaultRouteMode)
 	if !ok {
-		return nil, false // 空/auto/无法识别：不加限定
+		return nil, false, nil // 空/auto/无法识别：不加限定
+	}
+	allowedOfferingIDs, accessActive, err := AllowedOfferingIDsForRequest(c, modelName)
+	if err != nil {
+		return nil, false, err
+	}
+	if !accessActive {
+		allowedOfferingIDs = nil
 	}
 
-	cacheKey := modelName + "|" + key.DefaultRouteMode
+	// ACL 因主体而异，策略缓存必须至少隔离 user/token；最终候选过滤和出站守卫仍会实时复验。
+	cacheKey := fmt.Sprintf("%s|%s|%d|%d", modelName, key.DefaultRouteMode, userID, tokenID)
 	now := time.Now()
 	routeStrategyCacheMu.RLock()
 	cached, exists := routeStrategyCache[cacheKey]
 	routeStrategyCacheMu.RUnlock()
 	if exists && now.Before(cached.expiresAt) {
 		if len(cached.channelIDs) == 0 {
-			return nil, false
+			return nil, false, nil
 		}
-		return cached.channelIDs, true
+		return cached.channelIDs, true, nil
 	}
 
-	channelIDs := computeEligibleBaseChannels(db, modelName, strategy)
+	channelIDs := computeEligibleBaseChannels(db, modelName, strategy, allowedOfferingIDs)
 	routeStrategyCacheMu.Lock()
 	routeStrategyCache[cacheKey] = cachedStrategyChannels{channelIDs: channelIDs, expiresAt: now.Add(routeStrategyCacheTTL)}
 	routeStrategyCacheMu.Unlock()
 	if len(channelIDs) == 0 {
-		return nil, false
+		return nil, false, nil
 	}
-	return channelIDs, true
+	return channelIDs, true, nil
 }
 
 // computeEligibleBaseChannels 算出"最优名次那一档"对应的底座渠道 ID。
 //
 // 与解释接口、应用接口**共用同一套候选装配与熔断口径**，避免出现
 // "解释里它在候选里、实际选路却不考虑它"这类不一致。
-func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing.Strategy) []int {
-	candidates, _, err := routing.AssembleCandidates(db, capacity.New(common.RDB), modelName, routing.AssembleOptions{})
+func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing.Strategy, allowedOfferingIDs map[int64]struct{}) []int {
+	candidates, _, err := routing.AssembleCandidates(db, capacity.New(common.RDB), modelName, routing.AssembleOptions{
+		AllowedOfferingIDs: allowedOfferingIDs,
+	})
 	if err != nil || len(candidates) == 0 {
 		return nil
 	}

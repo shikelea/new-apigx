@@ -171,6 +171,89 @@ func TestSubjectCanAccessResource(t *testing.T) {
 	ok, err = SubjectCanAccessResource(db, GrantSubjectUser, invited, GrantResourceGroup, groupID, 5000)
 	require.NoError(t, err)
 	assert.False(t, ok, "授权到期后不可访问")
+
+	// 授权显式撤销后也不可访问（不能只看 expires_at）。
+	require.NoError(t, db.Model(&Grant{}).Where("subject_id = ?", invited).
+		Updates(map[string]any{"expires_at": 0, "revoked_at": 4000}).Error)
+	ok, err = SubjectCanAccessResource(db, GrantSubjectUser, invited, GrantResourceGroup, groupID, 3000)
+	require.NoError(t, err)
+	assert.False(t, ok, "授权撤销后不可访问")
+}
+
+func TestResolveSourceAccessSnapshotIdentityMatrix(t *testing.T) {
+	const ownerA, ownerB, viewer, stranger int64 = 9751, 9752, 9753, 9754
+	db := newRepoDB(t)
+
+	type seeded struct {
+		group    *ShareGroup
+		channel  *Channel
+		offering *ModelOffering
+	}
+	seed := func(owner int64, visibility int, baseID int64, name string) seeded {
+		t.Helper()
+		group := &ShareGroup{
+			OwnerUserID: owner, Name: name, DefaultVisibility: visibility,
+			PublishStatus: ShareGroupPublishPublished,
+		}
+		require.NoError(t, CreateShareGroup(db, group))
+		channel := &Channel{
+			OwnerUserID: owner, ShareGroupID: group.ID, Name: name + "渠道", BaseChannelID: baseID,
+		}
+		require.NoError(t, CreateChannel(db, channel))
+		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "acl-model"}
+		require.NoError(t, CreateModelOffering(db, owner, offering))
+		require.NoError(t, db.Model(&ModelOffering{}).Where("id = ?", offering.ID).
+			Update("status", OfferingStatusPublished).Error)
+		return seeded{group: group, channel: channel, offering: offering}
+	}
+
+	public := seed(ownerA, ShareGroupVisibilityPublic, 91001, "公开")
+	private := seed(ownerA, ShareGroupVisibilityPrivate, 91002, "私有")
+	limited := seed(ownerB, ShareGroupVisibilityLimited, 91003, "受限")
+	suspended := seed(ownerB, ShareGroupVisibilityPublic, 91004, "暂停")
+	require.NoError(t, SetShareGroupPublishStatus(db, suspended.group.ID, ShareGroupPublishSuspended))
+
+	allowedIDs := func(snapshot SourceAccessSnapshot) map[int64]bool {
+		result := map[int64]bool{}
+		for id := range snapshot.AllowedOfferingIDs {
+			result[id] = true
+		}
+		return result
+	}
+
+	ownerSnapshot, err := ResolveSourceAccessSnapshot(db, ownerA, 0, "acl-model", 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, map[int64]bool{public.offering.ID: true, private.offering.ID: true}, allowedIDs(ownerSnapshot))
+	assert.Len(t, ownerSnapshot.ManagedBaseChannelIDs, 4, "暂停资源仍是 APIGX 管理渠道，必须留在 deny 集合中")
+
+	strangerSnapshot, err := ResolveSourceAccessSnapshot(db, stranger, 0, "acl-model", 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, map[int64]bool{public.offering.ID: true}, allowedIDs(strangerSnapshot))
+
+	groupGrant, err := CreateGrantForUser(db, ownerB, GrantResourceGroup, limited.group.ID, viewer, 0)
+	require.NoError(t, err)
+	viewerSnapshot, err := ResolveSourceAccessSnapshot(db, viewer, 0, "acl-model", 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, map[int64]bool{public.offering.ID: true, limited.offering.ID: true}, allowedIDs(viewerSnapshot))
+
+	// 撤销分组授权，再授予单个 Offering：粒度必须准确，且 revoked_at 必须实时生效。
+	require.NoError(t, db.Model(&Grant{}).Where("id = ?", groupGrant.ID).Update("revoked_at", 9_000).Error)
+	_, err = CreateGrantForUser(db, ownerA, GrantResourceOffering, private.offering.ID, viewer, 20_000)
+	require.NoError(t, err)
+	viewerSnapshot, err = ResolveSourceAccessSnapshot(db, viewer, 0, "acl-model", 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, map[int64]bool{public.offering.ID: true, private.offering.ID: true}, allowedIDs(viewerSnapshot))
+
+	// 平台 Key 也可作为授权主体；用户本身没有这条私有资源授权。
+	const platformKeyID int64 = 88001
+	require.NoError(t, db.Create(&Grant{
+		SubjectType: GrantSubjectAPIKey, SubjectID: platformKeyID,
+		ResourceType: GrantResourceOffering, ResourceID: private.offering.ID,
+		GrantedByUserID: ownerA, CreatedAt: 1, UpdatedAt: 1,
+	}).Error)
+	keySnapshot, err := ResolveSourceAccessSnapshot(db, stranger, platformKeyID, "acl-model", 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, map[int64]bool{public.offering.ID: true, private.offering.ID: true}, allowedIDs(keySnapshot))
 }
 
 // 注册邀请（§5 邀请准入）：**补偿回补**必须真的把名额还回去，且类型不得串用（§10.1）。

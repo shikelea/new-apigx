@@ -33,6 +33,29 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// OfferingAccessResource 是出站授权所需的最小资源快照。
+//
+// 它刻意只包含权限判定需要的字段，不把上游地址、凭据或内部配置带进路由层。
+// BaseChannelID 用于把 APIGX 分享渠道映射回 New API 的实际候选渠道。
+type OfferingAccessResource struct {
+	OfferingID      int64
+	ShareChannelID  int64
+	BaseChannelID   int64
+	OwnerUserID     int64
+	ShareGroupID    int64
+	GroupVisibility int
+}
+
+// SourceAccessSnapshot 是某个调用主体针对一个模型的授权快照。
+// ManagedBaseChannelIDs 包含 APIGX 曾创建过的全部底座渠道；Allowed* 只包含当前仍可路由且有权访问的资源。
+// 两者做差即可在候选阶段排除草稿、暂停、删除或无权访问的分享渠道，同时不影响管理员自建渠道。
+type SourceAccessSnapshot struct {
+	ManagedBaseChannelIDs []int
+	AllowedBaseChannelIDs []int
+	AllowedOfferingIDs    map[int64]struct{}
+	AllowedResources      []OfferingAccessResource
+}
+
 // 访问控制：邀请与授权（计划书 §4「访问控制：公开、邀请兑换、指定用户、仅自己；访问撤销与到期」、
 // §5「邀请准入」、§10.1「注册邀请码与资源访问邀请码使用独立类型和校验逻辑」）。
 //
@@ -271,7 +294,7 @@ func SubjectCanAccessResource(db *gorm.DB, subjectType int, subjectID int64, res
 
 	var count int64
 	if err := db.Model(&Grant{}).
-		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND (expires_at = 0 OR expires_at > ?)",
+		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND revoked_at = 0 AND (expires_at = 0 OR expires_at > ?)",
 			subjectType, subjectID, resourceType, resourceID, now).
 		Count(&count).Error; err != nil {
 		return false, err
@@ -299,12 +322,125 @@ func GrantExistsForResource(db *gorm.DB, subjectType int, subjectID int64, resou
 	}
 	var count int64
 	if err := db.Model(&Grant{}).
-		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND (expires_at = 0 OR expires_at > ?)",
+		Where("subject_type = ? AND subject_id = ? AND resource_type = ? AND resource_id = ? AND revoked_at = 0 AND (expires_at = 0 OR expires_at > ?)",
 			subjectType, subjectID, resourceType, resourceID, now).
 		Count(&count).Error; err != nil {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// ResolveSourceAccessSnapshot 统一计算一个用户/平台 Key 对某模型的分享来源访问范围。
+//
+// 判定顺序固定为：资源存活且已发布 → owner / 公开 / 分组 Grant / Offering Grant。
+// 平台 Key 的固定来源、允许分享者与允许模型属于调用凭证约束，由 relayhook 在本结果上继续求交。
+// 这里一次性读取 Grant，避免对每条供给做 N+1 查询。
+func ResolveSourceAccessSnapshot(db *gorm.DB, viewerUserID, platformKeyID int64, upstreamModelID string, now int64) (SourceAccessSnapshot, error) {
+	snapshot := SourceAccessSnapshot{AllowedOfferingIDs: map[int64]struct{}{}}
+	if db == nil {
+		return snapshot, errors.New("apigxmodel: nil db")
+	}
+	if viewerUserID <= 0 {
+		return snapshot, nil
+	}
+	if now <= 0 {
+		now = common.GetTimestamp()
+	}
+
+	// 用 Unscoped 读取历史映射：只要某个底座渠道曾由 APIGX 创建，它就不能在分享资源
+	// 被暂停或软删后伪装成普通管理员渠道绕过 ACL。
+	var managedBaseIDs64 []int64
+	if err := db.Unscoped().Model(&Channel{}).
+		Where("base_channel_id > 0").Distinct("base_channel_id").
+		Pluck("base_channel_id", &managedBaseIDs64).Error; err != nil {
+		return snapshot, err
+	}
+	managedSeen := make(map[int]struct{}, len(managedBaseIDs64))
+	for _, id := range managedBaseIDs64 {
+		if id <= 0 {
+			continue
+		}
+		baseID := int(id)
+		if _, exists := managedSeen[baseID]; exists {
+			continue
+		}
+		managedSeen[baseID] = struct{}{}
+		snapshot.ManagedBaseChannelIDs = append(snapshot.ManagedBaseChannelIDs, baseID)
+	}
+	if strings.TrimSpace(upstreamModelID) == "" {
+		return snapshot, nil
+	}
+
+	offeringTable := ModelOffering{}.TableName()
+	channelTable := Channel{}.TableName()
+	groupTable := ShareGroup{}.TableName()
+	var resources []OfferingAccessResource
+	err := db.Table(offeringTable+" AS o").
+		Select("o.id AS offering_id, o.channel_id AS share_channel_id, c.base_channel_id AS base_channel_id, "+
+			"c.owner_user_id AS owner_user_id, g.id AS share_group_id, g.default_visibility AS group_visibility").
+		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
+		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
+		Where("o.upstream_model_id = ? AND o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ? AND g.publish_status = ?",
+			upstreamModelID, OfferingStatusPublished, AliveFlagAlive, ShareGroupPublishPublished).
+		Order("o.id ASC").Scan(&resources).Error
+	if err != nil {
+		return snapshot, err
+	}
+	if len(resources) == 0 {
+		return snapshot, nil
+	}
+
+	groupIDs := make([]int64, 0, len(resources))
+	offeringIDs := make([]int64, 0, len(resources))
+	for _, resource := range resources {
+		groupIDs = append(groupIDs, resource.ShareGroupID)
+		offeringIDs = append(offeringIDs, resource.OfferingID)
+	}
+
+	granted := map[string]struct{}{}
+	subjectSQL := "(subject_type = ? AND subject_id = ?)"
+	subjectArgs := []any{GrantSubjectUser, viewerUserID}
+	if platformKeyID > 0 {
+		subjectSQL = "(" + subjectSQL + " OR (subject_type = ? AND subject_id = ?))"
+		subjectArgs = append(subjectArgs, GrantSubjectAPIKey, platformKeyID)
+	}
+	var grants []Grant
+	grantQuery := db.Model(&Grant{}).
+		Where(subjectSQL, subjectArgs...).
+		Where("revoked_at = 0 AND (expires_at = 0 OR expires_at > ?)", now).
+		Where("(resource_type = ? AND resource_id IN ?) OR (resource_type = ? AND resource_id IN ?)",
+			GrantResourceGroup, groupIDs, GrantResourceOffering, offeringIDs)
+	if err := grantQuery.Find(&grants).Error; err != nil {
+		return snapshot, err
+	}
+	for _, grant := range grants {
+		granted[fmt.Sprintf("%d:%d", grant.ResourceType, grant.ResourceID)] = struct{}{}
+	}
+
+	allowedBaseSeen := map[int]struct{}{}
+	for _, resource := range resources {
+		allowed := resource.OwnerUserID == viewerUserID || resource.GroupVisibility == ShareGroupVisibilityPublic
+		if !allowed {
+			_, groupGranted := granted[fmt.Sprintf("%d:%d", GrantResourceGroup, resource.ShareGroupID)]
+			_, offeringGranted := granted[fmt.Sprintf("%d:%d", GrantResourceOffering, resource.OfferingID)]
+			allowed = groupGranted || offeringGranted
+		}
+		if !allowed {
+			continue
+		}
+		snapshot.AllowedOfferingIDs[resource.OfferingID] = struct{}{}
+		snapshot.AllowedResources = append(snapshot.AllowedResources, resource)
+		baseID := int(resource.BaseChannelID)
+		if baseID <= 0 {
+			continue
+		}
+		if _, exists := allowedBaseSeen[baseID]; exists {
+			continue
+		}
+		allowedBaseSeen[baseID] = struct{}{}
+		snapshot.AllowedBaseChannelIDs = append(snapshot.AllowedBaseChannelIDs, baseID)
+	}
+	return snapshot, nil
 }
 
 // randomInviteToken 生成一次性邀请码明文（base64url，无填充）。

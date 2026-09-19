@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
@@ -94,6 +95,12 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	}
 	if ch.Status != common.ChannelStatusEnabled {
 		return service.TaskErrorWrapperLocal(errors.New("the channel of the origin task is disabled"), "task_channel_disable", http.StatusBadRequest)
+	}
+	// 旧式 remix/continuation 在 Distribute 之后才从任务记录恢复原渠道，不能依赖候选过滤。
+	// 出站前按当前调用者与当前授权实时复验；授权撤销后历史 channel_id 不得继续放行。
+	if accessErr := relayhook.CheckSourceAllowed(c, ch.Id, info.OriginModelName); accessErr != nil {
+		return service.TaskErrorWrapperLocal(errors.New("no available source for the requested model"),
+			"no_available_source", http.StatusServiceUnavailable)
 	}
 	info.LockedChannel = ch
 
@@ -181,6 +188,10 @@ func ApplyChannelPin(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskError
 	}
 	if ch.Status != common.ChannelStatusEnabled {
 		return service.TaskErrorWrapperLocal(errors.New("the channel of the origin task is disabled"), "origin_task_channel_disabled", http.StatusBadRequest)
+	}
+	if accessErr := relayhook.CheckSourceAllowed(c, ch.Id, info.OriginModelName); accessErr != nil {
+		return service.TaskErrorWrapperLocal(errors.New("no available source for the requested model"),
+			"no_available_source", http.StatusServiceUnavailable)
 	}
 	info.LockedChannel = ch
 	return nil
@@ -483,7 +494,7 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	isOpenAIVideoAPI := strings.HasPrefix(c.Request.RequestURI, "/v1/videos/")
 
 	// Gemini/Vertex 支持实时查询：用户 fetch 时直接从上游拉取最新状态
-	if realtimeResp := tryRealtimeFetch(originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
+	if realtimeResp := tryRealtimeFetch(c, originTask, isOpenAIVideoAPI); len(realtimeResp) > 0 {
 		respBody = realtimeResp
 		return
 	}
@@ -522,7 +533,22 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 // tryRealtimeFetch 尝试从上游实时拉取 Gemini/Vertex 任务状态。
 // 仅当渠道类型为 Gemini 或 Vertex 时触发；其他渠道或出错时返回 nil。
 // 当非 OpenAI Video API 时，还会构建自定义格式的响应体。
-func tryRealtimeFetch(task *model.Task, isOpenAIVideoAPI bool) []byte {
+func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) []byte {
+	modelName := strings.TrimSpace(task.Properties.OriginModelName)
+	if modelName == "" {
+		modelName = strings.TrimSpace(task.Properties.UpstreamModelName)
+	}
+	if modelName == "" {
+		var taskData map[string]any
+		_ = common.Unmarshal(task.Data, &taskData)
+		modelName, _ = taskData["model"].(string)
+	}
+	// This fast path bypasses normal distribution and reuses the task's historical
+	// channel credential. Re-check the current caller before contacting upstream;
+	// denial falls back to the durable local task snapshot without revealing why.
+	if relayhook.CheckSourceAllowed(c, task.ChannelId, modelName) != nil {
+		return nil
+	}
 	channelModel, err := model.GetChannelById(task.ChannelId, true)
 	if err != nil {
 		return nil

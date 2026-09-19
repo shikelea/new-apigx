@@ -344,6 +344,36 @@ func TestApplyRankingGivesTiedCandidatesEqualWeight(t *testing.T) {
 	assert.Equal(t, channelA.GetWeight(), channelB.GetWeight(), "同分应同权重")
 }
 
+func TestAssembleCandidatesAppliesACLBeforeQualityAndCapacity(t *testing.T) {
+	env := newRoutingTestEnv(t)
+	allowed := env.seedChannelWithOffering(t, 1, "gpt-acl")
+	denied := env.seedChannelWithOffering(t, 2, "gpt-acl")
+	for _, seeded := range []seededChannel{allowed, denied} {
+		require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", seeded.OfferingID).
+			Update("status", apigxmodel.OfferingStatusPublished).Error)
+		var channel apigxmodel.Channel
+		require.NoError(t, env.db.Where("id = ?", seeded.ShareChannelID).First(&channel).Error)
+		require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", channel.ShareGroupID).
+			Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
+	}
+
+	candidates, public, err := AssembleCandidates(env.db, nil, "gpt-acl", AssembleOptions{
+		AllowedOfferingIDs: map[int64]struct{}{allowed.OfferingID: {}},
+	})
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	assert.Equal(t, allowed.OfferingID, candidates[0].OfferingID)
+	assert.Contains(t, public, allowed.OfferingID)
+	assert.NotContains(t, public, denied.OfferingID, "无权供给不得进入质量/容量装配或解释输出")
+
+	candidates, public, err = AssembleCandidates(env.db, nil, "gpt-acl", AssembleOptions{
+		AllowedOfferingIDs: map[int64]struct{}{},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, candidates)
+	assert.Empty(t, public)
+}
+
 // ---- fixture（投影测试需要真实库 + 我们的分享渠道） ----
 
 type routingTestEnv struct {

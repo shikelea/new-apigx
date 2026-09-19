@@ -637,7 +637,12 @@ func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing
 	rejection := readResponsesWSTestEvent(t, fixture.client)
 	assert.Equal(t, "error", rejection["type"])
 	assert.Equal(t, float64(http.StatusBadRequest), rejection["status"])
-	assert.Equal(t, 2990, <-preConsumed, "the rejected request reserved quota before contacting upstream")
+	select {
+	case remaining := <-preConsumed:
+		assert.Equal(t, 2990, remaining, "the rejected request reserved quota before contacting upstream")
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream did not observe the reserved quota before rejecting the request")
+	}
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
 	for {

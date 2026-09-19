@@ -145,6 +145,25 @@ func TestFilterCandidateIDs(t *testing.T) {
 			wantKept:  []int{},
 			wantEmpty: dto.FilterRequestPath,
 		},
+		{
+			name:      "ACL deny-list removes only managed unauthorized channel",
+			ids:       []int{900003, 900004, 900005},
+			modelName: "acl-model",
+			filters: []dto.ChannelFilter{{
+				Kind: dto.FilterDeniedChannelIds, DeniedChannelIds: []int{900004, 900005},
+			}},
+			wantKept: []int{900003},
+		},
+		{
+			name:      "ACL deny-list reports its own reason when it empties candidates",
+			ids:       []int{900004},
+			modelName: "acl-model",
+			filters: []dto.ChannelFilter{{
+				Kind: dto.FilterDeniedChannelIds, DeniedChannelIds: []int{900004},
+			}},
+			wantKept:  []int{},
+			wantEmpty: dto.FilterDeniedChannelIds,
+		},
 	}
 
 	channelSyncLock.Lock()

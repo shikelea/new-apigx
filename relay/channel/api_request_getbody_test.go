@@ -416,11 +416,21 @@ func runGoAwayAfterFirstRequestServer(ln net.Listener) <-chan h2ServerResult {
 
 			if attempt == 0 {
 				err = framer.WriteGoAway(0, http2.ErrCodeNo, nil)
-				conn.Close()
 				if err != nil {
+					conn.Close()
 					res.err = err
 					return
 				}
+				// A full close while the client's SETTINGS acknowledgement is still
+				// unread is translated into WSAECONNRESET on Windows. Half-close the
+				// server's write side and drain the peer instead, so the client first
+				// observes the graceful GOAWAY and can replay the request.
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					_ = tcpConn.CloseWrite()
+					_ = tcpConn.SetReadDeadline(time.Now().Add(time.Second))
+					_, _ = io.Copy(io.Discard, tcpConn)
+				}
+				conn.Close()
 				continue
 			}
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
@@ -312,6 +313,10 @@ func RelayMidjourneyTaskImageSeed(c *gin.Context) *dto.MidjourneyResponse {
 	if channel.Status != common.ChannelStatusEnabled {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "该任务所属渠道已被禁用")
 	}
+	modelName := service.CovertMjpActionToModelName(originTask.Action)
+	if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); accessErr != nil {
+		return service.MidjourneyErrorWrapper(constant.MjRequestError, "no_available_source")
+	}
 	c.Set("channel_id", originTask.ChannelId)
 	c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", channel.Key))
 
@@ -485,6 +490,9 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			}
 			if channel.Status != common.ChannelStatusEnabled {
 				return service.MidjourneyErrorWrapper(constant.MjRequestError, "该任务所属渠道已被禁用")
+			}
+			if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, relayInfo.OriginModelName); accessErr != nil {
+				return service.MidjourneyErrorWrapper(constant.MjRequestError, "no_available_source")
 			}
 			c.Set("base_url", channel.GetBaseURL())
 			c.Set("channel_id", originTask.ChannelId)

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
@@ -230,6 +231,49 @@ func legacyVideoAvailable(task *model.Task) bool {
 	}
 }
 
+func taskSourceModelName(task *model.Task) string {
+	if task == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(task.Properties.OriginModelName); name != "" {
+		return name
+	}
+	if name := strings.TrimSpace(task.Properties.UpstreamModelName); name != "" {
+		return name
+	}
+	var data struct {
+		Model string `json:"model"`
+	}
+	if err := common.Unmarshal(task.Data, &data); err == nil {
+		return strings.TrimSpace(data.Model)
+	}
+	return ""
+}
+
+// checkTaskArtifactSourceAllowed is called only before an artifact path contacts the
+// historical upstream channel. Locally persisted artifacts remain available to the task
+// owner; revoking a share grant stops further credentialed/proxied upstream access.
+func checkTaskArtifactSourceAllowed(c *gin.Context, task *model.Task) bool {
+	if task == nil {
+		return false
+	}
+	modelName := taskSourceModelName(task)
+	if middleware.IsTaskArtifactAccess(c) {
+		// A signed capability has no bearer token context. Bind the real-time ACL check
+		// to the task owner while deliberately omitting token preference constraints.
+		if accessErr := relayhook.CheckSourceAllowedForUser(int64(task.UserId), task.ChannelId, modelName); accessErr != nil {
+			writeTaskArtifactError(c, http.StatusServiceUnavailable, "no_available_source", "No available source for the requested model")
+			return false
+		}
+		return true
+	}
+	if accessErr := relayhook.CheckSourceAllowed(c, task.ChannelId, modelName); accessErr != nil {
+		writeTaskArtifactError(c, http.StatusServiceUnavailable, "no_available_source", "No available source for the requested model")
+		return false
+	}
+	return true
+}
+
 func getTaskForArtifactRequest(c *gin.Context, taskID string) (*model.Task, bool, error) {
 	if middleware.IsTaskArtifactAccess(c) {
 		task, exists, err := model.GetUniqueByOnlyTaskId(taskID)
@@ -300,6 +344,9 @@ func TaskArtifactContent(c *gin.Context) {
 			writeTaskArtifactError(c, http.StatusNotFound, "artifact_not_found", "Task or artifact not found")
 			return
 		}
+		if !checkTaskArtifactSourceAllowed(c, task) {
+			return
+		}
 		descriptor := &relaychannel.TaskContentRequest{
 			URL:            task.GetResultURL(),
 			Method:         c.Request.Method,
@@ -329,6 +376,9 @@ func TaskArtifactContent(c *gin.Context) {
 	artifactStore := service.GetTaskArtifactStore()
 	if ref, resolveErr := artifactStore.Resolve(task, artifactKey); resolveErr == nil && ref != nil {
 		_ = artifactStore.Serve(c, task, ref)
+		return
+	}
+	if !checkTaskArtifactSourceAllowed(c, task) {
 		return
 	}
 

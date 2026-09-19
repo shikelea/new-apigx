@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
 	appdto "github.com/QuantumNous/new-api/dto"
@@ -427,6 +428,11 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
+	// WebSocket 连接可跨多个 response.create 事件存活；每个事件都按当前授权和模型复验，
+	// 不能因为握手时曾获准就永久沿用已撤销的分享来源。
+	if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, model); accessErr != nil {
+		return accessErr
+	}
 	keyEnabled := channel.Key == s.lockedKey
 	if channel.ChannelInfo.IsMultiKey {
 		keys := channel.GetKeys()
@@ -831,6 +837,26 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
 	}) {
 		constraints.AddFilter(appdto.ChannelFilter{Kind: appdto.FilterResponsesWebSocket})
 	}
+	accessChannels, accessAllowList, applyAccessFilter, accessErr := relayhook.SourceAccessChannelFilter(c, modelName)
+	if accessErr != nil {
+		return nil, types.NewErrorWithStatusCode(errors.New("no available source for the requested model"),
+			types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
+	if applyAccessFilter {
+		filter := appdto.ChannelFilter{Kind: appdto.FilterDeniedChannelIds, DeniedChannelIds: accessChannels}
+		if accessAllowList {
+			filter = appdto.ChannelFilter{Kind: appdto.FilterAllowedChannelIds, AllowedChannelIds: accessChannels}
+		}
+		constraints.AddFilter(filter)
+	}
+	strategyChannels, strategyOK, strategyErr := relayhook.EligibleBaseChannelsForStrategy(c, modelName)
+	if strategyErr != nil {
+		return nil, types.NewErrorWithStatusCode(errors.New("no available source for the requested model"),
+			types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
+	if strategyOK {
+		constraints.AddFilter(appdto.ChannelFilter{Kind: appdto.FilterAllowedChannelIds, AllowedChannelIds: strategyChannels})
+	}
 	if pin, found, overridden := constraints.ResolvedPin(); found {
 		for _, lost := range overridden {
 			logger.LogWarn(c, fmt.Sprintf("channel pin overridden: winning_source=%s winning_channel_id=%d overridden_source=%s overridden_channel_id=%d", pin.Source, pin.ChannelId, lost.Source, lost.ChannelId))
@@ -841,6 +867,9 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
 		}
 		if channel.Status != common.ChannelStatusEnabled {
 			return nil, types.NewErrorWithStatusCode(errors.New("specified channel is disabled"), types.ErrorCodeGetChannelFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+		if accessErr := relayhook.CheckSourceAllowed(c, channel.Id, modelName); accessErr != nil {
+			return nil, accessErr
 		}
 		if ok, kind := appmodel.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
 			return nil, types.NewErrorWithStatusCode(errors.New("specified channel does not satisfy request constraints"), types.ErrorCode(kind), http.StatusBadRequest, types.ErrOptionWithSkipRetry())

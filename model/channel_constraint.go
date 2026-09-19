@@ -11,6 +11,8 @@ var filterEvalOrder = []dto.ChannelFilterKind{
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginIdentity,
 	dto.FilterResponsesWebSocket,
+	// ACL 是硬限制，必须在路由策略给出的 allow-list 之前求交。
+	dto.FilterDeniedChannelIds,
 	// 放在最后：它是最"具体"的限定（调用方已经算好可用渠道集合），
 	// 放在最后能让前面的过滤器先给出更精确的归因原因。
 	dto.FilterAllowedChannelIds,
@@ -109,6 +111,8 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 		return filter.TaskPluginKey == "" || slices.Contains(filter.TaskPluginChannelTypes, ch.Type)
 	case dto.FilterResponsesWebSocket:
 		return (ch.Type == constant.ChannelTypeOpenAI || ch.Type == constant.ChannelTypeCodex) && ch.GetSetting().ResponsesWebSocketEnabled
+	case dto.FilterDeniedChannelIds:
+		return !slices.Contains(filter.DeniedChannelIds, ch.Id)
 	case dto.FilterAllowedChannelIds:
 		// **空列表表示"不允许任何渠道"**（明确的"没有合格候选"），
 		// 而不是"没有这个限定"——调用方要表达"没算出来"就不该加这个过滤器。

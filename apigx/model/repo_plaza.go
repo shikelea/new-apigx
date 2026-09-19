@@ -119,6 +119,7 @@ func plazaVisibilityPredicate(viewerUserID int64) (string, []any) {
 	condition := "(g.default_visibility = ?" +
 		" OR EXISTS (SELECT 1 FROM " + grantTable + " AS gr" +
 		" WHERE gr.subject_type = ? AND gr.subject_id = ?" +
+		" AND gr.revoked_at = 0" +
 		" AND (gr.expires_at = 0 OR gr.expires_at > ?)" +
 		" AND ((gr.resource_type = ? AND gr.resource_id = g.id) OR (gr.resource_type = ? AND gr.resource_id = o.id))))" +
 		// 闸门（U-1）：公开/受邀**之外**，分组本身还必须处于「已发布」。
