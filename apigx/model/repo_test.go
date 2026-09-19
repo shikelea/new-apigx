@@ -131,6 +131,36 @@ func TestUpstreamKeyOwnershipTravelsThroughChannel(t *testing.T) {
 	assert.ErrorIs(t, SetUpstreamKeyCooldown(db, ownerB, keyA.ID, common.GetTimestamp()+60), ErrNotFound)
 }
 
+func TestUpstreamKeyCredentialHistorySurvivesRotationAndDelete(t *testing.T) {
+	db := newRepoDB(t)
+	const owner int64 = 3101
+	_, channel := seedGroupAndChannel(t, db, owner)
+	key := &UpstreamKey{
+		ChannelID: channel.ID, StableKeyID: "rotate-1", Name: "rotating",
+		SecretRef: "secret://v1", SecretFingerprint: "fp-v1", Status: UpstreamKeyStatusEnabled,
+	}
+	require.NoError(t, CreateUpstreamKey(db, owner, key))
+
+	v1, err := ResolveUpstreamKeyCredential(db, key.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "secret://v1", v1.SecretRef)
+
+	rotated, err := RotateUpstreamKeyCredential(db, owner, key.ID, "secret://v2", "fp-v2")
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, rotated.CredentialVersion)
+	v2, err := ResolveUpstreamKeyCredential(db, key.ID, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "secret://v2", v2.SecretRef)
+
+	require.NoError(t, DeleteUpstreamKey(db, owner, key.ID))
+	v1AfterDelete, err := ResolveUpstreamKeyCredential(db, key.ID, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "secret://v1", v1AfterDelete.SecretRef)
+	v2AfterDelete, err := ResolveUpstreamKeyCredential(db, key.ID, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "secret://v2", v2AfterDelete.SecretRef)
+}
+
 // Key 池筛选：启用 / 未到期 / 不在冷却，三者必须同时满足。
 func TestAvailableUpstreamKeysFiltersThreeConditions(t *testing.T) {
 	db := newRepoDB(t)

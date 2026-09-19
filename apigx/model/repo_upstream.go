@@ -3,9 +3,11 @@ package apigxmodel
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // 领域仓储：上游账户池与上游 Key。
@@ -143,7 +145,12 @@ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
 	}
 	key.AliveFlag = AliveFlagAlive
 	touchTimestamps(true, &key.CreatedAt, &key.UpdatedAt)
-	return db.Create(key).Error
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(key).Error; err != nil {
+			return err
+		}
+		return createUpstreamKeyCredential(tx, key, 0)
+	})
 }
 
 // Weights 返回用于加权挑选的权重（0 视为未设置）。
@@ -220,6 +227,120 @@ func DeleteUpstreamKey(db *gorm.DB, ownerUserID, keyID int64) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// RotateUpstreamKeyCredential 原子保存新凭据版本并更新当前 Key。旧版本继续保留给已提交任务。
+func RotateUpstreamKeyCredential(db *gorm.DB, ownerUserID, keyID int64, secretRef, fingerprint string) (*UpstreamKey, error) {
+	if strings.TrimSpace(secretRef) == "" || strings.TrimSpace(fingerprint) == "" {
+		return nil, fmt.Errorf("%w: secret_ref and secret_fingerprint are required", ErrInvalidArgument)
+	}
+	var updated UpstreamKey
+	err := db.Transaction(func(tx *gorm.DB) error {
+		key, err := getUpstreamKeyWithOwnershipLocked(tx, ownerUserID, keyID)
+		if err != nil {
+			return err
+		}
+		now := common.GetTimestamp()
+		// 升级旧数据时先把当前版本补进历史表；已存在时 OnConflict 保持幂等。
+		if err := createUpstreamKeyCredential(tx, key, 0); err != nil {
+			return err
+		}
+		if err := tx.Model(&UpstreamKeyCredential{}).
+			Where("upstream_key_id = ? AND credential_version = ? AND retired_at = 0", key.ID, key.CredentialVersion).
+			Update("retired_at", now).Error; err != nil {
+			return err
+		}
+		nextVersion := key.CredentialVersion + 1
+		credential := &UpstreamKeyCredential{
+			UpstreamKeyID: key.ID, CredentialVersion: nextVersion,
+			SecretRef: secretRef, SecretFingerprint: fingerprint,
+			StartedAt: now, CreatedAt: now,
+		}
+		if err := tx.Create(credential).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
+			Updates(map[string]any{
+				"secret_ref": secretRef, "secret_fingerprint": fingerprint,
+				"credential_version": nextVersion, "credential_started_at": now,
+				"status": UpstreamKeyStatusEnabled, "updated_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		key.SecretRef = secretRef
+		key.SecretFingerprint = fingerprint
+		key.CredentialVersion = nextVersion
+		key.CredentialStartedAt = now
+		key.Status = UpstreamKeyStatusEnabled
+		key.UpdatedAt = now
+		updated = *key
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// ResolveUpstreamKeyCredential 读取任务提交时绑定的凭据版本。Key 已轮换或软删除仍可读取。
+func ResolveUpstreamKeyCredential(db *gorm.DB, keyID, credentialVersion int64) (*UpstreamKeyCredential, error) {
+	if db == nil || keyID <= 0 || credentialVersion <= 0 {
+		return nil, ErrNotFound
+	}
+	var credential UpstreamKeyCredential
+	err := db.Where("upstream_key_id = ? AND credential_version = ?", keyID, credentialVersion).
+		First(&credential).Error
+	if err == nil {
+		return &credential, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	// 兼容升级前尚未建立历史行的当前版本，并立即补写，之后即使删除也能继续查询。
+	var key UpstreamKey
+	if err := db.Unscoped().Where("id = ? AND credential_version = ?", keyID, credentialVersion).First(&key).Error; err != nil {
+		return nil, ErrNotFound
+	}
+	if err := createUpstreamKeyCredential(db, &key, 0); err != nil {
+		return nil, err
+	}
+	return &UpstreamKeyCredential{
+		UpstreamKeyID: key.ID, CredentialVersion: key.CredentialVersion,
+		SecretRef: key.SecretRef, SecretFingerprint: key.SecretFingerprint,
+		StartedAt: key.CredentialStartedAt, CreatedAt: key.CreatedAt,
+	}, nil
+}
+
+func createUpstreamKeyCredential(db *gorm.DB, key *UpstreamKey, retiredAt int64) error {
+	if key == nil || key.ID <= 0 || key.CredentialVersion <= 0 || key.SecretRef == "" {
+		return fmt.Errorf("%w: complete upstream key credential is required", ErrInvalidArgument)
+	}
+	credential := &UpstreamKeyCredential{
+		UpstreamKeyID: key.ID, CredentialVersion: key.CredentialVersion,
+		SecretRef: key.SecretRef, SecretFingerprint: key.SecretFingerprint,
+		StartedAt: key.CredentialStartedAt, RetiredAt: retiredAt, CreatedAt: key.CreatedAt,
+	}
+	if credential.StartedAt == 0 {
+		credential.StartedAt = common.GetTimestamp()
+	}
+	if credential.CreatedAt == 0 {
+		credential.CreatedAt = credential.StartedAt
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(credential).Error
+}
+
+func getUpstreamKeyWithOwnershipLocked(db *gorm.DB, ownerUserID, keyID int64) (*UpstreamKey, error) {
+	var key UpstreamKey
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", keyID).First(&key).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if _, err := GetChannel(db, ownerUserID, key.ChannelID); err != nil {
+		return nil, ErrNotFound
+	}
+	return &key, nil
 }
 
 // getUpstreamKeyWithOwnership 取出 Key 并校验其所属渠道属于该所有者。

@@ -156,6 +156,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 
 	keys := r.Group("/keys")
 	{
+		keys.POST("/:id/rotate", h.rotateUpstreamKey)
 		keys.PATCH("/:id/status", h.updateKeyStatus)
 		keys.PATCH("/:id/cooldown", h.updateKeyCooldown)
 		keys.DELETE("/:id", h.deleteUpstreamKey)
@@ -672,6 +673,47 @@ func (h *handler) listUpstreamKeys(c *gin.Context) {
 		})
 	}
 	ok(c, gin.H{"items": items})
+}
+
+type rotateUpstreamKeyRequest struct {
+	Key string `json:"key"`
+}
+
+func (h *handler) rotateUpstreamKey(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req rotateUpstreamKeyRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Key) == "" {
+		fail(c, http.StatusBadRequest, "missing_key", "upstream key is required")
+		return
+	}
+	plain := strings.TrimSpace(req.Key)
+	envelope, err := secretbox.Encrypt(plain)
+	if err != nil {
+		fail(c, http.StatusServiceUnavailable, "secret_store_unavailable", "credential store is not configured")
+		return
+	}
+	fingerprint, err := secretbox.Fingerprint(plain)
+	if err != nil {
+		fail(c, http.StatusServiceUnavailable, "secret_store_unavailable", "credential store is not configured")
+		return
+	}
+	key, err := apigxmodel.RotateUpstreamKeyCredential(h.db, owner, id, envelope, fingerprint)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if _, err := channelpool.ProjectKeyPool(h.db, key.ChannelID); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": key.ID, "credential_version": key.CredentialVersion, "masked": maskTail(plain)})
 }
 
 type updateStatusRequest struct {

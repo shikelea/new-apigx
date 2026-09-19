@@ -69,6 +69,289 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	// MultiKeyStableIDs 与真实 Key 列表一一对齐。APIGX 用它让健康、容量和统计锚定稳定身份，
+	// 避免增删、重排或权重变化后把按位置保存的状态套到另一把 Key 上。
+	MultiKeyStableIDs []string `json:"multi_key_stable_ids,omitempty"`
+	// MultiKeyWeights 与真实 Key 列表一一对齐；权重直接参与选择，不再通过复制明文槽位表达。
+	MultiKeyWeights []int64 `json:"multi_key_weights,omitempty"`
+	// 以下三张表是带稳定身份渠道的权威运行期状态。旧索引表仍保留并镜像写入，
+	// 以兼容未提供稳定 ID 的原生 New API 渠道与既有管理接口。
+	MultiKeyStatusByStableID         map[string]int    `json:"multi_key_status_by_stable_id,omitempty"`
+	MultiKeyDisabledReasonByStableID map[string]string `json:"multi_key_disabled_reason_by_stable_id,omitempty"`
+	MultiKeyDisabledTimeByStableID   map[string]int64  `json:"multi_key_disabled_time_by_stable_id,omitempty"`
+	// 状态来源表让底座健康、容量和熔断分别持有自己的标记。MultiKeyStatusList 与
+	// MultiKeyStatusByStableID 只是给既有接口读取的合并镜像，恢复一个来源不会误删另一个来源。
+	MultiKeyStatusSources           map[int]map[string]int    `json:"multi_key_status_sources,omitempty"`
+	MultiKeyStatusSourcesByStableID map[string]map[string]int `json:"multi_key_status_sources_by_stable_id,omitempty"`
+}
+
+const maxMultiKeyWeight int64 = 16
+
+const multiKeyStatusSourceBase = "base"
+
+// MultiKeyStableIDAt 返回指定真实 Key 槽位的稳定身份。
+func (c *ChannelInfo) MultiKeyStableIDAt(index int) (string, bool) {
+	if c == nil || index < 0 || index >= len(c.MultiKeyStableIDs) {
+		return "", false
+	}
+	stableID := strings.TrimSpace(c.MultiKeyStableIDs[index])
+	return stableID, stableID != ""
+}
+
+func (c *ChannelInfo) multiKeyWeightAt(index int) int64 {
+	weight := int64(1)
+	if c != nil && index >= 0 && index < len(c.MultiKeyWeights) {
+		weight = c.MultiKeyWeights[index]
+	}
+	if weight <= 0 {
+		return 1
+	}
+	if weight > maxMultiKeyWeight {
+		return maxMultiKeyWeight
+	}
+	return weight
+}
+
+// MultiKeyStatusAt 返回真实 Key 槽位当前是否可选。带稳定 ID 时只读取稳定状态，
+// 避免增删/重排后旧索引镜像误伤另一把 Key；没有稳定元数据的原生渠道继续读取旧索引表。
+func (c *ChannelInfo) MultiKeyStatusAt(index int) int {
+	if c == nil {
+		return common.ChannelStatusEnabled
+	}
+	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+		if sources := c.MultiKeyStatusSourcesByStableID[stableID]; len(sources) > 0 {
+			return mergedMultiKeyStatus(sources)
+		}
+		if c.MultiKeyStatusByStableID != nil {
+			if status, exists := c.MultiKeyStatusByStableID[stableID]; exists {
+				return status
+			}
+		}
+		return common.ChannelStatusEnabled
+	}
+	if sources := c.MultiKeyStatusSources[index]; len(sources) > 0 {
+		return mergedMultiKeyStatus(sources)
+	}
+	if c.MultiKeyStatusList != nil {
+		if status, exists := c.MultiKeyStatusList[index]; exists {
+			return status
+		}
+	}
+	return common.ChannelStatusEnabled
+}
+
+func multiKeyStatusMarkSource(markValue int) string {
+	return fmt.Sprintf("mark:%d", markValue)
+}
+
+func inferredMultiKeyStatusSource(status int) string {
+	if status >= 90 {
+		return multiKeyStatusMarkSource(status)
+	}
+	return multiKeyStatusSourceBase
+}
+
+// mergedMultiKeyStatus 合并同一 Key 的独立状态来源。底座自身状态优先用于兼容展示；
+// 其余标记取最大值以保证结果确定。任一非启用来源都会让该 Key 不可选。
+func mergedMultiKeyStatus(sources map[string]int) int {
+	if status, ok := sources[multiKeyStatusSourceBase]; ok && status != common.ChannelStatusEnabled {
+		return status
+	}
+	merged := common.ChannelStatusEnabled
+	for _, status := range sources {
+		if status != common.ChannelStatusEnabled && status > merged {
+			merged = status
+		}
+	}
+	return merged
+}
+
+// statusSourcesAt 返回指定真实槽位的权威来源表，并把升级前的单值状态迁入来源表。
+func (c *ChannelInfo) statusSourcesAt(index int) (map[string]int, bool) {
+	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+		if c.MultiKeyStatusSourcesByStableID == nil {
+			c.MultiKeyStatusSourcesByStableID = make(map[string]map[string]int)
+		}
+		sources := c.MultiKeyStatusSourcesByStableID[stableID]
+		changed := false
+		if sources == nil {
+			sources = make(map[string]int)
+			c.MultiKeyStatusSourcesByStableID[stableID] = sources
+			changed = true
+		}
+		if len(sources) == 0 {
+			if status, exists := c.MultiKeyStatusByStableID[stableID]; exists && status != common.ChannelStatusEnabled {
+				sources[inferredMultiKeyStatusSource(status)] = status
+				changed = true
+			}
+		}
+		return sources, changed
+	}
+	if c.MultiKeyStatusSources == nil {
+		c.MultiKeyStatusSources = make(map[int]map[string]int)
+	}
+	sources := c.MultiKeyStatusSources[index]
+	changed := false
+	if sources == nil {
+		sources = make(map[string]int)
+		c.MultiKeyStatusSources[index] = sources
+		changed = true
+	}
+	if len(sources) == 0 {
+		if status, exists := c.MultiKeyStatusList[index]; exists && status != common.ChannelStatusEnabled {
+			sources[inferredMultiKeyStatusSource(status)] = status
+			changed = true
+		}
+	}
+	return sources, changed
+}
+
+func (c *ChannelInfo) refreshMultiKeyStatusAt(index int, sources map[string]int) {
+	status := mergedMultiKeyStatus(sources)
+	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+		if status == common.ChannelStatusEnabled {
+			delete(c.MultiKeyStatusByStableID, stableID)
+		} else {
+			if c.MultiKeyStatusByStableID == nil {
+				c.MultiKeyStatusByStableID = make(map[string]int)
+			}
+			c.MultiKeyStatusByStableID[stableID] = status
+		}
+	}
+	if status == common.ChannelStatusEnabled {
+		delete(c.MultiKeyStatusList, index)
+	} else {
+		if c.MultiKeyStatusList == nil {
+			c.MultiKeyStatusList = make(map[int]int)
+		}
+		c.MultiKeyStatusList[index] = status
+	}
+}
+
+func (c *ChannelInfo) compactMultiKeyStatusSources(index int, sources map[string]int) {
+	if len(sources) != 0 {
+		return
+	}
+	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+		delete(c.MultiKeyStatusSourcesByStableID, stableID)
+		if len(c.MultiKeyStatusSourcesByStableID) == 0 {
+			c.MultiKeyStatusSourcesByStableID = nil
+		}
+		return
+	}
+	delete(c.MultiKeyStatusSources, index)
+	if len(c.MultiKeyStatusSources) == 0 {
+		c.MultiKeyStatusSources = nil
+	}
+}
+
+// SetMultiKeyStatusAt 只更新底座健康来源，同时维护稳定身份状态和兼容索引镜像。
+func (c *ChannelInfo) SetMultiKeyStatusAt(index, status int, reason string, at int64) {
+	if c == nil || index < 0 {
+		return
+	}
+	sources, _ := c.statusSourcesAt(index)
+	if status == common.ChannelStatusEnabled {
+		delete(sources, multiKeyStatusSourceBase)
+		delete(c.MultiKeyDisabledReason, index)
+		delete(c.MultiKeyDisabledTime, index)
+		if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+			delete(c.MultiKeyDisabledReasonByStableID, stableID)
+			delete(c.MultiKeyDisabledTimeByStableID, stableID)
+		}
+		c.refreshMultiKeyStatusAt(index, sources)
+		c.compactMultiKeyStatusSources(index, sources)
+		return
+	}
+	sources[multiKeyStatusSourceBase] = status
+	if c.MultiKeyDisabledReason == nil {
+		c.MultiKeyDisabledReason = make(map[int]string)
+	}
+	if c.MultiKeyDisabledTime == nil {
+		c.MultiKeyDisabledTime = make(map[int]int64)
+	}
+	c.MultiKeyDisabledReason[index] = reason
+	c.MultiKeyDisabledTime[index] = at
+	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+		if c.MultiKeyDisabledReasonByStableID == nil {
+			c.MultiKeyDisabledReasonByStableID = make(map[string]string)
+		}
+		if c.MultiKeyDisabledTimeByStableID == nil {
+			c.MultiKeyDisabledTimeByStableID = make(map[string]int64)
+		}
+		c.MultiKeyDisabledReasonByStableID[stableID] = reason
+		c.MultiKeyDisabledTimeByStableID[stableID] = at
+	}
+	c.refreshMultiKeyStatusAt(index, sources)
+}
+
+// ReplaceMultiKeyStatusMarks 原子替换某一来源写入的状态标记，保留其他来源的状态。
+// 稳定 ID 表是权威数据，索引表只作为旧接口可见的镜像。
+func (c *ChannelInfo) ReplaceMultiKeyStatusMarks(markValue int, indexes []int) bool {
+	if c == nil {
+		return false
+	}
+	targets := make(map[int]struct{}, len(indexes))
+	for _, index := range indexes {
+		if index >= 0 && index < c.MultiKeySize {
+			targets[index] = struct{}{}
+		}
+	}
+	source := multiKeyStatusMarkSource(markValue)
+	changed := false
+	for index := 0; index < c.MultiKeySize; index++ {
+		sources, migrated := c.statusSourcesAt(index)
+		changed = changed || migrated
+		_, wanted := targets[index]
+		if wanted {
+			if current, exists := sources[source]; !exists || current != markValue {
+				sources[source] = markValue
+				changed = true
+			}
+		} else if _, exists := sources[source]; exists {
+			delete(sources, source)
+			changed = true
+		}
+		c.refreshMultiKeyStatusAt(index, sources)
+		c.compactMultiKeyStatusSources(index, sources)
+	}
+	if len(c.MultiKeyStatusList) == 0 {
+		c.MultiKeyStatusList = nil
+	}
+	if len(c.MultiKeyStatusByStableID) == 0 {
+		c.MultiKeyStatusByStableID = nil
+	}
+	return changed
+}
+
+// HasMultiKeyStatusMark 报告任一独立来源是否仍持有指定标记。
+func (c *ChannelInfo) HasMultiKeyStatusMark(markValue int) bool {
+	if c == nil {
+		return false
+	}
+	source := multiKeyStatusMarkSource(markValue)
+	for _, sources := range c.MultiKeyStatusSourcesByStableID {
+		if sources[source] == markValue {
+			return true
+		}
+	}
+	for _, sources := range c.MultiKeyStatusSources {
+		if sources[source] == markValue {
+			return true
+		}
+	}
+	// 兼容升级前尚未拆分来源的持久化单值。
+	for _, status := range c.MultiKeyStatusByStableID {
+		if status == markValue {
+			return true
+		}
+	}
+	for _, status := range c.MultiKeyStatusList {
+		if status == markValue {
+			return true
+		}
+	}
+	return false
 }
 
 type ChannelSortOptions struct {
@@ -220,22 +503,10 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	statusList := channel.ChannelInfo.MultiKeyStatusList
-	// helper to get key status, default to enabled when missing
-	getStatus := func(idx int) int {
-		if statusList == nil {
-			return common.ChannelStatusEnabled
-		}
-		if status, ok := statusList[idx]; ok {
-			return status
-		}
-		return common.ChannelStatusEnabled
-	}
-
 	// Collect indexes of enabled keys
 	enabledIdx := make([]int, 0, len(keys))
 	for i := range keys {
-		if getStatus(i) == common.ChannelStatusEnabled {
+		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled {
 			enabledIdx = append(enabledIdx, i)
 		}
 	}
@@ -248,9 +519,19 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 
 	switch channel.ChannelInfo.MultiKeyMode {
 	case constant.MultiKeyModeRandom:
-		// Randomly pick one enabled key
-		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
-		return keys[selectedIdx], selectedIdx, nil
+		// 按每把真实 Key 的权重随机选择；权重不再通过复制明文槽位表达。
+		totalWeight := int64(0)
+		for _, idx := range enabledIdx {
+			totalWeight += channel.ChannelInfo.multiKeyWeightAt(idx)
+		}
+		cursor := int64(rand.Intn(int(totalWeight)))
+		for _, idx := range enabledIdx {
+			cursor -= channel.ChannelInfo.multiKeyWeightAt(idx)
+			if cursor < 0 {
+				return keys[idx], idx, nil
+			}
+		}
+		return keys[enabledIdx[0]], enabledIdx[0], nil
 	case constant.MultiKeyModePolling:
 		// Use channel-specific lock to ensure thread-safe polling
 
@@ -268,20 +549,27 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 				// CacheUpdateChannel(channel)
 			}
 		}()
-		// Start from the saved polling index and look for the next enabled key
-		start := channelInfo.MultiKeyPollingIndex
-		if start < 0 || start >= len(keys) {
+		// MultiKeyPollingIndex 是加权轮询单元游标。只在当前可用集合上求和，
+		// 因而禁用/冷却/满载一把 Key 后会立刻把份额重新归一到剩余 Key。
+		totalWeight := int64(0)
+		for _, idx := range enabledIdx {
+			totalWeight += channel.ChannelInfo.multiKeyWeightAt(idx)
+		}
+		start := int64(channelInfo.MultiKeyPollingIndex)
+		if start < 0 {
 			start = 0
 		}
-		for i := range keys {
-			idx := (start + i) % len(keys)
-			if getStatus(idx) == common.ChannelStatusEnabled {
-				// update polling index for next call (point to the next position)
-				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
+		start %= totalWeight
+		cursor := start
+		for _, idx := range enabledIdx {
+			weight := channel.ChannelInfo.multiKeyWeightAt(idx)
+			if cursor < weight {
+				channel.ChannelInfo.MultiKeyPollingIndex = int((start + 1) % totalWeight)
 				return keys[idx], idx, nil
 			}
+			cursor -= weight
 		}
-		// Fallback – should not happen, but return first enabled key
+		// Fallback – should not happen, but return first enabled key.
 		return keys[enabledIdx[0]], enabledIdx[0], nil
 	default:
 		// Unknown mode, default to first enabled key (or original key string)
@@ -585,11 +873,29 @@ func (channel *Channel) Update() error {
 			}
 		}
 		channel.ChannelInfo.MultiKeySize = len(keys)
+		// 稳定身份元数据必须与真实 Key 槽位一一对齐。普通 New API 渠道若直接编辑了
+		// Key 列表而没有同步这份元数据，就退回原生索引语义，禁止错绑身份。
+		if len(channel.ChannelInfo.MultiKeyStableIDs) > 0 && len(channel.ChannelInfo.MultiKeyStableIDs) != len(keys) {
+			channel.ChannelInfo.MultiKeyStableIDs = nil
+			channel.ChannelInfo.MultiKeyWeights = nil
+			channel.ChannelInfo.MultiKeyStatusByStableID = nil
+			channel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
+			channel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
+			channel.ChannelInfo.MultiKeyStatusSources = nil
+			channel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
+		}
 		// Clean up status data that exceeds the new key count to prevent index out of range
 		if channel.ChannelInfo.MultiKeyStatusList != nil {
 			for idx := range channel.ChannelInfo.MultiKeyStatusList {
 				if idx >= channel.ChannelInfo.MultiKeySize {
 					delete(channel.ChannelInfo.MultiKeyStatusList, idx)
+				}
+			}
+		}
+		if channel.ChannelInfo.MultiKeyStatusSources != nil {
+			for idx := range channel.ChannelInfo.MultiKeyStatusSources {
+				if idx >= channel.ChannelInfo.MultiKeySize {
+					delete(channel.ChannelInfo.MultiKeyStatusSources, idx)
 				}
 			}
 		}
@@ -694,23 +1000,8 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 			channel.SetOtherInfo(info)
 			return
 		}
-		if channel.ChannelInfo.MultiKeyStatusList == nil {
-			channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
-		}
-		if status == common.ChannelStatusEnabled {
-			delete(channel.ChannelInfo.MultiKeyStatusList, keyIndex)
-		} else {
-			channel.ChannelInfo.MultiKeyStatusList[keyIndex] = status
-			if channel.ChannelInfo.MultiKeyDisabledReason == nil {
-				channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
-			}
-			if channel.ChannelInfo.MultiKeyDisabledTime == nil {
-				channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
-			}
-			channel.ChannelInfo.MultiKeyDisabledReason[keyIndex] = reason
-			channel.ChannelInfo.MultiKeyDisabledTime[keyIndex] = common.GetTimestamp()
-		}
-		if !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
+		channel.ChannelInfo.SetMultiKeyStatusAt(keyIndex, status, reason, common.GetTimestamp())
+		if !hasEnabledMultiKey(keys, &channel.ChannelInfo) {
 			channel.Status = common.ChannelStatusAutoDisabled
 			info := channel.GetOtherInfo()
 			info["status_reason"] = ChannelStatusReasonAllKeysDisabled
@@ -722,13 +1013,9 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 	}
 }
 
-func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
+func hasEnabledMultiKey(keys []string, info *ChannelInfo) bool {
 	for i := range keys {
-		if statusList == nil {
-			return true
-		}
-		status, ok := statusList[i]
-		if !ok || status == common.ChannelStatusEnabled {
+		if info == nil || info.MultiKeyStatusAt(i) == common.ChannelStatusEnabled {
 			return true
 		}
 	}

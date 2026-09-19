@@ -194,31 +194,30 @@ func TestProjectKeyPoolWritesBaseMultiKeyChannel(t *testing.T) {
 
 	projection, err := ProjectKeyPool(db, shareChannel.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 7, projection.KeyCount, "权重 1:5:1 → 7 个槽位（权重 = 流量占比）")
+	assert.Equal(t, 3, projection.KeyCount, "每把领域 Key 只应占一个真实槽位")
 
-	// 底座渠道应进入多 Key 模式，且 Key 按权重**展开**（权重 = 流量占比，见 T2.6）
+	// 底座渠道应进入多 Key 模式，稳定 ID 与权重和唯一真实槽位一一对齐。
 	var loaded basemodel.Channel
 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
 	assert.True(t, loaded.ChannelInfo.IsMultiKey, "必须切到多 Key 模式")
-	assert.Equal(t, 7, loaded.ChannelInfo.MultiKeySize, "权重 1:5:1 应展开为 7 个槽位（权重 = 流量占比）")
+	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize)
 	assert.Equal(t, constant.MultiKeyModePolling, loaded.ChannelInfo.MultiKeyMode)
 
 	lines := loaded.GetKeys()
-	require.Len(t, lines, 7)
-	assert.Equal(t, []string{"sk-second-bbbbbbb", "sk-second-bbbbbbb", "sk-second-bbbbbbb", "sk-second-bbbbbbb",
-		"sk-second-bbbbbbb", "sk-first-aaaaaaaa", "sk-third-ccccccc"}, lines,
-		"权重高的占更多槽位；权重相同按 ID 升序，保证顺序确定")
+	require.Len(t, lines, 3)
+	assert.Equal(t, []string{"sk-second-bbbbbbb", "sk-first-aaaaaaaa", "sk-third-ccccccc"}, lines,
+		"权重只决定选择份额；真实 Key 仍按 weight DESC, id ASC 保持确定顺序")
+	assert.Equal(t, []string{"stable-b", "stable-a", "stable-c"}, loaded.ChannelInfo.MultiKeyStableIDs)
+	assert.Equal(t, []int64{5, 1, 1}, loaded.ChannelInfo.MultiKeyWeights)
 
-	// 索引 → 稳定 ID 的映射必须与写入顺序一致（前 5 个槽位都是权重 5 的那把）
+	// 索引 → 稳定 ID 的映射必须与唯一真实槽位一致。
 	assert.Equal(t, "stable-b", mustStable(t, projection, 0))
-	assert.Equal(t, "stable-b", mustStable(t, projection, 4))
-	assert.Equal(t, "stable-a", mustStable(t, projection, 5))
-	assert.Equal(t, "stable-c", mustStable(t, projection, 6))
+	assert.Equal(t, "stable-a", mustStable(t, projection, 1))
+	assert.Equal(t, "stable-c", mustStable(t, projection, 2))
 
-	// 同一把 Key 有多个槽位时，按稳定 ID 反查只给出一个（首个）槽位
 	idx, ok := projection.IndexOfStableKeyID("stable-c")
 	assert.True(t, ok)
-	assert.Equal(t, 6, idx)
+	assert.Equal(t, 2, idx)
 }
 
 func mustStable(t *testing.T, p *Projection, index int) string {
@@ -534,9 +533,7 @@ func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
 	}).Error)
 
 	// **等权**：本用例要验证的是"失效 Key 被跳过、换用另一把"，
-	// 因此两把 Key 权重相同（等权时不做加权展开，一把一个槽位，见 T2.6）。
-	// 若给成 1:5，权重高的那把会有 5 个槽位，标记掉索引 0 之后底座跳到索引 1——
-	// **还是同一把 Key**，那验证的就不是本用例想验证的事了。
+	// 因此两把 Key 权重相同，让断言只观察失效隔离而不受加权选择顺序干扰。
 	secrets := []string{"sk-low-aaaaaaaaa", "sk-high-bbbbbbbb"}
 	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, []int64{1, 1})
 	projection, err := ProjectKeyPool(db, shareChannel.ID)
@@ -911,27 +908,10 @@ func TestCompleteAttemptIsIdempotent(t *testing.T) {
 
 // ---- Key 加权与剩余容量（T2.6） ----
 
-// 加权轮询的经典形式：把 Key 按权重展开，底座的轮询/随机就会按比例选中。
-func TestBuildWeightedKeyIndexesProportionalToWeight(t *testing.T) {
-	expanded := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 3}, {Index: 1, Weight: 1}})
-	require.Len(t, expanded, 4)
-	assert.Equal(t, []int{0, 0, 0, 1}, expanded, "权重 3:1 应展开为 3 次与 1 次")
-
-	// 权重 0 视为 1：**不能等于"没有机会"**（否则没配权重的 Key 永远选不到）
-	zero := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 0}, {Index: 1, Weight: 2}})
-	require.Len(t, zero, 3)
-	assert.Contains(t, zero, 0, "权重 0 的 Key 仍应出现一次")
-	assert.Equal(t, 2, countIndex(zero, 1))
-
-	// 展开上限：权重写错（例如 10000）不得把列表撑爆
-	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}, {Index: 1, Weight: 1}})
-	assert.Len(t, huge, 17, "权重写错时展开次数必须被上限截断（16 + 1）")
-
-	// 顺序确定：与传入顺序无关，按索引升序展开
-	reordered := BuildWeightedKeyIndexes([]KeyWeight{{Index: 1, Weight: 1}, {Index: 0, Weight: 3}})
-	assert.Equal(t, expanded, reordered, "展开结果必须与传入顺序无关（可复现）")
-
-	assert.Empty(t, BuildWeightedKeyIndexes(nil))
+func TestEffectiveWeightBounds(t *testing.T) {
+	assert.EqualValues(t, 1, effectiveWeight(0), "未配置权重仍要有一次机会")
+	assert.EqualValues(t, 3, effectiveWeight(3))
+	assert.EqualValues(t, maxKeyWeight, effectiveWeight(10_000), "异常大权重必须被截断")
 }
 
 // 剩余容量：已满的 Key 要被标出来让底座跳过；未配置上限**不等于**已满。
@@ -946,8 +926,8 @@ func TestSaturatedKeyIndexes(t *testing.T) {
 	assert.Empty(t, SaturatedKeyIndexes(nil))
 }
 
-// 状态表合并：只回收**我们自己**写的标记，底座自己的禁用原因必须原样保留。
-func TestMergeKeyStatusListKeepsBaseMarks(t *testing.T) {
+// 旧单值合并纯函数仍保留给兼容调用；新运行链路由 ChannelInfo 按来源独立保存。
+func TestMergeKeyStatusListCompatibility(t *testing.T) {
 	const baseAutoDisabled = common.ChannelStatusAutoDisabled
 	current := map[int]int{
 		0: baseAutoDisabled,                   // 底座因鉴权失败自动禁用
@@ -967,19 +947,8 @@ func TestMergeKeyStatusListKeepsBaseMarks(t *testing.T) {
 		apigxmodel.StatusCapacitySaturated))
 }
 
-func countIndex(indexes []int, target int) int {
-	count := 0
-	for _, index := range indexes {
-		if index == target {
-			count++
-		}
-	}
-	return count
-}
-
-// 加权投影：权重按占比展开，且**每个槽位仍映射回同一把 Key**；
-// 解不开的凭据被跳过时**下标不得串位**（阶段 1 曾在此处出过回归）。
-func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
+// 加权投影只保存唯一真实 Key、稳定 ID 与权重；解不开的凭据被跳过时下标不得串位。
+func TestProjectedPoolStoresStableWeightsWithoutDuplicatingSecrets(t *testing.T) {
 	db := setupProjectionEnv(t)
 	ResetMappingCacheForTest()
 	t.Cleanup(ResetMappingCacheForTest)
@@ -1030,26 +999,16 @@ func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
 	projection, err := ProjectKeyPool(db, channel.ID)
 	require.NoError(t, err)
 	require.NotNil(t, projection)
-	assert.Equal(t, 4, projection.KeyCount, "权重 3:1（解不开的那把被跳过）应展开为 4 个槽位")
+	assert.Equal(t, 2, projection.KeyCount, "解不开的凭据被跳过，其余每把只占一个槽位")
 
 	var base basemodel.Channel
 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
-	assert.Equal(t, 4, len(strings.Split(base.Key, "\n")))
-	assert.Equal(t, 4, base.ChannelInfo.MultiKeySize)
-
-	countA, countB := 0, 0
-	for index := range 4 {
-		switch projection.IndexToStableKey[index] {
-		case "stable-a":
-			countA++
-		case "stable-b":
-			countB++
-		case "stable-broken":
-			t.Fatalf("解不开的凭据不得出现在投影里")
-		}
-	}
-	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
-	assert.Equal(t, 1, countB)
+	assert.Equal(t, 2, len(strings.Split(base.Key, "\n")))
+	assert.Equal(t, 2, base.ChannelInfo.MultiKeySize)
+	assert.Equal(t, []string{"stable-a", "stable-b"}, base.ChannelInfo.MultiKeyStableIDs)
+	assert.Equal(t, []int64{3, 1}, base.ChannelInfo.MultiKeyWeights)
+	assert.Equal(t, "stable-a", projection.IndexToStableKey[0])
+	assert.Equal(t, "stable-b", projection.IndexToStableKey[1])
 }
 
 // 上游 Base URL 归一化：真实 API 回扫发现的形态（用户填 `.../v1` 会被底座再拼一层）。

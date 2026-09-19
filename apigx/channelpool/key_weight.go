@@ -6,86 +6,21 @@ import (
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 )
 
-// Key 加权与剩余容量策略（T2.6）。
+// Key 加权与剩余容量策略。
 //
-// # 复用底座的哪一部分
-//
-// 底座的 `Channel.GetNextEnabledKey`（`model/channel.go`）已经提供了两个我们需要的旋钮，
-// 因此**不重写选择器**：
-//   - `ChannelInfo.MultiKeyStatusList`：`getStatus(i)` **缺失即视为启用**，
-//     只有状态等于 `common.ChannelStatusEnabled` 的索引会被选用 ⇒ 把"已满/冷却中"的
-//     Key 标成非启用值，底座就会**自己跳过**它；
-//   - `MultiKeyMode`（轮询/随机）：它在一份**列表**上做轮询或均匀随机，
-//     因此把列表按权重展开（权重 3 的 Key 出现 3 次）即可得到**加权轮询/加权随机**，
-//     两种模式都自然成立，且不需要改底座。
-//
-// # 为什么用"展开"实现加权
-//
-// 底座没有 per-Key 权重字段。展开是唯一**无需改底座**、且对轮询与随机都等价有效的做法
-// （加权轮询的经典 WRR 形式）。代价是投影后的 key 列表会变长，因此设了展开上限，
-// 并把权重 0 视为 1 —— 与底座对渠道权重的 +10 平滑是同一个精神：
-// **权重 0 不等于"没有机会"**，否则一把没配权重的 Key 会永远选不到。
+// 阶段 C 起，每把真实 Key 只投影一个槽位；稳定 ID 和权重随 ChannelInfo 一同写入，
+// `model.Channel.GetNextEnabledKey` 直接执行加权轮询/随机。这里仅负责限制输入权重并提供容量纯函数。
 
-// maxWeightedKeyExpansion 是单个 Key 的最大展开次数（防止权重写错把列表撑爆）。
-const maxWeightedKeyExpansion = 16
+// maxKeyWeight 是单个 Key 的最大选择权重，避免异常配置垄断选择窗口。
+const maxKeyWeight = 16
 
-// KeyWeight 是一把参与加权的上游 Key。
-type KeyWeight struct {
-	// Index 是该 Key 在**投影后底座 key 列表**中的索引。
-	Index int
-	// Weight 是分享者配置的权重；0 视为 1。
-	Weight int64
-}
-
-// BuildWeightedKeyIndexes 按权重把 Key 展开成一个索引序列（WRR）。
-//
-// 返回的序列用于投影到底座的多 Key 列表：轮询会按序列顺序取，随机会在序列上均匀取，
-// 两种情况下的选中概率都与权重成正比。
-func BuildWeightedKeyIndexes(keys []KeyWeight) []int {
-	if len(keys) == 0 {
-		return nil
-	}
-	// 按索引排序，保证结果确定（便于测试与复现）
-	ordered := make([]KeyWeight, len(keys))
-	copy(ordered, keys)
-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Index < ordered[j].Index })
-
-	// **权重全等 = 未配置加权**：保持"一把 Key 一个槽位"，
-	// 既不膨胀底座列表、也不搅动索引空间（索引一变，运行期状态与逐 Key 统计都要迁移）。
-	// 只有权重**确实不同**时才做按比例展开。
-	allEqual := true
-	for i := 1; i < len(ordered); i++ {
-		if effectiveWeight(ordered[i].Weight) != effectiveWeight(ordered[0].Weight) {
-			allEqual = false
-			break
-		}
-	}
-	if allEqual {
-		indexes := make([]int, 0, len(ordered))
-		for _, key := range ordered {
-			indexes = append(indexes, key.Index)
-		}
-		return indexes
-	}
-
-	expanded := make([]int, 0, len(ordered))
-	for _, key := range ordered {
-		for range int(effectiveWeight(key.Weight)) {
-			expanded = append(expanded, key.Index)
-		}
-	}
-	return expanded
-}
-
-// effectiveWeight 把权重归一为"至少出现一次"的取值：
-// 权重 0/负数视为 1（**权重 0 不等于没有机会**，与底座对渠道权重的 +10 平滑同一精神），
-// 并施加展开上限（防止权重写错把列表撑爆）。
+// effectiveWeight 把权重归一为至少一个份额，并限制单 Key 最大份额。
 func effectiveWeight(weight int64) int64 {
 	if weight <= 0 {
 		return 1
 	}
-	if weight > maxWeightedKeyExpansion {
-		return maxWeightedKeyExpansion
+	if weight > maxKeyWeight {
+		return maxKeyWeight
 	}
 	return weight
 }

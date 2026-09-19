@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"io"
 	"net/http"
 
@@ -78,6 +79,15 @@ type TaskAdaptor interface {
 
 	FetchTask(baseUrl, key string, task *model.Task, proxy string) (*http.Response, error)
 	ParseTaskResult(task *model.Task, resp *http.Response, respBody []byte) (*relaycommon.TaskInfo, error)
+}
+
+// TaskCancellationAdaptor is optional. A task channel must implement this
+// contract explicitly before the gateway exposes cancellation as available.
+// The boolean result means the upstream confirmed a terminal cancellation;
+// false means the request was accepted/pending and the normal poller must keep
+// observing the task. Callers must never fabricate a canceled state locally.
+type TaskCancellationAdaptor interface {
+	CancelTask(ctx context.Context, baseURL, key string, task *model.Task, proxy string) (confirmed bool, err error)
 }
 
 // TaskSubmitResponse is the transport-independent result of parsing an

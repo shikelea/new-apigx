@@ -148,6 +148,14 @@ const reserveScript = `
 local leaseKey = KEYS[#KEYS]
 local ttl = tonumber(ARGV[1])
 local n = #KEYS - 1
+if redis.call('EXISTS', leaseKey) == 1 then
+  local entries = redis.call('HGETALL', leaseKey)
+  for i = 1, #entries, 2 do
+    redis.call('EXPIRE', entries[i], ttl)
+  end
+  redis.call('EXPIRE', leaseKey, ttl)
+  return {1, ''}
+end
 for i = 1, n do
   local limit = tonumber(ARGV[1 + (i - 1) * 2 + 1])
   local amount = tonumber(ARGV[1 + (i - 1) * 2 + 2])

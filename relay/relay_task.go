@@ -567,7 +567,16 @@ func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) [
 		return nil
 	}
 
-	resp, err := adaptor.FetchTask(baseURL, channelModel.Key, task, proxy)
+	credentialKey := channelModel.Key
+	credential, managed, credentialErr := relayhook.ResolveAsyncTaskCredential(task.ID, task.ChannelId)
+	if credentialErr != nil {
+		_ = relayhook.SyncAsyncTaskFromBase(task.ID, "UNKNOWN", "credential_snapshot_unavailable", task.StartTime, task.FinishTime)
+		return nil
+	}
+	if managed {
+		credentialKey = credential.Secret
+	}
+	resp, err := adaptor.FetchTask(baseURL, credentialKey, task, proxy)
 	if err != nil || resp == nil {
 		return nil
 	}
@@ -603,6 +612,7 @@ func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) [
 	if !snap.Equal(task.Snapshot()) {
 		_, _ = task.UpdateWithStatus(snap.Status)
 	}
+	_ = relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime)
 
 	// OpenAI Video API 由调用者的 ConvertToOpenAIVideo 分支处理
 	if isOpenAIVideoAPI {

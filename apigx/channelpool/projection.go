@@ -142,7 +142,8 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 // 正确做法：以底座渠道**当前的 Key 列表**为唯一事实来源逐位匹配。这样无论底座
 // 隔离、删除还是重排过哪一把，任何索引都能被正确翻译。
 //
-// 匹配方式是**按凭据明文比对**（底座列表里存的就是明文），因此不依赖顺序。
+// 新投影把稳定 ID 与真实 Key 槽位一同写入 ChannelInfo，可直接恢复映射；
+// 旧投影没有该元数据时才回退到按凭据明文比对。
 func MapBaseKeyIndexes(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 	if db == nil {
 		return nil, errors.New("channelpool: nil db")
@@ -160,8 +161,28 @@ func MapBaseKeyIndexes(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 		return nil, err
 	}
 
-	// 我们这边**全部存活**的 Key（含已失效/冷却中的）：底座列表里可能仍然留着它们，
-	// 索引必须能被翻译，否则统计又一次落空。
+	baseKeys := baseChannel.GetKeys()
+	indexToStable := make(map[int]string, len(baseKeys))
+	indexToKeyValue := make(map[int]string, len(baseKeys))
+	if len(baseChannel.ChannelInfo.MultiKeyStableIDs) == len(baseKeys) {
+		complete := true
+		for i, stableID := range baseChannel.ChannelInfo.MultiKeyStableIDs {
+			stableID = strings.TrimSpace(stableID)
+			if stableID == "" {
+				complete = false
+				break
+			}
+			indexToStable[i] = stableID
+			indexToKeyValue[i] = baseKeys[i]
+		}
+		if complete {
+			return &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(baseKeys)}, nil
+		}
+		clear(indexToStable)
+		clear(indexToKeyValue)
+	}
+
+	// 兼容阶段 C 之前的旧投影：只有缺少稳定元数据时，才解密当前存活 Key 并按明文匹配。
 	var ours []apigxmodel.UpstreamKey
 	if err := db.Where("channel_id = ?", shareChannelID).Find(&ours).Error; err != nil {
 		return nil, err
@@ -176,10 +197,6 @@ func MapBaseKeyIndexes(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 		}
 		secretToStable[plain] = ours[i].StableKeyID
 	}
-
-	baseKeys := baseChannel.GetKeys()
-	indexToStable := make(map[int]string, len(baseKeys))
-	indexToKeyValue := make(map[int]string, len(baseKeys))
 	for i, secret := range baseKeys {
 		stable, ok := secretToStable[secret]
 		if !ok {
@@ -201,6 +218,8 @@ type builtPool struct {
 	*Projection
 	shareChannel apigxmodel.Channel
 	secrets      []string
+	stableIDs    []string
+	weights      []int64
 }
 
 func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
@@ -227,20 +246,10 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 	indexToStable := make(map[int]string, len(keys))
 	indexToKeyValue := make(map[int]string, len(keys))
 
-	// 先收集可解密的 Key（失败的跳过并记录），再按**权重展开**（T2.6）：
-	// 底座没有 per-Key 权重，而它的轮询/随机都作用在"一份列表"上，
-	// 因此把权重 3 的 Key 在列表里放 3 次即可得到**加权轮询/加权随机**。
-	//
-	// 语义说明（本阶段明确采用）：**权重 = 流量占比**——计划书说「Key 权重只在选 Key 时
-	// 使用」「渠道权重用于流量分散」；而 stage-1 时期"权重只决定顺序"在轮询下等价于等权，
-	// 表达不出"某把 Key 多分担一些"。
-	//
-	// `plaintexts` 与 `stableIDs` 必须**同步追加**：跳过的 Key 会让两套下标与 `keys` 错位，
-	// 早期实现直接拿展开槽位去索引 `keys`，遇到解不开的凭据就会把状态映射到**另一把 Key** 上
-	// （那个回归曾被全量测试抓到：含失效 Key 的用例挂在索引映射上）。
-	plaintexts := make([]string, 0, len(keys))
+	// 一把领域 Key 只投影为一个真实槽位。稳定 ID 和归一化权重与槽位一一对齐，
+	// `GetNextEnabledKey` 直接执行加权轮询/随机；不再复制明文 Key 来表达份额。
 	stableIDs := make([]string, 0, len(keys))
-	weights := make([]KeyWeight, 0, len(keys))
+	weights := make([]int64, 0, len(keys))
 	for i := range keys {
 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
 		if err != nil {
@@ -249,14 +258,12 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 				keys[i].ID, keys[i].StableKeyID, err))
 			continue
 		}
-		weights = append(weights, KeyWeight{Index: len(plaintexts), Weight: keys[i].Weight})
+		index := len(secrets)
+		indexToStable[index] = keys[i].StableKeyID
+		indexToKeyValue[index] = plain
+		secrets = append(secrets, plain)
 		stableIDs = append(stableIDs, keys[i].StableKeyID)
-		plaintexts = append(plaintexts, plain)
-	}
-	for _, slot := range BuildWeightedKeyIndexes(weights) {
-		indexToStable[len(secrets)] = stableIDs[slot]
-		indexToKeyValue[len(secrets)] = plaintexts[slot]
-		secrets = append(secrets, plaintexts[slot])
+		weights = append(weights, effectiveWeight(keys[i].Weight))
 	}
 	if len(secrets) == 0 {
 		return nil, ErrNoUsableKey
@@ -266,6 +273,8 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 		Projection:   &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)},
 		shareChannel: shareChannel,
 		secrets:      secrets,
+		stableIDs:    stableIDs,
+		weights:      weights,
 	}, nil
 }
 
@@ -281,9 +290,16 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	baseChannel.ChannelInfo.IsMultiKey = true
 	baseChannel.ChannelInfo.MultiKeySize = len(built.secrets)
 	baseChannel.ChannelInfo.MultiKeyMode = baseMultiKeyMode(built.shareChannel.KeyPoolMode)
+	baseChannel.ChannelInfo.MultiKeyStableIDs = append([]string(nil), built.stableIDs...)
+	baseChannel.ChannelInfo.MultiKeyWeights = append([]int64(nil), built.weights...)
 	baseChannel.ChannelInfo.MultiKeyStatusList = nil
 	baseChannel.ChannelInfo.MultiKeyDisabledReason = nil
 	baseChannel.ChannelInfo.MultiKeyDisabledTime = nil
+	baseChannel.ChannelInfo.MultiKeyStatusByStableID = nil
+	baseChannel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
+	baseChannel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
+	baseChannel.ChannelInfo.MultiKeyStatusSources = nil
+	baseChannel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
 
 	// 池子重新有可用凭据时，把**因全池失效而被自动停用**的渠道恢复过来。

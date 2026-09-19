@@ -380,38 +380,48 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
 	var prep basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&prep).Error)
 	prep.ChannelInfo = basemodel.ChannelInfo{
-		IsMultiKey:   true,
-		MultiKeySize: 3,
+		IsMultiKey:        true,
+		MultiKeySize:      3,
+		MultiKeyStableIDs: []string{"stable-a", "stable-b", "stable-c"},
 		MultiKeyStatusList: map[int]int{
 			1: common.ChannelStatusAutoDisabled,   // 底座因鉴权失败自动禁用
 			2: apigxmodel.StatusCapacitySaturated, // 容量饱和（另一个功能写的）
+		},
+		MultiKeyStatusByStableID: map[string]int{
+			"stable-b": common.ChannelStatusAutoDisabled,
+			"stable-c": apigxmodel.StatusCapacitySaturated,
 		},
 	}
 	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", env.baseChannelID).
 		Update("channel_info", prep.ChannelInfo).Error)
 
-	// 打开：三个条目全部标记为熔断
+	// 打开：三个稳定 Key 都持有熔断来源；已有底座健康/容量状态仍独立保留。
 	syncBreakerMarks(env.db, env.baseChannelID, true)
 	var marked basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&marked).Error)
 	for index := range 3 {
-		assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusList[index],
-			"索引 %d 应被标记为熔断（底座据此跳过该渠道的所有 Key）", index)
+		assert.NotEqual(t, common.ChannelStatusEnabled, marked.ChannelInfo.MultiKeyStatusAt(index),
+			"索引 %d 应被熔断来源标记为不可用", index)
+		stableID, ok := marked.ChannelInfo.MultiKeyStableIDAt(index)
+		require.True(t, ok)
+		assert.Equal(t, apigxmodel.StatusBreakerOpen,
+			marked.ChannelInfo.MultiKeyStatusSourcesByStableID[stableID]["mark:91"])
 	}
+	assert.Equal(t, common.ChannelStatusAutoDisabled, marked.ChannelInfo.MultiKeyStatusAt(1))
+	assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusAt(2),
+		"容量和熔断并存时兼容镜像应确定地展示更高标记")
 
 	// 恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
+	breakerOpenedAt.Store(env.baseChannelID, time.Now().Add(-breakerCooldown-time.Second))
 	syncBreakerMarks(env.db, env.baseChannelID, false)
 	var restored basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&restored).Error)
-	// 恢复后**我们的**标记必须消失（缺失即启用）。
-	//
-	// "不误删底座自己的禁用原因、也不误删容量饱和标记"这条由 `channelpool.MergeKeyStatusList`
-	// 的纯函数用例覆盖（本函数就是复用它）；这里不重复断言在 SQLite 测试环境里
-	// 读回其他状态值（该环境对 map 字段的写回有已知限制，见上方 setup 注释）。
-	for index := range 3 {
-		_, stillMarked := restored.ChannelInfo.MultiKeyStatusList[index]
-		assert.False(t, stillMarked, "索引 %d 的熔断标记应被回收", index)
-	}
+	assert.False(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
+	assert.Equal(t, common.ChannelStatusEnabled, restored.ChannelInfo.MultiKeyStatusAt(0))
+	assert.Equal(t, common.ChannelStatusAutoDisabled, restored.ChannelInfo.MultiKeyStatusAt(1),
+		"熔断恢复不得复活底座已经因鉴权失败禁用的 Key")
+	assert.Equal(t, apigxmodel.StatusCapacitySaturated, restored.ChannelInfo.MultiKeyStatusAt(2),
+		"熔断恢复不得清掉容量来源")
 }
 
 // 非多 Key 渠道不标记（没有可标记的条目）。

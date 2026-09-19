@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
@@ -21,6 +23,8 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/samber/lo"
 )
+
+var resolveAsyncTaskCredential = relayhook.ResolveAsyncTaskCredential
 
 // TaskPollingAdaptor 定义轮询所需的最小适配器接口，避免 service -> relay 的循环依赖
 type TaskPollingAdaptor interface {
@@ -262,22 +266,44 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 		}
 		return err
 	}
-	proxy := ch.GetSetting().Proxy
-	baseURL := ch.GetBaseURL()
-	if baseURL == "" {
-		baseURL = constant.GetChannelBaseURL(ch.Type)
-	}
 	tasks := make([]*model.Task, 0, len(taskIds))
 	for _, upstreamID := range taskIds {
 		if task := taskM[upstreamID]; task != nil {
 			tasks = append(tasks, task)
 		}
 	}
+	credentialGroups := make(map[string][]*model.Task)
+	for _, task := range tasks {
+		credential, managed, credentialErr := resolveAsyncTaskCredential(task.ID, task.ChannelId)
+		if credentialErr != nil {
+			_ = relayhook.SyncAsyncTaskFromBase(task.ID, "UNKNOWN", "credential_snapshot_unavailable", task.StartTime, task.FinishTime)
+			logger.LogError(ctx, fmt.Sprintf("task %s credential snapshot unavailable: %v", task.TaskID, credentialErr))
+			continue
+		}
+		key := ch.Key
+		if managed {
+			key = credential.Secret
+		}
+		credentialGroups[key] = append(credentialGroups[key], task)
+	}
+	for key, group := range credentialGroups {
+		if err := updateBatchTasksWithCredential(ctx, adaptor, ch, channelId, key, group, taskM); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func updateBatchTasksWithCredential(ctx context.Context, adaptor BatchTaskPollingAdaptor, ch *model.Channel, channelId int, key string, tasks []*model.Task, taskM map[string]*model.Task) error {
+	proxy := ch.GetSetting().Proxy
+	baseURL := ch.GetBaseURL()
+	if baseURL == "" {
+		baseURL = constant.GetChannelBaseURL(ch.Type)
+	}
 	info := &relaycommon.RelayInfo{}
-	info.ChannelMeta = &relaycommon.ChannelMeta{ChannelBaseUrl: baseURL}
-	info.ApiKey = ch.Key
+	info.ChannelMeta = &relaycommon.ChannelMeta{ChannelBaseUrl: baseURL, ApiKey: key}
 	adaptor.Init(info)
-	resp, err := adaptor.FetchBatchTasks(baseURL, ch.Key, tasks, proxy)
+	resp, err := adaptor.FetchBatchTasks(baseURL, key, tasks, proxy)
 	if err != nil {
 		common.SysLog(fmt.Sprintf("Get Task Do req error: %v", err))
 		return recordPollFailureForTasks(ctx, adaptor, tasks, pollClassTransport, 0, err.Error())
@@ -369,6 +395,9 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 		if !won {
 			logger.LogWarn(ctx, fmt.Sprintf("Batch task %s already transitioned by another process, skip billing", task.TaskID))
 			continue
+		}
+		if syncErr := relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime); syncErr != nil {
+			common.SysError("sync APIGX async task error: " + syncErr.Error())
 		}
 		if terminalTransition {
 			billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, &responseItem.TaskInfo)
@@ -491,6 +520,14 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	if privateData.Key != "" {
 		key = privateData.Key
 	}
+	credential, managed, credentialErr := resolveAsyncTaskCredential(task.ID, task.ChannelId)
+	if credentialErr != nil {
+		_ = relayhook.SyncAsyncTaskFromBase(task.ID, "UNKNOWN", "credential_snapshot_unavailable", task.StartTime, task.FinishTime)
+		return credentialErr
+	}
+	if managed {
+		key = credential.Secret
+	}
 	snap := task.Snapshot()
 	resp, err := adaptor.FetchTask(baseURL, key, task, proxy)
 	if err != nil {
@@ -611,6 +648,9 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	} else {
 		// No changes, skip update
 		logger.LogDebug(ctx, "No update needed for task %s", task.TaskID)
+	}
+	if syncErr := relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime); syncErr != nil {
+		common.SysError("sync APIGX async task error: " + syncErr.Error())
 	}
 
 	if shouldFinalizeBilling {
@@ -809,12 +849,49 @@ func failTaskFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, task *mod
 	if !won {
 		return nil
 	}
+	if syncErr := relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime); syncErr != nil {
+		common.SysError("sync APIGX async task error: " + syncErr.Error())
+	}
 	taskResult := relaycommon.FailTaskInfo(reason)
 	billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 	if !billingSettled && task.Quota != 0 {
 		RefundTaskQuota(ctx, task, reason)
 	}
 	return nil
+}
+
+// FinalizeCanceledTask performs the base-task CAS, billing refund and APIGX
+// terminal release after an adaptor has confirmed upstream cancellation.
+// The base schema has no canceled status, so it persists FAILURE with a stable
+// reason code while APIGX keeps the distinct canceled state.
+func FinalizeCanceledTask(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task) (bool, error) {
+	if task == nil || adaptor == nil {
+		return false, errors.New("cancel task requires task and adaptor")
+	}
+	if task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure {
+		return false, nil
+	}
+	fromStatus := task.Status
+	now := time.Now().Unix()
+	task.Status = model.TaskStatusFailure
+	task.Progress = taskcommon.ProgressComplete
+	if task.FinishTime == 0 {
+		task.FinishTime = now
+	}
+	task.FailReason = "user_canceled"
+	won, err := task.UpdateWithStatus(fromStatus)
+	if err != nil || !won {
+		return won, err
+	}
+	if syncErr := relayhook.SyncAsyncTaskCanceled(task.ID, task.FailReason, task.FinishTime); syncErr != nil {
+		common.SysError("sync APIGX canceled task error: " + syncErr.Error())
+	}
+	taskResult := relaycommon.FailTaskInfo(task.FailReason)
+	billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	if !billingSettled && task.Quota != 0 {
+		RefundTaskQuota(ctx, task, task.FailReason)
+	}
+	return true, nil
 }
 
 func failTasksFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, tasks []*model.Task, reason string) error {

@@ -48,6 +48,7 @@ type Config struct {
 
 var (
 	currentConfig atomic.Value // 存 Config
+	asyncLeases   sync.Map     // reservation UID -> *Lease，任务终态后幂等释放
 	// leaseTTL 是容量租约时长，长流由后台协程续租。
 	//
 	// 注意粒度：TTL 以**秒**为单位下发（`ttl/time.Second`），因此小于 1 秒的值会被截断为 0
@@ -435,6 +436,119 @@ func ReleaseFromContext(c *gin.Context) {
 		lease.Release()
 	}
 	c.Set(leaseContextKey, (*Lease)(nil))
+}
+
+func leaseIDFromContext(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	value, exists := c.Get(leaseContextKey)
+	if !exists {
+		return ""
+	}
+	lease, ok := value.(*Lease)
+	if !ok || lease == nil {
+		return ""
+	}
+	return lease.ID()
+}
+
+// TransferLeaseToAsyncTask 把请求租约从 Gin 生命周期移交给任务生命周期。
+// 移交后 Distributor 的 defer 看见空上下文，不会在提交响应结束时释放。
+func TransferLeaseToAsyncTask(c *gin.Context, expectedUID string) bool {
+	if c == nil || expectedUID == "" {
+		return false
+	}
+	value, exists := c.Get(leaseContextKey)
+	if !exists {
+		return false
+	}
+	lease, ok := value.(*Lease)
+	if !ok || lease == nil || lease.ID() != expectedUID {
+		return false
+	}
+	asyncLeases.Store(expectedUID, lease)
+	c.Set(leaseContextKey, (*Lease)(nil))
+	return true
+}
+
+func releaseAsyncTaskLease(uid string) error {
+	if uid == "" {
+		return nil
+	}
+	if value, ok := asyncLeases.LoadAndDelete(uid); ok {
+		if lease, valid := value.(*Lease); valid && lease != nil {
+			lease.Release()
+			return nil
+		}
+	}
+	if common.RDB == nil {
+		return capacity.ErrRedisUnavailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return capacity.New(common.RDB).Release(ctx, uid)
+}
+
+func restoreAsyncTaskLease(task *apigxmodel.AsyncTask) error {
+	if task == nil || task.ReservationUID == "" {
+		return nil
+	}
+	if _, exists := asyncLeases.Load(task.ReservationUID); exists {
+		return nil
+	}
+	if common.RDB == nil {
+		return capacity.ErrRedisUnavailable
+	}
+	ctrl := capacity.New(common.RDB)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if alive, err := ctrl.Renew(ctx, task.ReservationUID, leaseTTL); err != nil {
+		return err
+	} else if !alive {
+		db := channelpool.CurrentDB()
+		if db == nil {
+			return errors.New("apigx capacity: database unavailable while restoring async task")
+		}
+		var shareChannel apigxmodel.Channel
+		if err := db.Unscoped().Where("id = ?", task.ChannelID).First(&shareChannel).Error; err != nil {
+			return err
+		}
+		fake := &gin.Context{}
+		common.SetContextKey(fake, constant.ContextKeyUserId, int(task.UserID))
+		tokenID := task.BaseTokenID
+		if tokenID == 0 {
+			// Compatibility for stage-C preview rows written before BaseTokenID was
+			// split from the APIGX API key identity.
+			tokenID = task.ApiKeyID
+		}
+		common.SetContextKey(fake, constant.ContextKeyTokenId, int(tokenID))
+		dims, err := buildDimensions(fake, int(shareChannel.BaseChannelID))
+		if err != nil {
+			return err
+		}
+		cfg := getConfig()
+		if cfg.UpstreamKeyLimit > 0 && task.UpstreamKeyID > 0 {
+			dims = append(dims, capacity.Dimension{Key: capacity.UpstreamKeyConcurrency(task.UpstreamKeyID), Limit: cfg.UpstreamKeyLimit, Amount: 1})
+		}
+		if cfg.UpstreamAccountLimit > 0 && task.UpstreamAccountID > 0 {
+			dims = append(dims, capacity.Dimension{Key: capacity.UpstreamAccountConcurrency(task.UpstreamAccountID), Limit: cfg.UpstreamAccountLimit, Amount: 1})
+		}
+		if len(dims) == 0 {
+			return errors.New("apigx capacity: async task dimensions unavailable")
+		}
+		if err := ctrl.Reserve(ctx, task.ReservationUID, dims, leaseTTL); err != nil {
+			return err
+		}
+	}
+	lease := &Lease{ctrl: ctrl, id: task.ReservationUID, ttl: leaseTTL, stop: make(chan struct{})}
+	actual, loaded := asyncLeases.LoadOrStore(task.ReservationUID, lease)
+	if loaded {
+		_ = actual
+		return nil
+	}
+	lease.startRenew()
+	return nil
 }
 
 // admissionCycleKey 是"本次预留所属周期"的上下文键。

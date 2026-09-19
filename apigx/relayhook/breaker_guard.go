@@ -189,43 +189,42 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
 //
 // # 恢复
 //
-// 熔断不再打开时调用本函数即可**回收我们自己的标记**（只删值等于 StatusBreakerOpen 的格子，
-// 不碰底座自己的禁用原因，也不碰容量饱和标记）。
+// 熔断不再打开时调用本函数即可**回收熔断来源**，不碰底座自己的禁用原因，
+// 也不碰容量饱和来源；兼容单值表由 ChannelInfo 重新合并。
 func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 	var channel basemodel.Channel
 	if err := db.Where("id = ?", channelID).First(&channel).Error; err != nil {
 		return
 	}
-	indices := channel.ChannelInfo.MultiKeyStatusList
 	keyCount := channel.ChannelInfo.MultiKeySize
 	if !channel.ChannelInfo.IsMultiKey || keyCount <= 0 {
 		return // 非多 Key 渠道：没有可标记的条目（这类渠道的改道由底座自身的失败处理负责）
 	}
+	hadOurMark := channel.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen)
+	if !open {
+		if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
+			// 冷却未过时保持当前不可用状态；不能先删标记再返回，否则后续无法识别并恢复渠道。
+			if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
+				return
+			}
+			breakerOpenedAt.Delete(channelID)
+		}
+		if !hadOurMark {
+			return
+		}
+	}
 
-	// 复用 `channelpool.MergeKeyStatusList`：那份"只回收自己写过的格子、保留别人标记"
-	// 的逻辑已经有纯函数级用例（T2.6），在这里再写一遍等于把同一件事实现两次，
-	// 而且第二份不会有测试覆盖。
-	var next map[int]int
+	// 复用 ChannelInfo 的来源合并：熔断、容量和底座健康分别持有标记，
+	// 恢复某个来源后重新生成兼容单值表。
 	if open {
 		all := make([]int, 0, keyCount)
 		for index := range keyCount {
 			all = append(all, index)
 		}
-		next = channelpool.MergeKeyStatusList(indices, nil, all, apigxmodel.StatusBreakerOpen)
+		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, all)
 	} else {
-		// 恢复：把"上一轮我们标记过的索引"交给它回收（只删值等于我们标记的格子）
-		ours := make([]int, 0, len(indices))
-		for index, status := range indices {
-			if status == apigxmodel.StatusBreakerOpen {
-				ours = append(ours, index)
-			}
-		}
-		if len(ours) == 0 {
-			return
-		}
-		next = channelpool.MergeKeyStatusList(indices, ours, nil, apigxmodel.StatusBreakerOpen)
+		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
 	}
-	channel.ChannelInfo.MultiKeyStatusList = next
 
 	// **刻意不动权重**：曾经的方案是"把熔断渠道的权重压到接近零"，但实测与底座语义相冲突——
 	// 底座对权重有 **+10 平滑**，权重 1 与 1 之间的分配是 11:11（≈50%），
@@ -241,12 +240,6 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 		if _, loaded := breakerOpenedAt.Load(channelID); !loaded {
 			breakerOpenedAt.Store(channelID, time.Now())
 		}
-	} else if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
-		// 冷却未过：**保持不可用**，不因为"窗口里没有新失败"就恢复（那会造成抖动）
-		if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
-			return
-		}
-		breakerOpenedAt.Delete(channelID)
 	}
 
 	// **真正让底座不选中它**（修法①）：标记只让"选中后立刻失败"，不足以改道；
@@ -271,7 +264,7 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 		// 避免把底座因鉴权失败等原因禁用的渠道顺手恢复。
 		var now basemodel.Channel
 		if err := db.Where("id = ?", channelID).First(&now).Error; err == nil {
-			if now.Status == common.ChannelStatusAutoDisabled && hasOurBreakerMark(now.ChannelInfo.MultiKeyStatusList) {
+			if now.Status == common.ChannelStatusAutoDisabled && hadOurMark {
 				if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
 					Update("status", common.ChannelStatusEnabled).Error; err != nil {
 					common.SysError("apigx breaker: restore channel status failed: " + err.Error())
@@ -291,14 +284,4 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 	if basemodel.DB != nil {
 		basemodel.InitChannelCache()
 	}
-}
-
-// hasOurBreakerMark 判断状态表里是否还有我们写的熔断标记。
-func hasOurBreakerMark(statusList map[int]int) bool {
-	for _, status := range statusList {
-		if status == apigxmodel.StatusBreakerOpen {
-			return true
-		}
-	}
-	return false
 }

@@ -37,6 +37,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
 		assertOfferingReviewDialect(t, db)
 		assertQualityRoutingDialect(t, db)
+		assertStageCAsyncTaskDialect(t, db)
 	})
 
 	t.Run("postgres", func(t *testing.T) {
@@ -62,6 +63,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
 		assertOfferingReviewDialect(t, db)
 		assertQualityRoutingDialect(t, db)
+		assertStageCAsyncTaskDialect(t, db)
 
 		// 存储引擎必须是 InnoDB。这不是洁癖：
 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
@@ -86,6 +88,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
 	assertOfferingReviewDialect(t, db)
 	assertQualityRoutingDialect(t, db)
+	assertStageCAsyncTaskDialect(t, db)
 }
 
 var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
@@ -175,6 +178,75 @@ func assertQualityRoutingDialect(t *testing.T, db *gorm.DB) {
 		return errRollbackQualityRoutingMatrix
 	})
 	require.ErrorIs(t, err, errRollbackQualityRoutingMatrix)
+}
+
+var errRollbackStageCAsyncTaskMatrix = errors.New("rollback stage c async task matrix fixture")
+
+// assertStageCAsyncTaskDialect executes the migration-sensitive Stage C path
+// on every real dialect: the new base_token_id column, credential history after
+// rotation/deletion, one-way async state transitions, and durable snapshot
+// repair events all have to behave the same on SQLite, PostgreSQL, and MySQL.
+func assertStageCAsyncTaskDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	assert.True(t, db.Migrator().HasColumn(&AsyncTask{}, "base_token_id"))
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const owner int64 = 9_830_001
+		group := &ShareGroup{OwnerUserID: owner, Name: "stage-c-matrix"}
+		require.NoError(t, CreateShareGroup(tx, group))
+		channel := &Channel{
+			OwnerUserID: owner, ShareGroupID: group.ID, Name: "stage-c-matrix",
+			BaseChannelID: 9_830_001,
+		}
+		require.NoError(t, CreateChannel(tx, channel))
+		key := &UpstreamKey{
+			ChannelID: channel.ID, StableKeyID: "stage-c-key",
+			SecretRef: "ciphertext-v1", SecretFingerprint: "fingerprint-v1",
+			Status: UpstreamKeyStatusEnabled,
+		}
+		require.NoError(t, CreateUpstreamKey(tx, owner, key))
+		rotated, rotateErr := RotateUpstreamKeyCredential(tx, owner, key.ID, "ciphertext-v2", "fingerprint-v2")
+		require.NoError(t, rotateErr)
+		require.EqualValues(t, 2, rotated.CredentialVersion)
+		require.NoError(t, DeleteUpstreamKey(tx, owner, key.ID))
+		v1, resolveErr := ResolveUpstreamKeyCredential(tx, key.ID, 1)
+		require.NoError(t, resolveErr)
+		assert.Equal(t, "ciphertext-v1", v1.SecretRef)
+
+		task := &AsyncTask{
+			PublicTaskID: "stage-c-matrix-task", BaseTaskID: 9_830_001,
+			UserID: owner, BaseTokenID: 9_830_088, ChannelID: channel.ID,
+			UpstreamKeyID: key.ID, UpstreamKeyCredentialVersion: 1,
+			Status: AsyncTaskStatusRunning,
+		}
+		_, created, createErr := CreateAsyncTaskSnapshot(tx, task)
+		require.NoError(t, createErr)
+		require.True(t, created)
+		stored, getErr := GetAsyncTaskByBaseTaskID(tx, task.BaseTaskID)
+		require.NoError(t, getErr)
+		assert.EqualValues(t, 9_830_088, stored.BaseTokenID)
+		_, changed, advanceErr := AdvanceAsyncTaskStatus(tx, task.BaseTaskID, AsyncTaskStatusSucceeded, "completed", 0, common.GetTimestamp())
+		require.NoError(t, advanceErr)
+		assert.True(t, changed)
+		_, _, advanceErr = AdvanceAsyncTaskStatus(tx, task.BaseTaskID, AsyncTaskStatusFailed, "late_failure", 0, 0)
+		assert.ErrorIs(t, advanceErr, ErrAsyncTaskTransition)
+
+		repair := &AsyncTask{
+			PublicTaskID: "stage-c-matrix-repair", BaseTaskID: 9_830_002,
+			UserID: owner, BaseTokenID: 9_830_089, ChannelID: channel.ID,
+			UpstreamKeyID: key.ID, UpstreamKeyCredentialVersion: 2,
+			Status: AsyncTaskStatusRunning,
+		}
+		require.NoError(t, QueueAsyncTaskSnapshotRepair(tx, repair, "snapshot_insert_failed"))
+		pending, found, pendingErr := GetPendingAsyncTaskSnapshotRepair(tx, repair.BaseTaskID)
+		require.NoError(t, pendingErr)
+		require.True(t, found)
+		_, _, createErr = CreateAsyncTaskSnapshot(tx, pending)
+		require.NoError(t, createErr)
+		require.NoError(t, MarkAsyncTaskSnapshotRepairCompleted(tx, pending))
+		assert.False(t, HasPendingAsyncTaskSnapshotRepairs(tx))
+		return errRollbackStageCAsyncTaskMatrix
+	})
+	require.ErrorIs(t, err, errRollbackStageCAsyncTaskMatrix)
 }
 
 // informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，

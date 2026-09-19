@@ -649,7 +649,8 @@ func executeTaskSubmissionWith(
 	}
 	service.LogTaskConsumption(c, relayInfo, task)
 	// #21：结算成功后写入我们自己的**任务归属快照**（只追加记录，不触碰扣费）
-	relayhook.RecordAsyncTaskSnapshot(c, relayInfo, int64(task.ID), task.TaskID, task.Action)
+	relayhook.RecordAsyncTaskSnapshot(c, relayInfo, int64(task.ID), task.TaskID, task.Action,
+		string(task.Status), task.StartTime, task.FinishTime)
 	diagnostics.complete(task, result.Quota)
 
 	return &taskSubmissionOutcome{Result: result, Task: task, RelayInfo: relayInfo}, nil

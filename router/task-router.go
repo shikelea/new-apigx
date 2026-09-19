@@ -23,6 +23,7 @@ func SetTaskRouter(router *gin.Engine) {
 	{
 		taskReadRouter.GET("/:key", controller.GetTask)
 		taskReadRouter.GET("/:key/artifacts", controller.GetTaskArtifacts)
+		taskReadRouter.POST("/:key/cancel", controller.CancelTask)
 	}
 
 	taskContentRouter := router.Group("/v1/tasks")

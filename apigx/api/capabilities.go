@@ -111,7 +111,7 @@ var capabilityMatrix = []capabilityEntry{
 			"结果内容访问（授权者取回）",
 		},
 		Limitations: []string{
-			"**不支持取消**：`/v1/videos/:id/cancel` 返回 404 —— 界面必须显示该能力限制，不得显示“可取消”",
+			"当前内置视频适配器不支持取消并返回 501 `task_cancellation_not_supported`；只有明确实现取消契约的适配器才可显示为可取消",
 			"通用任务 API `/v1/tasks` 在本配置下**未启用**（404）",
 		},
 	},

@@ -83,8 +83,38 @@ func TestApplyKeySaturationSkipsRedundantWrite(t *testing.T) {
 	applyKeySaturationMarks(db, baseChannelID, []int{1})
 	var second basemodel.Channel
 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&second).Error)
-	assert.True(t, equalStatusLists(first.ChannelInfo.MultiKeyStatusList, second.ChannelInfo.MultiKeyStatusList))
+	assert.Equal(t, first.ChannelInfo.MultiKeyStatusList, second.ChannelInfo.MultiKeyStatusList)
+	assert.Equal(t, first.ChannelInfo.MultiKeyStatusSources, second.ChannelInfo.MultiKeyStatusSources)
 	assert.Equal(t, apigxmodel.StatusCapacitySaturated, second.ChannelInfo.MultiKeyStatusList[1])
+}
+
+func TestApplyKeySaturationUsesStableIDAndPreservesBreaker(t *testing.T) {
+	db, baseChannelID := setupKeySaturationEnv(t, 2)
+	var prepared basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&prepared).Error)
+	prepared.ChannelInfo = basemodel.ChannelInfo{
+		IsMultiKey:        true,
+		MultiKeySize:      2,
+		MultiKeyStableIDs: []string{"stable-a", "stable-b"},
+	}
+	prepared.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, []int{1})
+	require.NoError(t, db.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
+		Update("channel_info", prepared.ChannelInfo).Error)
+
+	applyKeySaturationMarks(db, baseChannelID, []int{1})
+	var both basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&both).Error)
+	assert.True(t, both.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
+	assert.True(t, both.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusCapacitySaturated))
+	assert.Equal(t, apigxmodel.StatusBreakerOpen, both.ChannelInfo.MultiKeyStatusAt(1))
+
+	applyKeySaturationMarks(db, baseChannelID, nil)
+	var restored basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&restored).Error)
+	assert.False(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusCapacitySaturated))
+	assert.True(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
+	assert.Equal(t, apigxmodel.StatusBreakerOpen, restored.ChannelInfo.MultiKeyStatusAt(1),
+		"容量恢复不得清掉同一稳定 Key 上的熔断来源")
 }
 
 // 非多 Key 渠道不标记（没有可标记的条目）。

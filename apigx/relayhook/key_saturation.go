@@ -22,8 +22,8 @@ import (
 // 底座仍会把请求交给已满载的 Key，然后由准入拒绝——表现为"明明还有另一把可用的 Key，
 // 请求却被拒"（用户在容量充足时看到 429）。
 //
-// 实现直接复用已有机制：`SaturatedKeyIndexes` 判定 + `MergeKeyStatusList` 合并
-// （只回收我们自己写的格子），底座的 `GetNextEnabledKey` 会跳过被标记的索引。
+// 实现直接复用已有机制：`SaturatedKeyIndexes` 判定 + ChannelInfo 的独立来源标记。
+// 容量恢复只清容量来源，底座健康和熔断来源仍保留；`GetNextEnabledKey` 跳过合并后不可用的索引。
 //
 // # 为什么要节流
 //
@@ -126,18 +126,9 @@ func applyKeySaturationMarks(db *gorm.DB, baseChannelID int, saturated []int) {
 	if !channel.ChannelInfo.IsMultiKey || channel.ChannelInfo.MultiKeySize <= 0 {
 		return
 	}
-	current := channel.ChannelInfo.MultiKeyStatusList
-	ours := make([]int, 0, len(current))
-	for index, status := range current {
-		if status == apigxmodel.StatusCapacitySaturated {
-			ours = append(ours, index)
-		}
-	}
-	next := channelpool.MergeKeyStatusList(current, ours, saturated, apigxmodel.StatusCapacitySaturated)
-	if equalStatusLists(current, next) {
+	if !channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusCapacitySaturated, saturated) {
 		return
 	}
-	channel.ChannelInfo.MultiKeyStatusList = next
 	if err := db.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
 		Update("channel_info", channel.ChannelInfo).Error; err != nil {
 		common.SysError("apigx capacity: update key saturation marks failed: " + err.Error())
@@ -146,17 +137,4 @@ func applyKeySaturationMarks(db *gorm.DB, baseChannelID int, saturated []int) {
 	if refreshed, err := basemodel.GetChannelById(baseChannelID, true); err == nil && refreshed != nil {
 		basemodel.CacheUpdateChannel(refreshed)
 	}
-}
-
-// equalStatusLists 判断两份状态表是否等价（nil 与空视为相同）。
-func equalStatusLists(a, b map[int]int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for index, status := range a {
-		if other, ok := b[index]; !ok || other != status {
-			return false
-		}
-	}
-	return true
 }

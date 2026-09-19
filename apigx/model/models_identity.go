@@ -283,6 +283,21 @@ type UpstreamKey struct {
 // TableName 返回表名。
 func (UpstreamKey) TableName() string { return TablePrefix + "upstream_keys" }
 
+// UpstreamKeyCredential 保存每一版上游凭据的受保护引用。当前版本仍镜像在 UpstreamKey，
+// 历史版本只允许已绑定的异步任务按 key_id + credential_version 读取，轮换或软删除 Key 不清理。
+type UpstreamKeyCredential struct {
+	ID                int64  `gorm:"primaryKey"`
+	UpstreamKeyID     int64  `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:1"`
+	CredentialVersion int64  `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:2"`
+	SecretRef         string `gorm:"size:255;not null;default:''"`
+	SecretFingerprint string `gorm:"type:char(64);not null;default:''"`
+	StartedAt         int64  `gorm:"bigint;not null;default:0"`
+	RetiredAt         int64  `gorm:"bigint;not null;default:0"`
+	CreatedAt         int64  `gorm:"bigint;not null;default:0"`
+}
+
+func (UpstreamKeyCredential) TableName() string { return TablePrefix + "upstream_key_credentials" }
+
 // KeyModelCapability 记录「Key 支持的上游模型和能力、发现/验证状态及时间」，
 // 是「分享者声明 / 目录发现 / 连通性验证」三类证据的唯一落点（§8.1）。
 // 刻意不直接挂 canonical_model_id：本表记录的是「上游自称什么」，归一由 apigx_model_aliases 负责。

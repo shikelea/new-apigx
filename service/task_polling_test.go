@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
@@ -37,6 +38,30 @@ type batchPollingAdaptor struct {
 	batchCalls int
 	batchIDs   []string
 	results    map[string]*BatchTaskResult
+}
+
+type credentialGroupingBatchAdaptor struct {
+	taskPollingFetchAdaptor
+	groups map[string][]string
+}
+
+func (a *credentialGroupingBatchAdaptor) FetchMode() string { return "batch" }
+func (a *credentialGroupingBatchAdaptor) FetchBatchTasks(_ string, key string, tasks []*model.Task, _ string) (*http.Response, error) {
+	if a.groups == nil {
+		a.groups = map[string][]string{}
+	}
+	for _, task := range tasks {
+		a.groups[key] = append(a.groups[key], task.GetUpstreamTaskID())
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader([]byte(`{}`)))}, nil
+}
+func (a *credentialGroupingBatchAdaptor) ParseBatchResult(tasks []*model.Task, _ *http.Response, _ []byte) (map[string]*BatchTaskResult, error) {
+	results := make(map[string]*BatchTaskResult, len(tasks))
+	for _, task := range tasks {
+		id := task.GetUpstreamTaskID()
+		results[id] = &BatchTaskResult{TaskInfo: relaycommon.TaskInfo{TaskID: id, Status: model.TaskStatusInProgress}}
+	}
+	return results, nil
 }
 
 func (a *batchPollingAdaptor) FetchMode() string { return "batch" }
@@ -251,6 +276,91 @@ func TestDispatchPlatformUpdateUsesFetchMode(t *testing.T) {
 	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return nil }
 	assert.NotPanics(t, func() { DispatchPlatformUpdate(context.Background(), "missing-plugin", taskChannels, tasks) })
 	GetTaskAdaptorFunc = previousFactory
+}
+
+func TestUpdateBatchTasksGroupsRequestsByCredentialSnapshot(t *testing.T) {
+	truncate(t)
+	const channelID = 110
+	seedTaskPollingChannel(t, channelID, true)
+	first := seedPollingTask(t, channelID, "task_credential_a", "upstream_credential_a")
+	second := seedPollingTask(t, channelID, "task_credential_b", "upstream_credential_b")
+
+	previousResolver := resolveAsyncTaskCredential
+	resolveAsyncTaskCredential = func(baseTaskID int64, _ ...int) (*relayhook.AsyncTaskCredential, bool, error) {
+		switch baseTaskID {
+		case first.ID:
+			return &relayhook.AsyncTaskCredential{Secret: "historical-key-v1"}, true, nil
+		case second.ID:
+			return &relayhook.AsyncTaskCredential{Secret: "historical-key-v2"}, true, nil
+		default:
+			return nil, false, nil
+		}
+	}
+	t.Cleanup(func() { resolveAsyncTaskCredential = previousResolver })
+
+	adaptor := &credentialGroupingBatchAdaptor{}
+	err := updateBatchTasks(context.Background(), adaptor, channelID,
+		[]string{first.GetUpstreamTaskID(), second.GetUpstreamTaskID()},
+		map[string]*model.Task{
+			first.GetUpstreamTaskID():  first,
+			second.GetUpstreamTaskID(): second,
+		})
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]string{
+		"historical-key-v1": {first.GetUpstreamTaskID()},
+		"historical-key-v2": {second.GetUpstreamTaskID()},
+	}, adaptor.groups)
+}
+
+func TestFinalizeCanceledTaskUsesCASAndStableReason(t *testing.T) {
+	truncate(t)
+	task := makeTask(501, 0, 0, 0, BillingSourceWallet, 0)
+	task.TaskID = "cancel-finalize"
+	task.Status = model.TaskStatusInProgress
+	task.Progress = "50%"
+	require.NoError(t, model.DB.Create(task).Error)
+
+	won, err := FinalizeCanceledTask(context.Background(), &taskPollingFetchAdaptor{}, task)
+	require.NoError(t, err)
+	assert.True(t, won)
+	var persisted model.Task
+	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), persisted.Status)
+	assert.Equal(t, "user_canceled", persisted.FailReason)
+	assert.Equal(t, "100%", persisted.Progress)
+	assert.NotZero(t, persisted.FinishTime)
+
+	won, err = FinalizeCanceledTask(context.Background(), &taskPollingFetchAdaptor{}, &persisted)
+	require.NoError(t, err)
+	assert.False(t, won, "a terminal task must not be finalized or refunded twice")
+}
+
+func TestFinalizeCanceledTaskCASLossDoesNotRefund(t *testing.T) {
+	truncate(t)
+	const userID, initialQuota, taskQuota = 502, 10_000, 1_200
+	seedUser(t, userID, initialQuota)
+	task := makeTask(userID, 0, taskQuota, 0, BillingSourceWallet, 0)
+	task.TaskID = "cancel-cas-loss"
+	task.Status = model.TaskStatusInProgress
+	task.Progress = "50%"
+	require.NoError(t, model.DB.Create(task).Error)
+
+	// Simulate a polling worker winning the terminal transition after the
+	// cancellation request loaded its stale in-progress snapshot.
+	require.NoError(t, model.DB.Model(&model.Task{}).Where("id = ?", task.ID).
+		Updates(map[string]any{"status": model.TaskStatusSuccess, "progress": "100%"}).Error)
+	before, err := model.GetUserQuota(userID, true)
+	require.NoError(t, err)
+
+	won, err := FinalizeCanceledTask(context.Background(), &taskPollingFetchAdaptor{}, task)
+	require.NoError(t, err)
+	assert.False(t, won)
+	after, err := model.GetUserQuota(userID, true)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a lost CAS must not refund billing")
+	var persisted model.Task
+	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusSuccess), persisted.Status)
 }
 
 func TestUpdateBatchTasksSettlesTieredUsageForTerminalStates(t *testing.T) {
