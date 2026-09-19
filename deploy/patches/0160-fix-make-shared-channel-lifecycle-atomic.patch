@@ -1,0 +1,912 @@
+From b4a78236ebfe902f90f0ac89208eea01219cbcc7 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sat, 19 Sep 2026 12:11:12 +0800
+Subject: [PATCH] fix: make shared channel lifecycle atomic
+
+---
+ apigx/api/share.go                   | 186 ++++++++++-----
+ apigx/api/share_test.go              | 327 ++++++++++++++++++++++++++-
+ apigx/channelpool/projection.go      |  59 +++++
+ apigx/channelpool/projection_test.go |  87 +++++++
+ apigx/model/repo_share.go            |  17 ++
+ 5 files changed, 619 insertions(+), 57 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index ca82f3c..e801afa 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -393,7 +393,7 @@ func (h *handler) createChannel(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+ 		return
+ 	}
+-	// 自建渠道时随附的上游 Key：**渠道创建成功后**才登记（CreateUpstreamKey 要求 channel_id>0）
++	// 自建渠道时随附的上游 Key 与两类渠道记录在同一事务内登记。
+ 	var selfServeKey string
+ 
+ 	channel := &apigxmodel.Channel{
+@@ -411,24 +411,58 @@ func (h *handler) createChannel(c *gin.Context) {
+ 	if req.KeyPoolMode != nil {
+ 		channel.KeyPoolMode = *req.KeyPoolMode
+ 	}
+-	// 「分享者自建渠道」：未指定 base_channel_id 时，平台按配方代建一条底座渠道并绑定。
+-	if channel.BaseChannelID <= 0 {
++	// 绑定既有底座渠道是平台级动作。普通分享者只能提交自己的配方，由平台代建专属渠道；
++	// 否则只要猜到全局 channel ID，就能把别人的渠道挂到自己的分享资源下。
++	if channel.BaseChannelID > 0 {
++		if c.GetInt("role") < common.RoleAdminUser {
++			fail(c, http.StatusForbidden, "platform_binding_required",
++				"binding an existing base channel requires platform privileges")
++			return
++		}
++		var base basemodel.Channel
++		if err := h.db.Select("id").Where("id = ?", channel.BaseChannelID).First(&base).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				fail(c, http.StatusNotFound, "base_channel_not_found", "base channel not found")
++			} else {
++				failFromRepo(c, err)
++			}
++			return
++		}
++		if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
++			failFromRepo(c, err)
++			return
++		}
++	} else {
+ 		selfServeKey = strings.TrimSpace(req.UpstreamKey)
+-		if recipeErr := h.provisionBaseChannelForShareChannel(channel, selfServeKey); recipeErr != nil {
++		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey); recipeErr != nil {
+ 			failFromRepo(c, recipeErr)
+ 			return
+ 		}
+-	}
+-
+-	if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
+-		failFromRepo(c, err)
+-		return
+-	}
+-	if selfServeKey != "" {
+-		if keyErr := h.registerSelfServeUpstreamKey(owner, channel.ID, selfServeKey); keyErr != nil {
+-			failFromRepo(c, keyErr)
++		keyRecord, keyErr := prepareSelfServeUpstreamKey(selfServeKey)
++		if keyErr != nil {
++			common.SysError("apigx api: refuse to store upstream key: " + keyErr.Error())
++			fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
++				"credential store is not configured; refusing to store the key")
++			return
++		}
++		// 底座渠道、APIGX 渠道和初始加密 Key 共用同一个主库事务。任何一步失败都会
++		// 回滚底座行，避免留下仍为 enabled 的孤儿渠道。
++		if err := h.db.Transaction(func(tx *gorm.DB) error {
++			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey); err != nil {
++				return err
++			}
++			if err := apigxmodel.CreateChannel(tx, channel); err != nil {
++				return err
++			}
++			keyRecord.ChannelID = channel.ID
++			return apigxmodel.CreateUpstreamKey(tx, owner, keyRecord)
++		}); err != nil {
++			failFromRepo(c, err)
+ 			return
+ 		}
++		if basemodel.DB != nil {
++			basemodel.InitChannelCache()
++		}
+ 	}
+ 	ok(c, gin.H{"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name, "key_pool_mode": channel.KeyPoolMode})
+ }
+@@ -488,10 +522,38 @@ func (h *handler) deleteChannel(c *gin.Context) {
+ 	if !valid {
+ 		return
+ 	}
+-	if err := apigxmodel.DeleteChannel(h.db, owner, id); err != nil {
++	shareChannel, err := apigxmodel.GetChannelIncludingDeleted(h.db, owner, id)
++	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
++	// 第一步单独提交并立即刷新缓存：从这一刻起，即使后续清理失败，底座渠道也不会
++	// 再接收新请求。重试 DELETE 会继续完成剩余步骤。
++	baseExists, err := channelpool.QuiesceBaseChannel(h.db, shareChannel.BaseChannelID)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if baseExists {
++		basemodel.CacheUpdateChannelStatus(int(shareChannel.BaseChannelID), common.ChannelStatusManuallyDisabled)
++	}
++	relayhook.InvalidateRouteStrategyCache()
++
++	// 第二步撤销明文 Key、多 Key 状态、模型和能力投影。底座行保留为停用墓碑，
++	// 使历史任务仍能识别原渠道，同时没有任何可再次出站的凭据或能力。
++	if err := channelpool.ClearBaseChannelProjection(h.db, shareChannel.BaseChannelID); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if shareChannel.AliveFlag == apigxmodel.AliveFlagAlive {
++		if err := apigxmodel.DeleteChannel(h.db, owner, id); err != nil {
++			failFromRepo(c, err)
++			return
++		}
++	}
++	if basemodel.DB != nil {
++		basemodel.InitChannelCache()
++	}
+ 	ok(c, gin.H{"deleted": id})
+ }
+ 
+@@ -1326,18 +1388,26 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
+ 		return
+ 	}
+-	reviewed, err := apigxmodel.ReviewModelOffering(h.db, id, apigxmodel.OfferingStatusPublished,
+-		offeringReviewContext(c, reviewer, reasonCode))
++	var reviewed *apigxmodel.OfferingReviewResult
++	err := h.db.Transaction(func(tx *gorm.DB) error {
++		var reviewErr error
++		reviewed, reviewErr = apigxmodel.ReviewModelOffering(tx, id, apigxmodel.OfferingStatusPublished,
++			offeringReviewContext(c, reviewer, reasonCode))
++		if reviewErr != nil {
++			return reviewErr
++		}
++		// 审核状态、不可变审计、底座模型列表与能力必须一起提交。否则能力写入失败时，
++		// 广场会出现一条已经发布但底座永远无法选择的供给。
++		return syncBaseChannelServesModel(tx, id)
++	})
+ 	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
+-	// 关键：供给发布后，必须让**底座的渠道**真正能服务这个模型 ——
+-	// 自助建的底座渠道是直接 insert 的（没有走底座的建能力步骤），若不补这一步，
+-	// 该渠道 models 为空、abilities 为 0 ⇒ 底座分配器永远返回 model_not_found。
+-	if err := h.syncBaseChannelServesModel(id); err != nil {
+-		common.SysError("apigx api: sync base channel abilities failed: " + err.Error())
++	if basemodel.DB != nil {
++		basemodel.InitChannelCache()
+ 	}
++	relayhook.InvalidateRouteStrategyCache()
+ 	ok(c, gin.H{
+ 		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
+ 		"owner_user_id": reviewed.OwnerUserID,
+@@ -2149,20 +2219,14 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
+ //   - 分享者只填 名称/协议/上游地址/自己的 Key ⇒ **不需要知道管理员侧的渠道 ID**；
+ //   - 上游 Key 用**分享者自己的**，平台不代垫 ⇒ 消耗归分享者；
+ //   - 底座渠道的模型列表留空，由「同步模型」按上游实际能力填充（不做猜测）。
+-func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channel, upstreamKey string) error {
+-	if channel.Name == "" {
+-		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
+-	}
+-	if channel.BaseURL == "" {
+-		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
++func provisionBaseChannelForShareChannel(db *gorm.DB, channel *apigxmodel.Channel, upstreamKey string) error {
++	if db == nil {
++		return errors.New("apigx api: nil db")
+ 	}
+-	if upstreamKey == "" {
+-		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
+-	}
+-	channelType, ok := baseChannelTypeForProtocol(channel.Protocol)
+-	if !ok {
+-		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
++	if err := validateSelfServeChannelRecipe(channel, upstreamKey); err != nil {
++		return err
+ 	}
++	channelType, _ := baseChannelTypeForProtocol(channel.Protocol)
+ 
+ 	base := basemodel.Channel{
+ 		Name:        "APIGX-" + channel.Name,
+@@ -2174,7 +2238,7 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
+ 		Status:      common.ChannelStatusEnabled,
+ 		CreatedTime: common.GetTimestamp(),
+ 	}
+-	if err := h.db.Create(&base).Error; err != nil {
++	if err := db.Create(&base).Error; err != nil {
+ 		return err
+ 	}
+ 	channel.BaseChannelID = int64(base.Id)
+@@ -2182,31 +2246,46 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
+ 	return nil
+ }
+ 
+-// registerSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 登记进 Key 池。
++func validateSelfServeChannelRecipe(channel *apigxmodel.Channel, upstreamKey string) error {
++	if channel == nil {
++		return fmt.Errorf("%w: channel is required", apigxmodel.ErrInvalidArgument)
++	}
++	if channel.Name == "" {
++		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
++	}
++	if channel.BaseURL == "" {
++		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
++	}
++	if upstreamKey == "" {
++		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
++	}
++	_, ok := baseChannelTypeForProtocol(channel.Protocol)
++	if !ok {
++		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
++	}
++	return nil
++}
++
++// prepareSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 变成待落库记录。
+ //
+-// **必须在分享渠道创建之后调用** —— CreateUpstreamKey 要求 channel_id > 0；
+-// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
+-// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
+-func (h *handler) registerSelfServeUpstreamKey(ownerUserID, shareChannelID int64, upstreamKey string) error {
++// 加密和指纹在任何数据库写入之前完成；ChannelID 在事务内创建 APIGX 渠道后补上。
++func prepareSelfServeUpstreamKey(upstreamKey string) (*apigxmodel.UpstreamKey, error) {
+ 	envelope, encErr := secretbox.Encrypt(upstreamKey)
+ 	if encErr != nil {
+-		common.SysError("apigx api: refuse to store upstream key: " + encErr.Error())
+-		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
++		return nil, encErr
+ 	}
+ 	fingerprint, fpErr := secretbox.Fingerprint(upstreamKey)
+ 	if fpErr != nil {
+-		common.SysError("apigx api: fingerprint failed: " + fpErr.Error())
+-		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
++		return nil, fpErr
+ 	}
+-	return apigxmodel.CreateUpstreamKey(h.db, ownerUserID, &apigxmodel.UpstreamKey{
+-		ChannelID:         shareChannelID,
++	return &apigxmodel.UpstreamKey{
+ 		StableKeyID:       upstreamKeyStableID(upstreamKey),
+ 		Name:              "default",
+ 		SecretRef:         envelope,
+ 		SecretFingerprint: fingerprint,
+ 		Weight:            1,
+ 		Status:            apigxmodel.UpstreamKeyStatusEnabled,
+-	})
++	}, nil
+ }
+ 
+ // baseChannelTypeForProtocol 把我们的协议标识映射到底座渠道类型（用底座常量，不写死数字）。
+@@ -2283,13 +2362,16 @@ func (h *handler) summarizeOwnerUsage(c *gin.Context) {
+ //
+ // 修法（与底座自己的姿势一致）：把该模型并入底座渠道的 models，然后重建能力。
+ // 只动 models 与能力，不触碰上游地址与凭据。
+-func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
++func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
++	if db == nil {
++		return errors.New("apigx api: nil db")
++	}
+ 	var offering apigxmodel.ModelOffering
+-	if err := h.db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
++	if err := db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
+ 		return err
+ 	}
+ 	var shareChannel apigxmodel.Channel
+-	if err := h.db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
++	if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
+ 		return err
+ 	}
+ 	if shareChannel.BaseChannelID <= 0 || offering.UpstreamModelID == "" {
+@@ -2297,7 +2379,7 @@ func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
+ 	}
+ 
+ 	var base basemodel.Channel
+-	if err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
++	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
+ 		return err
+ 	}
+ 
+@@ -2312,7 +2394,7 @@ func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
+ 	if !exists {
+ 		merged := append(models, offering.UpstreamModelID)
+ 		joined := strings.Join(merged, ",")
+-		if err := h.db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
++		if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
+ 			Update("models", joined).Error; err != nil {
+ 			return err
+ 		}
+@@ -2320,7 +2402,7 @@ func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
+ 	}
+ 
+ 	// 重建能力（底座建渠道后的同一姿势）
+-	if err := base.AddAbilities(h.db); err != nil {
++	if err := base.AddAbilities(db); err != nil {
+ 		return err
+ 	}
+ 	return nil
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index ded1e0f..cf5c518 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -2,6 +2,7 @@ package apigxapi
+ 
+ import (
+ 	"encoding/json"
++	"errors"
+ 	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
+ 	"net/http"
+ 	"net/http/httptest"
+@@ -20,6 +21,8 @@ import (
+ 	"github.com/glebarez/sqlite"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"gorm.io/driver/mysql"
++	"gorm.io/driver/postgres"
+ 	"gorm.io/gorm"
+ )
+ 
+@@ -45,18 +48,33 @@ type testEnv struct {
+ 
+ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
+ 	t.Helper()
+-	gin.SetMode(gin.TestMode)
+-
+ 	dsn := filepath.Join(t.TempDir(), "apigx_api_test.db")
+ 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+ 	require.NoError(t, err)
+ 	sqlDB, err := db.DB()
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { _ = sqlDB.Close() })
++	migrateTestEnv(t, db)
++	return configureTestEnv(t, db, withMasterKey)
++}
++
++func migrateTestEnv(t *testing.T, db *gorm.DB) {
++	t.Helper()
+ 	require.NoError(t, apigxmodel.Migrate(db))
+ 	// 投影会调用底座的 channel.Update()（并同步 abilities），因此接口层测试也要有底座表，
+-	// 且底座的全局 DB 必须指向同一个库（生产由启动路径设置）。
+-	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
++	// MySQL 测试库的服务端默认引擎是 MyISAM，必须显式要求 InnoDB 才能验证事务回滚。
++	migration := db
++	if db.Dialector.Name() == "mysql" {
++		migration = db.Set("gorm:table_options", "ENGINE=InnoDB")
++	}
++	require.NoError(t, migration.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
++}
++
++func configureTestEnv(t *testing.T, db *gorm.DB, withMasterKey bool) *testEnv {
++	t.Helper()
++	gin.SetMode(gin.TestMode)
++
++	// 底座的全局 DB 必须指向同一个库（生产由启动路径设置）。
+ 	previousDB := basemodel.DB
+ 	basemodel.DB = db
+ 	t.Cleanup(func() { basemodel.DB = previousDB })
+@@ -94,7 +112,7 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
+ 			}
+ 		}
+ 	})
+-	Register(api.Group(""), apigxmodel.DefaultDB())
++	Register(api.Group(""), db)
+ 	return &testEnv{db: db, engine: engine}
+ }
+ 
+@@ -146,6 +164,11 @@ func (e *testEnv) createGroup(t *testing.T, userID int64, name string) int64 {
+ 
+ func (e *testEnv) createChannel(t *testing.T, userID, groupID, baseChannelID int64) int64 {
+ 	t.Helper()
++	// 绑定既有底座渠道现在是平台级动作，并且服务端会验证该行真实存在。
++	// 旧夹具只传一个虚构 ID；这里补齐底座事实，避免测试绕过生产契约。
++	require.NoError(t, e.db.FirstOrCreate(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "测试底座渠道", Key: "fixture-key", Status: common.ChannelStatusEnabled,
++	}, "id = ?", baseChannelID).Error)
+ 	payload := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+ 		`,"base_channel_id":` + strconv.FormatInt(baseChannelID, 10) +
+ 		`,"name":"主线路","protocol":"openai","base_url":"http://stub"}`
+@@ -318,6 +341,300 @@ func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
+ 	assert.Equal(t, http.StatusNotFound, rec.Code)
+ }
+ 
++func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
++	t.Run("ordinary user provisions a complete channel", func(t *testing.T) {
++		env := newTestEnv(t, true)
++		const owner int64 = 5101
++		groupID := env.createGroup(t, owner, "自建渠道组")
++		secret := "sk-self-serve-complete"
++		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"`+secret+`"}`,
++			common.RoleCommonUser)
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++		assert.NotContains(t, rec.Body.String(), secret)
++		channelID := int64(body["data"].(map[string]any)["id"].(float64))
++
++		shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
++		require.NoError(t, err)
++		var baseChannel basemodel.Channel
++		require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error)
++		assert.Equal(t, common.ChannelStatusEnabled, baseChannel.Status)
++		assert.Equal(t, secret, baseChannel.Key, "底座现有转发路径仍需要明文投影")
++		assert.Equal(t, "https://example.com", baseChannel.GetBaseURL())
++
++		var storedKey apigxmodel.UpstreamKey
++		require.NoError(t, env.db.Where("channel_id = ?", channelID).First(&storedKey).Error)
++		assert.True(t, secretbox.IsEnvelope(storedKey.SecretRef))
++		assert.NotContains(t, storedKey.SecretRef, secret)
++	})
++
++	t.Run("ordinary user cannot bind a global base channel", func(t *testing.T) {
++		env := newTestEnv(t, true)
++		const owner int64 = 5102
++		groupID := env.createGroup(t, owner, "禁止绑定组")
++		baseID := nextBaseChannelID()
++		require.NoError(t, env.db.Create(&basemodel.Channel{
++			Id: int(baseID), Name: "管理员渠道", Key: "admin-secret", Status: common.ChannelStatusEnabled,
++		}).Error)
++		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"base_channel_id":`+strconv.FormatInt(baseID, 10)+`,"name":"越权绑定"}`,
++			common.RoleCommonUser)
++		assert.Equal(t, http.StatusForbidden, rec.Code)
++		var count int64
++		require.NoError(t, env.db.Model(&apigxmodel.Channel{}).Count(&count).Error)
++		assert.Zero(t, count)
++	})
++
++	t.Run("missing secret store writes nothing", func(t *testing.T) {
++		env := newTestEnv(t, false)
++		const owner int64 = 5103
++		groupID := env.createGroup(t, owner, "缺主密钥组")
++		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"失败线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-no-store"}`,
++			common.RoleCommonUser)
++		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
++		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
++			var count int64
++			require.NoError(t, env.db.Model(target).Count(&count).Error)
++			assert.Zero(t, count)
++		}
++	})
++
++	t.Run("initial key write failure rolls back both channel rows", func(t *testing.T) {
++		env := newTestEnv(t, true)
++		const owner int64 = 5104
++		groupID := env.createGroup(t, owner, "故障注入组")
++		callbackName := "b3:fail_initial_key"
++		injected := errors.New("injected upstream key write failure")
++		require.NoError(t, env.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
++			if tx.Statement.Schema != nil && tx.Statement.Schema.Table == (apigxmodel.UpstreamKey{}).TableName() {
++				tx.AddError(injected)
++			}
++		}))
++		t.Cleanup(func() { _ = env.db.Callback().Create().Remove(callbackName) })
++
++		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-rollback"}`,
++			common.RoleCommonUser)
++		assert.Equal(t, http.StatusInternalServerError, rec.Code)
++		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
++			var count int64
++			require.NoError(t, env.db.Model(target).Count(&count).Error)
++			assert.Zero(t, count, "%T must roll back", target)
++		}
++	})
++}
++
++func TestDeleteChannelFailsClosedAndIsIdempotent(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner, stranger int64 = 5201, 5202
++	groupID := env.createGroup(t, owner, "删除生命周期组")
++	rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"待删除线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-delete"}`,
++		common.RoleCommonUser)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	channelID := int64(body["data"].(map[string]any)["id"].(float64))
++	shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
++	require.NoError(t, err)
++	baseID := int(shareChannel.BaseChannelID)
++	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", baseID).Updates(map[string]any{
++		"models": "delete-model", "channel_info": basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 1},
++	}).Error)
++	require.NoError(t, env.db.Create(&basemodel.Ability{
++		Group: "default", Model: "delete-model", ChannelId: baseID, Enabled: true,
++	}).Error)
++
++	// 故障注入在最后的 APIGX 软删除：请求会失败，但底座已先停用并清空投影。
++	callbackName := "b3:fail_apigx_channel_retire"
++	injected := errors.New("injected apigx channel retire failure")
++	require.NoError(t, env.db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
++		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == (apigxmodel.Channel{}).TableName() {
++			tx.AddError(injected)
++		}
++	}))
++	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
++	assert.Equal(t, http.StatusInternalServerError, rec.Code)
++
++	var baseChannel basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", baseID).First(&baseChannel).Error)
++	assert.Equal(t, common.ChannelStatusManuallyDisabled, baseChannel.Status)
++	assert.Empty(t, baseChannel.Key)
++	assert.Empty(t, baseChannel.Models)
++	assert.False(t, baseChannel.ChannelInfo.IsMultiKey)
++	var abilityCount int64
++	require.NoError(t, env.db.Model(&basemodel.Ability{}).Where("channel_id = ?", baseID).Count(&abilityCount).Error)
++	assert.Zero(t, abilityCount)
++	_, err = apigxmodel.GetChannel(env.db, owner, channelID)
++	assert.NoError(t, err, "领域软删除失败时保持可重试，但底座必须已失败关闭")
++
++	require.NoError(t, env.db.Callback().Update().Remove(callbackName))
++	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	_, err = apigxmodel.GetChannel(env.db, owner, channelID)
++	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
++
++	// 墓碑保留 base_channel_id，重复删除仍能安全重放所有收尾步骤。
++	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
++	assert.Equal(t, http.StatusOK, rec.Code)
++	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), stranger, "", common.RoleCommonUser)
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++}
++
++func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, reviewer, channelID int64, modelID string) {
++	t.Helper()
++	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++		`{"upstream_model_id":"`+modelID+`"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", reviewer,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	callbackName := "b3:fail_ability_projection:" + env.db.Dialector.Name()
++	require.NoError(t, env.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
++		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "abilities" {
++			tx.AddError(errors.New("injected ability projection failure"))
++		}
++	}))
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish",
++		reviewer, `{"reason_code":"matrix_approval"}`)
++	assert.Equal(t, http.StatusInternalServerError, rec.Code)
++	require.NoError(t, env.db.Callback().Create().Remove(callbackName))
++
++	var offering apigxmodel.ModelOffering
++	require.NoError(t, env.db.Where("id = ?", offeringID).First(&offering).Error)
++	assert.Equal(t, apigxmodel.OfferingStatusPending, offering.Status)
++	var auditCount int64
++	require.NoError(t, env.db.Model(&apigxmodel.AuditEvent{}).
++		Where("target_type = ? AND target_id = ?", "model_offering", offeringID).Count(&auditCount).Error)
++	assert.Zero(t, auditCount)
++	shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
++	require.NoError(t, err)
++	var base basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
++	assert.NotContains(t, base.Models, modelID)
++	var abilityCount int64
++	require.NoError(t, env.db.Model(&basemodel.Ability{}).
++		Where("channel_id = ? AND model = ?", shareChannel.BaseChannelID, modelID).Count(&abilityCount).Error)
++	assert.Zero(t, abilityCount)
++
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish",
++		reviewer, `{"reason_code":"matrix_approval"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	require.NoError(t, env.db.Where("id = ?", offeringID).First(&offering).Error)
++	assert.Equal(t, apigxmodel.OfferingStatusPublished, offering.Status)
++	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
++	assert.Contains(t, base.Models, modelID)
++	require.NoError(t, env.db.Model(&basemodel.Ability{}).
++		Where("channel_id = ? AND model = ? AND enabled = ?", shareChannel.BaseChannelID, modelID, true).Count(&abilityCount).Error)
++	assert.EqualValues(t, 1, abilityCount)
++}
++
++func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
++	tests := []struct {
++		name string
++		open func(*testing.T) *gorm.DB
++	}{
++		{name: "sqlite", open: func(t *testing.T) *gorm.DB {
++			db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "self-serve-lifecycle.db")), &gorm.Config{})
++			require.NoError(t, err)
++			return db
++		}},
++		{name: "postgres", open: func(t *testing.T) *gorm.DB {
++			dsn := os.Getenv("APIGX_TEST_PG_DSN")
++			if dsn == "" {
++				t.Skip("未设置 APIGX_TEST_PG_DSN：PostgreSQL 自建渠道生命周期未执行")
++			}
++			db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++			require.NoError(t, err)
++			return db
++		}},
++		{name: "mysql", open: func(t *testing.T) *gorm.DB {
++			dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
++			if dsn == "" {
++				t.Skip("未设置 APIGX_TEST_MYSQL_DSN：MySQL 自建渠道生命周期未执行")
++			}
++			db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
++			require.NoError(t, err)
++			return db
++		}},
++	}
++
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			db := tc.open(t)
++			sqlDB, err := db.DB()
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = sqlDB.Close() })
++			migrateTestEnv(t, db)
++
++			rollbackFixture := errors.New("rollback self-serve lifecycle fixture")
++			err = db.Transaction(func(tx *gorm.DB) error {
++				env := configureTestEnv(t, tx, true)
++				const owner int64 = 9_830_001
++				groupID := env.createGroup(t, owner, "三库生命周期组")
++				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
++					`,"name":"三库自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
++				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
++				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++				channelID := int64(body["data"].(map[string]any)["id"].(float64))
++				shareChannel, getErr := apigxmodel.GetChannel(tx, owner, channelID)
++				require.NoError(t, getErr)
++				baseID := shareChannel.BaseChannelID
++				assertOfferingPublishProjectionAtomic(t, env, owner, owner+99, channelID, "b3-matrix-publish-"+tc.name)
++
++				var baseBefore, channelBefore, keyBefore int64
++				require.NoError(t, tx.Model(&basemodel.Channel{}).Count(&baseBefore).Error)
++				require.NoError(t, tx.Model(&apigxmodel.Channel{}).Count(&channelBefore).Error)
++				require.NoError(t, tx.Model(&apigxmodel.UpstreamKey{}).Count(&keyBefore).Error)
++
++				callbackName := "b3:matrix_fail_initial_key:" + tc.name
++				require.NoError(t, tx.Callback().Create().Before("gorm:create").Register(callbackName, func(callbackTx *gorm.DB) {
++					if callbackTx.Statement.Schema != nil && callbackTx.Statement.Schema.Table == (apigxmodel.UpstreamKey{}).TableName() {
++						callbackTx.AddError(errors.New("injected matrix upstream key failure"))
++					}
++				}))
++				failedBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
++					`,"name":"三库回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-matrix-rollback"}`
++				rec, _ = env.doWithRole(t, http.MethodPost, "/api/channels", owner, failedBody, common.RoleCommonUser)
++				assert.Equal(t, http.StatusInternalServerError, rec.Code)
++				require.NoError(t, tx.Callback().Create().Remove(callbackName))
++
++				var baseAfter, channelAfter, keyAfter int64
++				require.NoError(t, tx.Model(&basemodel.Channel{}).Count(&baseAfter).Error)
++				require.NoError(t, tx.Model(&apigxmodel.Channel{}).Count(&channelAfter).Error)
++				require.NoError(t, tx.Model(&apigxmodel.UpstreamKey{}).Count(&keyAfter).Error)
++				assert.Equal(t, baseBefore, baseAfter)
++				assert.Equal(t, channelBefore, channelAfter)
++				assert.Equal(t, keyBefore, keyAfter)
++
++				require.NoError(t, tx.Model(&basemodel.Channel{}).Where("id = ?", baseID).
++					Update("channel_info", basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 2}).Error)
++				rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
++				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++				rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
++				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++				var retired basemodel.Channel
++				require.NoError(t, tx.Where("id = ?", baseID).First(&retired).Error)
++				assert.Equal(t, common.ChannelStatusManuallyDisabled, retired.Status)
++				assert.Empty(t, retired.Key)
++				assert.Empty(t, retired.Models)
++				assert.False(t, retired.ChannelInfo.IsMultiKey)
++				var abilityCount int64
++				require.NoError(t, tx.Model(&basemodel.Ability{}).Where("channel_id = ?", baseID).Count(&abilityCount).Error)
++				assert.Zero(t, abilityCount)
++				_, getErr = apigxmodel.GetChannel(tx, owner, channelID)
++				assert.ErrorIs(t, getErr, apigxmodel.ErrNotFound)
++				return rollbackFixture
++			})
++			require.ErrorIs(t, err, rollbackFixture)
++		})
++	}
++}
++
+ func TestUpstreamKeyStatusAndValidation(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const owner int64 = 6001
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index 21c3e58..dc6fd92 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -35,6 +35,65 @@ import (
+ // ErrNoUsableKey 表示池内没有可用凭据——此时渠道不能接收新请求（计划书 §9.2）。
+ var ErrNoUsableKey = errors.New("channelpool: no usable upstream key")
+ 
++// QuiesceBaseChannel 先把底座渠道和能力置为不可选，作为删除 saga 的失败关闭边界。
++// 它单独提交；后续清理失败时也不会重新接收新请求。返回 false 表示底座渠道已不存在。
++func QuiesceBaseChannel(db *gorm.DB, baseChannelID int64) (bool, error) {
++	if db == nil {
++		return false, errors.New("channelpool: nil db")
++	}
++	if baseChannelID <= 0 {
++		return false, fmt.Errorf("channelpool: invalid base channel id %d", baseChannelID)
++	}
++	exists := false
++	err := db.Transaction(func(tx *gorm.DB) error {
++		var baseChannel basemodel.Channel
++		if err := tx.Select("id").Where("id = ?", baseChannelID).First(&baseChannel).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return nil
++			}
++			return err
++		}
++		exists = true
++		if err := tx.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
++			Update("status", common.ChannelStatusManuallyDisabled).Error; err != nil {
++			return err
++		}
++		return tx.Model(&basemodel.Ability{}).Where("channel_id = ?", baseChannelID).
++			Update("enabled", false).Error
++	})
++	return exists, err
++}
++
++// ClearBaseChannelProjection 撤销 APIGX 写入底座的凭据、模型、能力和多 Key 状态。
++// 调用方必须先 QuiesceBaseChannel；该函数可重复执行，供失败后的重试收尾。
++func ClearBaseChannelProjection(db *gorm.DB, baseChannelID int64) error {
++	if db == nil {
++		return errors.New("channelpool: nil db")
++	}
++	if baseChannelID <= 0 {
++		return fmt.Errorf("channelpool: invalid base channel id %d", baseChannelID)
++	}
++	return db.Transaction(func(tx *gorm.DB) error {
++		var baseChannel basemodel.Channel
++		if err := tx.Select("id").Where("id = ?", baseChannelID).First(&baseChannel).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return nil
++			}
++			return err
++		}
++		updates := map[string]any{
++			"status":       common.ChannelStatusManuallyDisabled,
++			"key":          "",
++			"models":       "",
++			"channel_info": basemodel.ChannelInfo{},
++		}
++		if err := tx.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).Updates(updates).Error; err != nil {
++			return err
++		}
++		return tx.Where("channel_id = ?", baseChannelID).Delete(&basemodel.Ability{}).Error
++	})
++}
++
+ // Projection 是一次投影的结果。
+ type Projection struct {
+ 	// IndexToStableKey 把底座渠道的 Key 索引映射回我们稳定的凭据 ID。
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index 9c90604..4038d3c 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -1,6 +1,7 @@
+ package channelpool
+ 
+ import (
++	"errors"
+ 	"net/http/httptest"
+ 	"os"
+ 	"path/filepath"
+@@ -19,11 +20,15 @@ import (
+ 	"github.com/go-redis/redis/v8"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"gorm.io/driver/mysql"
++	"gorm.io/driver/postgres"
+ 	"gorm.io/gorm"
+ )
+ 
+ const testMasterKey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+ 
++var errRollbackBaseChannelLifecycle = errors.New("rollback base channel lifecycle fixture")
++
+ func setupProjectionEnv(t *testing.T) *gorm.DB {
+ 	t.Helper()
+ 	dsn := filepath.Join(t.TempDir(), "apigx_channelpool_test.db")
+@@ -59,6 +64,88 @@ func setupProjectionEnv(t *testing.T) *gorm.DB {
+ 	return db
+ }
+ 
++func TestBaseChannelRetirementOnConfiguredDialects(t *testing.T) {
++	tests := []struct {
++		name string
++		open func(*testing.T) *gorm.DB
++	}{
++		{name: "sqlite", open: func(t *testing.T) *gorm.DB {
++			db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "base-lifecycle.db")), &gorm.Config{})
++			require.NoError(t, err)
++			return db
++		}},
++		{name: "postgres", open: func(t *testing.T) *gorm.DB {
++			dsn := os.Getenv("APIGX_TEST_PG_DSN")
++			if dsn == "" {
++				t.Skip("未设置 APIGX_TEST_PG_DSN：PostgreSQL B3 生命周期矩阵未执行")
++			}
++			db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++			require.NoError(t, err)
++			return db
++		}},
++		{name: "mysql", open: func(t *testing.T) *gorm.DB {
++			dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
++			if dsn == "" {
++				t.Skip("未设置 APIGX_TEST_MYSQL_DSN：MySQL B3 生命周期矩阵未执行")
++			}
++			db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
++			require.NoError(t, err)
++			return db
++		}},
++	}
++
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			db := tc.open(t)
++			sqlDB, err := db.DB()
++			require.NoError(t, err)
++			t.Cleanup(func() { _ = sqlDB.Close() })
++			migration := db
++			if db.Dialector.Name() == "mysql" {
++				migration = db.Set("gorm:table_options", "ENGINE=InnoDB")
++			}
++			require.NoError(t, migration.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
++
++			err = db.Transaction(func(tx *gorm.DB) error {
++				base := &basemodel.Channel{
++					Id: 9_820_001, Name: "b3-lifecycle", Key: "sk-one\nsk-two", Models: "model-a",
++					Group: "default", Status: common.ChannelStatusEnabled,
++					ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
++				}
++				require.NoError(t, tx.Create(base).Error)
++				require.NoError(t, tx.Create(&basemodel.Ability{
++					Group: "default", Model: "model-a", ChannelId: base.Id, Enabled: true,
++				}).Error)
++
++				exists, lifecycleErr := QuiesceBaseChannel(tx, int64(base.Id))
++				require.NoError(t, lifecycleErr)
++				assert.True(t, exists)
++				var quiesced basemodel.Channel
++				require.NoError(t, tx.Where("id = ?", base.Id).First(&quiesced).Error)
++				assert.Equal(t, common.ChannelStatusManuallyDisabled, quiesced.Status)
++				var ability basemodel.Ability
++				require.NoError(t, tx.Where("channel_id = ?", base.Id).First(&ability).Error)
++				assert.False(t, ability.Enabled)
++
++				require.NoError(t, ClearBaseChannelProjection(tx, int64(base.Id)))
++				require.NoError(t, ClearBaseChannelProjection(tx, int64(base.Id)), "重复清理必须幂等")
++				var cleared basemodel.Channel
++				require.NoError(t, tx.Where("id = ?", base.Id).First(&cleared).Error)
++				assert.Equal(t, common.ChannelStatusManuallyDisabled, cleared.Status)
++				assert.Empty(t, cleared.Key)
++				assert.Empty(t, cleared.Models)
++				assert.False(t, cleared.ChannelInfo.IsMultiKey)
++				assert.Zero(t, cleared.ChannelInfo.MultiKeySize)
++				var abilityCount int64
++				require.NoError(t, tx.Model(&basemodel.Ability{}).Where("channel_id = ?", base.Id).Count(&abilityCount).Error)
++				assert.Zero(t, abilityCount)
++				return errRollbackBaseChannelLifecycle
++			})
++			require.ErrorIs(t, err, errRollbackBaseChannelLifecycle)
++		})
++	}
++}
++
+ // seedShareChannelWithKeys 建好「分享者 → 分组 → 渠道 → N 把 Key」与对应的底座渠道。
+ func seedShareChannelWithKeys(t *testing.T, db *gorm.DB, owner int64, baseChannelID int64, secrets []string, weights []int64) *apigxmodel.Channel {
+ 	t.Helper()
+diff --git a/apigx/model/repo_share.go b/apigx/model/repo_share.go
+index d482b00..1da387b 100644
+--- a/apigx/model/repo_share.go
++++ b/apigx/model/repo_share.go
+@@ -210,6 +210,23 @@ func GetChannel(db *gorm.DB, ownerUserID, id int64) (*Channel, error) {
+ 	return &channel, nil
+ }
+ 
++// GetChannelIncludingDeleted 按所有者读取渠道及其墓碑，用于可重试的生命周期收尾。
++// owner 条件仍在查询里：已经删除的资源也不能被其他用户枚举。
++func GetChannelIncludingDeleted(db *gorm.DB, ownerUserID, id int64) (*Channel, error) {
++	if db == nil || ownerUserID <= 0 || id <= 0 {
++		return nil, fmt.Errorf("%w: owner and id are required", ErrInvalidArgument)
++	}
++	var channel Channel
++	err := db.Unscoped().Where("id = ? AND owner_user_id = ?", id, ownerUserID).First(&channel).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &channel, nil
++}
++
+ // ListChannelsByGroup 列出某分组下的存活渠道（已校验分组归属）。
+ func ListChannelsByGroup(db *gorm.DB, ownerUserID, shareGroupID int64, limit int) ([]Channel, error) {
+ 	if _, err := GetShareGroup(db, ownerUserID, shareGroupID); err != nil {
+-- 
+2.53.0.windows.1
+
