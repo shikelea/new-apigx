@@ -13,12 +13,12 @@
 ## 当前统计
 
 - 基线提交：`69a50029819a26c53e6babd276d49cfe2f8880ad`
-- 当前 fork 提交：`338405ddb61ff84a6ff1dac959ddafafe1d68845`
-- 相对基线提交数：**162** 个
-- 变化文件：**223** 个（新增 **132**，修改上游已有文件 **91**）
-- 行数变化：新增 **32,387** 行，删除 **191** 行
+- 当前 fork 提交：`6c927799038205180d4fcfd683fcf86c4a11bf68`
+- 相对基线提交数：**163** 个
+- 变化文件：**237** 个（新增 **141**，修改上游已有文件 **96**）
+- 行数变化：新增 **35,523** 行，删除 **210** 行
 - 未跟踪文件：**0** 个
-- 核对时间：2026-09-19（`git diff --name-status/--shortstat`；阶段 C 收口）
+- 核对时间：2026-09-19（`git diff --name-status/--shortstat`；阶段 D 收口）
 
 > 2026-09-18 接手审查纠正：本节此前仍写“修改上游文件 0 个”，那只是阶段 0 早期快照，已经与当前 fork 不符。完整风险与整改顺序见 `docs/TAKEOVER_AUDIT.md`。
 
@@ -39,6 +39,7 @@
 | D-035 | `new-api/apigx/api/share.go`、`apigx/channelpool/projection.go`、`apigx/model/repo_share.go` 及既有测试文件 | 渠道原子生命周期 | 普通用户只能按配方代建专属底座渠道；底座/APIGX 渠道/初始加密 Key 同事务创建；供给发布、审核审计、底座模型与能力同事务提交；删除先停用底座与能力并清缓存，再幂等清空明文 Key、模型、多 Key 状态和能力，最后软删领域渠道 | 接手审查 P0：原创建失败会留下启用孤儿底座，发布能力投影失败会留下不可路由的已发布供给，删除只软删领域行且底座仍可转发 | 中：触及分享渠道创建、发布与删除；已完成逐步骤故障注入、重复删除、SQLite/PostgreSQL/MySQL 矩阵、真实 PostgreSQL+Redis HTTP 和全仓回归 | 2026-09-19 | 已实施 |
 | D-036 | `new-api/{middleware/distributor.go,service/{billing_session,text_quota}.go,relay/common/relay_info.go}`、`new-api/apigx/{relayhook,routing,qualityhook,model,api,channelpool}/**`、平台 Key 前端文案 | 默认 `auto` 综合质量路由 | 空值和 `auto` 均按 6 小时可靠性、延迟、文本吞吐与实时容量综合排序；授权、熔断、满载先排除，无候选失败关闭；移除包含实时占用的最终优胜集合缓存；容量策略更新立即清准入缓存；文本成功样本成对累计 token/生成时长，探测、平台拒绝、取消与结算重试不污染质量 | 接手审查 P0-2：原 `auto` 明确绕过质量决策并退回底座随机，最终路由缓存还会让满载后的请求持续撞同一渠道 | 中高：触及每请求候选与结算质量采集；已完成定向/全仓回归、三库质量矩阵、最终二进制真实 HTTP 五策略与满载切换验收 | 2026-09-19 | 已实施 |
 | D-037 | `new-api/model/channel.go`、`apigx/{channelpool,model,relayhook}/**`、`controller/{relay,system_task_handlers,task_cancel}.go`、`service/task_polling.go`、任务/视频路由 | 稳定多 Key 与异步任务生命周期 | 每把真实 Key 只保留一个槽位，稳定 Key ID、原生权重和健康/容量/熔断独立来源进入底座选择器；新增加密凭据版本历史、不可变任务快照、历史凭据查询、状态 CAS、持久修复事件、任务租约移交/续租/幂等释放、取消能力契约和 501 明确限制 | 接手审查 P1-1/P1-2：旧权重靠复制明文槽位，索引状态会串 Key；异步任务只写快照，不按历史凭据查询，也没有终态、取消与重启对账闭环 | **中高**：触及底座多 Key 选择、任务提交/轮询和容量租约；已完成三库矩阵、全仓、真实 PostgreSQL+Redis HTTP、Key 轮换/删除、真实进程中断恢复与 162 补丁重建；真实第三方取消仍未实现 | 2026-09-19 | 已实施 |
+| D-038 | `new-api/apigx/{price,model,relayhook,api}/**`、`service/{quota,text_quota,task_polling,token_counter}.go`、`relay/{common,channel/openai}/**`、Kling 插件与分享者用量卡 | New API 本地价格匹配与六类统一计量 | 一键匹配只读 New API 当前本地按次价、倍率价和计价表达式，以服务端候选令牌确认并写不可变价格版本；同步与异步事件统一记录真实能力、维度、单位、可信度和冻结成本；分享者按渠道、Key、模型查看净用量、重试和四类成本状态 | 接手审查 P1-3/P1-4：原一键匹配要求客户端上传读数，图片假 token、语音秒数和异步任务最终 facts 不能形成可追溯成本，分享者汇总也会重复或漏算 | **中高**：触及结算后计量、异步终态、视频状态查询和分享者聚合；三库、阶段 D HTTP 20/20、全仓、前端构建/typecheck/定向用例、最终二进制与 163 补丁重建均通过 | 2026-09-19 | 已实施 |
 | D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
 | D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
 | D-009 | `new-api/middleware/distributor.go` | 必须修改 | 在 `SetupContextForSelectedChannel` 之后、`c.Next()` 之前插入容量钩子：`relayhook.Acquire` 取租约、`defer lease.Release()` 在下游全部结束后释放；满载 429、账本不可用 503。另加 1 行 import | T1.7 第二部分；计划书 §9.2（共享容量控制必须贯穿请求生命周期） | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。改动本身是「新增一个可开关的调用」，默认关闭时行为不变 | 2026-09-16 | 已实施（默认关闭，`APIGX_CAPACITY_ENABLED`） |
@@ -62,7 +63,7 @@
 | D-010 | `new-api/apigx/relayhook/{capacity_hook,capacity_hook_test}.go` | 新增 | 容量接线：`Acquire`/`Lease.Release`/长流续租协程/错误码映射（429+Retry-After、503）；为渠道+平台 Key+用户三维度做同一次原子预留 | T1.7 | 低（新包；不反向依赖 middleware，避免循环） | 2026-09-16 | 已实施 |
 | D-008 | `new-api/apigx/capacity/{capacity,capacity_test}.go` | 新增 | 共享容量账本：Lua 原子预留/幂等归还/租约续租与过期回收；维度 key 覆盖用户·平台 Key·渠道·供给·上游 Key·上游账户池 | T1.7；计划书 §9.2（底座没有渠道/Key 级并发上限，阶段 0 已实测确认） | 无（上游不存在同名路径） | 2026-09-16 | 已实施（核心账本） |
 | D-007 | `new-api/service/apigx_usage_only.go`、`apigx_usage_only_test.go` | 新增（同包） | 模式开关（`APIGX_USAGE_ONLY`）、`UsageOnlyFunding`、`newUsageOnlySession` 及其单测 | T1.6 | 低（新文件；与底座 `funding_source.go` 同包，便于实现 FundingSource 接口而不产生循环依赖） | 2026-09-16 | 已实施 |
-| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0162-fix-close-multi-key-and-async-task-lifecycle.patch`；fork 分支 `apigx`，HEAD `338405d` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-19 | 162 个补丁从基线重放成功，tree `65876bdc7f1eceb528d47ddc7d4dbcf2d45493c5` 一致 |
+| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0163-feat-complete-price-matching-and-unified-metering.patch`；fork 分支 `apigx`，HEAD `6c92779` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-19 | 163 个补丁从基线重放成功，tree `8910ff2ef81e31f8dd5e19fd8112b0c4207c416d` 一致 |
 
 ## 二、新增文件（不修改上游）
 
@@ -76,7 +77,7 @@
 | `new-api/apigx/route/` | 路由注册入口，上游 `router/` 只加一行调用 | T0.3 | 2026-09-16 |
 | `new-api/apigx/relayhook/` | 与 relay 链路的接线：路由决定注入、Key 注入、计量钩子、扩展头剥离 | T0.6 | 2026-09-16 |
 | `new-api/apigx/capacity/` | 共享容量控制（并发/速率/预算预留/任务槽位/对账） | T0.6 | 2026-09-16 |
-| `new-api/apigx/pricing/` | 价格来源适配（模眼、ModelRadar）与渠道价格版本 | 阶段 2 | 2026-09-16 |
+| `new-api/apigx/price/` | New API 本地价格匹配与渠道/供给不可变价格版本 | 阶段 2 / 接手整改阶段 D | 2026-09-16 |
 | `new-api/apigx/startup/` | 共享模式启动配置与依赖一致性检查，缺失关键保护时失败关闭 | 接手整改阶段 A | 2026-09-18 |
 | `new-api/apigx/model/` | 新增 GORM 实体（三库兼容） | T0.4 | 2026-09-16 |
 | `new-api/web/src/features/apigx-*/` | 前端新功能模块，复用既有组件与 i18n | 阶段 1 | 2026-09-16 |
@@ -89,7 +90,7 @@
 |---|---|---|
 | 厂商适配器与协议转换 | `relay/`、`relaykit/`（独立模块，`go.mod` 有 `replace ... => ./relaykit`） | 直接复用，逐端点核验；保持 `relaykit` 可独立构建 |
 | 模型目录发现 | `controller/channel.go:1411 FetchModels`、`controller/channel_upstream_update.go:364/467/513/858/914` | 复用发现与「新增/变更/消失」差异流程，外层加 owner 约束 |
-| 价格同步抓取与预览 | `controller/ratio_sync.go:211 FetchUpstreamRatios`、`router/api-router.go:245` | 复用抓取、多来源预览、差异确认与版本冲突；仅改保存目标 |
+| 价格配置 | `setting/ratio_setting/**`、`setting/billing_setting/**` | APIGX 只读取已生效的本地按次价、倍率价与计价表达式；底座管理员可继续使用原生同步界面维护这些值 |
 | 计费预留/结算框架 | `service/billing_session.go:27/43/84/128/154/196/252/306/377` | 复用框架，新增 `usage_only` 资金来源 |
 | 用户级模型限流 | `middleware/model-rate-limit.go:169`、`setting/rate_limit.go:62` | 复用（注意：它不是渠道并发/TPM 上限） |
 | 性能统计采集 | `model/perf_metric.go:11-23/25/29/51` | 复用采集，扩展供给与 Key 策略版本维度 |

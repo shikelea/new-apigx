@@ -49,7 +49,7 @@
 | 9 | 流中断或异步状态未知 ⇒ 不误计完整成功，不重复创建任务 | ✅ 已有测试证据 | **新增** `TestAbandonedAttemptIsNotEmptySuccess`（中断的尝试 `http_status=0` ⇒ **不算成功**；对照：正常完成必须 200 ⇒ 断言有区分力；实测 PASS）；口径与 U-3 消耗视图一致（[015]） |
 | 10 | 上游或本地缺失 usage ⇒ 标为估算/未知，保留未计量数量 | ✅ 已有测试证据 | `TestPriceUnknownIsNotZero`（**未知 ≠ 零**）；`docs/stage3` 已声明语音**时长**无法度量 |
 | 11 | 价格同步失败、单位冲突或模型未知 ⇒ 旧版本继续使用或待确认，不错误估为零 | ✅ 已有测试证据 | `TestIngestSourcePriceKeepsOldPriceOnSuspiciousData`、`TestPriceRuleVersioningAndValidation`、`TestPriceUnknownIsNotZero` |
-| 12 | 模眼分页中断、同模型跨地区报价不同 ⇒ 不把漏页当删除、价格变体不互相覆盖 | ✅ 已有测试证据 | `TestPriceSyncCannotOverwriteManualOverride`、`TestPriceSnapshotScopesAreIsolated`（作用域隔离） |
+| 12 | New API 本地价格变化、动态表达式或同模型渠道变体 ⇒ 旧候选失效、表达式转人工、各作用域互不覆盖 | ✅ 已有测试证据 | `TestPreviewAndConfirmChannelMatchesUseServerLocalPricing`、`TestConfirmChannelMatchesRejectsStaleAndUnauthorizedCandidates`、`TestPriceSnapshotScopesAreIsolated` |
 | 13 | 上游倍率、原始币种及汇率不同 ⇒ 口径明确、默认 USD、历史不随汇率改写 | ✅ 已有测试证据 | `TestIngestNonUSDPriceUsesSavedFxRate`、`TestFxRateMissingIsNotOneToOne`、`TestFxRateConversionDirection`、`TestFxRateSnapshotSealsPreviousVersion` |
 | 14 | 两位分享者同时同步同一模型价格 ⇒ 各自动作只应用到自己授权的供给 | ✅ 已有测试证据 | `TestPriceSnapshotScopesAreIsolated`（作用域互不串价） |
 

@@ -540,7 +540,7 @@ apigx_async_tasks ──1:N── apigx_upstream_object_refs
 
 ### 5.9 `apigx_model_aliases` —— ModelAlias
 
-**用途**：「上游或外部价格 ID 到标准模型的映射、范围和确认状态」（计划书 §7 第 7 行）。§8.4 要求「通过独立的『价格来源映射』连接标准模型」，并保留厂商入口/地区/服务档位。
+**用途**：「上游模型 ID 或 New API 本地价格 ID 到标准模型的映射、范围和确认状态」（计划书 §7 第 7 行）。§8.4 要求通过独立映射连接标准模型，并保留厂商入口、地区和服务档位。
 
 **关联**：`target_canonical_model_id` → `apigx_canonical_models.id`。`scope_type` + `scope_id` 指向分组/渠道/供给。
 
@@ -549,9 +549,9 @@ apigx_async_tasks ──1:N── apigx_upstream_object_refs
 | `id` | `ID` | |
 | `scope_type` | `ENUM` | 0=平台全局 / 1=厂商 / 2=渠道 / 3=供给 |
 | `scope_id` | `FK` | 对应范围 ID；`scope_type=0` 时为 0 |
-| `source` | `ENUM` | 0=上游目录 / 1=外部价格源（模眼/ModelRadar/models.dev/OpenRouter） / 2=分享者建议 |
-| `source_ref` | `STR(255)` | 来源标识/URL（不可信，展示转义；出站前 SSRF 校验） |
-| `external_model_id` | `STR(191)` | 上游或外部价格库的模型 ID（原文） |
+| `source` | `ENUM` | 0=上游目录 / 1=New API 本地定价 / 2=分享者建议 |
+| `source_ref` | `STR(255)` | 本地配置来源标识（不可信，展示时转义） |
+| `external_model_id` | `STR(191)` | 上游模型或 New API 本地价格配置中的模型 ID（原文） |
 | `normalized_model_id` | `STR(191)` | 归一化后的匹配键（大小写/空白归一；**不做版本号或日期剥离**，§8.2） |
 | `alias_key_hash` | `HASH64` | `SHA-256(scope_type|scope_id|source|normalized_model_id)`；进唯一索引 |
 | `target_canonical_model_id` | `FK` | 映射目标 |
@@ -568,7 +568,7 @@ apigx_async_tasks ──1:N── apigx_upstream_object_refs
 
 - **主键**：`id`。
 - **唯一约束**：`uniqueIndex(alias_key_hash, alive_flag)` —— 同一范围内同一来源的同一上游 ID 只能有一条有效映射。
-  > 注意 `region_label` / `tier_label` **不在唯一键内**：它们通过 `apigx_price_rules.conditions` 与 `apigx_price_rule_items` 承载多地区/多档位报价，避免同模型跨地区报价互相覆盖（§11 验收「模眼分页中断、同模型跨地区报价不同」）。
+  > 注意 `region_label` / `tier_label` **不在唯一键内**：它们通过 `apigx_price_rules.conditions` 与 `apigx_price_rule_items` 承载多地区/多档位配置，避免同模型变体互相覆盖。
 - **索引**：`index(scope_type, scope_id, confirmation_state)` 服务「某范围待确认映射列表」；`index(target_canonical_model_id, confirmation_state)` 服务「标准模型的反向映射」；`index(source, normalized_model_id)` 服务同步时的批量匹配。
 - **软删除**：是。
 - **不可变快照字段**：`scope_type`、`scope_id`、`source`、`external_model_id`、`created_at`。
@@ -755,7 +755,7 @@ apigx_async_tasks ──1:N── apigx_upstream_object_refs
 | `scope_type` | `ENUM` | 0=供给 / 1=上游 Key / 2=渠道 |
 | `scope_id` | `FK` | |
 | `version` | `BIGINT` | 该 scope 内单调递增的版本号 |
-| `source` | `ENUM` | 0=人工覆盖 / 1=上游渠道报价 / 2=模眼 / 3=ModelRadar / 4=New API 内置预设 / 5=models.dev / 6=OpenRouter |
+| `source` | `ENUM` | 0=人工覆盖 / 1=上游渠道报价 / 4=New API 本地配置；2/3/5/6 为历史保留值，不进入 APIGX 自动匹配 |
 | `source_ref` | `STR(255)` | 来源 URL 或标识（不可信；出站前 SSRF 校验，展示转义） |
 | `currency` | `CUR3` | 原币种 |
 | `pricing_mode` | `ENUM` | 0=分项绝对单价 / 1=按次（`model_price`）/ 2=旧倍率兼容导入（§8.3 的换算表） |

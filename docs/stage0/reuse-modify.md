@@ -62,7 +62,7 @@
 | 5 | 多 Key 选择 | `model/channel.go:206`（`GetNextEnabledKey`）、`:252`（`rand.Intn`）、`:637-650`（锁） | 必须修改 | 支持确定的 Key 注入；补逐 Key 状态/冷却/到期/权重/剩余容量策略；补「共享上游账户池」联合约束 | §3.5、§9.2、[N4j] | 中：`GetNextEnabledKey` 是全渠道共用路径 | **是**（Key 决定价格版本与预留对象） |
 | 6 | 多 Key 状态与轮换 | `model/channel.go:182` `GetKeys`、`:673 handlerMultiKeyUpdate`、`:725 hasEnabledMultiKey`、`:738 UpdateChannelStatus` | 加扩展点 | 补稳定凭据 ID、逐 Key 消耗统计与历史归属；不把历史任务改绑到池里下一把 Key | §3.5、§10.3 | 中 | 否 |
 | 7 | 模型目录发现 | `controller/channel.go:1411 FetchModels`、`controller/channel_upstream_update.go:364 fetchChannelUpstreamModelIDs`、`:467 fetchAdvancedCustomUpstreamModelIDs`、`:513 checkAndPersistChannelUpstreamModelUpdates`、`:858 ApplyChannelUpstreamModelUpdates`、`:914 DetectChannelUpstreamModelUpdates` | 加扩展点 | 复用发现与「新增/变更/消失」差异流程；外层加 owner 约束；新增项进待发布而非自动扩大分享范围 | §3.2、§8.1 | 中 | 否 |
-| 8 | 价格同步（抓取/预览/确认） | `controller/ratio_sync.go:211 FetchUpstreamRatios`、`router/api-router.go:245`（`/ratio_sync` 组） | 加扩展点 | 复用抓取、多来源预览、差异确认与版本冲突；**改保存目标**（见 #9）；补模眼/ModelRadar 适配器 | §8.3、§8.4 | 中 | 否 |
+| 8 | 价格匹配（预览/确认） | `setting/ratio_setting/**`、`setting/billing_setting/**` | 加扩展点 | 只读取 New API 当前本地按次价、倍率价和计价表达式；生成服务端候选令牌并写渠道/供给不可变版本；不增加外部价格源适配器 | §8.3、§8.4 | 中 | 否 |
 | 9 | 全站模型价格保存 | `model/model_pricing_config.go:461 UpdateModelPricing`、`:224 PreviewModelPricing`、`:347 ValidateModelPricing`（`:480` 版本冲突 `ErrModelPricingConflict`） | 必须修改 | 原生按 `ModelName` 写全站 Option，没有分享渠道 ID；改为把分享者同步结果写入其有权管理的供给与 Key 价格配置，生成不可变价格版本；普通分享者不得改全站价格 | §8.3、§8.4 | **高**：这是「单渠道同步不得污染全局」的落点 | 否（但影响估算） |
 | 10 | 上游分组倍率 | `relay/helper/price.go:49 HandleGroupRatio`（`:63 GetGroupGroupRatio`） | 加扩展点 | 成本倍率必须对应**实际执行 Key** 的适用身份；特殊用户组倍率与普通组倍率为替代关系，不重复相乘；不套用 APIGX 自己的用户组倍率 | §8.3 | 中 | **是** |
 | 11 | 计费会话（预留/结算/退款） | `service/billing_session.go:27/43/84/128/154/196/252/306/377` | 必须修改 | 新增 `usage_only` 模式；保持鉴权/额度/计量与幂等；不得绕过配额钳制与饱和审计 | §6、§8.5、§9.2 | **高**：计费是全站核心链路 | **是** |
@@ -108,7 +108,7 @@ new-api/
 │   ├── route/                    # 路由注册入口，由上游 router/ 里各调用**一行**
 │   ├── relayhook/                # 与 relay 的接线：路由决定注入、Key 注入、计量钩子、扩展头剥离
 │   ├── capacity/                 # 共享容量控制（并发/速率/预算预留/任务槽位/对账）
-│   ├── pricing/                  # 价格来源适配（模眼、ModelRadar）与渠道价格版本
+│   ├── price/                    # New API 本地价格匹配与渠道/供给不可变版本
 │   └── model/                    # 新增 GORM 实体（三库兼容）
 └── web/src/features/apigx-*/     # 前端新功能模块，复用既有组件与 i18n
 ```

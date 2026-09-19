@@ -1,5 +1,25 @@
 # 任务清单
 
+## [已完成] 接手整改阶段 D：价格匹配与六类能力统一计量（2026-09-19）
+
+**本轮目标**：在继续复用 New API 定价与结算框架的前提下，让抓取模型后的价格一键匹配形成服务端闭环，并让对话、图片、语音、向量、重排、视频都写入可追溯、不可回写的真实用量与 USD 估算成本快照。
+**验收标准**：① 一键匹配只复用 New API 本地价格/计价表达式，不另建外部价格源，未知不自动写 0；② 模型 ID 规范化、别名和人工确认边界明确；③ 六类能力各有正确数量与单位，重试/修订不重复或覆盖原事件；④ 价格、源币种、汇率与规则版本在用量发生时固化；⑤ 分享者汇总能区分已定价成本与未定价量；⑥ 三库、全仓、可控 HTTP 与补丁重建通过。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 价格读取/匹配 | `new-api/apigx/price/**`、`new-api/apigx/model/repo_price.go`、`new-api/apigx/api/share.go` | 修改 | 复用底座价格、候选预览、确认与不可变版本 |
+| 六类计量 | `new-api/apigx/relayhook/usage_record.go`、`new-api/service/**`、任务结算链 | 修改 | 真实数量、单位、估算成本、幂等与修订 |
+| 分享者汇总 | `new-api/apigx/model/**`、`new-api/apigx/api/share.go` | 修改 | 已定价/未定价、渠道/Key/模型聚合 |
+| 验证交付 | 相关 `*_test.go`、`tools/**/*-verify/**`、补丁链与台账 | 修改 | 六类用量、价格版本、三库、HTTP、重建 |
+
+**任务清单**：
+- [x] D1 还原 New API 价格、本地表达式、APIGX 价格规则与六类结算/用量写入链路，确认复用边界和缺口 → `docs/stage-d-price-metering-audit.md`；逐项核对 `BillingSession`、文本/图片/语音/任务结算、插件 usage 与 APIGX 快照链，明确图片假 token、音频秒数丢失、任务最终 facts 未落事件等缺口
+- [x] D2 实现服务端一键匹配：规范模型 ID，只读取 New API 本地按次价/倍率价/计价表达式，预览后以服务端候选令牌确认并产生不可变价格版本 → `new-api/apigx/price/match.go`、`new-api/apigx/api/share.go`；`go test ./apigx/price ./apigx/api -count=1` 通过
+- [x] D3 实现对话/图片/语音/向量/重排/视频统一数量、单位、价格/汇率快照、幂等事件与追加修订 → `new-api/apigx/{model/usage_event.go,relayhook/usage_record.go}`、`new-api/{relay/common,relay/channel/openai,service,controller}`；八种单位、待汇率/零价/溢出、缓存/推理分项、图片假 token 排除与真实张数、STT/TTS 实测秒数、视频冻结价格及幂等专项通过，受影响包联合回归通过
+- [x] D4 更新分享者聚合与 API，使已定价成本、未定价用量和失败/重试可区分 → `new-api/apigx/model/repo_owner_usage.go`、`new-api/apigx/api/share.go`、`new-api/web/src/features/share/components/usage-summary-card.tsx`；最新校正形成净用量，已定价/待汇率/未定价/明确零价分列，渠道/Key/模型、30 天默认窗口/90 天上限与分页生效；后端联合回归、前端 typecheck/11 个用例/静态检查通过
+- [x] D5 完成六类可控闭环、三库、全仓、最终二进制、补丁重建与台账交付 → 阶段 D HTTP 20/20；SQLite 3.50.4 / PostgreSQL 18.4 / MySQL 5.7.26（InnoDB）矩阵、`relaykit` 独立测试、前端构建/typecheck/定向用例、`go test ./... -count=1 -timeout=10m` 全过；候选二进制 `/api/status` 200；inner `6c92779`，第 163 个补丁从锁定基线重建 tree `8910ff2ef81e31f8dd5e19fd8112b0c4207c416d` 与 fork HEAD 一致
+
 ## [已完成] 接手整改阶段 C：多 Key 与异步任务闭环（2026-09-19）
 
 **本轮目标**：让渠道内 Key 选择、权重、健康、容量和统计统一锚定稳定 Key ID；让异步任务从提交到查询、取消、终态、超时与恢复始终使用创建时快照，并且只释放和结算一次。
