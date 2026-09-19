@@ -1,0 +1,703 @@
+From d10e17ad91c03ddaa24144da573ae136ab125f4d Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sat, 19 Sep 2026 11:16:37 +0800
+Subject: [PATCH] fix: enable cross-owner offering review
+
+---
+ apigx/api/share.go                 | 131 ++++++++++++++++--
+ apigx/api/share_test.go            |  85 ++++++++++++
+ apigx/model/migrate_matrix_test.go |  54 ++++++++
+ apigx/model/repo_offering.go       | 206 +++++++++++++++++++++++++++++
+ apigx/model/repo_test.go           |  59 +++++++++
+ 5 files changed, 527 insertions(+), 8 deletions(-)
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 1dfa57a..ca82f3c 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -16,8 +16,9 @@ import (
+ 	"encoding/hex"
+ 	"errors"
+ 	"fmt"
+-	"github.com/QuantumNous/new-api/constant"
++	"io"
+ 	"net/http"
++	"os"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -29,12 +30,12 @@ import (
+ 	"github.com/QuantumNous/new-api/apigx/routing"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+ 	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/controller"
+ 	"github.com/QuantumNous/new-api/middleware"
+ 	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/gin-gonic/gin"
+ 	"gorm.io/gorm"
+-	"os"
+ )
+ 
+ // Register 注册全部分享者接口。调用方需已挂好认证中间件（UserAuth）。
+@@ -79,6 +80,13 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		offerings.DELETE("/:id", h.deleteOffering)
+ 	}
+ 
++	// 平台审核面：跨 owner 读取待审核队列。具体发布/驳回动作仍使用 offerings 下的端点，
++	// 但它们在服务端执行 reviewer-scoped 状态转换，不能复用分享者的 owner-scoped CRUD。
++	reviews := r.Group("/reviews")
++	{
++		reviews.GET("/offerings", h.listOfferingsForReview)
++	}
++
+ 	plaza := r.Group("/plaza")
+ 	{
+ 		plaza.GET("", h.listPlaza)
+@@ -1210,8 +1218,95 @@ func requirePlatformReviewer(c *gin.Context) bool {
+ 	return true
+ }
+ 
++type reviewOfferingRequest struct {
++	// ReasonCode 是脱敏的运营理由码，只允许 a-z / 0-9 / 点 / 下划线 / 连字符。
++	// 不接受自由文本，避免把凭据或上游原始错误写入不可变审计表。
++	ReasonCode string `json:"reason_code"`
++}
++
++func readReviewReasonCode(c *gin.Context, fallback string) (string, bool) {
++	var req reviewOfferingRequest
++	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return "", false
++	}
++	reason := strings.ToLower(strings.TrimSpace(req.ReasonCode))
++	if reason == "" {
++		reason = fallback
++	}
++	if len(reason) > 64 {
++		fail(c, http.StatusBadRequest, "invalid_reason_code", "reason_code must be at most 64 characters")
++		return "", false
++	}
++	for i := 0; i < len(reason); i++ {
++		ch := reason[i]
++		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' {
++			continue
++		}
++		fail(c, http.StatusBadRequest, "invalid_reason_code", "reason_code contains unsupported characters")
++		return "", false
++	}
++	return reason, true
++}
++
++func offeringReviewContext(c *gin.Context, reviewerID int64, reasonCode string) apigxmodel.OfferingReviewContext {
++	ipHash := ""
++	if clientIP := strings.TrimSpace(c.ClientIP()); clientIP != "" {
++		sum := sha256.Sum256([]byte(clientIP))
++		ipHash = hex.EncodeToString(sum[:])
++	}
++	userAgent := []rune(strings.TrimSpace(c.Request.UserAgent()))
++	if len(userAgent) > 255 {
++		userAgent = userAgent[:255]
++	}
++	return apigxmodel.OfferingReviewContext{
++		ReviewerUserID: reviewerID,
++		ReviewerRole:   c.GetInt("role"),
++		ReviewerKeyID:  int64(c.GetInt("token_id")),
++		ReasonCode:     reasonCode,
++		RequestID:      c.GetString(common.RequestIdKey),
++		IPHash:         ipHash,
++		UserAgent:      string(userAgent),
++	}
++}
++
++func (h *handler) listOfferingsForReview(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
++		return
++	}
++	page, pageSize := 1, 20
++	if parsed, err := strconv.Atoi(c.Query("page")); err == nil && parsed > 0 {
++		page = parsed
++	}
++	if parsed, err := strconv.Atoi(c.Query("page_size")); err == nil && parsed > 0 && parsed <= 100 {
++		pageSize = parsed
++	}
++	items, total, err := apigxmodel.ListOfferingsForReview(h.db, apigxmodel.OfferingStatusPending, (page-1)*pageSize, pageSize)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	result := make([]gin.H, 0, len(items))
++	for _, item := range items {
++		var caps apigxmodel.Capability
++		_ = common.UnmarshalJsonStr(item.Capabilities, &caps)
++		result = append(result, gin.H{
++			"id": item.OfferingID, "public_id": item.OfferingPublicID,
++			"owner_user_id":  item.OwnerUserID,
++			"share_group_id": item.ShareGroupID, "share_group_public_id": item.ShareGroupPublicID,
++			"share_group_name": item.ShareGroupName, "group_visibility": item.GroupVisibility,
++			"channel_id": item.ChannelID, "channel_public_id": item.ChannelPublicID, "channel_name": item.ChannelName,
++			"upstream_model_id": item.UpstreamModelID, "capabilities": caps,
++			"status": item.Status, "revision": item.Revision,
++			"price_configured": h.offeringHasAcceptedPrice(item.OfferingID),
++			"created_at":       item.CreatedAt, "updated_at": item.UpdatedAt,
++		})
++	}
++	ok(c, gin.H{"items": result, "total": total, "page": page, "page_size": pageSize})
++}
++
+ func (h *handler) publishOffering(c *gin.Context) {
+-	owner, valid := h.ownerID(c)
++	reviewer, valid := h.ownerID(c)
+ 	if !valid || !requirePlatformReviewer(c) {
+ 		return
+ 	}
+@@ -1219,6 +1314,10 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 	if !valid {
+ 		return
+ 	}
++	reasonCode, valid := readReviewReasonCode(c, "approved")
++	if !valid {
++		return
++	}
+ 	// **强制要求设置价格**（与底座一致：底座在价格未配置时直接判定"模型暂时无法使用"）。
+ 	// 分享者在发布供给前必须已有**被接受的价格**（供给作用域或渠道作用域皆可），
+ 	// 否则这份供给不该出现在广场里、也不该被计费型调用选中。
+@@ -1227,7 +1326,9 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
+ 		return
+ 	}
+-	if err := apigxmodel.PublishModelOffering(h.db, owner, id); err != nil {
++	reviewed, err := apigxmodel.ReviewModelOffering(h.db, id, apigxmodel.OfferingStatusPublished,
++		offeringReviewContext(c, reviewer, reasonCode))
++	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
+@@ -1237,7 +1338,11 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 	if err := h.syncBaseChannelServesModel(id); err != nil {
+ 		common.SysError("apigx api: sync base channel abilities failed: " + err.Error())
+ 	}
+-	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
++	ok(c, gin.H{
++		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
++		"owner_user_id": reviewed.OwnerUserID,
++		"from_status":   reviewed.FromStatus, "status": reviewed.ToStatus,
++	})
+ }
+ 
+ // offeringHasAcceptedPrice 判断该供给是否已有**被接受**的价格（供给作用域或它所属渠道作用域）。
+@@ -1267,7 +1372,7 @@ func (h *handler) offeringHasAcceptedPrice(offeringID int64) bool {
+ }
+ 
+ func (h *handler) rejectOffering(c *gin.Context) {
+-	owner, valid := h.ownerID(c)
++	reviewer, valid := h.ownerID(c)
+ 	if !valid || !requirePlatformReviewer(c) {
+ 		return
+ 	}
+@@ -1275,11 +1380,21 @@ func (h *handler) rejectOffering(c *gin.Context) {
+ 	if !valid {
+ 		return
+ 	}
+-	if err := apigxmodel.RejectModelOffering(h.db, owner, id); err != nil {
++	reasonCode, valid := readReviewReasonCode(c, "policy_rejected")
++	if !valid {
++		return
++	}
++	reviewed, err := apigxmodel.ReviewModelOffering(h.db, id, apigxmodel.OfferingStatusRejected,
++		offeringReviewContext(c, reviewer, reasonCode))
++	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
+-	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusRejected})
++	ok(c, gin.H{
++		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
++		"owner_user_id": reviewed.OwnerUserID,
++		"from_status":   reviewed.FromStatus, "status": reviewed.ToStatus,
++	})
+ }
+ 
+ func (h *handler) deleteOffering(c *gin.Context) {
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 8173e10..ded1e0f 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -657,6 +657,91 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
+ 	assert.Equal(t, http.StatusOK, rec.Code, "软删除后应可重新发布")
+ }
+ 
++func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner, reviewer int64 = 8451, 8499
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "跨 owner 审核底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	groupID := env.createGroup(t, owner, "待审核组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	createPending := func(modelID string) int64 {
++		t.Helper()
++		rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++			`{"upstream_model_id":"`+modelID+`"}`)
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++		id := int64(body["data"].(map[string]any)["id"].(float64))
++		rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(id, 10)+"/submit", owner, "")
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++		return id
++	}
++
++	publishID := createPending("review-publish")
++	rec, _ := env.do(t, http.MethodPut, "/api/price-rules", reviewer,
++		`{"scope_type":0,"scope_id":`+strconv.FormatInt(publishID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	// 普通用户不能读取平台待审核队列；管理员能看到其他 owner 的资源。
++	rec, _ = env.doWithRole(t, http.MethodGet, "/api/reviews/offerings", owner, "", common.RoleCommonUser)
++	assert.Equal(t, http.StatusForbidden, rec.Code)
++	rec, body := env.do(t, http.MethodGet, "/api/reviews/offerings?page=1&page_size=10", reviewer, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	queue := body["data"].(map[string]any)
++	items := queue["items"].([]any)
++	require.Len(t, items, 1)
++	first := items[0].(map[string]any)
++	assert.Equal(t, float64(owner), first["owner_user_id"])
++	assert.Equal(t, "review-publish", first["upstream_model_id"])
++	assert.Equal(t, true, first["price_configured"])
++	assert.NotContains(t, rec.Body.String(), plainSecret)
++
++	// 分享者即使知道 ID，也不能用普通用户角色自行通过审核。
++	rec, _ = env.doWithRole(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(publishID, 10)+"/publish",
++		owner, `{"reason_code":"self_approval"}`, common.RoleCommonUser)
++	assert.Equal(t, http.StatusForbidden, rec.Code)
++
++	// 另一位管理员可发布 owner 的供给，并得到 owner 与前后状态；不需要伪装成资源 owner。
++	rec, body = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(publishID, 10)+"/publish",
++		reviewer, `{"reason_code":"manual_approval"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data := body["data"].(map[string]any)
++	assert.Equal(t, float64(owner), data["owner_user_id"])
++	assert.Equal(t, float64(apigxmodel.OfferingStatusPending), data["from_status"])
++	assert.Equal(t, float64(apigxmodel.OfferingStatusPublished), data["status"])
++
++	// 重复审核不能成功，也不能产生第二条审计事件。
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(publishID, 10)+"/publish", reviewer, "")
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	var publishEvents []apigxmodel.AuditEvent
++	require.NoError(t, env.db.Where("target_type = ? AND target_id = ?", "model_offering", publishID).Find(&publishEvents).Error)
++	require.Len(t, publishEvents, 1)
++	assert.Equal(t, reviewer, publishEvents[0].ActorUserID)
++	assert.Equal(t, "offering_publish", publishEvents[0].Action)
++	assert.Contains(t, publishEvents[0].ChangeSummary, `"owner_user_id":8451`)
++	assert.Contains(t, publishEvents[0].ChangeSummary, `"reason_code":"manual_approval"`)
++
++	rejectID := createPending("review-reject")
++	// 理由只接受脱敏码；自由文本在进入不可变审计表前被拒绝，状态保持待审核。
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(rejectID, 10)+"/reject",
++		reviewer, `{"reason_code":"contains a secret"}`)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	var rejectOffering apigxmodel.ModelOffering
++	require.NoError(t, env.db.Where("id = ?", rejectID).First(&rejectOffering).Error)
++	assert.Equal(t, apigxmodel.OfferingStatusPending, rejectOffering.Status)
++
++	rec, body = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(rejectID, 10)+"/reject",
++		reviewer, `{"reason_code":"unsupported_claim"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	assert.Equal(t, float64(owner), body["data"].(map[string]any)["owner_user_id"])
++	var rejectEvents []apigxmodel.AuditEvent
++	require.NoError(t, env.db.Where("target_type = ? AND target_id = ?", "model_offering", rejectID).Find(&rejectEvents).Error)
++	require.Len(t, rejectEvents, 1)
++	assert.Equal(t, "offering_reject", rejectEvents[0].Action)
++	assert.Contains(t, rejectEvents[0].ChangeSummary, `"reason_code":"unsupported_claim"`)
++}
++
+ // ---- 广场与详情（T1.9） ----
+ 
+ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+diff --git a/apigx/model/migrate_matrix_test.go b/apigx/model/migrate_matrix_test.go
+index 3efb714..229d0f1 100644
+--- a/apigx/model/migrate_matrix_test.go
++++ b/apigx/model/migrate_matrix_test.go
+@@ -1,9 +1,11 @@
+ package apigxmodel
+ 
+ import (
++	"errors"
+ 	"os"
+ 	"testing"
+ 
++	"github.com/QuantumNous/new-api/common"
+ 	"github.com/glebarez/sqlite"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+@@ -33,6 +35,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
+ 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
+ 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
++		assertOfferingReviewDialect(t, db)
+ 	})
+ 
+ 	t.Run("postgres", func(t *testing.T) {
+@@ -56,6 +59,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
+ 		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
+ 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
++		assertOfferingReviewDialect(t, db)
+ 
+ 		// 存储引擎必须是 InnoDB。这不是洁癖：
+ 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
+@@ -78,6 +82,56 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
+ 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+ 	require.NoError(t, Migrate(db), "第二次迁移必须幂等")
+ 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
++	assertOfferingReviewDialect(t, db)
++}
++
++var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
++
++// assertOfferingReviewDialect 在每个真实方言上执行 B2 的 JOIN、条件更新、嵌套事务和审计写入。
++// 外层事务最终主动回滚，矩阵库可反复使用且不会积累夹具。
++func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	err := db.Transaction(func(tx *gorm.DB) error {
++		const owner, reviewer int64 = 9_810_001, 9_810_099
++		_, pendingBefore, listErr := ListOfferingsForReview(tx, OfferingStatusPending, 0, 1)
++		require.NoError(t, listErr)
++		group := &ShareGroup{
++			OwnerUserID: owner, Name: "review-matrix",
++			DefaultVisibility: ShareGroupVisibilityPublic, PublishStatus: ShareGroupPublishPublished,
++		}
++		require.NoError(t, CreateShareGroup(tx, group))
++		channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "review-matrix", BaseChannelID: 9_810_001}
++		require.NoError(t, CreateChannel(tx, channel))
++		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-matrix-model"}
++		require.NoError(t, CreateModelOffering(tx, owner, offering))
++		require.NoError(t, SubmitModelOffering(tx, owner, offering.ID))
++
++		items, total, listErr := ListOfferingsForReview(tx, OfferingStatusPending, int(pendingBefore), 20)
++		require.NoError(t, listErr)
++		require.EqualValues(t, pendingBefore+1, total)
++		require.NotEmpty(t, items)
++		assert.Equal(t, offering.ID, items[0].OfferingID)
++		assert.Equal(t, owner, items[0].OwnerUserID)
++
++		result, reviewErr := ReviewModelOffering(tx, offering.ID, OfferingStatusPublished, OfferingReviewContext{
++			ReviewerUserID: reviewer,
++			ReviewerRole:   common.RoleAdminUser,
++			ReasonCode:     "matrix_approval",
++			RequestID:      "matrix-request",
++		})
++		require.NoError(t, reviewErr)
++		assert.Equal(t, owner, result.OwnerUserID)
++		var event AuditEvent
++		require.NoError(t, tx.Where("target_type = ? AND target_id = ?", "model_offering", offering.ID).First(&event).Error)
++		assert.Equal(t, reviewer, event.ActorUserID)
++		assert.Equal(t, "offering_publish", event.Action)
++		_, reviewErr = ReviewModelOffering(tx, offering.ID, OfferingStatusRejected, OfferingReviewContext{
++			ReviewerUserID: reviewer, ReviewerRole: common.RoleAdminUser, ReasonCode: "duplicate",
++		})
++		assert.ErrorIs(t, reviewErr, ErrInvalidArgument)
++		return errRollbackOfferingReviewMatrix
++	})
++	require.ErrorIs(t, err, errRollbackOfferingReviewMatrix)
+ }
+ 
+ // informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，
+diff --git a/apigx/model/repo_offering.go b/apigx/model/repo_offering.go
+index e20f5af..be66b35 100644
+--- a/apigx/model/repo_offering.go
++++ b/apigx/model/repo_offering.go
+@@ -40,6 +40,48 @@ type Capability struct {
+ 	Reasoning bool `json:"reasoning"`
+ }
+ 
++// OfferingReviewContext 是平台审核动作的脱敏上下文。
++// ReasonCode 只接受短理由码，不接收自由文本，避免管理员误把凭据写入不可变审计表。
++type OfferingReviewContext struct {
++	ReviewerUserID int64
++	ReviewerRole   int
++	ReviewerKeyID  int64
++	ReasonCode     string
++	RequestID      string
++	IPHash         string
++	UserAgent      string
++}
++
++// OfferingReviewResult 返回审核对象的 owner 与状态变化，供 API 响应和后续投影使用。
++type OfferingReviewResult struct {
++	OfferingID       int64
++	OfferingPublicID string
++	OwnerUserID      int64
++	FromStatus       int
++	ToStatus         int
++}
++
++// OfferingReviewItem 是管理员待审核队列所需的最小跨 owner 投影。
++// 不包含上游地址、Key、账户池或任何凭据材料。
++type OfferingReviewItem struct {
++	OfferingID         int64
++	OfferingPublicID   string
++	OwnerUserID        int64
++	ShareGroupID       int64
++	ShareGroupPublicID string
++	ShareGroupName     string
++	GroupVisibility    int
++	ChannelID          int64
++	ChannelPublicID    string
++	ChannelName        string
++	UpstreamModelID    string
++	Capabilities       string
++	Status             int
++	Revision           int64
++	CreatedAt          int64
++	UpdatedAt          int64
++}
++
+ // OfferingKeyHashFor 计算供给的业务键哈希（渠道 + 上游模型名）。
+ //
+ // 用哈希而不是把两列一起放进唯一索引，是为了让「墓碑」语义只依赖一个列：
+@@ -152,6 +194,170 @@ func RejectModelOffering(db *gorm.DB, ownerUserID, id int64) error {
+ 	return transitionOffering(db, ownerUserID, id, []int{OfferingStatusPending}, OfferingStatusRejected)
+ }
+ 
++// ListOfferingsForReview 返回平台审核队列。它是 reviewer-scoped 读取，因此刻意不接 owner 参数；
++// API 层必须先验证管理员角色。分享者自己的列表仍走 ListModelOfferingsByChannel 的 owner 约束。
++func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingReviewItem, int64, error) {
++	if db == nil {
++		return nil, 0, errors.New("apigxmodel: nil db")
++	}
++	if status < OfferingStatusDraft || status > OfferingStatusRejected {
++		return nil, 0, fmt.Errorf("%w: invalid offering review status", ErrInvalidArgument)
++	}
++	if offset < 0 {
++		offset = 0
++	}
++	if limit <= 0 || limit > 100 {
++		limit = 20
++	}
++
++	offeringTable := ModelOffering{}.TableName()
++	channelTable := Channel{}.TableName()
++	groupTable := ShareGroup{}.TableName()
++	base := db.Table(offeringTable+" AS o").
++		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
++		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
++		Where("o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ?", status, AliveFlagAlive)
++
++	var total int64
++	if err := base.Count(&total).Error; err != nil {
++		return nil, 0, err
++	}
++	var items []OfferingReviewItem
++	err := base.Select("o.id AS offering_id, o.public_id AS offering_public_id, " +
++		"c.owner_user_id AS owner_user_id, g.id AS share_group_id, g.public_id AS share_group_public_id, " +
++		"g.name AS share_group_name, g.default_visibility AS group_visibility, " +
++		"c.id AS channel_id, c.public_id AS channel_public_id, c.name AS channel_name, " +
++		"o.upstream_model_id AS upstream_model_id, o.capabilities AS capabilities, " +
++		"o.status AS status, o.revision AS revision, o.created_at AS created_at, o.updated_at AS updated_at").
++		Order("o.updated_at ASC, o.id ASC").Offset(offset).Limit(limit).Scan(&items).Error
++	return items, total, err
++}
++
++// ReviewModelOffering 执行跨 owner 的平台审核，并把状态变化与脱敏审核上下文写入同一事务。
++// 条件更新保证两个管理员同时审核同一条供给时最多一个成功；审计写入失败会回滚状态变化。
++func ReviewModelOffering(db *gorm.DB, id int64, toStatus int, review OfferingReviewContext) (*OfferingReviewResult, error) {
++	if db == nil {
++		return nil, errors.New("apigxmodel: nil db")
++	}
++	if id <= 0 || review.ReviewerUserID <= 0 || review.ReviewerRole < common.RoleAdminUser {
++		return nil, fmt.Errorf("%w: offering and reviewer are required", ErrInvalidArgument)
++	}
++	if toStatus != OfferingStatusPublished && toStatus != OfferingStatusRejected {
++		return nil, fmt.Errorf("%w: unsupported review decision", ErrInvalidArgument)
++	}
++	reasonCode := strings.TrimSpace(review.ReasonCode)
++	if !validOfferingReviewReasonCode(reasonCode) {
++		return nil, fmt.Errorf("%w: review reason code is required", ErrInvalidArgument)
++	}
++	if len(review.RequestID) > 64 || (review.IPHash != "" && len(review.IPHash) != 64) || len([]rune(review.UserAgent)) > 255 {
++		return nil, fmt.Errorf("%w: invalid review audit context", ErrInvalidArgument)
++	}
++
++	result := &OfferingReviewResult{}
++	err := db.Transaction(func(tx *gorm.DB) error {
++		var offering ModelOffering
++		if err := tx.Where("id = ? AND alive_flag = ?", id, AliveFlagAlive).First(&offering).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNotFound
++			}
++			return err
++		}
++		var channel Channel
++		if err := tx.Select("id", "owner_user_id").Where("id = ? AND alive_flag = ?", offering.ChannelID, AliveFlagAlive).First(&channel).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNotFound
++			}
++			return err
++		}
++		if offering.Status != OfferingStatusPending {
++			return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, toStatus)
++		}
++
++		now := common.GetTimestamp()
++		updates := map[string]any{"status": toStatus, "updated_at": now}
++		if toStatus == OfferingStatusPublished {
++			updates["verified_at"] = now
++		}
++		updated := tx.Model(&ModelOffering{}).
++			Where("id = ? AND alive_flag = ? AND status = ?", offering.ID, AliveFlagAlive, OfferingStatusPending).
++			Updates(updates)
++		if updated.Error != nil {
++			return updated.Error
++		}
++		if updated.RowsAffected != 1 {
++			return fmt.Errorf("%w: offering was already reviewed", ErrInvalidArgument)
++		}
++
++		action := "offering_reject"
++		if toStatus == OfferingStatusPublished {
++			action = "offering_publish"
++		}
++		summary, err := common.Marshal(map[string]any{
++			"owner_user_id": channel.OwnerUserID,
++			"from_status":   OfferingStatusPending,
++			"to_status":     toStatus,
++			"reason_code":   reasonCode,
++		})
++		if err != nil {
++			return err
++		}
++		event := &AuditEvent{
++			EventUID:       common.NewRequestId(),
++			ActorUserID:    review.ReviewerUserID,
++			ActorRole:      review.ReviewerRole,
++			ActorApiKeyID:  review.ReviewerKeyID,
++			Category:       "admin",
++			Action:         action,
++			TargetType:     "model_offering",
++			TargetID:       offering.ID,
++			TargetPublicID: offering.PublicID,
++			BeforeDigest:   offeringReviewDigest(offering.ID, channel.OwnerUserID, OfferingStatusPending, offering.Revision),
++			AfterDigest:    offeringReviewDigest(offering.ID, channel.OwnerUserID, toStatus, offering.Revision),
++			ChangeSummary:  string(summary),
++			RequestID:      review.RequestID,
++			IpHash:         review.IPHash,
++			UserAgent:      review.UserAgent,
++			OccurredAt:     now,
++			CreatedAt:      now,
++		}
++		if err := tx.Create(event).Error; err != nil {
++			return err
++		}
++
++		result = &OfferingReviewResult{
++			OfferingID:       offering.ID,
++			OfferingPublicID: offering.PublicID,
++			OwnerUserID:      channel.OwnerUserID,
++			FromStatus:       OfferingStatusPending,
++			ToStatus:         toStatus,
++		}
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return result, nil
++}
++
++func offeringReviewDigest(offeringID, ownerUserID int64, status int, revision int64) string {
++	sum := sha256.Sum256([]byte(fmt.Sprintf("offering:%d:owner:%d:status:%d:revision:%d", offeringID, ownerUserID, status, revision)))
++	return hex.EncodeToString(sum[:])
++}
++
++func validOfferingReviewReasonCode(reason string) bool {
++	if reason == "" || len(reason) > 64 {
++		return false
++	}
++	for i := 0; i < len(reason); i++ {
++		ch := reason[i]
++		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' {
++			continue
++		}
++		return false
++	}
++	return true
++}
++
+ func transitionOffering(db *gorm.DB, ownerUserID, id int64, from []int, to int) error {
+ 	offering, err := GetModelOffering(db, ownerUserID, id)
+ 	if err != nil {
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 9f93cda..451b199 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -480,6 +480,65 @@ func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
+ 	assert.Equal(t, OfferingStatusDraft, again.Status)
+ }
+ 
++func TestReviewerScopedOfferingReviewIsCrossOwnerAtomicAndAudited(t *testing.T) {
++	const owner, reviewer int64 = 7101, 7199
++	db := newRepoDB(t)
++	group := &ShareGroup{
++		OwnerUserID: owner, Name: "跨 owner 审核组",
++		DefaultVisibility: ShareGroupVisibilityPublic, PublishStatus: ShareGroupPublishPublished,
++	}
++	require.NoError(t, CreateShareGroup(db, group))
++	channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "审核渠道", BaseChannelID: 98001}
++	require.NoError(t, CreateChannel(db, channel))
++	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-model"}
++	require.NoError(t, CreateModelOffering(db, owner, offering))
++	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
++
++	items, total, err := ListOfferingsForReview(db, OfferingStatusPending, 0, 20)
++	require.NoError(t, err)
++	require.EqualValues(t, 1, total)
++	require.Len(t, items, 1)
++	assert.Equal(t, owner, items[0].OwnerUserID)
++	assert.Equal(t, offering.ID, items[0].OfferingID)
++
++	reviewed, err := ReviewModelOffering(db, offering.ID, OfferingStatusPublished, OfferingReviewContext{
++		ReviewerUserID: reviewer,
++		ReviewerRole:   common.RoleAdminUser,
++		ReasonCode:     "manual_approval",
++		RequestID:      "req-review-1",
++		IPHash:         strings.Repeat("a", 64),
++		UserAgent:      "review-test",
++	})
++	require.NoError(t, err)
++	assert.Equal(t, owner, reviewed.OwnerUserID)
++	assert.Equal(t, OfferingStatusPending, reviewed.FromStatus)
++	assert.Equal(t, OfferingStatusPublished, reviewed.ToStatus)
++
++	// 条件更新保证同一供给只能审核一次；第二次不得再写审计。
++	_, err = ReviewModelOffering(db, offering.ID, OfferingStatusRejected, OfferingReviewContext{
++		ReviewerUserID: reviewer, ReviewerRole: common.RoleAdminUser, ReasonCode: "duplicate_review",
++	})
++	assert.ErrorIs(t, err, ErrInvalidArgument)
++
++	var events []AuditEvent
++	require.NoError(t, db.Where("target_type = ? AND target_id = ?", "model_offering", offering.ID).Find(&events).Error)
++	require.Len(t, events, 1)
++	event := events[0]
++	assert.Equal(t, reviewer, event.ActorUserID)
++	assert.Equal(t, "admin", event.Category)
++	assert.Equal(t, "offering_publish", event.Action)
++	assert.Equal(t, offering.PublicID, event.TargetPublicID)
++	assert.Equal(t, "req-review-1", event.RequestID)
++	assert.NotEqual(t, event.BeforeDigest, event.AfterDigest)
++	assert.Contains(t, event.ChangeSummary, `"owner_user_id":7101`)
++	assert.Contains(t, event.ChangeSummary, `"reason_code":"manual_approval"`)
++
++	items, total, err = ListOfferingsForReview(db, OfferingStatusPending, 0, 20)
++	require.NoError(t, err)
++	assert.Zero(t, total)
++	assert.Empty(t, items)
++}
++
+ func TestListModelOfferingsByChannelScopesByOwner(t *testing.T) {
+ 	db := newRepoDB(t)
+ 	const ownerA, ownerB int64 = 13101, 13102
+-- 
+2.53.0.windows.1
+

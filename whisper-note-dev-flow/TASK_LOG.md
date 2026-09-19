@@ -1,5 +1,24 @@
 # 任务清单
 
+## [已完成] 接手整改阶段 B2：跨 owner 审核（2026-09-19）
+
+**本轮目标**：把供给审核从错误的 owner-scoped 写操作改成 reviewer-scoped 状态转换，使管理员可审核任意分享者提交的 Offering，同时保留分享者 CRUD 的 owner 隔离，并落不可变脱敏审计事件。
+**验收标准**：① 管理员可读取待审核队列并发布/驳回其他 owner 的供给；② 普通用户不可跨 owner 读取或审核；③ 状态转换使用条件更新，重复/并发审核不能产生两个成功；④审计记录审核人、资源 owner、前后状态、理由码和请求关联，不记录凭据；⑤ SQLite/MySQL/PostgreSQL 兼容，受影响包与全仓回归通过。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 审核仓储 | `new-api/apigx/model/repo_offering.go` | 修改 | 跨 owner 读取、条件状态转换与 AuditEvent 同事务写入 |
+| 审核接口 | `new-api/apigx/api/share.go` | 修改 | 管理员待审核队列、发布/驳回请求与脱敏上下文 |
+| 回归测试 | `new-api/apigx/model/repo_test.go`、`new-api/apigx/api/share_test.go` | 修改 | 跨 owner 正反例、重复审核、审计字段和不泄露验证 |
+| 交付台账 | `docs/stage0/upstream-diff.md`、补丁链、流程文档 | 修改 | 登记底座差异与可重建证据 |
+
+**任务清单**：
+- [x] B2.1 定义 reviewer-scoped 仓储契约与脱敏审核理由码 → `apigx/model/repo_offering.go`；理由只接受 64 字符内安全码，仓储层再次校验管理员角色和审计字段长度
+- [x] B2.2 实现跨 owner 待审核读取、发布/驳回和原子审计 → `GET /api/apigx/reviews/offerings` + 既有 publish/reject 端点；条件状态更新与 `AuditEvent` 同事务
+- [x] B2.3 完成管理员/普通用户、跨 owner、重复审核与审计回归 → `apigx/model`、`apigx/api` 全套通过；SQLite 3.50.4 / PostgreSQL 18.4 / MySQL 8.0.12 真实方言矩阵通过
+- [x] B2.4 运行受影响包、三库相关验证与全仓回归，更新补丁链和项目状态并提交 → 真实 HTTP 13/13；SQLite/PostgreSQL/MySQL 矩阵、受影响包和全仓通过；inner `d10e17a`；159 补丁重建 tree `21c6a53730aa97cbe23d3060867188898db07334` 一致
+
 ## [已完成] 接手整改阶段 B1：统一出站 ACL（2026-09-18）
 
 **本轮目标**：把公开、邀请码/指定用户、仅自己三种可见性与平台 Key 来源范围收口为一个服务端授权决策，并覆盖固定来源、自动路由、亲和缓存、失败重试和异步任务原渠道锁定，关闭非公开资源可被底座直接选中的 P0 绕过。
