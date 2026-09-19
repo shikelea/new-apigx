@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// T2.7 用户侧验收：**平台 Key 的默认路由策略真的按请求生效**
+// B4 用户侧验收：**平台 Key 的默认路由策略真的按请求生效**
 //
 // 场景：同一模型两条健康供给（各有自己的上游 Key，便于从替身日志分辨）。
-//   ① 把平台 Key 的 default_route_mode 设为 reliability → 请求应**只**落到质量更好的那条
-//   ② 改回 auto → 请求应**两条都用到**（策略不生效时才会这样）
+//   ① 空值 / auto / reliability / latency / throughput 都应只选择质量更好的 A
+//   ② A 的渠道并发占满时，auto 应立即改选仍有余量的 B
+//   ③ A 释放后，下一请求应立即恢复选择 A（不能命中旧的最终路由结果缓存）
 //
 // 测量用替身自己的请求日志（按凭据指纹计数，日志不留明文；脚本本地复算指纹匹配）。
 //
@@ -27,6 +28,13 @@ async function call(url, { method = 'GET', body, auth } = {}) {
   const text = await res.text();
   let json = null; try { json = JSON.parse(text); } catch { /* 非 JSON */ }
   return { status: res.status, json, text };
+}
+
+function expectOK(result, action) {
+  if (result.status !== 200 || result.json?.success === false) {
+    throw new Error(`${action}失败：HTTP ${result.status} ${result.text.slice(0, 180)}`);
+  }
+  return result.json?.data ?? result.json;
 }
 
 let failureCount = 0;
@@ -81,10 +89,11 @@ async function main() {
     const MODEL = 'stub/strategy-' + stamp;
     const mkBase = async (tag) => {
       const name = 'STRAT-' + tag + '-' + stamp;
-      await call(`${BASE}/api/channel/`, {
+      const created = await call(`${BASE}/api/channel/`, {
         method: 'POST', auth: root,
         body: { mode: 'single', channel: { name, type: 1, key: 'sk-' + tag + '-' + stamp, base_url: 'http://127.0.0.1:8100', models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
       });
+      expectOK(created, `创建底座渠道 ${tag}`);
       for (let i = 0; i < 10; i++) {
         const list = await (async () => {
         // **翻页合并**：底座的列表接口把 page_size 封顶在 100，而开发库里测试渠道已 112+ 条，
@@ -106,29 +115,46 @@ async function main() {
       throw new Error('查不到底座渠道 ' + name);
     };
     const g = await call(`${BASE}/api/apigx/share-groups`, { method: 'POST', auth: root, body: { name: 'STRAT组-' + stamp, default_visibility: 2 } });
+    const group = expectOK(g, '创建分享分组');
+    const groupPublished = await call(`${BASE}/api/apigx/share-groups/${group.id}/publish-status`, {
+      method: 'POST', auth: root, body: { status: 2 },
+    });
+    expectOK(groupPublished, '发布分享分组');
     const seed = async (tag) => {
       const baseChannel = await mkBase(tag);
       const upstreamKey = 'sk-' + tag + '-up-' + stamp;
       const ch = await call(`${BASE}/api/apigx/channels`, {
         method: 'POST', auth: root,
-        body: { share_group_id: g.json.data.id, base_channel_id: baseChannel.id, name: 'STRAT渠道-' + tag + '-' + stamp, protocol: 'openai', base_url: 'http://127.0.0.1:8100' },
+        body: { share_group_id: group.id, base_channel_id: baseChannel.id, name: 'STRAT渠道-' + tag + '-' + stamp, protocol: 'openai', base_url: 'http://127.0.0.1:8100' },
       });
-      const channelId = ch.json.data.id;
-      await call(`${BASE}/api/apigx/channels/${channelId}/keys`, {
+      const channelId = expectOK(ch, `创建分享渠道 ${tag}`).id;
+      const key = await call(`${BASE}/api/apigx/channels/${channelId}/keys`, {
         method: 'POST', auth: root, body: { stable_key_id: 'strat-' + tag + '-' + stamp, name: 'k', key: upstreamKey },
       });
-      await call(`${BASE}/api/apigx/channels/${channelId}/apply`, { method: 'POST', auth: root });
+      expectOK(key, `添加上游 Key ${tag}`);
+      const applied = await call(`${BASE}/api/apigx/channels/${channelId}/apply`, { method: 'POST', auth: root });
+      expectOK(applied, `投影渠道 ${tag}`);
       const off = await call(`${BASE}/api/apigx/channels/${channelId}/offerings`, {
         method: 'POST', auth: root, body: { upstream_model_id: MODEL },
       });
-      const offeringId = off.json.data.id;
-      await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: root });
-      await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, { method: 'POST', auth: root });
+      const offeringId = expectOK(off, `创建供给 ${tag}`).id;
+      const price = await call(`${BASE}/api/apigx/price-rules`, {
+        method: 'PUT', auth: root,
+        body: { scope_type: 0, scope_id: offeringId, input_usd_per_million: 1, output_usd_per_million: 2 },
+      });
+      expectOK(price, `配置供给价格 ${tag}`);
+      const submitted = await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: root });
+      expectOK(submitted, `提交供给 ${tag}`);
+      const published = await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, {
+        method: 'POST', auth: root, body: { reason_code: 'b4_route_verification' },
+      });
+      expectOK(published, `发布供给 ${tag}`);
       return { offeringId, channelId, upstreamKey };
     };
     const a = await seed('good');
     const b = await seed('meh');
     const vt = await platformToken(root);
+    if (!vt?.id) throw new Error('找不到用于验收的平台 Key');
     saveOut({ model: MODEL, stamp, tokenId: vt.id, a, b });
     info(`已建立两条供给：model=${MODEL}（A=good offering=${a.offeringId}，B=meh offering=${b.offeringId}）`);
     info('下一步：psql 给 A 灌更好的质量样本，然后执行 --phase measure');
@@ -172,6 +198,25 @@ async function main() {
     return statuses;
   };
 
+  const assertOnlyA = async (mode) => {
+    await setMode(mode);
+    const statuses = await fire(ROUNDS);
+    const count = await counts();
+    const label = mode || '(空=auto)';
+    info(`${label} 模式：A=${count.a} B=${count.b}（状态 ${[...new Set(statuses)].join(',')}）`);
+    (statuses.every((s) => s === 200) ? pass : fail)(`${label} 模式下请求全部成功 — ${statuses.filter((s) => s === 200).length}/${ROUNDS}`);
+    (count.a === ROUNDS && count.b === 0 ? pass : fail)(`${label} 只选择综合更优的 A — A=${count.a} B=${count.b}`);
+  };
+
+  const waitForARequest = async () => {
+    for (let i = 0; i < 40; i++) {
+      const count = await counts();
+      if (count.a > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('等待 A 到达替身超时');
+  };
+
   // 等模型可路由
   let routable = false;
   for (let i = 0; i < 24 && !routable; i++) {
@@ -181,30 +226,44 @@ async function main() {
   }
   if (!routable) throw new Error('模型不可路由');
 
-  // ① 策略 = reliability → 只应落到质量更好的 A
-  await setMode('reliability');
-  // 策略合格集合有 30 秒缓存：切换后等它过期
-  info('等待策略缓存过期（32s）...');
-  await new Promise((r) => setTimeout(r, 32000));
-  const statuses1 = await fire(ROUNDS);
-  const c1 = await counts();
-  info(`reliability 模式：A=${c1.a} B=${c1.b}（状态 ${[...new Set(statuses1)].join(',')}）`);
-  (statuses1.every((s) => s === 200) ? pass : fail)(`reliability 模式下请求全部成功 — ${statuses1.filter((s) => s === 200).length}/${ROUNDS}`);
-  (c1.b === 0 && c1.a > 0 ? pass : fail)(`策略生效：流量只落到更优来源 — A=${c1.a} B=${c1.b}`);
+  // ① 默认综合自动和三种显式质量策略，都必须只选择质量更好的 A。
+  await call(`${STUB}/_control/profile`, { method: 'POST', body: { delayMs: 0, status: 0, hang: false } });
+  for (const mode of ['', 'auto', 'reliability', 'latency', 'throughput']) {
+    await assertOnlyA(mode);
+  }
 
-  // ② 策略 = auto → 不再限定，两条都应被用到
-  await setMode('auto');
-  await new Promise((r) => setTimeout(r, 32000));
-  const statuses2 = await fire(ROUNDS);
-  const c2 = await counts();
-  info(`auto 模式：A=${c2.a} B=${c2.b}（状态 ${[...new Set(statuses2)].join(',')}）`);
-  (c2.a > 0 && c2.b > 0 ? pass : fail)(`auto 模式不加限定：两条来源都被用到 — A=${c2.a} B=${c2.b}`);
-
-  // ③ 拼错的策略名必须被拒（否则用户以为设了、实际永远不生效）
+  // ② 拼错的策略名必须被拒（否则用户以为设了、实际永远不生效）
   const bad = await call(`${BASE}/api/apigx/platform-keys/${vt.id}/preferences`, {
     method: 'PUT', auth: root, body: { default_route_mode: 'latencyy' },
   });
   (bad.status === 400 ? pass : fail)(`未知策略名被拒（不静默失效） — HTTP ${bad.status}`);
+
+  // ③ A 质量更好，但它只有 1 个并发槽。先用一个延迟请求占满 A，第二个 auto
+  // 请求必须在决策阶段看见实时占用并改选 B；释放后再立即恢复 A。
+  const policy = await call(`${BASE}/api/apigx/channels/${out.a.channelId}/capacity-policy`, {
+    method: 'PUT', auth: root, body: { concurrency_mode: 4, concurrency_value: 1 },
+  });
+  if (policy.status !== 200) throw new Error(`设置 A 并发上限失败：${policy.status} ${policy.text.slice(0, 140)}`);
+  await setMode('auto');
+  await call(`${STUB}/_control/reset`, { method: 'POST' });
+  await call(`${STUB}/_control/profile`, { method: 'POST', body: { delayMs: 1500, status: 0, hang: false } });
+
+  const holding = chat();
+  await waitForARequest();
+  const fallback = await chat();
+  const held = await holding;
+  const during = await counts();
+  info(`A 满载期间：A=${during.a} B=${during.b}（首请求 ${held.status}，并发请求 ${fallback.status}）`);
+  (held.status === 200 && fallback.status === 200 ? pass : fail)('A 满载期间两次请求均由可用渠道完成');
+  (during.a === 1 && during.b === 1 ? pass : fail)(`A 满载后 auto 改选 B — A=${during.a} B=${during.b}`);
+
+  await call(`${STUB}/_control/profile`, { method: 'POST', body: { delayMs: 0 } });
+  await call(`${STUB}/_control/reset`, { method: 'POST' });
+  const recovered = await chat();
+  const after = await counts();
+  info(`A 释放后：A=${after.a} B=${after.b}（状态 ${recovered.status}）`);
+  (recovered.status === 200 ? pass : fail)('A 释放后的下一请求成功');
+  (after.a === 1 && after.b === 0 ? pass : fail)(`没有旧最终结果缓存：下一请求立即恢复 A — A=${after.a} B=${after.b}`);
 }
 
 main()

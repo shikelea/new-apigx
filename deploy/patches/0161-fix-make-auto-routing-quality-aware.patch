@@ -1,0 +1,1134 @@
+From 5cc4a4d3ef51f3edc9e8fc886602e8e4909e53ed Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sat, 19 Sep 2026 14:09:20 +0800
+Subject: [PATCH] fix: make auto routing quality aware
+
+---
+ apigx/api/share.go                       |   8 +-
+ apigx/api/share_test.go                  |  12 ++-
+ apigx/channelpool/policy_source.go       |   6 +-
+ apigx/model/migrate_matrix_test.go       |  43 +++++++++
+ apigx/model/repo_quality.go              | 117 ++++++++++++++++-------
+ apigx/model/repo_quality_test.go         |  53 +++++++++-
+ apigx/qualityhook/quality.go             |  15 ++-
+ apigx/qualityhook/quality_test.go        |  45 +++++++++
+ apigx/relayhook/route_strategy.go        |  55 ++---------
+ apigx/relayhook/route_strategy_test.go   |  73 ++++++++++++++
+ apigx/routing/assemble.go                |   5 +
+ apigx/routing/decide_test.go             |  27 ++++++
+ middleware/distributor.go                |   3 +-
+ relay/common/relay_info.go               |   5 +-
+ service/billing_session.go               |  12 ++-
+ service/billing_session_quality_test.go  |  74 ++++++++++++++
+ service/text_quota.go                    |  10 ++
+ web/src/features/keys/lib/apigx-scope.ts |   4 +-
+ web/src/features/keys/types.ts           |   4 +-
+ web/src/i18n/locales/en.json             |   2 +-
+ web/src/i18n/locales/fr.json             |   2 +-
+ web/src/i18n/locales/ja.json             |   2 +-
+ web/src/i18n/locales/ru.json             |   2 +-
+ web/src/i18n/locales/vi.json             |   2 +-
+ web/src/i18n/locales/zh-TW.json          |   2 +-
+ web/src/i18n/locales/zh.json             |   2 +-
+ 26 files changed, 482 insertions(+), 103 deletions(-)
+ create mode 100644 apigx/relayhook/route_strategy_test.go
+ create mode 100644 service/billing_session_quality_test.go
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index e801afa..8625f2f 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -537,7 +537,6 @@ func (h *handler) deleteChannel(c *gin.Context) {
+ 	if baseExists {
+ 		basemodel.CacheUpdateChannelStatus(int(shareChannel.BaseChannelID), common.ChannelStatusManuallyDisabled)
+ 	}
+-	relayhook.InvalidateRouteStrategyCache()
+ 
+ 	// 第二步撤销明文 Key、多 Key 状态、模型和能力投影。底座行保留为停用墓碑，
+ 	// 使历史任务仍能识别原渠道，同时没有任何可再次出站的凭据或能力。
+@@ -915,6 +914,9 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 			failFromRepo(c, linkErr)
+ 			return
+ 		}
++		// 准入热路径缓存了渠道策略链。写入成功后必须立即失效，否则质量路由会按新上限
++		// 判断容量，而最终原子预留仍按旧策略执行，产生“看起来已满但仍继续选中”的窗口。
++		channelpool.InvalidatePolicyCache(shareChannel.ID)
+ 		ok(c, gin.H{"id": existing.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
+ 	case errors.Is(err, apigxmodel.ErrNotFound):
+ 		created := &apigxmodel.CapacityPolicy{
+@@ -934,6 +936,7 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
+ 			failFromRepo(c, linkErr)
+ 			return
+ 		}
++		channelpool.InvalidatePolicyCache(shareChannel.ID)
+ 		ok(c, gin.H{"id": created.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
+ 	default:
+ 		failFromRepo(c, err)
+@@ -951,7 +954,7 @@ type platformKeyPreferencesRequest struct {
+ 	AllowedOwnerUserIDs []int64  `json:"allowed_owner_user_ids"`
+ 	AllowFallback       *bool    `json:"allow_fallback"`
+ 	// DefaultRouteMode 是「默认路由策略」（计划书 §9.1：保存到平台 Key 的偏好）。
+-	// 空串与 "auto" 都表示自动（不加限定）；latency / throughput / reliability 会把它
++	// 空串与 "auto" 都表示综合自动；latency / throughput / reliability 会把它
+ 	// 变成**请求级候选限定**（见 relayhook.EligibleBaseChannelsForStrategy）。
+ 	DefaultRouteMode *string `json:"default_route_mode"`
+ }
+@@ -1407,7 +1410,6 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 	if basemodel.DB != nil {
+ 		basemodel.InitChannelCache()
+ 	}
+-	relayhook.InvalidateRouteStrategyCache()
+ 	ok(c, gin.H{
+ 		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
+ 		"owner_user_id": reviewed.OwnerUserID,
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index cf5c518..3d48ddd 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -3,7 +3,6 @@ package apigxapi
+ import (
+ 	"encoding/json"
+ 	"errors"
+-	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"os"
+@@ -13,7 +12,10 @@ import (
+ 	"sync/atomic"
+ 	"testing"
+ 
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+ 	"github.com/QuantumNous/new-api/common"
+ 	basemodel "github.com/QuantumNous/new-api/model"
+@@ -800,6 +802,10 @@ func TestSetChannelCapacityPolicy(t *testing.T) {
+ 	assert.EqualValues(t, 4, stored.MaxConcurrencyMode)
+ 	assert.EqualValues(t, 3, stored.MaxConcurrency)
+ 	assert.EqualValues(t, 1, stored.PolicyVersion)
++	firstChain := channelpool.ChannelConcurrencyChain(env.db, channelID, 0, 0, 0)
++	firstResolution, err := capacity.Resolve(firstChain...)
++	require.NoError(t, err)
++	assert.EqualValues(t, 3, firstResolution.Value)
+ 
+ 	// 再次设置：应更新同一条（不新建），版本号递增
+ 	rec, body = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+@@ -814,6 +820,10 @@ func TestSetChannelCapacityPolicy(t *testing.T) {
+ 	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
+ 	assert.EqualValues(t, 9, stored.MaxConcurrency)
+ 	assert.EqualValues(t, 2, stored.PolicyVersion)
++	secondChain := channelpool.ChannelConcurrencyChain(env.db, channelID, 0, 0, 0)
++	secondResolution, err := capacity.Resolve(secondChain...)
++	require.NoError(t, err)
++	assert.EqualValues(t, 9, secondResolution.Value, "策略更新后准入缓存必须立即失效")
+ 
+ 	// 四态非法组合必须被拒（明确值要求 > 0）
+ 	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
+diff --git a/apigx/channelpool/policy_source.go b/apigx/channelpool/policy_source.go
+index 7448fb2..9f93d30 100644
+--- a/apigx/channelpool/policy_source.go
++++ b/apigx/channelpool/policy_source.go
+@@ -15,9 +15,9 @@ import (
+ // # 为什么要有缓存
+ //
+ // 上限要在**每个请求**上解析（热路径），而策略存在数据库里。缓存按「分享渠道」维度存
+-// 已经解析好的**策略链**，TTL 取短值；策略变更（分享者改上限）最长一个 TTL 后生效——
+-// 这一点必须记录：容量上限不是「改了立刻全局生效」的配置，短暂延迟是可接受的，
+-// 因为它只影响准入的宽严，不会造成记账错误。
++// 已经解析好的**策略链**，TTL 取短值；正式写接口在策略变更后调用
++// `InvalidatePolicyCache`，因此本进程内下一次请求立即读取新策略。TTL 只作为绕过正式写接口时的
++// 最终收敛边界，不能依赖它维持候选判断与最终原子预留的一致性。
+ 
+ const policyCacheTTL = 30 * time.Second
+ 
+diff --git a/apigx/model/migrate_matrix_test.go b/apigx/model/migrate_matrix_test.go
+index 229d0f1..7e38e55 100644
+--- a/apigx/model/migrate_matrix_test.go
++++ b/apigx/model/migrate_matrix_test.go
+@@ -36,6 +36,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
+ 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
+ 		assertOfferingReviewDialect(t, db)
++		assertQualityRoutingDialect(t, db)
+ 	})
+ 
+ 	t.Run("postgres", func(t *testing.T) {
+@@ -60,6 +61,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
+ 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+ 		assertOfferingReviewDialect(t, db)
++		assertQualityRoutingDialect(t, db)
+ 
+ 		// 存储引擎必须是 InnoDB。这不是洁癖：
+ 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
+@@ -83,6 +85,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
+ 	require.NoError(t, Migrate(db), "第二次迁移必须幂等")
+ 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+ 	assertOfferingReviewDialect(t, db)
++	assertQualityRoutingDialect(t, db)
+ }
+ 
+ var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
+@@ -134,6 +137,46 @@ func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
+ 	require.ErrorIs(t, err, errRollbackOfferingReviewMatrix)
+ }
+ 
++var errRollbackQualityRoutingMatrix = errors.New("rollback quality routing matrix fixture")
++
++// assertQualityRoutingDialect 覆盖 B4 新依赖的原子桶累加与 6 小时汇总：
++// 平台拒绝和探测不进入可靠性分母，吞吐分子/分母在三种方言上保持一致。
++func assertQualityRoutingDialect(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	err := db.Transaction(func(tx *gorm.DB) error {
++		const offeringID int64 = 9_820_001
++		const bucketTs int64 = 1_700_000_000 - 1_700_000_000%60
++		for range MinSamplesForQuality {
++			require.NoError(t, RecordQualitySample(tx, QualitySample{
++				OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
++				LatencyMs: 1000, OutputTokens: 100, GenerationMs: 1000,
++			}))
++		}
++		for range 5 {
++			require.NoError(t, RecordQualitySample(tx, QualitySample{
++				OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeRejected,
++				LatencyMs: 1,
++			}))
++		}
++		for range 3 {
++			require.NoError(t, RecordQualitySample(tx, QualitySample{
++				OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
++				LatencyMs: 1, OutputTokens: 999, GenerationMs: 1, IsProbe: true,
++			}))
++		}
++
++		view, viewErr := ResolveQualityView(tx, offeringID, QualityWindowSixHour, bucketTs+30)
++		require.NoError(t, viewErr)
++		assert.EqualValues(t, MinSamplesForQuality, view.SampleCount)
++		assert.EqualValues(t, MinSamplesForQuality, view.SuccessCount)
++		assert.EqualValues(t, 5, view.PlatformRejects)
++		assert.EqualValues(t, 2_000, view.OutputTokensSum)
++		assert.EqualValues(t, 20_000, view.GenerationMsSum)
++		return errRollbackQualityRoutingMatrix
++	})
++	require.ErrorIs(t, err, errRollbackQualityRoutingMatrix)
++}
++
+ // informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，
+ // 同时适用于 PostgreSQL 与 MySQL（SQLite 用 sqlite_master，见 apigxTableNames）。
+ func informationSchemaApigxTables(t *testing.T, db *gorm.DB, column string) []string {
+diff --git a/apigx/model/repo_quality.go b/apigx/model/repo_quality.go
+index 00108eb..900be0d 100644
+--- a/apigx/model/repo_quality.go
++++ b/apigx/model/repo_quality.go
+@@ -99,6 +99,9 @@ func RecordQualitySample(db *gorm.DB, sample QualitySample) error {
+ 	if db == nil || sample.OfferingID <= 0 {
+ 		return fmt.Errorf("%w: offering_id is required", ErrInvalidArgument)
+ 	}
++	if !validQualityOutcome(sample.Outcome) {
++		return fmt.Errorf("%w: unknown outcome %d", ErrInvalidArgument, sample.Outcome)
++	}
+ 	if sample.BucketTs == 0 {
+ 		sample.BucketTs = alignToMinute(common.GetTimestamp())
+ 	}
+@@ -132,34 +135,30 @@ func RecordQualitySample(db *gorm.DB, sample QualitySample) error {
+ 		} else {
+ 			updates["natural_request_count"] = gorm.Expr("natural_request_count + 1")
+ 		}
+-		switch sample.Outcome {
+-		case QualityOutcomeSuccess:
+-			updates["complete_success_count"] = gorm.Expr("complete_success_count + 1")
+-		case QualityOutcomeTimeout:
+-			updates["timeout_count"] = gorm.Expr("timeout_count + 1")
+-		case QualityOutcomeUpstream:
+-			updates["upstream_failure_count"] = gorm.Expr("upstream_failure_count + 1")
+-		case QualityOutcomeCancel:
+-			updates["cancelled_count"] = gorm.Expr("cancelled_count + 1")
+-		case QualityOutcomeRejected:
+-			updates["platform_reject_count"] = gorm.Expr("platform_reject_count + 1")
+-		default:
+-			return fmt.Errorf("%w: unknown outcome %d", ErrInvalidArgument, sample.Outcome)
++		// 主动探测只记 ProbeCount；它不能改变自然流量的可靠性、延迟或吞吐评分。
++		if !sample.IsProbe {
++			applyOutcomeUpdates(updates, sample.Outcome)
+ 		}
+ 
+-		totalAfter := existing.NaturalRequestCount + existing.ProbeCount + 1
+-		if sample.LatencyMs > 0 {
++		qualified := !sample.IsProbe && qualityOutcomeQualified(sample.Outcome)
++		totalAfter := bucketQualifiedCount(existing) + 1
++		if qualified {
++			updates["sample_ok_count"] = gorm.Expr("sample_ok_count + 1")
++		}
++		if qualified && sample.LatencyMs > 0 {
+ 			updates["latency_ms_sum"] = gorm.Expr("latency_ms_sum + ?", sample.LatencyMs)
+ 			updates["latency_ms_p50"] = updateMedianEstimate(existing.LatencyMsP50, sample.LatencyMs, totalAfter)
+ 		}
+-		if sample.TtftMs > 0 {
++		if qualified && sample.TtftMs > 0 {
+ 			updates["ttft_ms_sum"] = gorm.Expr("ttft_ms_sum + ?", sample.TtftMs)
+ 			updates["ttft_ms_p50"] = updateMedianEstimate(existing.TtftMsP50, sample.TtftMs, totalAfter)
+ 		}
+-		if sample.OutputTokens > 0 {
++		// token 与生成时长必须成对累计；只记录其中一项会让窗口汇总把不同请求的
++		// 分子、分母拼在一起，得到无法对应任何真实样本的吞吐率。
++		throughputKnown := !sample.IsProbe && sample.Outcome == QualityOutcomeSuccess &&
++			sample.OutputTokens > 0 && sample.GenerationMs > 0
++		if throughputKnown {
+ 			updates["output_tokens_sum"] = gorm.Expr("output_tokens_sum + ?", sample.OutputTokens)
+-		}
+-		if sample.GenerationMs > 0 {
+ 			updates["generation_ms_sum"] = gorm.Expr("generation_ms_sum + ?", sample.GenerationMs)
+ 		}
+ 		return tx.Model(&QualityBucket{}).Where("bucket_key_hash = ?", keyHash).Updates(updates).Error
+@@ -172,8 +171,52 @@ func applySampleToBucket(bucket *QualityBucket, sample QualitySample) {
+ 		bucket.ProbeCount = 1
+ 	} else {
+ 		bucket.NaturalRequestCount = 1
++		applyOutcomeToBucket(bucket, sample.Outcome)
++	}
++	qualified := !sample.IsProbe && qualityOutcomeQualified(sample.Outcome)
++	if qualified {
++		bucket.SampleOkCount = 1
++	}
++	if qualified && sample.LatencyMs > 0 {
++		bucket.LatencyMsSum = sample.LatencyMs
++		bucket.LatencyMsP50 = sample.LatencyMs // 首个样本即当前中位数的起点
++	}
++	if qualified && sample.TtftMs > 0 {
++		bucket.TtftMsSum = sample.TtftMs
++		bucket.TtftMsP50 = sample.TtftMs
++	}
++	if !sample.IsProbe && sample.Outcome == QualityOutcomeSuccess &&
++		sample.OutputTokens > 0 && sample.GenerationMs > 0 {
++		bucket.OutputTokensSum = sample.OutputTokens
++		bucket.GenerationMsSum = sample.GenerationMs
++	}
++}
++
++func validQualityOutcome(outcome int) bool {
++	return outcome >= QualityOutcomeSuccess && outcome <= QualityOutcomeRejected
++}
++
++func qualityOutcomeQualified(outcome int) bool {
++	return outcome == QualityOutcomeSuccess || outcome == QualityOutcomeTimeout || outcome == QualityOutcomeUpstream
++}
++
++func applyOutcomeUpdates(updates map[string]any, outcome int) {
++	switch outcome {
++	case QualityOutcomeSuccess:
++		updates["complete_success_count"] = gorm.Expr("complete_success_count + 1")
++	case QualityOutcomeTimeout:
++		updates["timeout_count"] = gorm.Expr("timeout_count + 1")
++	case QualityOutcomeUpstream:
++		updates["upstream_failure_count"] = gorm.Expr("upstream_failure_count + 1")
++	case QualityOutcomeCancel:
++		updates["cancelled_count"] = gorm.Expr("cancelled_count + 1")
++	case QualityOutcomeRejected:
++		updates["platform_reject_count"] = gorm.Expr("platform_reject_count + 1")
+ 	}
+-	switch sample.Outcome {
++}
++
++func applyOutcomeToBucket(bucket *QualityBucket, outcome int) {
++	switch outcome {
+ 	case QualityOutcomeSuccess:
+ 		bucket.CompleteSuccessCount = 1
+ 	case QualityOutcomeTimeout:
+@@ -185,16 +228,14 @@ func applySampleToBucket(bucket *QualityBucket, sample QualitySample) {
+ 	case QualityOutcomeRejected:
+ 		bucket.PlatformRejectCount = 1
+ 	}
+-	if sample.LatencyMs > 0 {
+-		bucket.LatencyMsSum = sample.LatencyMs
+-		bucket.LatencyMsP50 = sample.LatencyMs // 首个样本即当前中位数的起点
+-	}
+-	if sample.TtftMs > 0 {
+-		bucket.TtftMsSum = sample.TtftMs
+-		bucket.TtftMsP50 = sample.TtftMs
++}
++
++func bucketQualifiedCount(bucket QualityBucket) int64 {
++	if bucket.SampleOkCount > 0 {
++		return bucket.SampleOkCount
+ 	}
+-	bucket.OutputTokensSum = sample.OutputTokens
+-	bucket.GenerationMsSum = sample.GenerationMs
++	// 兼容 B4 前已写入但尚未维护 SampleOkCount 的桶。
++	return bucket.CompleteSuccessCount + bucket.TimeoutCount + bucket.UpstreamFailureCount
+ }
+ 
+ // updateMedianEstimate 用**流式中位数估计**更新 P50。
+@@ -243,6 +284,10 @@ type QualityView struct {
+ 	ReliabilityLowerBoundPpm int64
+ 	// LatencyMsP50 是**近似**中位数（见 updateMedianEstimate）。
+ 	LatencyMsP50 int64
++	// OutputTokensSum / GenerationMsSum 只累计带可靠 usage 的文本成功样本。
++	// 两者任一为 0 都表示吞吐未知，调用方不得把它当作 0 token/s。
++	OutputTokensSum int64
++	GenerationMsSum int64
+ 	// LatestBucketTs 是窗口内最新的桶时间（0 表示窗口内没有任何样本）。
+ 	LatestBucketTs int64
+ 	// LatestUpstreamFailureTs 是窗口内**最后一次上游失败/超时**所在桶的时间（0 表示没有）。
+@@ -293,26 +338,29 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
+ 	var latencyWeightedSum, latencyWeight int64
+ 	for i := range buckets {
+ 		bucket := &buckets[i]
+-		view.SampleCount += bucket.NaturalRequestCount
++		qualifiedCount := bucketQualifiedCount(*bucket)
++		view.SampleCount += qualifiedCount
+ 		view.SuccessCount += bucket.CompleteSuccessCount
+ 		view.TimeoutCount += bucket.TimeoutCount
+ 		view.UpstreamFailures += bucket.UpstreamFailureCount
+ 		view.CancelledCount += bucket.CancelledCount
+ 		view.PlatformRejects += bucket.PlatformRejectCount
+-		if bucket.BucketTs > view.LatestBucketTs {
++		if qualifiedCount > 0 && bucket.BucketTs > view.LatestBucketTs {
+ 			view.LatestBucketTs = bucket.BucketTs
+ 		}
+ 		if bucket.UpstreamFailureCount+bucket.TimeoutCount > 0 && bucket.BucketTs > view.LatestUpstreamFailureTs {
+ 			view.LatestUpstreamFailureTs = bucket.BucketTs
+ 		}
+ 		if bucket.LatencyMsP50 > 0 {
+-			weight := bucket.NaturalRequestCount
++			weight := qualifiedCount
+ 			if weight <= 0 {
+ 				weight = 1
+ 			}
+ 			latencyWeightedSum += bucket.LatencyMsP50 * weight
+ 			latencyWeight += weight
+ 		}
++		view.OutputTokensSum += bucket.OutputTokensSum
++		view.GenerationMsSum += bucket.GenerationMsSum
+ 	}
+ 	if latencyWeight > 0 {
+ 		view.LatencyMsP50 = latencyWeightedSum / latencyWeight
+@@ -321,8 +369,9 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
+ 	view.Insufficient = view.SampleCount < MinSamplesForQuality
+ 	view.Stale = view.LatestBucketTs > 0 && at-view.LatestBucketTs > int64(QualityStaleAfter.Seconds())
+ 	if view.SampleCount > 0 {
+-		view.SuccessRatePpm = view.SuccessCount * 1_000_000 / view.SampleCount
+-		view.ReliabilityLowerBoundPpm = wilsonLowerBoundPpm(view.SuccessCount, view.SampleCount)
++		reliabilitySuccesses := min(view.SuccessCount, view.SampleCount)
++		view.SuccessRatePpm = reliabilitySuccesses * 1_000_000 / view.SampleCount
++		view.ReliabilityLowerBoundPpm = wilsonLowerBoundPpm(reliabilitySuccesses, view.SampleCount)
+ 	}
+ 	return view, nil
+ }
+diff --git a/apigx/model/repo_quality_test.go b/apigx/model/repo_quality_test.go
+index 2f5bc7f..317749c 100644
+--- a/apigx/model/repo_quality_test.go
++++ b/apigx/model/repo_quality_test.go
+@@ -39,7 +39,7 @@ func TestRecordQualitySampleAccumulatesExactly(t *testing.T) {
+ 
+ 	view, err := ResolveQualityView(db, offeringID, QualityWindowMinute, at)
+ 	require.NoError(t, err)
+-	assert.EqualValues(t, 30, view.SampleCount)
++	assert.EqualValues(t, 27, view.SampleCount, "平台拒绝不进入上游质量分母")
+ 	assert.EqualValues(t, 21, view.SuccessCount)
+ 	assert.EqualValues(t, 3, view.TimeoutCount)
+ 	assert.EqualValues(t, 3, view.UpstreamFailures)
+@@ -49,6 +49,55 @@ func TestRecordQualitySampleAccumulatesExactly(t *testing.T) {
+ 	assert.Greater(t, view.LatencyMsP50, int64(0), "P50 应有估计值")
+ }
+ 
++// 文本吞吐只在分子和分母都可观测时成立；6 小时视图应原样汇总，不能把未知写成 0 token/s。
++func TestQualityViewAggregatesThroughputInputs(t *testing.T) {
++	db := newRepoDB(t)
++	const offeringID int64 = 8804
++	at := int64(1_700_000_000)
++	bucketTs := at - at%60
++
++	require.NoError(t, RecordQualitySample(db, QualitySample{
++		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
++		LatencyMs: 1000, OutputTokens: 80, GenerationMs: 800,
++	}))
++	require.NoError(t, RecordQualitySample(db, QualitySample{
++		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
++		LatencyMs: 1200, OutputTokens: 20, GenerationMs: 200,
++	}))
++
++	view, err := ResolveQualityView(db, offeringID, QualityWindowSixHour, at)
++	require.NoError(t, err)
++	assert.EqualValues(t, 100, view.OutputTokensSum)
++	assert.EqualValues(t, 1000, view.GenerationMsSum)
++
++	unknown, err := ResolveQualityView(db, 8898, QualityWindowSixHour, at)
++	require.NoError(t, err)
++	assert.Zero(t, unknown.OutputTokensSum)
++	assert.Zero(t, unknown.GenerationMsSum)
++}
++
++func TestQualityViewIgnoresPartialThroughputSamples(t *testing.T) {
++	db := newRepoDB(t)
++	const offeringID int64 = 8805
++	at := int64(1_700_000_000)
++	bucketTs := at - at%60
++
++	// 两条成功样本分别只带分子和分母。它们不能被拼成一条虚假的 100 token/s 观测。
++	require.NoError(t, RecordQualitySample(db, QualitySample{
++		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
++		LatencyMs: 1000, OutputTokens: 100,
++	}))
++	require.NoError(t, RecordQualitySample(db, QualitySample{
++		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
++		LatencyMs: 1000, GenerationMs: 1000,
++	}))
++
++	view, err := ResolveQualityView(db, offeringID, QualityWindowSixHour, at)
++	require.NoError(t, err)
++	assert.Zero(t, view.OutputTokensSum)
++	assert.Zero(t, view.GenerationMsSum)
++}
++
+ // **样本不足不给结论**：样本数不够时，不能把成功率当成质量评分。
+ func TestQualityViewFlagsInsufficientSamples(t *testing.T) {
+ 	db := newRepoDB(t)
+@@ -158,6 +207,8 @@ func TestQualitySampleSeparatesProbesAndRejectsUnknownOutcome(t *testing.T) {
+ 	require.NoError(t, db.Where("offering_id = ?", offeringID).First(&bucket).Error)
+ 	assert.EqualValues(t, 1, bucket.ProbeCount, "探测请求单独计数")
+ 	assert.EqualValues(t, 1, bucket.NaturalRequestCount)
++	assert.EqualValues(t, 1, bucket.CompleteSuccessCount, "探测成功不得混入自然流量成功数")
++	assert.EqualValues(t, 1, bucket.SampleOkCount, "只有自然流量的合格上游尝试进入质量分母")
+ 
+ 	// 失效请求数（平台拒绝）不参与成功率分母之外的"上游质量"：这里只验证计数分开
+ 	assert.ErrorIs(t, RecordQualitySample(db, QualitySample{
+diff --git a/apigx/qualityhook/quality.go b/apigx/qualityhook/quality.go
+index e60bbbc..cdf9695 100644
+--- a/apigx/qualityhook/quality.go
++++ b/apigx/qualityhook/quality.go
+@@ -96,18 +96,29 @@ func RecordFromRelay(relayInfo *relaycommon.RelayInfo, apiErr *types.NewAPIError
+ 		OfferingID: offeringID,
+ 		Outcome:    ClassifyOutcome(apiErr, statusCode),
+ 	}
++	if apiErr == nil && relayInfo.APIGXQualityOutputTokens > 0 {
++		sample.OutputTokens = relayInfo.APIGXQualityOutputTokens
++	}
+ 	// 真实毫秒精度（`StartTime` / `FirstResponseTime` 都是 time.Time）
+ 	if !relayInfo.StartTime.IsZero() {
+ 		now := time.Now()
+ 		if elapsed := now.Sub(relayInfo.StartTime).Milliseconds(); elapsed > 0 {
+ 			sample.LatencyMs = elapsed
++			// 非流式响应没有可观察的首 token 时刻，使用完整上游耗时作为保守生成时段；
++			// 流式响应则在下面改成首个有效输出之后的时段。
++			if sample.OutputTokens > 0 {
++				sample.GenerationMs = elapsed
++			}
+ 			if !relayInfo.FirstResponseTime.IsZero() && relayInfo.FirstResponseTime.After(relayInfo.StartTime) {
+ 				ttft := relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()
+ 				if ttft > 0 {
+ 					sample.TtftMs = ttft
+ 					// 生成阶段 = 总时长 - 首字延迟（近似：中间的网络往返不计入）
+-					if generation := elapsed - ttft; generation > 0 {
+-						sample.GenerationMs = generation
++					if sample.OutputTokens > 0 {
++						generation := elapsed - ttft
++						if generation > 0 {
++							sample.GenerationMs = generation
++						}
+ 					}
+ 				}
+ 			}
+diff --git a/apigx/qualityhook/quality_test.go b/apigx/qualityhook/quality_test.go
+index 97218a6..a68f3c8 100644
+--- a/apigx/qualityhook/quality_test.go
++++ b/apigx/qualityhook/quality_test.go
+@@ -4,11 +4,19 @@ import (
+ 	"context"
+ 	"errors"
+ 	"net/http"
++	"path/filepath"
+ 	"testing"
++	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/channelpool"
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
+ 	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/glebarez/sqlite"
+ 	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
+ )
+ 
+ // 归因的核心要求（计划书验收：「6 小时窗口内有错误、取消和少样本 | 归因正确」）：
+@@ -58,3 +66,40 @@ func TestQualityStatsDisabledByDefault(t *testing.T) {
+ 	t.Setenv("APIGX_QUALITY_STATS_ENABLED", "true")
+ 	assert.True(t, Enabled())
+ }
++
++func TestRecordFromRelayPersistsTextThroughput(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "quality-hook.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, apigxmodel.Migrate(db))
++
++	group := &apigxmodel.ShareGroup{OwnerUserID: 1001, Name: "quality", PublicID: "quality-group"}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	channel := &apigxmodel.Channel{
++		OwnerUserID: 1001, ShareGroupID: group.ID, PublicID: "quality-channel",
++		Name: "quality", BaseChannelID: 7001,
++	}
++	require.NoError(t, apigxmodel.CreateChannel(db, channel))
++	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "quality-model"}
++	require.NoError(t, apigxmodel.CreateModelOffering(db, 1001, offering))
++
++	previousDB := channelpool.CurrentDB
++	channelpool.SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { channelpool.SetDBProvider(previousDB) })
++	t.Setenv("APIGX_QUALITY_STATS_ENABLED", "true")
++
++	start := time.Now().Add(-time.Second)
++	RecordFromRelay(&relaycommon.RelayInfo{
++		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 7001},
++		OriginModelName: "quality-model", StartTime: start,
++		FirstResponseTime: start.Add(200 * time.Millisecond), APIGXQualityOutputTokens: 80,
++	}, nil)
++
++	view, err := apigxmodel.ResolveQualityView(db, offering.ID, apigxmodel.QualityWindowSixHour, common.GetTimestamp())
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, view.SuccessCount)
++	assert.EqualValues(t, 80, view.OutputTokensSum)
++	assert.Greater(t, view.GenerationMsSum, int64(0))
++}
+diff --git a/apigx/relayhook/route_strategy.go b/apigx/relayhook/route_strategy.go
+index 8b63ae7..949f92a 100644
+--- a/apigx/relayhook/route_strategy.go
++++ b/apigx/relayhook/route_strategy.go
+@@ -1,10 +1,7 @@
+ package relayhook
+ 
+ import (
+-	"fmt"
+ 	"strings"
+-	"sync"
+-	"time"
+ 
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
+ 	"github.com/QuantumNous/new-api/apigx/channelpool"
+@@ -35,27 +32,6 @@ import (
+ //
+ // 本函数**不引入对 service 的依赖**（那会形成 import 循环）：只返回渠道 ID，加过滤器由 middleware 完成。
+ 
+-// routeStrategyCacheTTL 是"合格集合"的缓存时长：算一次要读候选+质量+价格，
+-// 属每请求路径，故按 (模型, 策略) 缓存。
+-const routeStrategyCacheTTL = 30 * time.Second
+-
+-type cachedStrategyChannels struct {
+-	channelIDs []int
+-	expiresAt  time.Time
+-}
+-
+-var (
+-	routeStrategyCacheMu sync.RWMutex
+-	routeStrategyCache   = map[string]cachedStrategyChannels{}
+-)
+-
+-// InvalidateRouteStrategyCache 清空策略合格集合缓存（策略变化或测试时用）。
+-func InvalidateRouteStrategyCache() {
+-	routeStrategyCacheMu.Lock()
+-	routeStrategyCache = map[string]cachedStrategyChannels{}
+-	routeStrategyCacheMu.Unlock()
+-}
+-
+ // routeStrategyFilterEnabled 是"按 Key 的默认路由策略限定候选"的开关（默认关闭）。
+ func routeStrategyFilterEnabled() bool {
+ 	return common.GetEnvOrDefaultBool("APIGX_ROUTE_STRATEGY_ENABLED", false)
+@@ -63,8 +39,9 @@ func routeStrategyFilterEnabled() bool {
+ 
+ // EligibleBaseChannelsForStrategy 按调用者平台 Key 的默认路由策略算出本次的合格渠道集合。
+ //
+-// 返回 ok=false 表示**不要加限定**（未开启、未配置策略、策略为 auto、或算不出候选）——
+-// 宁可退回底座默认选路，也不要因为算不出来就把请求打成"没有合格渠道"。
++// 返回 ok=false 只表示功能未开启、没有平台 Key 偏好或当前不是 APIGX 请求。
++// 一旦平台 Key 选择了策略（空值也表示默认 auto），即使没有合格候选也返回 ok=true
++// 和空列表，让请求明确失败；不能静默退回底座随机而伪装成策略已经生效。
+ func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, bool, error) {
+ 	if !routeStrategyFilterEnabled() || c == nil || strings.TrimSpace(modelName) == "" {
+ 		return nil, false, nil
+@@ -88,7 +65,7 @@ func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, b
+ 	}
+ 	strategy, ok := parseRouteStrategy(key.DefaultRouteMode)
+ 	if !ok {
+-		return nil, false, nil // 空/auto/无法识别：不加限定
++		return nil, true, nil // 数据库中出现未知旧值时失败关闭，避免静默随机
+ 	}
+ 	allowedOfferingIDs, accessActive, err := AllowedOfferingIDsForRequest(c, modelName)
+ 	if err != nil {
+@@ -98,25 +75,11 @@ func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, b
+ 		allowedOfferingIDs = nil
+ 	}
+ 
+-	// ACL 因主体而异，策略缓存必须至少隔离 user/token；最终候选过滤和出站守卫仍会实时复验。
+-	cacheKey := fmt.Sprintf("%s|%s|%d|%d", modelName, key.DefaultRouteMode, userID, tokenID)
+-	now := time.Now()
+-	routeStrategyCacheMu.RLock()
+-	cached, exists := routeStrategyCache[cacheKey]
+-	routeStrategyCacheMu.RUnlock()
+-	if exists && now.Before(cached.expiresAt) {
+-		if len(cached.channelIDs) == 0 {
+-			return nil, false, nil
+-		}
+-		return cached.channelIDs, true, nil
+-	}
+-
++	// 候选包含 Redis 中的当前并发占用，不能缓存最终优胜集合；否则渠道在缓存期内满载后，
++	// 请求仍会不断命中它并在原子预留处 429，而不会改选仍有余量的渠道。
+ 	channelIDs := computeEligibleBaseChannels(db, modelName, strategy, allowedOfferingIDs)
+-	routeStrategyCacheMu.Lock()
+-	routeStrategyCache[cacheKey] = cachedStrategyChannels{channelIDs: channelIDs, expiresAt: now.Add(routeStrategyCacheTTL)}
+-	routeStrategyCacheMu.Unlock()
+ 	if len(channelIDs) == 0 {
+-		return nil, false, nil
++		return []int{}, true, nil
+ 	}
+ 	return channelIDs, true, nil
+ }
+@@ -181,9 +144,11 @@ func baseChannelIDForShareChannel(db *gorm.DB, shareChannelID int64) int {
+ 
+ // parseRouteStrategy 把平台 Key 上的默认路由模式解析为策略。
+ //
+-// 「空」与「auto」都表示**不加限定**（计划书：最后使用系统默认 auto）。
++// 「空」与「auto」都表示综合自动；空值是历史平台 Key 的默认存储形式。
+ func parseRouteStrategy(mode string) (routing.Strategy, bool) {
+ 	switch strings.ToLower(strings.TrimSpace(mode)) {
++	case "", "auto":
++		return routing.StrategyAuto, true
+ 	case "latency":
+ 		return routing.StrategyLatency, true
+ 	case "throughput":
+diff --git a/apigx/relayhook/route_strategy_test.go b/apigx/relayhook/route_strategy_test.go
+new file mode 100644
+index 0000000..ed0a4bd
+--- /dev/null
++++ b/apigx/relayhook/route_strategy_test.go
+@@ -0,0 +1,73 @@
++package relayhook
++
++import (
++	"testing"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/routing"
++	"github.com/QuantumNous/new-api/common"
++	basemodel "github.com/QuantumNous/new-api/model"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestParseRouteStrategyTreatsEmptyAndAutoAsCompositeAuto(t *testing.T) {
++	for _, mode := range []string{"", "auto", " AUTO "} {
++		strategy, ok := parseRouteStrategy(mode)
++		assert.True(t, ok, "mode=%q", mode)
++		assert.Equal(t, routing.StrategyAuto, strategy, "mode=%q", mode)
++	}
++	_, ok := parseRouteStrategy("typo")
++	assert.False(t, ok)
++}
++
++func TestComputeEligibleBaseChannelsUsesAutoQualityRanking(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", env.offeringID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
++	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", env.shareChannel.ShareGroupID).
++		Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
++
++	secondBaseID := env.baseChannelID + 10000
++	priority := int64(0)
++	weight := uint(0)
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: secondBaseID, Name: "strategy-base-2", Key: "sk-y", Status: common.ChannelStatusEnabled,
++		Priority: &priority, Weight: &weight,
++	}).Error)
++	secondGroup := &apigxmodel.ShareGroup{
++		OwnerUserID: 991002, Name: "strategy-group-2", PublicID: "strategy-group-2",
++		PublishStatus: apigxmodel.ShareGroupPublishPublished,
++	}
++	require.NoError(t, apigxmodel.CreateShareGroup(env.db, secondGroup))
++	secondChannel := &apigxmodel.Channel{
++		PublicID: "strategy-channel-2", OwnerUserID: 991002, ShareGroupID: secondGroup.ID,
++		Name: "strategy-share-2", BaseChannelID: int64(secondBaseID),
++	}
++	require.NoError(t, apigxmodel.CreateChannel(env.db, secondChannel))
++	secondOffering := &apigxmodel.ModelOffering{ChannelID: secondChannel.ID, UpstreamModelID: "breaker-model"}
++	require.NoError(t, apigxmodel.CreateModelOffering(env.db, 991002, secondOffering))
++	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", secondOffering.ID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
++
++	now := common.GetTimestamp()
++	bucketTs := now - now%60
++	for range apigxmodel.MinSamplesForQuality {
++		require.NoError(t, apigxmodel.RecordQualitySample(env.db, apigxmodel.QualitySample{
++			OfferingID: env.offeringID, BucketTs: bucketTs, Outcome: apigxmodel.QualityOutcomeSuccess,
++			LatencyMs: 100, OutputTokens: 120, GenerationMs: 1000,
++		}))
++		require.NoError(t, apigxmodel.RecordQualitySample(env.db, apigxmodel.QualitySample{
++			OfferingID: secondOffering.ID, BucketTs: bucketTs, Outcome: apigxmodel.QualityOutcomeSuccess,
++			LatencyMs: 900, OutputTokens: 20, GenerationMs: 1000,
++		}))
++	}
++
++	allowed := map[int64]struct{}{env.offeringID: {}, secondOffering.ID: {}}
++	assert.Equal(t, []int{env.baseChannelID},
++		computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyAuto, allowed))
++	assert.Equal(t, []int{env.baseChannelID},
++		computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyThroughput, allowed))
++	assert.Empty(t, computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyAuto, map[int64]struct{}{}),
++		"没有授权供给时必须保持空集合，不能回退到底座随机")
++}
+diff --git a/apigx/routing/assemble.go b/apigx/routing/assemble.go
+index 9229135..564ada3 100644
+--- a/apigx/routing/assemble.go
++++ b/apigx/routing/assemble.go
+@@ -91,6 +91,11 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
+ 		view, viewErr := apigxmodel.ResolveQualityView(db, offering.ID, opts.WindowKind, opts.Now)
+ 		if viewErr == nil {
+ 			candidate.Quality = view
++			if view.OutputTokensSum > 0 && view.GenerationMsSum > 0 {
++				candidate.ThroughputKnown = true
++				candidate.OutputTokensPerSecond = float64(view.OutputTokensSum) /
++					(float64(view.GenerationMsSum) / 1000)
++			}
+ 		}
+ 
+ 		// 熔断（T2.8）：失败率过高且冷却未过 → **从候选中摘除**（原因写清，便于解释）；
+diff --git a/apigx/routing/decide_test.go b/apigx/routing/decide_test.go
+index 3ba08c7..942173f 100644
+--- a/apigx/routing/decide_test.go
++++ b/apigx/routing/decide_test.go
+@@ -374,6 +374,33 @@ func TestAssembleCandidatesAppliesACLBeforeQualityAndCapacity(t *testing.T) {
+ 	assert.Empty(t, public)
+ }
+ 
++func TestAssembleCandidatesCarriesSixHourTextThroughput(t *testing.T) {
++	env := newRoutingTestEnv(t)
++	seeded := env.seedChannelWithOffering(t, 1, "gpt-throughput-view")
++	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", seeded.OfferingID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
++	var channel apigxmodel.Channel
++	require.NoError(t, env.db.Where("id = ?", seeded.ShareChannelID).First(&channel).Error)
++	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", channel.ShareGroupID).
++		Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
++
++	now := common.GetTimestamp()
++	bucketTs := now - now%60
++	for range apigxmodel.MinSamplesForQuality {
++		require.NoError(t, apigxmodel.RecordQualitySample(env.db, apigxmodel.QualitySample{
++			OfferingID: seeded.OfferingID, BucketTs: bucketTs,
++			Outcome: apigxmodel.QualityOutcomeSuccess, LatencyMs: 1000,
++			OutputTokens: 120, GenerationMs: 1000,
++		}))
++	}
++
++	candidates, _, err := AssembleCandidates(env.db, nil, "gpt-throughput-view", AssembleOptions{Now: now})
++	require.NoError(t, err)
++	require.Len(t, candidates, 1)
++	assert.True(t, candidates[0].ThroughputKnown)
++	assert.InDelta(t, 120, candidates[0].OutputTokensPerSecond, 0.001)
++}
++
+ // ---- fixture（投影测试需要真实库 + 我们的分享渠道） ----
+ 
+ type routingTestEnv struct {
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 0049d0f..1a265df 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -72,7 +72,8 @@ func Distribute() func(c *gin.Context) {
+ 		}
+ 		// APIGX 默认路由策略（T2.7 用户侧）：按调用者平台 Key 的策略算出**合格渠道集合**，
+ 		// 作为请求级过滤器交给底座——复用底座既有的候选过滤机制，不改写选择器。
+-		// 策略为空/auto 或算不出候选时**不加限定**（宁可退回默认选路）。
++		// 空值/auto 都使用综合质量路由；策略已启用但没有合格候选时，空 allow-list
++		// 会明确返回无可用来源，不能静默退回底座随机。
+ 		allowedChannels, strategyOK, strategyErr := relayhook.EligibleBaseChannelsForStrategy(c, modelRequest.Model)
+ 		if strategyErr != nil {
+ 			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "no available source for the requested model", types.ErrorCodeChannelNoAvailableKey)
+diff --git a/relay/common/relay_info.go b/relay/common/relay_info.go
+index 6d4a0ae..f1a77b1 100644
+--- a/relay/common/relay_info.go
++++ b/relay/common/relay_info.go
+@@ -91,7 +91,10 @@ type RelayInfo struct {
+ 	TokenUnlimited    bool
+ 	StartTime         time.Time
+ 	FirstResponseTime time.Time
+-	isFirstResponse   bool
++	// APIGXQualityOutputTokens 是本次成功请求可确认的有效输出 token 数。
++	// 只由结算路径在质量样本落桶前填写；0 表示上游未返回可用 usage，不能据此推断吞吐。
++	APIGXQualityOutputTokens int64
++	isFirstResponse          bool
+ 	//SendLastReasoningResponse bool
+ 	IsStream               bool
+ 	IsGeminiBatchEmbedding bool
+diff --git a/service/billing_session.go b/service/billing_session.go
+index 63f6500..c9ff119 100644
+--- a/service/billing_session.go
++++ b/service/billing_session.go
+@@ -34,6 +34,7 @@ type BillingSession struct {
+ 	trusted          bool // 是否命中信任额度旁路
+ 	fundingSettled   bool // funding.Settle 已成功，资金来源已提交
+ 	settled          bool // Settle 全部完成（资金 + 令牌）
++	qualityRecorded  bool // 上游成功质量样本已安排写入；结算重试不得重复计数
+ 	refunded         bool // Refund 已调用
+ 	mu               sync.Mutex
+ }
+@@ -48,10 +49,19 @@ func (s *BillingSession) Settle(actualQuota int) error {
+ 	//
+ 	// defer 必须注册在 `s.mu.Lock()` **之前**：defer 是后注册先执行，
+ 	// 若放在加锁之后就会在**持锁期间写库**。
+-	defer qualityhook.RecordFromRelay(s.relayInfo, nil)
++	shouldRecordQuality := false
++	defer func() {
++		if shouldRecordQuality {
++			qualityhook.RecordFromRelay(s.relayInfo, nil)
++		}
++	}()
+ 
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
++	if !s.qualityRecorded {
++		s.qualityRecorded = true
++		shouldRecordQuality = true
++	}
+ 	if s.settled {
+ 		return nil
+ 	}
+diff --git a/service/billing_session_quality_test.go b/service/billing_session_quality_test.go
+new file mode 100644
+index 0000000..ba392a9
+--- /dev/null
++++ b/service/billing_session_quality_test.go
+@@ -0,0 +1,74 @@
++package service
++
++import (
++	"errors"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/channelpool"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++type failOnceFunding struct {
++	settles int
++}
++
++func (*failOnceFunding) Source() string         { return BillingSourceUsageOnly }
++func (*failOnceFunding) PreConsume(_ int) error { return nil }
++func (f *failOnceFunding) Settle(_ int) error {
++	f.settles++
++	if f.settles == 1 {
++		return errors.New("first settlement failed")
++	}
++	return nil
++}
++func (*failOnceFunding) Refund() error { return nil }
++
++func TestBillingSessionRecordsQualityOnceAcrossSettlementRetry(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "billing-quality.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, apigxmodel.Migrate(db))
++
++	group := &apigxmodel.ShareGroup{OwnerUserID: 1001, Name: "billing-quality", PublicID: "billing-quality-group"}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	channel := &apigxmodel.Channel{
++		OwnerUserID: 1001, ShareGroupID: group.ID, PublicID: "billing-quality-channel",
++		Name: "billing-quality", BaseChannelID: 7002,
++	}
++	require.NoError(t, apigxmodel.CreateChannel(db, channel))
++	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "billing-quality-model"}
++	require.NoError(t, apigxmodel.CreateModelOffering(db, 1001, offering))
++
++	previousDB := channelpool.CurrentDB
++	channelpool.SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { channelpool.SetDBProvider(previousDB) })
++	t.Setenv("APIGX_QUALITY_STATS_ENABLED", "true")
++
++	funding := &failOnceFunding{}
++	relayInfo := &relaycommon.RelayInfo{
++		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 7002},
++		OriginModelName: "billing-quality-model",
++		StartTime:       time.Now().Add(-time.Second),
++		IsPlayground:    true,
++	}
++	session := &BillingSession{relayInfo: relayInfo, funding: funding}
++	require.Error(t, session.Settle(1))
++	require.NoError(t, session.Settle(1))
++	require.NoError(t, session.Settle(1))
++
++	view, err := apigxmodel.ResolveQualityView(db, offering.ID, apigxmodel.QualityWindowSixHour, common.GetTimestamp())
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, view.SampleCount)
++	assert.EqualValues(t, 1, view.SuccessCount)
++	assert.Equal(t, 2, funding.settles)
++}
+diff --git a/service/text_quota.go b/service/text_quota.go
+index 332b1f8..742463d 100644
+--- a/service/text_quota.go
++++ b/service/text_quota.go
+@@ -460,6 +460,16 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
+ 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
+ 	}
+ 
++	// 只有会生成文本的协议才把 completion token 作为质量吞吐分子。
++	// 图片、向量、重排等接口即使复用文本计费结构，也不能伪装成 token/s 吞吐。
++	switch relayInfo.RelayMode {
++	case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeCompletions,
++		relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact,
++		relayconstant.RelayModeGemini:
++		relayInfo.APIGXQualityOutputTokens = int64(summary.CompletionTokens)
++	default:
++		relayInfo.APIGXQualityOutputTokens = 0
++	}
+ 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
+ 		logger.LogError(ctx, "error settling billing: "+err.Error())
+ 	}
+diff --git a/web/src/features/keys/lib/apigx-scope.ts b/web/src/features/keys/lib/apigx-scope.ts
+index 9120ee3..89cfc40 100644
+--- a/web/src/features/keys/lib/apigx-scope.ts
++++ b/web/src/features/keys/lib/apigx-scope.ts
+@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */import type { PlatformKeyPreferencesPayload } from '../types'
+ 
+-/** 路由策略选项（空串与 auto 同义：不加限定，由后端统一解释）。 */
++/** 路由策略选项（空串与 auto 同义：综合质量路由，由后端统一解释）。 */
+ export const ROUTE_MODE_OPTIONS: { value: string; labelKey: string }[] = [
+   { value: 'auto', labelKey: 'apigxKey.routeMode.auto' },
+   { value: 'latency', labelKey: 'apigxKey.routeMode.latency' },
+@@ -71,4 +71,4 @@ export function buildScopePayload(form: ScopeFormState): PlatformKeyPreferencesP
+     allow_fallback: form.allowFallback,
+     default_route_mode: form.defaultRouteMode,
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/web/src/features/keys/types.ts b/web/src/features/keys/types.ts
+index 4c980cd..d3bb2e1 100644
+--- a/web/src/features/keys/types.ts
++++ b/web/src/features/keys/types.ts
+@@ -127,7 +127,7 @@ export interface PlatformKeyPreferences {
+   allowed_model_ids: string[]
+   allowed_owner_user_ids: number[]
+   allow_fallback: boolean
+-  /** 空串与 `auto` 都表示自动（不加限定） */
++  /** 空串与 `auto` 都表示综合自动质量路由 */
+   default_route_mode: string
+ }
+ 
+@@ -144,4 +144,4 @@ export interface PlatformKeyPreferencesPayload {
+   allowed_owner_user_ids?: number[]
+   allow_fallback?: boolean
+   default_route_mode?: string
+-}
+\ No newline at end of file
++}
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index bb4d660..9b49482 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6631,7 +6631,7 @@
+     "apigxKey.scope.title": "Source scope & routing",
+     "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
+     "apigxKey.scope.routeMode": "Default routing strategy",
+-    "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++    "apigxKey.scope.routeMode.auto": "Auto (quality and capacity)",
+     "apigxKey.scope.routeMode.latency": "Prefer low latency",
+     "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
+     "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 10b0ac2..904780d 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6631,7 +6631,7 @@
+     "apigxKey.scope.title": "Source scope & routing",
+     "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
+     "apigxKey.scope.routeMode": "Default routing strategy",
+-    "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++    "apigxKey.scope.routeMode.auto": "Auto (quality and capacity)",
+     "apigxKey.scope.routeMode.latency": "Prefer low latency",
+     "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
+     "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 5613727..c708c15 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6631,7 +6631,7 @@
+     "apigxKey.scope.title": "Source scope & routing",
+     "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
+     "apigxKey.scope.routeMode": "Default routing strategy",
+-    "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++    "apigxKey.scope.routeMode.auto": "Auto (quality and capacity)",
+     "apigxKey.scope.routeMode.latency": "Prefer low latency",
+     "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
+     "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index af224b4..c5c583a 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6631,7 +6631,7 @@
+     "apigxKey.scope.title": "Source scope & routing",
+     "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
+     "apigxKey.scope.routeMode": "Default routing strategy",
+-    "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++    "apigxKey.scope.routeMode.auto": "Auto (quality and capacity)",
+     "apigxKey.scope.routeMode.latency": "Prefer low latency",
+     "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
+     "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 7498fc1..5685cf6 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6631,7 +6631,7 @@
+     "apigxKey.scope.title": "Source scope & routing",
+     "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
+     "apigxKey.scope.routeMode": "Default routing strategy",
+-    "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++    "apigxKey.scope.routeMode.auto": "Auto (quality and capacity)",
+     "apigxKey.scope.routeMode.latency": "Prefer low latency",
+     "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
+     "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 16eeebd..b74349a 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6631,7 +6631,7 @@
+     "apigxKey.scope.title": "Source scope & routing",
+     "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
+     "apigxKey.scope.routeMode": "Default routing strategy",
+-    "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
++    "apigxKey.scope.routeMode.auto": "Auto (quality and capacity)",
+     "apigxKey.scope.routeMode.latency": "Prefer low latency",
+     "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
+     "apigxKey.scope.routeMode.reliability": "Prefer high reliability",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 86d24f4..db705a4 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6631,7 +6631,7 @@
+     "apigxKey.scope.title": "来源限制与路由策略",
+     "apigxKey.scope.hint": "保存在这把 API Key 上。某一维留空即表示该维度不限制。",
+     "apigxKey.scope.routeMode": "默认路由策略",
+-    "apigxKey.scope.routeMode.auto": "自动（不加限定）",
++    "apigxKey.scope.routeMode.auto": "综合自动（质量与容量）",
+     "apigxKey.scope.routeMode.latency": "偏好低延迟",
+     "apigxKey.scope.routeMode.throughput": "偏好高吞吐",
+     "apigxKey.scope.routeMode.reliability": "偏好高可靠",
+-- 
+2.53.0.windows.1
+
