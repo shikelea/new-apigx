@@ -1,6 +1,7 @@
 package channelpool
 
 import (
+	"errors"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -19,10 +20,14 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 const testMasterKey = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+var errRollbackBaseChannelLifecycle = errors.New("rollback base channel lifecycle fixture")
 
 func setupProjectionEnv(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -57,6 +62,88 @@ func setupProjectionEnv(t *testing.T) *gorm.DB {
 		secretbox.ResetKeyCacheForTest()
 	})
 	return db
+}
+
+func TestBaseChannelRetirementOnConfiguredDialects(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(*testing.T) *gorm.DB
+	}{
+		{name: "sqlite", open: func(t *testing.T) *gorm.DB {
+			db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "base-lifecycle.db")), &gorm.Config{})
+			require.NoError(t, err)
+			return db
+		}},
+		{name: "postgres", open: func(t *testing.T) *gorm.DB {
+			dsn := os.Getenv("APIGX_TEST_PG_DSN")
+			if dsn == "" {
+				t.Skip("未设置 APIGX_TEST_PG_DSN：PostgreSQL B3 生命周期矩阵未执行")
+			}
+			db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+			require.NoError(t, err)
+			return db
+		}},
+		{name: "mysql", open: func(t *testing.T) *gorm.DB {
+			dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
+			if dsn == "" {
+				t.Skip("未设置 APIGX_TEST_MYSQL_DSN：MySQL B3 生命周期矩阵未执行")
+			}
+			db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+			require.NoError(t, err)
+			return db
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := tc.open(t)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = sqlDB.Close() })
+			migration := db
+			if db.Dialector.Name() == "mysql" {
+				migration = db.Set("gorm:table_options", "ENGINE=InnoDB")
+			}
+			require.NoError(t, migration.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
+
+			err = db.Transaction(func(tx *gorm.DB) error {
+				base := &basemodel.Channel{
+					Id: 9_820_001, Name: "b3-lifecycle", Key: "sk-one\nsk-two", Models: "model-a",
+					Group: "default", Status: common.ChannelStatusEnabled,
+					ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
+				}
+				require.NoError(t, tx.Create(base).Error)
+				require.NoError(t, tx.Create(&basemodel.Ability{
+					Group: "default", Model: "model-a", ChannelId: base.Id, Enabled: true,
+				}).Error)
+
+				exists, lifecycleErr := QuiesceBaseChannel(tx, int64(base.Id))
+				require.NoError(t, lifecycleErr)
+				assert.True(t, exists)
+				var quiesced basemodel.Channel
+				require.NoError(t, tx.Where("id = ?", base.Id).First(&quiesced).Error)
+				assert.Equal(t, common.ChannelStatusManuallyDisabled, quiesced.Status)
+				var ability basemodel.Ability
+				require.NoError(t, tx.Where("channel_id = ?", base.Id).First(&ability).Error)
+				assert.False(t, ability.Enabled)
+
+				require.NoError(t, ClearBaseChannelProjection(tx, int64(base.Id)))
+				require.NoError(t, ClearBaseChannelProjection(tx, int64(base.Id)), "重复清理必须幂等")
+				var cleared basemodel.Channel
+				require.NoError(t, tx.Where("id = ?", base.Id).First(&cleared).Error)
+				assert.Equal(t, common.ChannelStatusManuallyDisabled, cleared.Status)
+				assert.Empty(t, cleared.Key)
+				assert.Empty(t, cleared.Models)
+				assert.False(t, cleared.ChannelInfo.IsMultiKey)
+				assert.Zero(t, cleared.ChannelInfo.MultiKeySize)
+				var abilityCount int64
+				require.NoError(t, tx.Model(&basemodel.Ability{}).Where("channel_id = ?", base.Id).Count(&abilityCount).Error)
+				assert.Zero(t, abilityCount)
+				return errRollbackBaseChannelLifecycle
+			})
+			require.ErrorIs(t, err, errRollbackBaseChannelLifecycle)
+		})
+	}
 }
 
 // seedShareChannelWithKeys 建好「分享者 → 分组 → 渠道 → N 把 Key」与对应的底座渠道。

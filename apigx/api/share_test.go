@@ -2,6 +2,7 @@ package apigxapi
 
 import (
 	"encoding/json"
+	"errors"
 	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,8 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -45,18 +48,33 @@ type testEnv struct {
 
 func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
-
 	dsn := filepath.Join(t.TempDir(), "apigx_api_test.db")
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
+	migrateTestEnv(t, db)
+	return configureTestEnv(t, db, withMasterKey)
+}
+
+func migrateTestEnv(t *testing.T, db *gorm.DB) {
+	t.Helper()
 	require.NoError(t, apigxmodel.Migrate(db))
 	// 投影会调用底座的 channel.Update()（并同步 abilities），因此接口层测试也要有底座表，
-	// 且底座的全局 DB 必须指向同一个库（生产由启动路径设置）。
-	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
+	// MySQL 测试库的服务端默认引擎是 MyISAM，必须显式要求 InnoDB 才能验证事务回滚。
+	migration := db
+	if db.Dialector.Name() == "mysql" {
+		migration = db.Set("gorm:table_options", "ENGINE=InnoDB")
+	}
+	require.NoError(t, migration.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
+}
+
+func configureTestEnv(t *testing.T, db *gorm.DB, withMasterKey bool) *testEnv {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	// 底座的全局 DB 必须指向同一个库（生产由启动路径设置）。
 	previousDB := basemodel.DB
 	basemodel.DB = db
 	t.Cleanup(func() { basemodel.DB = previousDB })
@@ -94,7 +112,7 @@ func newTestEnv(t *testing.T, withMasterKey bool) *testEnv {
 			}
 		}
 	})
-	Register(api.Group(""), apigxmodel.DefaultDB())
+	Register(api.Group(""), db)
 	return &testEnv{db: db, engine: engine}
 }
 
@@ -146,6 +164,11 @@ func (e *testEnv) createGroup(t *testing.T, userID int64, name string) int64 {
 
 func (e *testEnv) createChannel(t *testing.T, userID, groupID, baseChannelID int64) int64 {
 	t.Helper()
+	// 绑定既有底座渠道现在是平台级动作，并且服务端会验证该行真实存在。
+	// 旧夹具只传一个虚构 ID；这里补齐底座事实，避免测试绕过生产契约。
+	require.NoError(t, e.db.FirstOrCreate(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "测试底座渠道", Key: "fixture-key", Status: common.ChannelStatusEnabled,
+	}, "id = ?", baseChannelID).Error)
 	payload := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
 		`,"base_channel_id":` + strconv.FormatInt(baseChannelID, 10) +
 		`,"name":"主线路","protocol":"openai","base_url":"http://stub"}`
@@ -316,6 +339,300 @@ func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPost, "/api/channels", ownerB,
 		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"base_channel_id":60001,"name":"偷渡"}`)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+	t.Run("ordinary user provisions a complete channel", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5101
+		groupID := env.createGroup(t, owner, "自建渠道组")
+		secret := "sk-self-serve-complete"
+		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"`+secret+`"}`,
+			common.RoleCommonUser)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), secret)
+		channelID := int64(body["data"].(map[string]any)["id"].(float64))
+
+		shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+		require.NoError(t, err)
+		var baseChannel basemodel.Channel
+		require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error)
+		assert.Equal(t, common.ChannelStatusEnabled, baseChannel.Status)
+		assert.Equal(t, secret, baseChannel.Key, "底座现有转发路径仍需要明文投影")
+		assert.Equal(t, "https://example.com", baseChannel.GetBaseURL())
+
+		var storedKey apigxmodel.UpstreamKey
+		require.NoError(t, env.db.Where("channel_id = ?", channelID).First(&storedKey).Error)
+		assert.True(t, secretbox.IsEnvelope(storedKey.SecretRef))
+		assert.NotContains(t, storedKey.SecretRef, secret)
+	})
+
+	t.Run("ordinary user cannot bind a global base channel", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5102
+		groupID := env.createGroup(t, owner, "禁止绑定组")
+		baseID := nextBaseChannelID()
+		require.NoError(t, env.db.Create(&basemodel.Channel{
+			Id: int(baseID), Name: "管理员渠道", Key: "admin-secret", Status: common.ChannelStatusEnabled,
+		}).Error)
+		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"base_channel_id":`+strconv.FormatInt(baseID, 10)+`,"name":"越权绑定"}`,
+			common.RoleCommonUser)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		var count int64
+		require.NoError(t, env.db.Model(&apigxmodel.Channel{}).Count(&count).Error)
+		assert.Zero(t, count)
+	})
+
+	t.Run("missing secret store writes nothing", func(t *testing.T) {
+		env := newTestEnv(t, false)
+		const owner int64 = 5103
+		groupID := env.createGroup(t, owner, "缺主密钥组")
+		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"失败线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-no-store"}`,
+			common.RoleCommonUser)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
+			var count int64
+			require.NoError(t, env.db.Model(target).Count(&count).Error)
+			assert.Zero(t, count)
+		}
+	})
+
+	t.Run("initial key write failure rolls back both channel rows", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5104
+		groupID := env.createGroup(t, owner, "故障注入组")
+		callbackName := "b3:fail_initial_key"
+		injected := errors.New("injected upstream key write failure")
+		require.NoError(t, env.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+			if tx.Statement.Schema != nil && tx.Statement.Schema.Table == (apigxmodel.UpstreamKey{}).TableName() {
+				tx.AddError(injected)
+			}
+		}))
+		t.Cleanup(func() { _ = env.db.Callback().Create().Remove(callbackName) })
+
+		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-rollback"}`,
+			common.RoleCommonUser)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
+			var count int64
+			require.NoError(t, env.db.Model(target).Count(&count).Error)
+			assert.Zero(t, count, "%T must roll back", target)
+		}
+	})
+}
+
+func TestDeleteChannelFailsClosedAndIsIdempotent(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, stranger int64 = 5201, 5202
+	groupID := env.createGroup(t, owner, "删除生命周期组")
+	rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"待删除线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-delete"}`,
+		common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	channelID := int64(body["data"].(map[string]any)["id"].(float64))
+	shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+	require.NoError(t, err)
+	baseID := int(shareChannel.BaseChannelID)
+	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", baseID).Updates(map[string]any{
+		"models": "delete-model", "channel_info": basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 1},
+	}).Error)
+	require.NoError(t, env.db.Create(&basemodel.Ability{
+		Group: "default", Model: "delete-model", ChannelId: baseID, Enabled: true,
+	}).Error)
+
+	// 故障注入在最后的 APIGX 软删除：请求会失败，但底座已先停用并清空投影。
+	callbackName := "b3:fail_apigx_channel_retire"
+	injected := errors.New("injected apigx channel retire failure")
+	require.NoError(t, env.db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == (apigxmodel.Channel{}).TableName() {
+			tx.AddError(injected)
+		}
+	}))
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var baseChannel basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", baseID).First(&baseChannel).Error)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, baseChannel.Status)
+	assert.Empty(t, baseChannel.Key)
+	assert.Empty(t, baseChannel.Models)
+	assert.False(t, baseChannel.ChannelInfo.IsMultiKey)
+	var abilityCount int64
+	require.NoError(t, env.db.Model(&basemodel.Ability{}).Where("channel_id = ?", baseID).Count(&abilityCount).Error)
+	assert.Zero(t, abilityCount)
+	_, err = apigxmodel.GetChannel(env.db, owner, channelID)
+	assert.NoError(t, err, "领域软删除失败时保持可重试，但底座必须已失败关闭")
+
+	require.NoError(t, env.db.Callback().Update().Remove(callbackName))
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	_, err = apigxmodel.GetChannel(env.db, owner, channelID)
+	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
+
+	// 墓碑保留 base_channel_id，重复删除仍能安全重放所有收尾步骤。
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), stranger, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, reviewer, channelID int64, modelID string) {
+	t.Helper()
+	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+		`{"upstream_model_id":"`+modelID+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", reviewer,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	callbackName := "b3:fail_ability_projection:" + env.db.Dialector.Name()
+	require.NoError(t, env.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "abilities" {
+			tx.AddError(errors.New("injected ability projection failure"))
+		}
+	}))
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish",
+		reviewer, `{"reason_code":"matrix_approval"}`)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.NoError(t, env.db.Callback().Create().Remove(callbackName))
+
+	var offering apigxmodel.ModelOffering
+	require.NoError(t, env.db.Where("id = ?", offeringID).First(&offering).Error)
+	assert.Equal(t, apigxmodel.OfferingStatusPending, offering.Status)
+	var auditCount int64
+	require.NoError(t, env.db.Model(&apigxmodel.AuditEvent{}).
+		Where("target_type = ? AND target_id = ?", "model_offering", offeringID).Count(&auditCount).Error)
+	assert.Zero(t, auditCount)
+	shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+	require.NoError(t, err)
+	var base basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
+	assert.NotContains(t, base.Models, modelID)
+	var abilityCount int64
+	require.NoError(t, env.db.Model(&basemodel.Ability{}).
+		Where("channel_id = ? AND model = ?", shareChannel.BaseChannelID, modelID).Count(&abilityCount).Error)
+	assert.Zero(t, abilityCount)
+
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish",
+		reviewer, `{"reason_code":"matrix_approval"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, env.db.Where("id = ?", offeringID).First(&offering).Error)
+	assert.Equal(t, apigxmodel.OfferingStatusPublished, offering.Status)
+	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
+	assert.Contains(t, base.Models, modelID)
+	require.NoError(t, env.db.Model(&basemodel.Ability{}).
+		Where("channel_id = ? AND model = ? AND enabled = ?", shareChannel.BaseChannelID, modelID, true).Count(&abilityCount).Error)
+	assert.EqualValues(t, 1, abilityCount)
+}
+
+func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(*testing.T) *gorm.DB
+	}{
+		{name: "sqlite", open: func(t *testing.T) *gorm.DB {
+			db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "self-serve-lifecycle.db")), &gorm.Config{})
+			require.NoError(t, err)
+			return db
+		}},
+		{name: "postgres", open: func(t *testing.T) *gorm.DB {
+			dsn := os.Getenv("APIGX_TEST_PG_DSN")
+			if dsn == "" {
+				t.Skip("未设置 APIGX_TEST_PG_DSN：PostgreSQL 自建渠道生命周期未执行")
+			}
+			db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+			require.NoError(t, err)
+			return db
+		}},
+		{name: "mysql", open: func(t *testing.T) *gorm.DB {
+			dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
+			if dsn == "" {
+				t.Skip("未设置 APIGX_TEST_MYSQL_DSN：MySQL 自建渠道生命周期未执行")
+			}
+			db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+			require.NoError(t, err)
+			return db
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := tc.open(t)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = sqlDB.Close() })
+			migrateTestEnv(t, db)
+
+			rollbackFixture := errors.New("rollback self-serve lifecycle fixture")
+			err = db.Transaction(func(tx *gorm.DB) error {
+				env := configureTestEnv(t, tx, true)
+				const owner int64 = 9_830_001
+				groupID := env.createGroup(t, owner, "三库生命周期组")
+				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+					`,"name":"三库自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
+				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				channelID := int64(body["data"].(map[string]any)["id"].(float64))
+				shareChannel, getErr := apigxmodel.GetChannel(tx, owner, channelID)
+				require.NoError(t, getErr)
+				baseID := shareChannel.BaseChannelID
+				assertOfferingPublishProjectionAtomic(t, env, owner, owner+99, channelID, "b3-matrix-publish-"+tc.name)
+
+				var baseBefore, channelBefore, keyBefore int64
+				require.NoError(t, tx.Model(&basemodel.Channel{}).Count(&baseBefore).Error)
+				require.NoError(t, tx.Model(&apigxmodel.Channel{}).Count(&channelBefore).Error)
+				require.NoError(t, tx.Model(&apigxmodel.UpstreamKey{}).Count(&keyBefore).Error)
+
+				callbackName := "b3:matrix_fail_initial_key:" + tc.name
+				require.NoError(t, tx.Callback().Create().Before("gorm:create").Register(callbackName, func(callbackTx *gorm.DB) {
+					if callbackTx.Statement.Schema != nil && callbackTx.Statement.Schema.Table == (apigxmodel.UpstreamKey{}).TableName() {
+						callbackTx.AddError(errors.New("injected matrix upstream key failure"))
+					}
+				}))
+				failedBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+					`,"name":"三库回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-matrix-rollback"}`
+				rec, _ = env.doWithRole(t, http.MethodPost, "/api/channels", owner, failedBody, common.RoleCommonUser)
+				assert.Equal(t, http.StatusInternalServerError, rec.Code)
+				require.NoError(t, tx.Callback().Create().Remove(callbackName))
+
+				var baseAfter, channelAfter, keyAfter int64
+				require.NoError(t, tx.Model(&basemodel.Channel{}).Count(&baseAfter).Error)
+				require.NoError(t, tx.Model(&apigxmodel.Channel{}).Count(&channelAfter).Error)
+				require.NoError(t, tx.Model(&apigxmodel.UpstreamKey{}).Count(&keyAfter).Error)
+				assert.Equal(t, baseBefore, baseAfter)
+				assert.Equal(t, channelBefore, channelAfter)
+				assert.Equal(t, keyBefore, keyAfter)
+
+				require.NoError(t, tx.Model(&basemodel.Channel{}).Where("id = ?", baseID).
+					Update("channel_info", basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 2}).Error)
+				rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+				var retired basemodel.Channel
+				require.NoError(t, tx.Where("id = ?", baseID).First(&retired).Error)
+				assert.Equal(t, common.ChannelStatusManuallyDisabled, retired.Status)
+				assert.Empty(t, retired.Key)
+				assert.Empty(t, retired.Models)
+				assert.False(t, retired.ChannelInfo.IsMultiKey)
+				var abilityCount int64
+				require.NoError(t, tx.Model(&basemodel.Ability{}).Where("channel_id = ?", baseID).Count(&abilityCount).Error)
+				assert.Zero(t, abilityCount)
+				_, getErr = apigxmodel.GetChannel(tx, owner, channelID)
+				assert.ErrorIs(t, getErr, apigxmodel.ErrNotFound)
+				return rollbackFixture
+			})
+			require.ErrorIs(t, err, rollbackFixture)
+		})
+	}
 }
 
 func TestUpstreamKeyStatusAndValidation(t *testing.T) {

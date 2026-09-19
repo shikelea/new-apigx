@@ -210,6 +210,23 @@ func GetChannel(db *gorm.DB, ownerUserID, id int64) (*Channel, error) {
 	return &channel, nil
 }
 
+// GetChannelIncludingDeleted 按所有者读取渠道及其墓碑，用于可重试的生命周期收尾。
+// owner 条件仍在查询里：已经删除的资源也不能被其他用户枚举。
+func GetChannelIncludingDeleted(db *gorm.DB, ownerUserID, id int64) (*Channel, error) {
+	if db == nil || ownerUserID <= 0 || id <= 0 {
+		return nil, fmt.Errorf("%w: owner and id are required", ErrInvalidArgument)
+	}
+	var channel Channel
+	err := db.Unscoped().Where("id = ? AND owner_user_id = ?", id, ownerUserID).First(&channel).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &channel, nil
+}
+
 // ListChannelsByGroup 列出某分组下的存活渠道（已校验分组归属）。
 func ListChannelsByGroup(db *gorm.DB, ownerUserID, shareGroupID int64, limit int) ([]Channel, error) {
 	if _, err := GetShareGroup(db, ownerUserID, shareGroupID); err != nil {

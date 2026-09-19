@@ -393,7 +393,7 @@ func (h *handler) createChannel(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
-	// 自建渠道时随附的上游 Key：**渠道创建成功后**才登记（CreateUpstreamKey 要求 channel_id>0）
+	// 自建渠道时随附的上游 Key 与两类渠道记录在同一事务内登记。
 	var selfServeKey string
 
 	channel := &apigxmodel.Channel{
@@ -411,23 +411,57 @@ func (h *handler) createChannel(c *gin.Context) {
 	if req.KeyPoolMode != nil {
 		channel.KeyPoolMode = *req.KeyPoolMode
 	}
-	// 「分享者自建渠道」：未指定 base_channel_id 时，平台按配方代建一条底座渠道并绑定。
-	if channel.BaseChannelID <= 0 {
+	// 绑定既有底座渠道是平台级动作。普通分享者只能提交自己的配方，由平台代建专属渠道；
+	// 否则只要猜到全局 channel ID，就能把别人的渠道挂到自己的分享资源下。
+	if channel.BaseChannelID > 0 {
+		if c.GetInt("role") < common.RoleAdminUser {
+			fail(c, http.StatusForbidden, "platform_binding_required",
+				"binding an existing base channel requires platform privileges")
+			return
+		}
+		var base basemodel.Channel
+		if err := h.db.Select("id").Where("id = ?", channel.BaseChannelID).First(&base).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				fail(c, http.StatusNotFound, "base_channel_not_found", "base channel not found")
+			} else {
+				failFromRepo(c, err)
+			}
+			return
+		}
+		if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
+			failFromRepo(c, err)
+			return
+		}
+	} else {
 		selfServeKey = strings.TrimSpace(req.UpstreamKey)
-		if recipeErr := h.provisionBaseChannelForShareChannel(channel, selfServeKey); recipeErr != nil {
+		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey); recipeErr != nil {
 			failFromRepo(c, recipeErr)
 			return
 		}
-	}
-
-	if err := apigxmodel.CreateChannel(h.db, channel); err != nil {
-		failFromRepo(c, err)
-		return
-	}
-	if selfServeKey != "" {
-		if keyErr := h.registerSelfServeUpstreamKey(owner, channel.ID, selfServeKey); keyErr != nil {
-			failFromRepo(c, keyErr)
+		keyRecord, keyErr := prepareSelfServeUpstreamKey(selfServeKey)
+		if keyErr != nil {
+			common.SysError("apigx api: refuse to store upstream key: " + keyErr.Error())
+			fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
+				"credential store is not configured; refusing to store the key")
 			return
+		}
+		// 底座渠道、APIGX 渠道和初始加密 Key 共用同一个主库事务。任何一步失败都会
+		// 回滚底座行，避免留下仍为 enabled 的孤儿渠道。
+		if err := h.db.Transaction(func(tx *gorm.DB) error {
+			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey); err != nil {
+				return err
+			}
+			if err := apigxmodel.CreateChannel(tx, channel); err != nil {
+				return err
+			}
+			keyRecord.ChannelID = channel.ID
+			return apigxmodel.CreateUpstreamKey(tx, owner, keyRecord)
+		}); err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		if basemodel.DB != nil {
+			basemodel.InitChannelCache()
 		}
 	}
 	ok(c, gin.H{"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name, "key_pool_mode": channel.KeyPoolMode})
@@ -488,9 +522,37 @@ func (h *handler) deleteChannel(c *gin.Context) {
 	if !valid {
 		return
 	}
-	if err := apigxmodel.DeleteChannel(h.db, owner, id); err != nil {
+	shareChannel, err := apigxmodel.GetChannelIncludingDeleted(h.db, owner, id)
+	if err != nil {
 		failFromRepo(c, err)
 		return
+	}
+	// 第一步单独提交并立即刷新缓存：从这一刻起，即使后续清理失败，底座渠道也不会
+	// 再接收新请求。重试 DELETE 会继续完成剩余步骤。
+	baseExists, err := channelpool.QuiesceBaseChannel(h.db, shareChannel.BaseChannelID)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if baseExists {
+		basemodel.CacheUpdateChannelStatus(int(shareChannel.BaseChannelID), common.ChannelStatusManuallyDisabled)
+	}
+	relayhook.InvalidateRouteStrategyCache()
+
+	// 第二步撤销明文 Key、多 Key 状态、模型和能力投影。底座行保留为停用墓碑，
+	// 使历史任务仍能识别原渠道，同时没有任何可再次出站的凭据或能力。
+	if err := channelpool.ClearBaseChannelProjection(h.db, shareChannel.BaseChannelID); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if shareChannel.AliveFlag == apigxmodel.AliveFlagAlive {
+		if err := apigxmodel.DeleteChannel(h.db, owner, id); err != nil {
+			failFromRepo(c, err)
+			return
+		}
+	}
+	if basemodel.DB != nil {
+		basemodel.InitChannelCache()
 	}
 	ok(c, gin.H{"deleted": id})
 }
@@ -1326,18 +1388,26 @@ func (h *handler) publishOffering(c *gin.Context) {
 			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
 		return
 	}
-	reviewed, err := apigxmodel.ReviewModelOffering(h.db, id, apigxmodel.OfferingStatusPublished,
-		offeringReviewContext(c, reviewer, reasonCode))
+	var reviewed *apigxmodel.OfferingReviewResult
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		var reviewErr error
+		reviewed, reviewErr = apigxmodel.ReviewModelOffering(tx, id, apigxmodel.OfferingStatusPublished,
+			offeringReviewContext(c, reviewer, reasonCode))
+		if reviewErr != nil {
+			return reviewErr
+		}
+		// 审核状态、不可变审计、底座模型列表与能力必须一起提交。否则能力写入失败时，
+		// 广场会出现一条已经发布但底座永远无法选择的供给。
+		return syncBaseChannelServesModel(tx, id)
+	})
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	// 关键：供给发布后，必须让**底座的渠道**真正能服务这个模型 ——
-	// 自助建的底座渠道是直接 insert 的（没有走底座的建能力步骤），若不补这一步，
-	// 该渠道 models 为空、abilities 为 0 ⇒ 底座分配器永远返回 model_not_found。
-	if err := h.syncBaseChannelServesModel(id); err != nil {
-		common.SysError("apigx api: sync base channel abilities failed: " + err.Error())
+	if basemodel.DB != nil {
+		basemodel.InitChannelCache()
 	}
+	relayhook.InvalidateRouteStrategyCache()
 	ok(c, gin.H{
 		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
 		"owner_user_id": reviewed.OwnerUserID,
@@ -2149,20 +2219,14 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
 //   - 分享者只填 名称/协议/上游地址/自己的 Key ⇒ **不需要知道管理员侧的渠道 ID**；
 //   - 上游 Key 用**分享者自己的**，平台不代垫 ⇒ 消耗归分享者；
 //   - 底座渠道的模型列表留空，由「同步模型」按上游实际能力填充（不做猜测）。
-func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channel, upstreamKey string) error {
-	if channel.Name == "" {
-		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
+func provisionBaseChannelForShareChannel(db *gorm.DB, channel *apigxmodel.Channel, upstreamKey string) error {
+	if db == nil {
+		return errors.New("apigx api: nil db")
 	}
-	if channel.BaseURL == "" {
-		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
+	if err := validateSelfServeChannelRecipe(channel, upstreamKey); err != nil {
+		return err
 	}
-	if upstreamKey == "" {
-		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
-	}
-	channelType, ok := baseChannelTypeForProtocol(channel.Protocol)
-	if !ok {
-		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
-	}
+	channelType, _ := baseChannelTypeForProtocol(channel.Protocol)
 
 	base := basemodel.Channel{
 		Name:        "APIGX-" + channel.Name,
@@ -2174,7 +2238,7 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
 		Status:      common.ChannelStatusEnabled,
 		CreatedTime: common.GetTimestamp(),
 	}
-	if err := h.db.Create(&base).Error; err != nil {
+	if err := db.Create(&base).Error; err != nil {
 		return err
 	}
 	channel.BaseChannelID = int64(base.Id)
@@ -2182,31 +2246,46 @@ func (h *handler) provisionBaseChannelForShareChannel(channel *apigxmodel.Channe
 	return nil
 }
 
-// registerSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 登记进 Key 池。
+func validateSelfServeChannelRecipe(channel *apigxmodel.Channel, upstreamKey string) error {
+	if channel == nil {
+		return fmt.Errorf("%w: channel is required", apigxmodel.ErrInvalidArgument)
+	}
+	if channel.Name == "" {
+		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
+	}
+	if channel.BaseURL == "" {
+		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
+	}
+	if upstreamKey == "" {
+		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
+	}
+	_, ok := baseChannelTypeForProtocol(channel.Protocol)
+	if !ok {
+		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
+	}
+	return nil
+}
+
+// prepareSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 变成待落库记录。
 //
-// **必须在分享渠道创建之后调用** —— CreateUpstreamKey 要求 channel_id > 0；
-// 与 createUpstreamKey 同一口径：**明文只入内存**，库里只存密文信封 + 查重指纹；
-// 主密钥未配置时直接失败（失败关闭，绝不退化成明文存储）。
-func (h *handler) registerSelfServeUpstreamKey(ownerUserID, shareChannelID int64, upstreamKey string) error {
+// 加密和指纹在任何数据库写入之前完成；ChannelID 在事务内创建 APIGX 渠道后补上。
+func prepareSelfServeUpstreamKey(upstreamKey string) (*apigxmodel.UpstreamKey, error) {
 	envelope, encErr := secretbox.Encrypt(upstreamKey)
 	if encErr != nil {
-		common.SysError("apigx api: refuse to store upstream key: " + encErr.Error())
-		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
+		return nil, encErr
 	}
 	fingerprint, fpErr := secretbox.Fingerprint(upstreamKey)
 	if fpErr != nil {
-		common.SysError("apigx api: fingerprint failed: " + fpErr.Error())
-		return fmt.Errorf("%w: credential store is not configured", apigxmodel.ErrInvalidArgument)
+		return nil, fpErr
 	}
-	return apigxmodel.CreateUpstreamKey(h.db, ownerUserID, &apigxmodel.UpstreamKey{
-		ChannelID:         shareChannelID,
+	return &apigxmodel.UpstreamKey{
 		StableKeyID:       upstreamKeyStableID(upstreamKey),
 		Name:              "default",
 		SecretRef:         envelope,
 		SecretFingerprint: fingerprint,
 		Weight:            1,
 		Status:            apigxmodel.UpstreamKeyStatusEnabled,
-	})
+	}, nil
 }
 
 // baseChannelTypeForProtocol 把我们的协议标识映射到底座渠道类型（用底座常量，不写死数字）。
@@ -2283,13 +2362,16 @@ func (h *handler) summarizeOwnerUsage(c *gin.Context) {
 //
 // 修法（与底座自己的姿势一致）：把该模型并入底座渠道的 models，然后重建能力。
 // 只动 models 与能力，不触碰上游地址与凭据。
-func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
+func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
+	if db == nil {
+		return errors.New("apigx api: nil db")
+	}
 	var offering apigxmodel.ModelOffering
-	if err := h.db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
+	if err := db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
 		return err
 	}
 	var shareChannel apigxmodel.Channel
-	if err := h.db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
+	if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
 		return err
 	}
 	if shareChannel.BaseChannelID <= 0 || offering.UpstreamModelID == "" {
@@ -2297,7 +2379,7 @@ func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
 	}
 
 	var base basemodel.Channel
-	if err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
+	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
 		return err
 	}
 
@@ -2312,7 +2394,7 @@ func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
 	if !exists {
 		merged := append(models, offering.UpstreamModelID)
 		joined := strings.Join(merged, ",")
-		if err := h.db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
+		if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
 			Update("models", joined).Error; err != nil {
 			return err
 		}
@@ -2320,7 +2402,7 @@ func (h *handler) syncBaseChannelServesModel(offeringID int64) error {
 	}
 
 	// 重建能力（底座建渠道后的同一姿势）
-	if err := base.AddAbilities(h.db); err != nil {
+	if err := base.AddAbilities(db); err != nil {
 		return err
 	}
 	return nil

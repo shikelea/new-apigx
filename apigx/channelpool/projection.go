@@ -35,6 +35,65 @@ import (
 // ErrNoUsableKey 表示池内没有可用凭据——此时渠道不能接收新请求（计划书 §9.2）。
 var ErrNoUsableKey = errors.New("channelpool: no usable upstream key")
 
+// QuiesceBaseChannel 先把底座渠道和能力置为不可选，作为删除 saga 的失败关闭边界。
+// 它单独提交；后续清理失败时也不会重新接收新请求。返回 false 表示底座渠道已不存在。
+func QuiesceBaseChannel(db *gorm.DB, baseChannelID int64) (bool, error) {
+	if db == nil {
+		return false, errors.New("channelpool: nil db")
+	}
+	if baseChannelID <= 0 {
+		return false, fmt.Errorf("channelpool: invalid base channel id %d", baseChannelID)
+	}
+	exists := false
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var baseChannel basemodel.Channel
+		if err := tx.Select("id").Where("id = ?", baseChannelID).First(&baseChannel).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		exists = true
+		if err := tx.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
+			Update("status", common.ChannelStatusManuallyDisabled).Error; err != nil {
+			return err
+		}
+		return tx.Model(&basemodel.Ability{}).Where("channel_id = ?", baseChannelID).
+			Update("enabled", false).Error
+	})
+	return exists, err
+}
+
+// ClearBaseChannelProjection 撤销 APIGX 写入底座的凭据、模型、能力和多 Key 状态。
+// 调用方必须先 QuiesceBaseChannel；该函数可重复执行，供失败后的重试收尾。
+func ClearBaseChannelProjection(db *gorm.DB, baseChannelID int64) error {
+	if db == nil {
+		return errors.New("channelpool: nil db")
+	}
+	if baseChannelID <= 0 {
+		return fmt.Errorf("channelpool: invalid base channel id %d", baseChannelID)
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		var baseChannel basemodel.Channel
+		if err := tx.Select("id").Where("id = ?", baseChannelID).First(&baseChannel).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		updates := map[string]any{
+			"status":       common.ChannelStatusManuallyDisabled,
+			"key":          "",
+			"models":       "",
+			"channel_info": basemodel.ChannelInfo{},
+		}
+		if err := tx.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).Updates(updates).Error; err != nil {
+			return err
+		}
+		return tx.Where("channel_id = ?", baseChannelID).Delete(&basemodel.Ability{}).Error
+	})
+}
+
 // Projection 是一次投影的结果。
 type Projection struct {
 	// IndexToStableKey 把底座渠道的 Key 索引映射回我们稳定的凭据 ID。
