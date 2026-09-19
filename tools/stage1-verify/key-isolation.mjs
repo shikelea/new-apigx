@@ -32,6 +32,12 @@ const pass = (s) => console.log('  \x1b[32mPASS\x1b[0m  ' + s);
 const fail = (s) => console.log('  \x1b[31mFAIL\x1b[0m  ' + s);
 const info = (s) => console.log('  \x1b[36mINFO\x1b[0m  ' + s);
 const dim = (s) => console.log('\x1b[2m  ' + s + '\x1b[0m');
+const expectOK = (response, label) => {
+  if (response.status !== 200 || response.json?.success === false || !response.json?.data) {
+    throw new Error(`${label}失败：HTTP ${response.status} ${response.text.slice(0, 180)}`);
+  }
+  return response.json.data;
+};
 
 async function login(user, password) {
   const r = await call(`${BASE}/api/user/login`, { method: 'POST', body: { username: user, password } });
@@ -89,9 +95,14 @@ async function main() {
   info(`底座影子渠道 id=${baseChannelId}（${channelName}）`);
 
   // ---- 2) 分享者建分组 + 渠道（绑定该底座渠道）+ 两把 Key ----
-  let r = await call(`${BASE}/api/apigx/share-groups`, { method: 'POST', auth: root, body: { name: `ISO分组-${stamp}` } });
-  if (r.status !== 200) throw new Error(`建分组失败：HTTP ${r.status} ${r.text.slice(0, 160)}`);
-  const groupId = r.json.data.id;
+  let r = await call(`${BASE}/api/apigx/share-groups`, {
+    method: 'POST', auth: root, body: { name: `ISO分组-${stamp}`, default_visibility: 2 },
+  });
+  const groupId = expectOK(r, '创建分享分组').id;
+  r = await call(`${BASE}/api/apigx/share-groups/${groupId}/publish-status`, {
+    method: 'POST', auth: root, body: { status: 2 },
+  });
+  expectOK(r, '发布分享分组');
 
   r = await call(`${BASE}/api/apigx/channels`, {
     method: 'POST', auth: root,
@@ -113,6 +124,22 @@ async function main() {
   r = await call(`${BASE}/api/apigx/channels/${shareChannelId}/apply`, { method: 'POST', auth: root });
   check('投影到底座渠道（apply）', r.status === 200 && r.json?.data?.applied_keys === 2, `HTTP ${r.status} applied=${r.json?.data?.applied_keys}`);
 
+  r = await call(`${BASE}/api/apigx/channels/${shareChannelId}/offerings`, {
+    method: 'POST', auth: root, body: { upstream_model_id: MODEL },
+  });
+  const offeringId = expectOK(r, '创建供给').id;
+  r = await call(`${BASE}/api/apigx/price-rules`, {
+    method: 'PUT', auth: root,
+    body: { scope_type: 0, scope_id: offeringId, input_usd_per_million: 1, output_usd_per_million: 2 },
+  });
+  expectOK(r, '配置供给价格');
+  r = await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: root });
+  expectOK(r, '提交供给');
+  r = await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, {
+    method: 'POST', auth: root, body: { reason_code: 'stage_c_key_isolation_verification' },
+  });
+  expectOK(r, '发布供给');
+
   // ---- 4) 取一把平台令牌用于发请求 ----
   const tokens = await call(`${BASE}/api/token/`, { auth: root });
   const items = tokens.json?.data?.items ?? tokens.json?.data ?? [];
@@ -128,9 +155,9 @@ async function main() {
     body: { model: MODEL, messages: [{ role: 'user', content: 'key isolation probe' }] },
   });
 
-  // ---- 5) 第一次请求：让上游返回 401 ----
+  // ---- 5) 等待新供给进入路由缓存，再让上游返回 401 ----
   await call(`${STUB}/_control/reset`, { method: 'POST' });
-  await call(`${STUB}/_control/profile`, { method: 'POST', body: { delayMs: 0, status: 401 } });
+  await call(`${STUB}/_control/profile`, { method: 'POST', body: { delayMs: 0, status: 0 } });
   // 新建渠道的**模型→渠道路由能力**缓存在网关内存里（默认 60s 从库同步一次）。
   // 已核实能力行确实写入了 abilities 表，因此这里只需等它进入网关缓存；
   // 用轮询而不是固定 sleep：同步时机不确定，死等要么不够要么浪费。
@@ -143,26 +170,22 @@ async function main() {
   if (!routable) throw new Error('等待模型可路由超时：网关始终返回 model_not_found');
   dim('新模型已进入网关路由缓存');
 
+  await call(`${STUB}/_control/reset`, { method: 'POST' });
+  await call(`${STUB}/_control/profile`, { method: 'POST', body: { delayMs: 0, status: 401 } });
   const first = await chat();
   info(`第一次（上游 401）→ 客户端 HTTP ${first.status}`);
   check('上游 401 时请求失败', first.status !== 200, `HTTP ${first.status}`);
 
-  // ---- 6) 上游恢复正常；把一把 Key 恢复启用后再请求 ----
-  //
-  // 注意：底座在 401 后会**用另一把 Key 重试**，所以「上游对一切返回 401」会把池子里
-  // 每一把都合法地标记失效，最终整池失效 → 渠道拒绝新请求（这是正确行为）。
-  // 因此这里显式恢复一把 Key，验证「隔离后仍能继续服务」以及成功统计能落上。
+  // ---- 6) 上游恢复正常；不改 Key 状态，直接验证另一把 Key 继续服务 ----
   await call(`${STUB}/_control/profile`, { method: 'POST', body: { status: 0 } });
   await call(`${STUB}/_control/reset`, { method: 'POST' });
 
   const beforeList = await call(`${BASE}/api/apigx/channels/${shareChannelId}/keys`, { auth: root });
   const keyItems = beforeList.json?.data?.items ?? [];
-  const toRevive = keyItems.find((k) => String(k.stable_key_id).startsWith('iso-b')) ?? keyItems[0];
-  if (!toRevive) throw new Error('找不到可恢复的 Key');
-  const reviveRes = await call(`${BASE}/api/apigx/keys/${toRevive.id}/status`, { method: 'PATCH', auth: root, body: { status: 1 } });
-  if (reviveRes.status !== 200) throw new Error(`恢复 Key 失败：HTTP ${reviveRes.status} ${reviveRes.text.slice(0, 120)}`);
-  await call(`${BASE}/api/apigx/channels/${shareChannelId}/apply`, { method: 'POST', auth: root });
-  dim(`已恢复 Key ${toRevive.stable_key_id} 并重新应用`);
+  check('401 后只隔离实际执行 Key', keyItems.filter((k) => k.status === 2).length === 1,
+    `invalid 数量=${keyItems.filter((k) => k.status === 2).length}`);
+  check('401 后另一把 Key 保持可用', keyItems.filter((k) => k.usable === true).length === 1,
+    `可用数量=${keyItems.filter((k) => k.usable === true).length}`);
 
   const second = await chat();
   const stubHits = (await call(`${STUB}/_control/requests?limit=10`)).json?.requests?.length ?? 0;
@@ -176,8 +199,8 @@ async function main() {
   const statuses = keys.map((k) => `${k.stable_key_id}:status=${k.status}:usable=${k.usable}`).join(' | ');
   info(statuses);
   const invalidCount = keys.filter((k) => k.status === 2).length;
-  check('有一把 Key 被隔离（status=invalid）', invalidCount === 1, `invalid 数量=${invalidCount}`);
-  check('另一把 Key 仍可用', keys.filter((k) => k.usable === true).length === 1, `可用数量=${keys.filter((k) => k.usable === true).length}`);
+  check('隔离状态在成功请求后保持', invalidCount === 1, `invalid 数量=${invalidCount}`);
+  check('成功请求未误伤健康 Key', keys.filter((k) => k.usable === true).length === 1, `可用数量=${keys.filter((k) => k.usable === true).length}`);
 
   // ---- 8) 响应中绝不含凭据 ----
   check('接口响应不含上游凭据', !list.text.includes(KEY_A) && !list.text.includes(KEY_B) && !list.text.includes('enc:v1:'));

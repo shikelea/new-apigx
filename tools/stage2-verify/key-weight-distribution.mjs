@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // T2.10 验收：**Key 权重真的影响上游流量分配**（T2.6）
 //
-// 做法：一条分享渠道挂两把上游 Key（sk-a / sk-b），权重设成 3:1，
-//   重投影后底座的多 Key 列表应当是 A×3 + B×1，于是真实请求按 3:1 落在两把 Key 上。
+// 做法：一条分享渠道挂两把上游 Key（sk-a / sk-b），权重设成 3:1。
+//   每把真实 Key 只投影一个槽位，底座在选 Key 时读取原生权重，于是真实请求按 3:1 落在两把 Key 上。
 //   测量手段：**替身自己记录的请求日志**（每秒请求的授权头都留了下来），
 //   因此看到的是"上游实际收到哪把 Key"，而不是我们自己算出来的数字。
 //
-// 用法（分两阶段，中间由 PowerShell 用 psql 设置权重）：
+// 用法（分两阶段，setup 通过公开 API 写入权重）：
 //   node tools/stage2-verify/key-weight-distribution.mjs --phase setup
 //   node tools/stage2-verify/key-weight-distribution.mjs --phase measure --rounds 16
 
@@ -32,6 +32,12 @@ let failureCount = 0;
 const pass = (s) => console.log('  \x1b[32mPASS\x1b[0m  ' + s);
 const fail = (s) => { failureCount++; console.log('  \x1b[31mFAIL\x1b[0m  ' + s); };
 const info = (s) => console.log('  \x1b[36mINFO\x1b[0m  ' + s);
+const expectOK = (response, label) => {
+  if (response.status !== 200 || response.json?.success === false || !response.json?.data) {
+    throw new Error(`${label}失败：HTTP ${response.status} ${response.text.slice(0, 180)}`);
+  }
+  return response.json.data;
+};
 
 const crypto = await import('node:crypto');
 const fs = await import('node:fs');
@@ -101,43 +107,56 @@ async function main() {
     if (!base?.id) throw new Error('查不到底座渠道');
 
     const g = await call(`${BASE}/api/apigx/share-groups`, { method: 'POST', auth: root, body: { name: 'KW组-' + stamp, default_visibility: 2 } });
+    const group = expectOK(g, '创建分享分组');
+    const groupPublished = await call(`${BASE}/api/apigx/share-groups/${group.id}/publish-status`, {
+      method: 'POST', auth: root, body: { status: 2 },
+    });
+    expectOK(groupPublished, '发布分享分组');
     const ch = await call(`${BASE}/api/apigx/channels`, {
       method: 'POST', auth: root,
-      body: { share_group_id: g.json.data.id, base_channel_id: base.id, name: 'KW渠道-' + stamp, protocol: 'openai', base_url: 'http://127.0.0.1:8100', key_pool_mode: 0 },
+      body: { share_group_id: group.id, base_channel_id: base.id, name: 'KW渠道-' + stamp, protocol: 'openai', base_url: 'http://127.0.0.1:8100', key_pool_mode: 0 },
     });
-    const channelId = ch.json.data.id;
+    const channelId = expectOK(ch, '创建分享渠道').id;
 
     // 两把上游 Key，凭据用**可辨认**的值，便于从替身日志里区分
     const keyA = 'sk-kw-A-' + stamp;
     const keyB = 'sk-kw-B-' + stamp;
-    for (const [stable, secret] of [['kw-a', keyA], ['kw-b', keyB]]) {
+    for (const [stable, secret, weight] of [['kw-a', keyA, 3], ['kw-b', keyB, 1]]) {
       const r = await call(`${BASE}/api/apigx/channels/${channelId}/keys`, {
-        method: 'POST', auth: root, body: { stable_key_id: stable + '-' + stamp, name: stable, key: secret },
+        method: 'POST', auth: root, body: { stable_key_id: stable + '-' + stamp, name: stable, key: secret, weight },
       });
       if (r.status !== 200) throw new Error('建 Key 失败：' + r.text.slice(0, 140));
     }
-    await call(`${BASE}/api/apigx/channels/${channelId}/apply`, { method: 'POST', auth: root });
+    const applied = await call(`${BASE}/api/apigx/channels/${channelId}/apply`, { method: 'POST', auth: root });
+    expectOK(applied, '投影分享渠道');
     const off = await call(`${BASE}/api/apigx/channels/${channelId}/offerings`, {
       method: 'POST', auth: root, body: { upstream_model_id: MODEL },
     });
-    const offeringId = off.json.data.id;
-    await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: root });
-    await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, { method: 'POST', auth: root });
+    const offeringId = expectOK(off, '创建供给').id;
+    const price = await call(`${BASE}/api/apigx/price-rules`, {
+      method: 'PUT', auth: root,
+      body: { scope_type: 0, scope_id: offeringId, input_usd_per_million: 1, output_usd_per_million: 2 },
+    });
+    expectOK(price, '配置供给价格');
+    const submitted = await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: root });
+    expectOK(submitted, '提交供给');
+    const published = await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, {
+      method: 'POST', auth: root, body: { reason_code: 'stage_c_key_weight_verification' },
+    });
+    expectOK(published, '发布供给');
 
     saveKw({ model: MODEL, stamp, channelId, baseChannelId: base.id, keyA, keyB });
     info(`已建立渠道与两把 Key：channel=${channelId} base=${base.id}`);
-    info(`  A=${keyA}`);
-    info(`  B=${keyB}`);
-    info('下一步：用 psql 把权重设为 A=3 / B=1，然后执行 --phase measure');
+    info('权重已通过 API 写为 A=3 / B=1；等待模型同步后执行 --phase measure');
     return;
   }
 
   if (PHASE === 'measure') {
     const kw = loadKw();
-    // 重新投影：权重变了，底座的多 Key 列表必须按新权重展开
+    // 重新投影：确认底座单槽位投影携带当前原生权重，不复制明文 Key。
     const applied = await call(`${BASE}/api/apigx/channels/${kw.channelId}/apply`, { method: 'POST', auth: root });
     if (applied.status !== 200) throw new Error('重投影失败：' + applied.text.slice(0, 140));
-    info('已按新权重重新投影');
+    info('已按原生权重重新投影（每把真实 Key 仍只有一个槽位）');
 
     const root2 = root;
     const key = await platformKey(root2);

@@ -1,0 +1,3974 @@
+From 338405ddb61ff84a6ff1dac959ddafafe1d68845 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sat, 19 Sep 2026 17:01:58 +0800
+Subject: [PATCH] fix: close multi-key and async task lifecycle
+
+---
+ apigx/api/capabilities.go                  |   2 +-
+ apigx/api/share.go                         |  42 ++
+ apigx/capacity/capacity.go                 |   8 +
+ apigx/channelpool/key_weight.go            |  81 +---
+ apigx/channelpool/projection.go            |  70 +--
+ apigx/channelpool/projection_test.go       |  97 ++---
+ apigx/model/migrate.go                     |   5 +-
+ apigx/model/migrate_matrix_test.go         |  72 ++++
+ apigx/model/models_identity.go             |  15 +
+ apigx/model/models_metering.go             |   3 +
+ apigx/model/repo_async_task.go             | 337 +++++++++++++++
+ apigx/model/repo_async_task_test.go        | 181 ++++++++
+ apigx/model/repo_test.go                   |  30 ++
+ apigx/model/repo_upstream.go               | 123 +++++-
+ apigx/relayhook/async_task.go              | 470 +++++++++++++++++++--
+ apigx/relayhook/async_task_test.go         | 352 +++++++++++++++
+ apigx/relayhook/breaker_guard.go           |  57 +--
+ apigx/relayhook/breaker_guard_test.go      |  38 +-
+ apigx/relayhook/capacity_hook.go           | 114 +++++
+ apigx/relayhook/key_saturation.go          |  28 +-
+ apigx/relayhook/key_saturation_test.go     |  32 +-
+ controller/relay.go                        |   3 +-
+ controller/system_task_handlers.go         |   6 +-
+ controller/task_cancel.go                  | 114 +++++
+ controller/task_cancel_test.go             | 131 ++++++
+ model/channel.go                           | 383 ++++++++++++++---
+ model/channel_status_test.go               |  77 ++++
+ relay/channel/adapter.go                   |  10 +
+ relay/relay_task.go                        |  12 +-
+ router/task-router.go                      |   1 +
+ router/task_plugin_protocol_router_test.go |  14 +
+ router/task_router_test.go                 |   3 +-
+ router/video-router.go                     |   4 +
+ service/task_polling.go                    |  93 +++-
+ service/task_polling_test.go               | 110 +++++
+ 35 files changed, 2775 insertions(+), 343 deletions(-)
+ create mode 100644 apigx/model/repo_async_task.go
+ create mode 100644 apigx/model/repo_async_task_test.go
+ create mode 100644 apigx/relayhook/async_task_test.go
+ create mode 100644 controller/task_cancel.go
+ create mode 100644 controller/task_cancel_test.go
+
+diff --git a/apigx/api/capabilities.go b/apigx/api/capabilities.go
+index 2722eb9..34a7dd9 100644
+--- a/apigx/api/capabilities.go
++++ b/apigx/api/capabilities.go
+@@ -111,7 +111,7 @@ var capabilityMatrix = []capabilityEntry{
+ 			"结果内容访问（授权者取回）",
+ 		},
+ 		Limitations: []string{
+-			"**不支持取消**：`/v1/videos/:id/cancel` 返回 404 —— 界面必须显示该能力限制，不得显示“可取消”",
++			"当前内置视频适配器不支持取消并返回 501 `task_cancellation_not_supported`；只有明确实现取消契约的适配器才可显示为可取消",
+ 			"通用任务 API `/v1/tasks` 在本配置下**未启用**（404）",
+ 		},
+ 	},
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 8625f2f..2e1e5e7 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -156,6 +156,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 
+ 	keys := r.Group("/keys")
+ 	{
++		keys.POST("/:id/rotate", h.rotateUpstreamKey)
+ 		keys.PATCH("/:id/status", h.updateKeyStatus)
+ 		keys.PATCH("/:id/cooldown", h.updateKeyCooldown)
+ 		keys.DELETE("/:id", h.deleteUpstreamKey)
+@@ -674,6 +675,47 @@ func (h *handler) listUpstreamKeys(c *gin.Context) {
+ 	ok(c, gin.H{"items": items})
+ }
+ 
++type rotateUpstreamKeyRequest struct {
++	Key string `json:"key"`
++}
++
++func (h *handler) rotateUpstreamKey(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req rotateUpstreamKeyRequest
++	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Key) == "" {
++		fail(c, http.StatusBadRequest, "missing_key", "upstream key is required")
++		return
++	}
++	plain := strings.TrimSpace(req.Key)
++	envelope, err := secretbox.Encrypt(plain)
++	if err != nil {
++		fail(c, http.StatusServiceUnavailable, "secret_store_unavailable", "credential store is not configured")
++		return
++	}
++	fingerprint, err := secretbox.Fingerprint(plain)
++	if err != nil {
++		fail(c, http.StatusServiceUnavailable, "secret_store_unavailable", "credential store is not configured")
++		return
++	}
++	key, err := apigxmodel.RotateUpstreamKeyCredential(h.db, owner, id, envelope, fingerprint)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if _, err := channelpool.ProjectKeyPool(h.db, key.ChannelID); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": key.ID, "credential_version": key.CredentialVersion, "masked": maskTail(plain)})
++}
++
+ type updateStatusRequest struct {
+ 	Status *int `json:"status"`
+ }
+diff --git a/apigx/capacity/capacity.go b/apigx/capacity/capacity.go
+index d87071e..dd9cc59 100644
+--- a/apigx/capacity/capacity.go
++++ b/apigx/capacity/capacity.go
+@@ -148,6 +148,14 @@ const reserveScript = `
+ local leaseKey = KEYS[#KEYS]
+ local ttl = tonumber(ARGV[1])
+ local n = #KEYS - 1
++if redis.call('EXISTS', leaseKey) == 1 then
++  local entries = redis.call('HGETALL', leaseKey)
++  for i = 1, #entries, 2 do
++    redis.call('EXPIRE', entries[i], ttl)
++  end
++  redis.call('EXPIRE', leaseKey, ttl)
++  return {1, ''}
++end
+ for i = 1, n do
+   local limit = tonumber(ARGV[1 + (i - 1) * 2 + 1])
+   local amount = tonumber(ARGV[1 + (i - 1) * 2 + 2])
+diff --git a/apigx/channelpool/key_weight.go b/apigx/channelpool/key_weight.go
+index 0b8cc58..57b3175 100644
+--- a/apigx/channelpool/key_weight.go
++++ b/apigx/channelpool/key_weight.go
+@@ -6,86 +6,21 @@ import (
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ )
+ 
+-// Key 加权与剩余容量策略（T2.6）。
++// Key 加权与剩余容量策略。
+ //
+-// # 复用底座的哪一部分
+-//
+-// 底座的 `Channel.GetNextEnabledKey`（`model/channel.go`）已经提供了两个我们需要的旋钮，
+-// 因此**不重写选择器**：
+-//   - `ChannelInfo.MultiKeyStatusList`：`getStatus(i)` **缺失即视为启用**，
+-//     只有状态等于 `common.ChannelStatusEnabled` 的索引会被选用 ⇒ 把"已满/冷却中"的
+-//     Key 标成非启用值，底座就会**自己跳过**它；
+-//   - `MultiKeyMode`（轮询/随机）：它在一份**列表**上做轮询或均匀随机，
+-//     因此把列表按权重展开（权重 3 的 Key 出现 3 次）即可得到**加权轮询/加权随机**，
+-//     两种模式都自然成立，且不需要改底座。
+-//
+-// # 为什么用"展开"实现加权
+-//
+-// 底座没有 per-Key 权重字段。展开是唯一**无需改底座**、且对轮询与随机都等价有效的做法
+-// （加权轮询的经典 WRR 形式）。代价是投影后的 key 列表会变长，因此设了展开上限，
+-// 并把权重 0 视为 1 —— 与底座对渠道权重的 +10 平滑是同一个精神：
+-// **权重 0 不等于"没有机会"**，否则一把没配权重的 Key 会永远选不到。
+-
+-// maxWeightedKeyExpansion 是单个 Key 的最大展开次数（防止权重写错把列表撑爆）。
+-const maxWeightedKeyExpansion = 16
+-
+-// KeyWeight 是一把参与加权的上游 Key。
+-type KeyWeight struct {
+-	// Index 是该 Key 在**投影后底座 key 列表**中的索引。
+-	Index int
+-	// Weight 是分享者配置的权重；0 视为 1。
+-	Weight int64
+-}
++// 阶段 C 起，每把真实 Key 只投影一个槽位；稳定 ID 和权重随 ChannelInfo 一同写入，
++// `model.Channel.GetNextEnabledKey` 直接执行加权轮询/随机。这里仅负责限制输入权重并提供容量纯函数。
+ 
+-// BuildWeightedKeyIndexes 按权重把 Key 展开成一个索引序列（WRR）。
+-//
+-// 返回的序列用于投影到底座的多 Key 列表：轮询会按序列顺序取，随机会在序列上均匀取，
+-// 两种情况下的选中概率都与权重成正比。
+-func BuildWeightedKeyIndexes(keys []KeyWeight) []int {
+-	if len(keys) == 0 {
+-		return nil
+-	}
+-	// 按索引排序，保证结果确定（便于测试与复现）
+-	ordered := make([]KeyWeight, len(keys))
+-	copy(ordered, keys)
+-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Index < ordered[j].Index })
+-
+-	// **权重全等 = 未配置加权**：保持"一把 Key 一个槽位"，
+-	// 既不膨胀底座列表、也不搅动索引空间（索引一变，运行期状态与逐 Key 统计都要迁移）。
+-	// 只有权重**确实不同**时才做按比例展开。
+-	allEqual := true
+-	for i := 1; i < len(ordered); i++ {
+-		if effectiveWeight(ordered[i].Weight) != effectiveWeight(ordered[0].Weight) {
+-			allEqual = false
+-			break
+-		}
+-	}
+-	if allEqual {
+-		indexes := make([]int, 0, len(ordered))
+-		for _, key := range ordered {
+-			indexes = append(indexes, key.Index)
+-		}
+-		return indexes
+-	}
+-
+-	expanded := make([]int, 0, len(ordered))
+-	for _, key := range ordered {
+-		for range int(effectiveWeight(key.Weight)) {
+-			expanded = append(expanded, key.Index)
+-		}
+-	}
+-	return expanded
+-}
++// maxKeyWeight 是单个 Key 的最大选择权重，避免异常配置垄断选择窗口。
++const maxKeyWeight = 16
+ 
+-// effectiveWeight 把权重归一为"至少出现一次"的取值：
+-// 权重 0/负数视为 1（**权重 0 不等于没有机会**，与底座对渠道权重的 +10 平滑同一精神），
+-// 并施加展开上限（防止权重写错把列表撑爆）。
++// effectiveWeight 把权重归一为至少一个份额，并限制单 Key 最大份额。
+ func effectiveWeight(weight int64) int64 {
+ 	if weight <= 0 {
+ 		return 1
+ 	}
+-	if weight > maxWeightedKeyExpansion {
+-		return maxWeightedKeyExpansion
++	if weight > maxKeyWeight {
++		return maxKeyWeight
+ 	}
+ 	return weight
+ }
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index dc6fd92..65d5900 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -142,7 +142,8 @@ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ // 正确做法：以底座渠道**当前的 Key 列表**为唯一事实来源逐位匹配。这样无论底座
+ // 隔离、删除还是重排过哪一把，任何索引都能被正确翻译。
+ //
+-// 匹配方式是**按凭据明文比对**（底座列表里存的就是明文），因此不依赖顺序。
++// 新投影把稳定 ID 与真实 Key 槽位一同写入 ChannelInfo，可直接恢复映射；
++// 旧投影没有该元数据时才回退到按凭据明文比对。
+ func MapBaseKeyIndexes(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 	if db == nil {
+ 		return nil, errors.New("channelpool: nil db")
+@@ -160,8 +161,28 @@ func MapBaseKeyIndexes(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 		return nil, err
+ 	}
+ 
+-	// 我们这边**全部存活**的 Key（含已失效/冷却中的）：底座列表里可能仍然留着它们，
+-	// 索引必须能被翻译，否则统计又一次落空。
++	baseKeys := baseChannel.GetKeys()
++	indexToStable := make(map[int]string, len(baseKeys))
++	indexToKeyValue := make(map[int]string, len(baseKeys))
++	if len(baseChannel.ChannelInfo.MultiKeyStableIDs) == len(baseKeys) {
++		complete := true
++		for i, stableID := range baseChannel.ChannelInfo.MultiKeyStableIDs {
++			stableID = strings.TrimSpace(stableID)
++			if stableID == "" {
++				complete = false
++				break
++			}
++			indexToStable[i] = stableID
++			indexToKeyValue[i] = baseKeys[i]
++		}
++		if complete {
++			return &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(baseKeys)}, nil
++		}
++		clear(indexToStable)
++		clear(indexToKeyValue)
++	}
++
++	// 兼容阶段 C 之前的旧投影：只有缺少稳定元数据时，才解密当前存活 Key 并按明文匹配。
+ 	var ours []apigxmodel.UpstreamKey
+ 	if err := db.Where("channel_id = ?", shareChannelID).Find(&ours).Error; err != nil {
+ 		return nil, err
+@@ -176,10 +197,6 @@ func MapBaseKeyIndexes(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 		}
+ 		secretToStable[plain] = ours[i].StableKeyID
+ 	}
+-
+-	baseKeys := baseChannel.GetKeys()
+-	indexToStable := make(map[int]string, len(baseKeys))
+-	indexToKeyValue := make(map[int]string, len(baseKeys))
+ 	for i, secret := range baseKeys {
+ 		stable, ok := secretToStable[secret]
+ 		if !ok {
+@@ -201,6 +218,8 @@ type builtPool struct {
+ 	*Projection
+ 	shareChannel apigxmodel.Channel
+ 	secrets      []string
++	stableIDs    []string
++	weights      []int64
+ }
+ 
+ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+@@ -227,20 +246,10 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 	indexToStable := make(map[int]string, len(keys))
+ 	indexToKeyValue := make(map[int]string, len(keys))
+ 
+-	// 先收集可解密的 Key（失败的跳过并记录），再按**权重展开**（T2.6）：
+-	// 底座没有 per-Key 权重，而它的轮询/随机都作用在"一份列表"上，
+-	// 因此把权重 3 的 Key 在列表里放 3 次即可得到**加权轮询/加权随机**。
+-	//
+-	// 语义说明（本阶段明确采用）：**权重 = 流量占比**——计划书说「Key 权重只在选 Key 时
+-	// 使用」「渠道权重用于流量分散」；而 stage-1 时期"权重只决定顺序"在轮询下等价于等权，
+-	// 表达不出"某把 Key 多分担一些"。
+-	//
+-	// `plaintexts` 与 `stableIDs` 必须**同步追加**：跳过的 Key 会让两套下标与 `keys` 错位，
+-	// 早期实现直接拿展开槽位去索引 `keys`，遇到解不开的凭据就会把状态映射到**另一把 Key** 上
+-	// （那个回归曾被全量测试抓到：含失效 Key 的用例挂在索引映射上）。
+-	plaintexts := make([]string, 0, len(keys))
++	// 一把领域 Key 只投影为一个真实槽位。稳定 ID 和归一化权重与槽位一一对齐，
++	// `GetNextEnabledKey` 直接执行加权轮询/随机；不再复制明文 Key 来表达份额。
+ 	stableIDs := make([]string, 0, len(keys))
+-	weights := make([]KeyWeight, 0, len(keys))
++	weights := make([]int64, 0, len(keys))
+ 	for i := range keys {
+ 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
+ 		if err != nil {
+@@ -249,14 +258,12 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 				keys[i].ID, keys[i].StableKeyID, err))
+ 			continue
+ 		}
+-		weights = append(weights, KeyWeight{Index: len(plaintexts), Weight: keys[i].Weight})
++		index := len(secrets)
++		indexToStable[index] = keys[i].StableKeyID
++		indexToKeyValue[index] = plain
++		secrets = append(secrets, plain)
+ 		stableIDs = append(stableIDs, keys[i].StableKeyID)
+-		plaintexts = append(plaintexts, plain)
+-	}
+-	for _, slot := range BuildWeightedKeyIndexes(weights) {
+-		indexToStable[len(secrets)] = stableIDs[slot]
+-		indexToKeyValue[len(secrets)] = plaintexts[slot]
+-		secrets = append(secrets, plaintexts[slot])
++		weights = append(weights, effectiveWeight(keys[i].Weight))
+ 	}
+ 	if len(secrets) == 0 {
+ 		return nil, ErrNoUsableKey
+@@ -266,6 +273,8 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 		Projection:   &Projection{IndexToStableKey: indexToStable, IndexToKeyValue: indexToKeyValue, KeyCount: len(secrets)},
+ 		shareChannel: shareChannel,
+ 		secrets:      secrets,
++		stableIDs:    stableIDs,
++		weights:      weights,
+ 	}, nil
+ }
+ 
+@@ -281,9 +290,16 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
+ 	baseChannel.ChannelInfo.IsMultiKey = true
+ 	baseChannel.ChannelInfo.MultiKeySize = len(built.secrets)
+ 	baseChannel.ChannelInfo.MultiKeyMode = baseMultiKeyMode(built.shareChannel.KeyPoolMode)
++	baseChannel.ChannelInfo.MultiKeyStableIDs = append([]string(nil), built.stableIDs...)
++	baseChannel.ChannelInfo.MultiKeyWeights = append([]int64(nil), built.weights...)
+ 	baseChannel.ChannelInfo.MultiKeyStatusList = nil
+ 	baseChannel.ChannelInfo.MultiKeyDisabledReason = nil
+ 	baseChannel.ChannelInfo.MultiKeyDisabledTime = nil
++	baseChannel.ChannelInfo.MultiKeyStatusByStableID = nil
++	baseChannel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
++	baseChannel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
++	baseChannel.ChannelInfo.MultiKeyStatusSources = nil
++	baseChannel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
+ 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
+ 
+ 	// 池子重新有可用凭据时，把**因全池失效而被自动停用**的渠道恢复过来。
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index 4038d3c..b2495b8 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -194,31 +194,30 @@ func TestProjectKeyPoolWritesBaseMultiKeyChannel(t *testing.T) {
+ 
+ 	projection, err := ProjectKeyPool(db, shareChannel.ID)
+ 	require.NoError(t, err)
+-	assert.Equal(t, 7, projection.KeyCount, "权重 1:5:1 → 7 个槽位（权重 = 流量占比）")
++	assert.Equal(t, 3, projection.KeyCount, "每把领域 Key 只应占一个真实槽位")
+ 
+-	// 底座渠道应进入多 Key 模式，且 Key 按权重**展开**（权重 = 流量占比，见 T2.6）
++	// 底座渠道应进入多 Key 模式，稳定 ID 与权重和唯一真实槽位一一对齐。
+ 	var loaded basemodel.Channel
+ 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
+ 	assert.True(t, loaded.ChannelInfo.IsMultiKey, "必须切到多 Key 模式")
+-	assert.Equal(t, 7, loaded.ChannelInfo.MultiKeySize, "权重 1:5:1 应展开为 7 个槽位（权重 = 流量占比）")
++	assert.Equal(t, 3, loaded.ChannelInfo.MultiKeySize)
+ 	assert.Equal(t, constant.MultiKeyModePolling, loaded.ChannelInfo.MultiKeyMode)
+ 
+ 	lines := loaded.GetKeys()
+-	require.Len(t, lines, 7)
+-	assert.Equal(t, []string{"sk-second-bbbbbbb", "sk-second-bbbbbbb", "sk-second-bbbbbbb", "sk-second-bbbbbbb",
+-		"sk-second-bbbbbbb", "sk-first-aaaaaaaa", "sk-third-ccccccc"}, lines,
+-		"权重高的占更多槽位；权重相同按 ID 升序，保证顺序确定")
++	require.Len(t, lines, 3)
++	assert.Equal(t, []string{"sk-second-bbbbbbb", "sk-first-aaaaaaaa", "sk-third-ccccccc"}, lines,
++		"权重只决定选择份额；真实 Key 仍按 weight DESC, id ASC 保持确定顺序")
++	assert.Equal(t, []string{"stable-b", "stable-a", "stable-c"}, loaded.ChannelInfo.MultiKeyStableIDs)
++	assert.Equal(t, []int64{5, 1, 1}, loaded.ChannelInfo.MultiKeyWeights)
+ 
+-	// 索引 → 稳定 ID 的映射必须与写入顺序一致（前 5 个槽位都是权重 5 的那把）
++	// 索引 → 稳定 ID 的映射必须与唯一真实槽位一致。
+ 	assert.Equal(t, "stable-b", mustStable(t, projection, 0))
+-	assert.Equal(t, "stable-b", mustStable(t, projection, 4))
+-	assert.Equal(t, "stable-a", mustStable(t, projection, 5))
+-	assert.Equal(t, "stable-c", mustStable(t, projection, 6))
++	assert.Equal(t, "stable-a", mustStable(t, projection, 1))
++	assert.Equal(t, "stable-c", mustStable(t, projection, 2))
+ 
+-	// 同一把 Key 有多个槽位时，按稳定 ID 反查只给出一个（首个）槽位
+ 	idx, ok := projection.IndexOfStableKeyID("stable-c")
+ 	assert.True(t, ok)
+-	assert.Equal(t, 6, idx)
++	assert.Equal(t, 2, idx)
+ }
+ 
+ func mustStable(t *testing.T, p *Projection, index int) string {
+@@ -534,9 +533,7 @@ func TestAuthFailureMakesBaseSkipTheFailedKey(t *testing.T) {
+ 	}).Error)
+ 
+ 	// **等权**：本用例要验证的是"失效 Key 被跳过、换用另一把"，
+-	// 因此两把 Key 权重相同（等权时不做加权展开，一把一个槽位，见 T2.6）。
+-	// 若给成 1:5，权重高的那把会有 5 个槽位，标记掉索引 0 之后底座跳到索引 1——
+-	// **还是同一把 Key**，那验证的就不是本用例想验证的事了。
++	// 因此两把 Key 权重相同，让断言只观察失效隔离而不受加权选择顺序干扰。
+ 	secrets := []string{"sk-low-aaaaaaaaa", "sk-high-bbbbbbbb"}
+ 	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, []int64{1, 1})
+ 	projection, err := ProjectKeyPool(db, shareChannel.ID)
+@@ -911,27 +908,10 @@ func TestCompleteAttemptIsIdempotent(t *testing.T) {
+ 
+ // ---- Key 加权与剩余容量（T2.6） ----
+ 
+-// 加权轮询的经典形式：把 Key 按权重展开，底座的轮询/随机就会按比例选中。
+-func TestBuildWeightedKeyIndexesProportionalToWeight(t *testing.T) {
+-	expanded := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 3}, {Index: 1, Weight: 1}})
+-	require.Len(t, expanded, 4)
+-	assert.Equal(t, []int{0, 0, 0, 1}, expanded, "权重 3:1 应展开为 3 次与 1 次")
+-
+-	// 权重 0 视为 1：**不能等于"没有机会"**（否则没配权重的 Key 永远选不到）
+-	zero := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 0}, {Index: 1, Weight: 2}})
+-	require.Len(t, zero, 3)
+-	assert.Contains(t, zero, 0, "权重 0 的 Key 仍应出现一次")
+-	assert.Equal(t, 2, countIndex(zero, 1))
+-
+-	// 展开上限：权重写错（例如 10000）不得把列表撑爆
+-	huge := BuildWeightedKeyIndexes([]KeyWeight{{Index: 0, Weight: 10_000}, {Index: 1, Weight: 1}})
+-	assert.Len(t, huge, 17, "权重写错时展开次数必须被上限截断（16 + 1）")
+-
+-	// 顺序确定：与传入顺序无关，按索引升序展开
+-	reordered := BuildWeightedKeyIndexes([]KeyWeight{{Index: 1, Weight: 1}, {Index: 0, Weight: 3}})
+-	assert.Equal(t, expanded, reordered, "展开结果必须与传入顺序无关（可复现）")
+-
+-	assert.Empty(t, BuildWeightedKeyIndexes(nil))
++func TestEffectiveWeightBounds(t *testing.T) {
++	assert.EqualValues(t, 1, effectiveWeight(0), "未配置权重仍要有一次机会")
++	assert.EqualValues(t, 3, effectiveWeight(3))
++	assert.EqualValues(t, maxKeyWeight, effectiveWeight(10_000), "异常大权重必须被截断")
+ }
+ 
+ // 剩余容量：已满的 Key 要被标出来让底座跳过；未配置上限**不等于**已满。
+@@ -946,8 +926,8 @@ func TestSaturatedKeyIndexes(t *testing.T) {
+ 	assert.Empty(t, SaturatedKeyIndexes(nil))
+ }
+ 
+-// 状态表合并：只回收**我们自己**写的标记，底座自己的禁用原因必须原样保留。
+-func TestMergeKeyStatusListKeepsBaseMarks(t *testing.T) {
++// 旧单值合并纯函数仍保留给兼容调用；新运行链路由 ChannelInfo 按来源独立保存。
++func TestMergeKeyStatusListCompatibility(t *testing.T) {
+ 	const baseAutoDisabled = common.ChannelStatusAutoDisabled
+ 	current := map[int]int{
+ 		0: baseAutoDisabled,                   // 底座因鉴权失败自动禁用
+@@ -967,19 +947,8 @@ func TestMergeKeyStatusListKeepsBaseMarks(t *testing.T) {
+ 		apigxmodel.StatusCapacitySaturated))
+ }
+ 
+-func countIndex(indexes []int, target int) int {
+-	count := 0
+-	for _, index := range indexes {
+-		if index == target {
+-			count++
+-		}
+-	}
+-	return count
+-}
+-
+-// 加权投影：权重按占比展开，且**每个槽位仍映射回同一把 Key**；
+-// 解不开的凭据被跳过时**下标不得串位**（阶段 1 曾在此处出过回归）。
+-func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
++// 加权投影只保存唯一真实 Key、稳定 ID 与权重；解不开的凭据被跳过时下标不得串位。
++func TestProjectedPoolStoresStableWeightsWithoutDuplicatingSecrets(t *testing.T) {
+ 	db := setupProjectionEnv(t)
+ 	ResetMappingCacheForTest()
+ 	t.Cleanup(ResetMappingCacheForTest)
+@@ -1030,26 +999,16 @@ func TestProjectedPoolExpandsKeysByWeight(t *testing.T) {
+ 	projection, err := ProjectKeyPool(db, channel.ID)
+ 	require.NoError(t, err)
+ 	require.NotNil(t, projection)
+-	assert.Equal(t, 4, projection.KeyCount, "权重 3:1（解不开的那把被跳过）应展开为 4 个槽位")
++	assert.Equal(t, 2, projection.KeyCount, "解不开的凭据被跳过，其余每把只占一个槽位")
+ 
+ 	var base basemodel.Channel
+ 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+-	assert.Equal(t, 4, len(strings.Split(base.Key, "\n")))
+-	assert.Equal(t, 4, base.ChannelInfo.MultiKeySize)
+-
+-	countA, countB := 0, 0
+-	for index := range 4 {
+-		switch projection.IndexToStableKey[index] {
+-		case "stable-a":
+-			countA++
+-		case "stable-b":
+-			countB++
+-		case "stable-broken":
+-			t.Fatalf("解不开的凭据不得出现在投影里")
+-		}
+-	}
+-	assert.Equal(t, 3, countA, "权重高的 Key 应占 3 个槽位")
+-	assert.Equal(t, 1, countB)
++	assert.Equal(t, 2, len(strings.Split(base.Key, "\n")))
++	assert.Equal(t, 2, base.ChannelInfo.MultiKeySize)
++	assert.Equal(t, []string{"stable-a", "stable-b"}, base.ChannelInfo.MultiKeyStableIDs)
++	assert.Equal(t, []int64{3, 1}, base.ChannelInfo.MultiKeyWeights)
++	assert.Equal(t, "stable-a", projection.IndexToStableKey[0])
++	assert.Equal(t, "stable-b", projection.IndexToStableKey[1])
+ }
+ 
+ // 上游 Base URL 归一化：真实 API 回扫发现的形态（用户填 `.../v1` 会被底座再拼一层）。
+diff --git a/apigx/model/migrate.go b/apigx/model/migrate.go
+index 5515f4e..68ee83b 100644
+--- a/apigx/model/migrate.go
++++ b/apigx/model/migrate.go
+@@ -57,6 +57,7 @@ func AllModels() []any {
+ 		&Channel{},
+ 		&UpstreamAccount{},
+ 		&UpstreamKey{},
++		&UpstreamKeyCredential{},
+ 		&KeyModelCapability{},
+ 		&CanonicalModel{},
+ 		&ModelAlias{},
+@@ -85,8 +86,8 @@ func AllModels() []any {
+ // TableNamePrefix 供迁移与验收脚本筛选 APIGX 自己的表（避免与底座表混淆）。
+ const TableNamePrefix = TablePrefix
+ 
+-// ExpectedTableCount 是当前冻结设计的表数量（schema-draft §5.1–§5.27，共 27 张）。
++// ExpectedTableCount 是当前冻结设计的表数量（原 27 张 + 凭据历史表）。
+ //
+ // 这是一个**契约常量**：新增表时必须同时调整它，并让 migrate_test.go 的断言继续成立；
+ // 这样「漏加迁移」会立刻变成测试失败，而不是静默少建一张表。
+-const ExpectedTableCount = 27
++const ExpectedTableCount = 28
+diff --git a/apigx/model/migrate_matrix_test.go b/apigx/model/migrate_matrix_test.go
+index 7e38e55..e82b4b8 100644
+--- a/apigx/model/migrate_matrix_test.go
++++ b/apigx/model/migrate_matrix_test.go
+@@ -37,6 +37,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
+ 		assertOfferingReviewDialect(t, db)
+ 		assertQualityRoutingDialect(t, db)
++		assertStageCAsyncTaskDialect(t, db)
+ 	})
+ 
+ 	t.Run("postgres", func(t *testing.T) {
+@@ -62,6 +63,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+ 		assertOfferingReviewDialect(t, db)
+ 		assertQualityRoutingDialect(t, db)
++		assertStageCAsyncTaskDialect(t, db)
+ 
+ 		// 存储引擎必须是 InnoDB。这不是洁癖：
+ 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
+@@ -86,6 +88,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
+ 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+ 	assertOfferingReviewDialect(t, db)
+ 	assertQualityRoutingDialect(t, db)
++	assertStageCAsyncTaskDialect(t, db)
+ }
+ 
+ var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
+@@ -177,6 +180,75 @@ func assertQualityRoutingDialect(t *testing.T, db *gorm.DB) {
+ 	require.ErrorIs(t, err, errRollbackQualityRoutingMatrix)
+ }
+ 
++var errRollbackStageCAsyncTaskMatrix = errors.New("rollback stage c async task matrix fixture")
++
++// assertStageCAsyncTaskDialect executes the migration-sensitive Stage C path
++// on every real dialect: the new base_token_id column, credential history after
++// rotation/deletion, one-way async state transitions, and durable snapshot
++// repair events all have to behave the same on SQLite, PostgreSQL, and MySQL.
++func assertStageCAsyncTaskDialect(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	assert.True(t, db.Migrator().HasColumn(&AsyncTask{}, "base_token_id"))
++	err := db.Transaction(func(tx *gorm.DB) error {
++		const owner int64 = 9_830_001
++		group := &ShareGroup{OwnerUserID: owner, Name: "stage-c-matrix"}
++		require.NoError(t, CreateShareGroup(tx, group))
++		channel := &Channel{
++			OwnerUserID: owner, ShareGroupID: group.ID, Name: "stage-c-matrix",
++			BaseChannelID: 9_830_001,
++		}
++		require.NoError(t, CreateChannel(tx, channel))
++		key := &UpstreamKey{
++			ChannelID: channel.ID, StableKeyID: "stage-c-key",
++			SecretRef: "ciphertext-v1", SecretFingerprint: "fingerprint-v1",
++			Status: UpstreamKeyStatusEnabled,
++		}
++		require.NoError(t, CreateUpstreamKey(tx, owner, key))
++		rotated, rotateErr := RotateUpstreamKeyCredential(tx, owner, key.ID, "ciphertext-v2", "fingerprint-v2")
++		require.NoError(t, rotateErr)
++		require.EqualValues(t, 2, rotated.CredentialVersion)
++		require.NoError(t, DeleteUpstreamKey(tx, owner, key.ID))
++		v1, resolveErr := ResolveUpstreamKeyCredential(tx, key.ID, 1)
++		require.NoError(t, resolveErr)
++		assert.Equal(t, "ciphertext-v1", v1.SecretRef)
++
++		task := &AsyncTask{
++			PublicTaskID: "stage-c-matrix-task", BaseTaskID: 9_830_001,
++			UserID: owner, BaseTokenID: 9_830_088, ChannelID: channel.ID,
++			UpstreamKeyID: key.ID, UpstreamKeyCredentialVersion: 1,
++			Status: AsyncTaskStatusRunning,
++		}
++		_, created, createErr := CreateAsyncTaskSnapshot(tx, task)
++		require.NoError(t, createErr)
++		require.True(t, created)
++		stored, getErr := GetAsyncTaskByBaseTaskID(tx, task.BaseTaskID)
++		require.NoError(t, getErr)
++		assert.EqualValues(t, 9_830_088, stored.BaseTokenID)
++		_, changed, advanceErr := AdvanceAsyncTaskStatus(tx, task.BaseTaskID, AsyncTaskStatusSucceeded, "completed", 0, common.GetTimestamp())
++		require.NoError(t, advanceErr)
++		assert.True(t, changed)
++		_, _, advanceErr = AdvanceAsyncTaskStatus(tx, task.BaseTaskID, AsyncTaskStatusFailed, "late_failure", 0, 0)
++		assert.ErrorIs(t, advanceErr, ErrAsyncTaskTransition)
++
++		repair := &AsyncTask{
++			PublicTaskID: "stage-c-matrix-repair", BaseTaskID: 9_830_002,
++			UserID: owner, BaseTokenID: 9_830_089, ChannelID: channel.ID,
++			UpstreamKeyID: key.ID, UpstreamKeyCredentialVersion: 2,
++			Status: AsyncTaskStatusRunning,
++		}
++		require.NoError(t, QueueAsyncTaskSnapshotRepair(tx, repair, "snapshot_insert_failed"))
++		pending, found, pendingErr := GetPendingAsyncTaskSnapshotRepair(tx, repair.BaseTaskID)
++		require.NoError(t, pendingErr)
++		require.True(t, found)
++		_, _, createErr = CreateAsyncTaskSnapshot(tx, pending)
++		require.NoError(t, createErr)
++		require.NoError(t, MarkAsyncTaskSnapshotRepairCompleted(tx, pending))
++		assert.False(t, HasPendingAsyncTaskSnapshotRepairs(tx))
++		return errRollbackStageCAsyncTaskMatrix
++	})
++	require.ErrorIs(t, err, errRollbackStageCAsyncTaskMatrix)
++}
++
+ // informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，
+ // 同时适用于 PostgreSQL 与 MySQL（SQLite 用 sqlite_master，见 apigxTableNames）。
+ func informationSchemaApigxTables(t *testing.T, db *gorm.DB, column string) []string {
+diff --git a/apigx/model/models_identity.go b/apigx/model/models_identity.go
+index 28b9247..8be3244 100644
+--- a/apigx/model/models_identity.go
++++ b/apigx/model/models_identity.go
+@@ -283,6 +283,21 @@ type UpstreamKey struct {
+ // TableName 返回表名。
+ func (UpstreamKey) TableName() string { return TablePrefix + "upstream_keys" }
+ 
++// UpstreamKeyCredential 保存每一版上游凭据的受保护引用。当前版本仍镜像在 UpstreamKey，
++// 历史版本只允许已绑定的异步任务按 key_id + credential_version 读取，轮换或软删除 Key 不清理。
++type UpstreamKeyCredential struct {
++	ID                int64  `gorm:"primaryKey"`
++	UpstreamKeyID     int64  `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:1"`
++	CredentialVersion int64  `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:2"`
++	SecretRef         string `gorm:"size:255;not null;default:''"`
++	SecretFingerprint string `gorm:"type:char(64);not null;default:''"`
++	StartedAt         int64  `gorm:"bigint;not null;default:0"`
++	RetiredAt         int64  `gorm:"bigint;not null;default:0"`
++	CreatedAt         int64  `gorm:"bigint;not null;default:0"`
++}
++
++func (UpstreamKeyCredential) TableName() string { return TablePrefix + "upstream_key_credentials" }
++
+ // KeyModelCapability 记录「Key 支持的上游模型和能力、发现/验证状态及时间」，
+ // 是「分享者声明 / 目录发现 / 连通性验证」三类证据的唯一落点（§8.1）。
+ // 刻意不直接挂 canonical_model_id：本表记录的是「上游自称什么」，归一由 apigx_model_aliases 负责。
+diff --git a/apigx/model/models_metering.go b/apigx/model/models_metering.go
+index a555c43..396b2a4 100644
+--- a/apigx/model/models_metering.go
++++ b/apigx/model/models_metering.go
+@@ -392,6 +392,7 @@ type AsyncTask struct {
+ 	UpstreamTaskID               string `gorm:"size:191;not null;default:''"`                                                                                                                                                                                 // 上游任务 ID（**私有，不出公共 DTO**，不得用于跨用户访问）；快照
+ 	UserID                       int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_user_status_created,priority:1"`                                                                                                                                 // 任务所有者（历史访问授权来自创建时的所有权）；快照
+ 	ApiKeyID                     int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 平台 Key；快照
++	BaseTokenID                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 底座 tokens.id；仅用于恢复该请求的容量维度；快照
+ 	OfferingID                   int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 原供给；快照
+ 	ChannelID                    int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_channel_status,priority:1"`                                                                                                                                      // 原渠道快照（后续查询/取消/下载不参与普通轮询）
+ 	UpstreamKeyID                int64  `gorm:"bigint;not null;default:0;index:idx_asynctask_upkey_status,priority:1"`                                                                                                                                        // 原 Key 快照（轮换/停用/移除后不改绑）；快照
+@@ -405,6 +406,8 @@ type AsyncTask struct {
+ 	FxRateMicro                  int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 汇率快照；快照
+ 	CapacityPolicyID             int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 容量策略
+ 	ReservationUID               string `gorm:"size:64;not null;default:''"`                                                                                                                                                                                  // 运行任务槽位预留引用（提交成功后持续占用到终态）
++	ReservationReleaseState      int    `gorm:"type:int;not null;default:0;index:idx_asynctask_release_state"`                                                                                                                                                // 0=持有 / 1=待幂等释放 / 2=已释放
++	ReservationReleasedAt        int64  `gorm:"bigint;not null;default:0"`                                                                                                                                                                                    // 容量租约确认释放时刻
+ 	Action                       string `gorm:"size:40;not null;default:''"`                                                                                                                                                                                  // 任务类型（对齐底座 tasks.action）；快照
+ 	Capability                   int    `gorm:"type:int;not null"`                                                                                                                                                                                            // 能力枚举
+ 	Status                       int    `gorm:"type:int;not null;index:idx_asynctask_user_status_created,priority:2;index:idx_asynctask_status_timeout,priority:1;index:idx_asynctask_channel_status,priority:2;index:idx_asynctask_upkey_status,priority:2"` // 状态：0=待提交 / 1=运行中 / 2=成功 / 3=失败 / 4=已取消 / 5=结果未知 / 6=对账中；仅单向推进
+diff --git a/apigx/model/repo_async_task.go b/apigx/model/repo_async_task.go
+new file mode 100644
+index 0000000..9d91e62
+--- /dev/null
++++ b/apigx/model/repo_async_task.go
+@@ -0,0 +1,337 @@
++package apigxmodel
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++var ErrAsyncTaskTransition = errors.New("apigx: invalid async task transition")
++
++const (
++	asyncTaskSnapshotRepairPendingAction   = "async_task_snapshot_repair_pending"
++	asyncTaskSnapshotRepairCompletedAction = "async_task_snapshot_repair_completed"
++	asyncTaskSnapshotRepairTargetType      = "async_task_snapshot"
++)
++
++type asyncTaskSnapshotRepairEnvelope struct {
++	Snapshot   AsyncTask `json:"snapshot"`
++	ReasonCode string    `json:"reason_code"`
++}
++
++const (
++	AsyncTaskStatusPendingSubmit = 0
++	AsyncTaskStatusRunning       = 1
++	AsyncTaskStatusSucceeded     = 2
++	AsyncTaskStatusFailed        = 3
++	AsyncTaskStatusCanceled      = 4
++	AsyncTaskStatusUnknown       = 5
++	AsyncTaskStatusReconciling   = 6
++
++	AsyncTaskReservationHeld      = 0
++	AsyncTaskReservationReleasing = 1
++	AsyncTaskReservationReleased  = 2
++)
++
++func IsAsyncTaskTerminal(status int) bool {
++	return status == AsyncTaskStatusSucceeded || status == AsyncTaskStatusFailed || status == AsyncTaskStatusCanceled
++}
++
++// CreateAsyncTaskSnapshot 只创建一次不可变快照；重复 base_task_id 返回原记录。
++func CreateAsyncTaskSnapshot(db *gorm.DB, task *AsyncTask) (*AsyncTask, bool, error) {
++	if db == nil || task == nil || task.BaseTaskID <= 0 || task.PublicTaskID == "" {
++		return nil, false, fmt.Errorf("%w: complete async task snapshot is required", ErrInvalidArgument)
++	}
++	now := common.GetTimestamp()
++	if task.CreatedAt == 0 {
++		task.CreatedAt = now
++	}
++	if task.UpdatedAt == 0 {
++		task.UpdatedAt = now
++	}
++	result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(task)
++	if result.Error != nil {
++		return nil, false, result.Error
++	}
++	if result.RowsAffected > 0 {
++		return task, true, nil
++	}
++	existing, err := GetAsyncTaskByBaseTaskID(db, task.BaseTaskID)
++	return existing, false, err
++}
++
++func GetAsyncTaskByBaseTaskID(db *gorm.DB, baseTaskID int64) (*AsyncTask, error) {
++	if db == nil || baseTaskID <= 0 {
++		return nil, ErrNotFound
++	}
++	var task AsyncTask
++	if err := db.Where("base_task_id = ?", baseTaskID).First(&task).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil, ErrNotFound
++		}
++		return nil, err
++	}
++	return &task, nil
++}
++
++// QueueAsyncTaskSnapshotRepair persists a credential-free copy of a snapshot
++// that could not be inserted. Audit events are immutable and already part of
++// the frozen schema, so the pending/completed event pair acts as a durable
++// repair queue without introducing another overlapping outbox table.
++func QueueAsyncTaskSnapshotRepair(db *gorm.DB, task *AsyncTask, reasonCode string) error {
++	if db == nil || task == nil || task.BaseTaskID <= 0 || task.PublicTaskID == "" {
++		return fmt.Errorf("%w: complete async task repair snapshot is required", ErrInvalidArgument)
++	}
++	envelope := asyncTaskSnapshotRepairEnvelope{Snapshot: *task, ReasonCode: reasonCode}
++	payload, err := common.Marshal(envelope)
++	if err != nil {
++		return err
++	}
++	digest := sha256.Sum256(payload)
++	now := common.GetTimestamp()
++	event := &AuditEvent{
++		EventUID:       asyncTaskSnapshotRepairEventUID(asyncTaskSnapshotRepairPendingAction, task.BaseTaskID),
++		Category:       "system_repair",
++		Action:         asyncTaskSnapshotRepairPendingAction,
++		TargetType:     asyncTaskSnapshotRepairTargetType,
++		TargetID:       task.BaseTaskID,
++		TargetPublicID: task.PublicTaskID,
++		AfterDigest:    hex.EncodeToString(digest[:]),
++		ChangeSummary:  string(payload),
++		OccurredAt:     now,
++		CreatedAt:      now,
++	}
++	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(event).Error
++}
++
++// GetPendingAsyncTaskSnapshotRepair returns the immutable repair payload only
++// while no matching completion event exists.
++func GetPendingAsyncTaskSnapshotRepair(db *gorm.DB, baseTaskID int64) (*AsyncTask, bool, error) {
++	if db == nil || baseTaskID <= 0 {
++		return nil, false, nil
++	}
++	var event AuditEvent
++	query := pendingAsyncTaskSnapshotRepairQuery(db).Select("pending.*").
++		Where("pending.target_id = ?", baseTaskID).
++		Order("pending.id ASC").Limit(1)
++	if err := query.Scan(&event).Error; err != nil {
++		return nil, false, err
++	}
++	if event.ID == 0 {
++		return nil, false, nil
++	}
++	task, err := decodeAsyncTaskSnapshotRepair(event.ChangeSummary)
++	return task, err == nil, err
++}
++
++func ListPendingAsyncTaskSnapshotRepairs(db *gorm.DB, limit int) ([]AsyncTask, error) {
++	if db == nil {
++		return nil, gorm.ErrInvalidDB
++	}
++	if limit <= 0 || limit > 1000 {
++		limit = 200
++	}
++	var events []AuditEvent
++	if err := pendingAsyncTaskSnapshotRepairQuery(db).Select("pending.*").
++		Order("pending.id ASC").Limit(limit).Scan(&events).Error; err != nil {
++		return nil, err
++	}
++	tasks := make([]AsyncTask, 0, len(events))
++	for i := range events {
++		task, err := decodeAsyncTaskSnapshotRepair(events[i].ChangeSummary)
++		if err != nil {
++			return nil, err
++		}
++		tasks = append(tasks, *task)
++	}
++	return tasks, nil
++}
++
++func HasPendingAsyncTaskSnapshotRepairs(db *gorm.DB) bool {
++	if db == nil {
++		return false
++	}
++	var count int64
++	err := pendingAsyncTaskSnapshotRepairQuery(db).Count(&count).Error
++	return err == nil && count > 0
++}
++
++func MarkAsyncTaskSnapshotRepairCompleted(db *gorm.DB, task *AsyncTask) error {
++	if db == nil || task == nil || task.BaseTaskID <= 0 {
++		return fmt.Errorf("%w: repaired async task is required", ErrInvalidArgument)
++	}
++	now := common.GetTimestamp()
++	event := &AuditEvent{
++		EventUID:       asyncTaskSnapshotRepairEventUID(asyncTaskSnapshotRepairCompletedAction, task.BaseTaskID),
++		Category:       "system_repair",
++		Action:         asyncTaskSnapshotRepairCompletedAction,
++		TargetType:     asyncTaskSnapshotRepairTargetType,
++		TargetID:       task.BaseTaskID,
++		TargetPublicID: task.PublicTaskID,
++		OccurredAt:     now,
++		CreatedAt:      now,
++	}
++	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(event).Error
++}
++
++func pendingAsyncTaskSnapshotRepairQuery(db *gorm.DB) *gorm.DB {
++	table := AuditEvent{}.TableName()
++	return db.Table(table+" AS pending").
++		Where("pending.action = ? AND pending.target_type = ?", asyncTaskSnapshotRepairPendingAction, asyncTaskSnapshotRepairTargetType).
++		Where("NOT EXISTS (SELECT 1 FROM "+table+" AS completed WHERE completed.action = ? AND completed.target_type = pending.target_type AND completed.target_id = pending.target_id)",
++			asyncTaskSnapshotRepairCompletedAction)
++}
++
++func decodeAsyncTaskSnapshotRepair(payload string) (*AsyncTask, error) {
++	var envelope asyncTaskSnapshotRepairEnvelope
++	if err := common.Unmarshal([]byte(payload), &envelope); err != nil {
++		return nil, err
++	}
++	if envelope.Snapshot.BaseTaskID <= 0 || envelope.Snapshot.PublicTaskID == "" {
++		return nil, fmt.Errorf("%w: invalid async task repair payload", ErrInvalidArgument)
++	}
++	return &envelope.Snapshot, nil
++}
++
++func asyncTaskSnapshotRepairEventUID(action string, baseTaskID int64) string {
++	prefix := "async-snapshot-pending-"
++	if action == asyncTaskSnapshotRepairCompletedAction {
++		prefix = "async-snapshot-completed-"
++	}
++	return prefix + fmt.Sprint(baseTaskID)
++}
++
++func allowedAsyncTaskTransition(from, to int) bool {
++	if from == to {
++		return true
++	}
++	if IsAsyncTaskTerminal(from) || to == AsyncTaskStatusPendingSubmit {
++		return false
++	}
++	switch from {
++	case AsyncTaskStatusPendingSubmit:
++		return to == AsyncTaskStatusRunning || to == AsyncTaskStatusFailed || to == AsyncTaskStatusUnknown || to == AsyncTaskStatusReconciling
++	case AsyncTaskStatusRunning:
++		return IsAsyncTaskTerminal(to) || to == AsyncTaskStatusUnknown || to == AsyncTaskStatusReconciling
++	case AsyncTaskStatusUnknown:
++		return IsAsyncTaskTerminal(to) || to == AsyncTaskStatusReconciling
++	case AsyncTaskStatusReconciling:
++		return to == AsyncTaskStatusRunning || IsAsyncTaskTerminal(to) || to == AsyncTaskStatusUnknown
++	default:
++		return false
++	}
++}
++
++// AdvanceAsyncTaskStatus 在行锁内执行单向状态转换；终态不可被重复回调改写。
++func AdvanceAsyncTaskStatus(db *gorm.DB, baseTaskID int64, next int, reason string, startAt, finishAt int64) (*AsyncTask, bool, error) {
++	var out AsyncTask
++	changed := false
++	err := db.Transaction(func(tx *gorm.DB) error {
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("base_task_id = ?", baseTaskID).First(&out).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNotFound
++			}
++			return err
++		}
++		if !allowedAsyncTaskTransition(out.Status, next) {
++			return fmt.Errorf("%w: %d -> %d", ErrAsyncTaskTransition, out.Status, next)
++		}
++		if out.Status == next {
++			return nil
++		}
++		now := common.GetTimestamp()
++		updates := map[string]any{"status": next, "status_reason": reason, "updated_at": now}
++		if startAt > 0 && out.StartAt == 0 {
++			updates["start_at"] = startAt
++			out.StartAt = startAt
++		}
++		if IsAsyncTaskTerminal(next) {
++			if finishAt <= 0 {
++				finishAt = now
++			}
++			updates["finish_at"] = finishAt
++			out.FinishAt = finishAt
++		}
++		previousStatus := out.Status
++		result := tx.Model(&AsyncTask{}).Where("id = ? AND status = ?", out.ID, previousStatus).Updates(updates)
++		if result.Error != nil {
++			return result.Error
++		}
++		if result.RowsAffected != 1 {
++			// The WHERE status predicate is the final CAS guard for dialects where
++			// SELECT FOR UPDATE is unavailable (notably SQLite). Re-read the winner
++			// instead of reporting that this caller advanced the state.
++			if err := tx.Where("id = ?", out.ID).First(&out).Error; err != nil {
++				return err
++			}
++			if out.Status == next {
++				return nil
++			}
++			return fmt.Errorf("%w: concurrent %d -> %d", ErrAsyncTaskTransition, previousStatus, out.Status)
++		}
++		out.Status = next
++		out.StatusReason = reason
++		out.UpdatedAt = now
++		changed = true
++		return nil
++	})
++	return &out, changed, err
++}
++
++// ClaimAsyncTaskReservationRelease 把终态任务的租约变为待释放。state=1 会被恢复任务重试，
++// Redis Release 本身幂等，因此多实例重复执行也不会减成负数。
++func ClaimAsyncTaskReservationRelease(db *gorm.DB, baseTaskID int64) (*AsyncTask, bool, error) {
++	var out AsyncTask
++	claimed := false
++	err := db.Transaction(func(tx *gorm.DB) error {
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("base_task_id = ?", baseTaskID).First(&out).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNotFound
++			}
++			return err
++		}
++		if !IsAsyncTaskTerminal(out.Status) || out.ReservationUID == "" || out.ReservationReleaseState == AsyncTaskReservationReleased {
++			return nil
++		}
++		if out.ReservationReleaseState == AsyncTaskReservationHeld {
++			if err := tx.Model(&AsyncTask{}).Where("id = ? AND reservation_release_state = ?", out.ID, AsyncTaskReservationHeld).
++				Updates(map[string]any{"reservation_release_state": AsyncTaskReservationReleasing, "updated_at": common.GetTimestamp()}).Error; err != nil {
++				return err
++			}
++			out.ReservationReleaseState = AsyncTaskReservationReleasing
++		}
++		claimed = true
++		return nil
++	})
++	return &out, claimed, err
++}
++
++func MarkAsyncTaskReservationReleased(db *gorm.DB, baseTaskID int64) error {
++	now := common.GetTimestamp()
++	return db.Model(&AsyncTask{}).
++		Where("base_task_id = ? AND reservation_release_state <> ?", baseTaskID, AsyncTaskReservationReleased).
++		Updates(map[string]any{
++			"reservation_release_state": AsyncTaskReservationReleased,
++			"reservation_released_at":   now,
++			"updated_at":                now,
++		}).Error
++}
++
++// ListAsyncTasksForReconciliation 返回需要恢复续租/轮询或补做释放的任务。
++func ListAsyncTasksForReconciliation(db *gorm.DB, now int64, limit int) ([]AsyncTask, error) {
++	if limit <= 0 || limit > 1000 {
++		limit = 200
++	}
++	var tasks []AsyncTask
++	err := db.Where("reservation_release_state = ? OR status IN ? OR (timeout_at > 0 AND timeout_at <= ? AND status IN ?)",
++		AsyncTaskReservationReleasing,
++		[]int{AsyncTaskStatusRunning, AsyncTaskStatusUnknown, AsyncTaskStatusReconciling},
++		now, []int{AsyncTaskStatusRunning, AsyncTaskStatusUnknown, AsyncTaskStatusReconciling}).
++		Order("updated_at ASC, id ASC").Limit(limit).Find(&tasks).Error
++	return tasks, err
++}
+diff --git a/apigx/model/repo_async_task_test.go b/apigx/model/repo_async_task_test.go
+new file mode 100644
+index 0000000..390461f
+--- /dev/null
++++ b/apigx/model/repo_async_task_test.go
+@@ -0,0 +1,181 @@
++package apigxmodel
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++func TestAsyncTaskSnapshotIsImmutableAndIdempotent(t *testing.T) {
++	db := newRepoDB(t)
++	original := &AsyncTask{
++		PublicTaskID: "apigx_async_1", BaseTaskID: 71001, UpstreamTaskID: "upstream-a",
++		UserID: 81, ChannelID: 91, UpstreamKeyID: 101, UpstreamKeyCredentialVersion: 3,
++		Status: AsyncTaskStatusRunning,
++	}
++	stored, created, err := CreateAsyncTaskSnapshot(db, original)
++	require.NoError(t, err)
++	require.True(t, created)
++	require.NotNil(t, stored)
++
++	duplicate := &AsyncTask{
++		PublicTaskID: "apigx_async_changed", BaseTaskID: original.BaseTaskID,
++		UpstreamTaskID: "upstream-b", UpstreamKeyID: 999, Status: AsyncTaskStatusFailed,
++	}
++	stored, created, err = CreateAsyncTaskSnapshot(db, duplicate)
++	require.NoError(t, err)
++	assert.False(t, created)
++	require.NotNil(t, stored)
++	assert.Equal(t, "apigx_async_1", stored.PublicTaskID)
++	assert.Equal(t, "upstream-a", stored.UpstreamTaskID)
++	assert.EqualValues(t, 101, stored.UpstreamKeyID)
++	assert.Equal(t, AsyncTaskStatusRunning, stored.Status)
++}
++
++func TestAsyncTaskStatusOnlyMovesForward(t *testing.T) {
++	db := newRepoDB(t)
++	task := &AsyncTask{PublicTaskID: "apigx_async_2", BaseTaskID: 71002, Status: AsyncTaskStatusPendingSubmit}
++	_, _, err := CreateAsyncTaskSnapshot(db, task)
++	require.NoError(t, err)
++
++	running, changed, err := AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusRunning, "accepted", 100, 0)
++	require.NoError(t, err)
++	assert.True(t, changed)
++	assert.Equal(t, AsyncTaskStatusRunning, running.Status)
++	assert.EqualValues(t, 100, running.StartAt)
++
++	done, changed, err := AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusSucceeded, "completed", 200, 300)
++	require.NoError(t, err)
++	assert.True(t, changed)
++	assert.Equal(t, AsyncTaskStatusSucceeded, done.Status)
++	assert.EqualValues(t, 100, done.StartAt, "the first observed start time is immutable")
++	assert.EqualValues(t, 300, done.FinishAt)
++
++	doneAgain, changed, err := AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusSucceeded, "duplicate_callback", 0, 999)
++	require.NoError(t, err)
++	assert.False(t, changed)
++	assert.Equal(t, "completed", doneAgain.StatusReason)
++	assert.EqualValues(t, 300, doneAgain.FinishAt)
++
++	_, changed, err = AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusFailed, "late_failure", 0, 0)
++	assert.ErrorIs(t, err, ErrAsyncTaskTransition)
++	assert.False(t, changed)
++}
++
++func TestAsyncTaskStatusCASMissIsNotReportedAsChanged(t *testing.T) {
++	db := newRepoDB(t)
++	task := &AsyncTask{PublicTaskID: "apigx_async_cas_miss", BaseTaskID: 71006, Status: AsyncTaskStatusRunning}
++	_, _, err := CreateAsyncTaskSnapshot(db, task)
++	require.NoError(t, err)
++
++	callbackName := "test:force_async_task_cas_miss"
++	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
++		if tx.Statement.Table == (AsyncTask{}).TableName() {
++			tx.Statement.AddClause(clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "1 = 0"}}})
++		}
++	}))
++	t.Cleanup(func() { _ = db.Callback().Update().Remove(callbackName) })
++
++	current, changed, err := AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusSucceeded, "completed", 0, 300)
++	assert.ErrorIs(t, err, ErrAsyncTaskTransition)
++	assert.False(t, changed)
++	require.NotNil(t, current)
++	assert.Equal(t, AsyncTaskStatusRunning, current.Status)
++
++	require.NoError(t, db.Callback().Update().Remove(callbackName))
++	reloaded, err := GetAsyncTaskByBaseTaskID(db, task.BaseTaskID)
++	require.NoError(t, err)
++	assert.Equal(t, AsyncTaskStatusRunning, reloaded.Status)
++	assert.Zero(t, reloaded.FinishAt)
++}
++
++func TestAsyncTaskReservationReleaseCanRecoverButFinishesOnce(t *testing.T) {
++	db := newRepoDB(t)
++	task := &AsyncTask{
++		PublicTaskID: "apigx_async_3", BaseTaskID: 71003,
++		Status: AsyncTaskStatusSucceeded, ReservationUID: "async-lease-71003",
++	}
++	_, _, err := CreateAsyncTaskSnapshot(db, task)
++	require.NoError(t, err)
++
++	claimed, ok, err := ClaimAsyncTaskReservationRelease(db, task.BaseTaskID)
++	require.NoError(t, err)
++	require.True(t, ok)
++	assert.Equal(t, AsyncTaskReservationReleasing, claimed.ReservationReleaseState)
++
++	// A process may crash after Redis release and before the DB acknowledgement.
++	// Re-claiming the releasing state is deliberate; Redis release is idempotent.
++	retry, ok, err := ClaimAsyncTaskReservationRelease(db, task.BaseTaskID)
++	require.NoError(t, err)
++	require.True(t, ok)
++	assert.Equal(t, AsyncTaskReservationReleasing, retry.ReservationReleaseState)
++
++	require.NoError(t, MarkAsyncTaskReservationReleased(db, task.BaseTaskID))
++	_, ok, err = ClaimAsyncTaskReservationRelease(db, task.BaseTaskID)
++	require.NoError(t, err)
++	assert.False(t, ok, "an acknowledged release must never be performed again")
++
++	reloaded, err := GetAsyncTaskByBaseTaskID(db, task.BaseTaskID)
++	require.NoError(t, err)
++	assert.Equal(t, AsyncTaskReservationReleased, reloaded.ReservationReleaseState)
++	assert.NotZero(t, reloaded.ReservationReleasedAt)
++}
++
++func TestAsyncTaskTimeoutIsListedWithoutAssumingTerminalState(t *testing.T) {
++	db := newRepoDB(t)
++	now := common.GetTimestamp()
++	task := &AsyncTask{
++		PublicTaskID: "apigx_async_4", BaseTaskID: 71004,
++		Status: AsyncTaskStatusRunning, TimeoutAt: now - 1, ReservationUID: "async-lease-71004",
++	}
++	_, _, err := CreateAsyncTaskSnapshot(db, task)
++	require.NoError(t, err)
++
++	listed, err := ListAsyncTasksForReconciliation(db, now, 10)
++	require.NoError(t, err)
++	require.Len(t, listed, 1)
++	assert.Equal(t, AsyncTaskStatusRunning, listed[0].Status, "a local timeout does not claim the upstream stopped")
++	assert.False(t, IsAsyncTaskTerminal(listed[0].Status))
++
++	_, _, err = AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusReconciling, "timeout_pending_upstream_reconciliation", 0, 0)
++	require.NoError(t, err)
++	_, _, err = AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusRunning, "upstream_still_running", 0, 0)
++	require.NoError(t, err)
++
++	_, _, err = AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusPendingSubmit, "invalid_rewind", 0, 0)
++	assert.True(t, errors.Is(err, ErrAsyncTaskTransition))
++}
++
++func TestAsyncTaskSnapshotRepairQueueIsDurableAndCompletesOnce(t *testing.T) {
++	db := newRepoDB(t)
++	snapshot := &AsyncTask{
++		PublicTaskID: "apigx_repair_1", BaseTaskID: 71005, UpstreamTaskID: "upstream-repair",
++		UserID: 82, ChannelID: 92, UpstreamKeyID: 102, UpstreamKeyCredentialVersion: 7,
++		Status: AsyncTaskStatusRunning, ReservationUID: "async-lease-71005",
++	}
++	require.NoError(t, QueueAsyncTaskSnapshotRepair(db, snapshot, "snapshot_insert_failed"))
++	require.NoError(t, QueueAsyncTaskSnapshotRepair(db, snapshot, "duplicate"), "queue writes must be idempotent")
++	assert.True(t, HasPendingAsyncTaskSnapshotRepairs(db))
++
++	pending, found, err := GetPendingAsyncTaskSnapshotRepair(db, snapshot.BaseTaskID)
++	require.NoError(t, err)
++	require.True(t, found)
++	assert.Equal(t, snapshot.UpstreamTaskID, pending.UpstreamTaskID)
++	assert.Equal(t, snapshot.UpstreamKeyCredentialVersion, pending.UpstreamKeyCredentialVersion)
++	assert.Equal(t, snapshot.ReservationUID, pending.ReservationUID)
++
++	listed, err := ListPendingAsyncTaskSnapshotRepairs(db, 10)
++	require.NoError(t, err)
++	require.Len(t, listed, 1)
++	require.NoError(t, MarkAsyncTaskSnapshotRepairCompleted(db, pending))
++	require.NoError(t, MarkAsyncTaskSnapshotRepairCompleted(db, pending), "completion is idempotent")
++	assert.False(t, HasPendingAsyncTaskSnapshotRepairs(db))
++	_, found, err = GetPendingAsyncTaskSnapshotRepair(db, snapshot.BaseTaskID)
++	require.NoError(t, err)
++	assert.False(t, found)
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 451b199..ccba039 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -131,6 +131,36 @@ func TestUpstreamKeyOwnershipTravelsThroughChannel(t *testing.T) {
+ 	assert.ErrorIs(t, SetUpstreamKeyCooldown(db, ownerB, keyA.ID, common.GetTimestamp()+60), ErrNotFound)
+ }
+ 
++func TestUpstreamKeyCredentialHistorySurvivesRotationAndDelete(t *testing.T) {
++	db := newRepoDB(t)
++	const owner int64 = 3101
++	_, channel := seedGroupAndChannel(t, db, owner)
++	key := &UpstreamKey{
++		ChannelID: channel.ID, StableKeyID: "rotate-1", Name: "rotating",
++		SecretRef: "secret://v1", SecretFingerprint: "fp-v1", Status: UpstreamKeyStatusEnabled,
++	}
++	require.NoError(t, CreateUpstreamKey(db, owner, key))
++
++	v1, err := ResolveUpstreamKeyCredential(db, key.ID, 1)
++	require.NoError(t, err)
++	assert.Equal(t, "secret://v1", v1.SecretRef)
++
++	rotated, err := RotateUpstreamKeyCredential(db, owner, key.ID, "secret://v2", "fp-v2")
++	require.NoError(t, err)
++	assert.EqualValues(t, 2, rotated.CredentialVersion)
++	v2, err := ResolveUpstreamKeyCredential(db, key.ID, 2)
++	require.NoError(t, err)
++	assert.Equal(t, "secret://v2", v2.SecretRef)
++
++	require.NoError(t, DeleteUpstreamKey(db, owner, key.ID))
++	v1AfterDelete, err := ResolveUpstreamKeyCredential(db, key.ID, 1)
++	require.NoError(t, err)
++	assert.Equal(t, "secret://v1", v1AfterDelete.SecretRef)
++	v2AfterDelete, err := ResolveUpstreamKeyCredential(db, key.ID, 2)
++	require.NoError(t, err)
++	assert.Equal(t, "secret://v2", v2AfterDelete.SecretRef)
++}
++
+ // Key 池筛选：启用 / 未到期 / 不在冷却，三者必须同时满足。
+ func TestAvailableUpstreamKeysFiltersThreeConditions(t *testing.T) {
+ 	db := newRepoDB(t)
+diff --git a/apigx/model/repo_upstream.go b/apigx/model/repo_upstream.go
+index cc5ad19..4baecee 100644
+--- a/apigx/model/repo_upstream.go
++++ b/apigx/model/repo_upstream.go
+@@ -3,9 +3,11 @@ package apigxmodel
+ import (
+ 	"errors"
+ 	"fmt"
++	"strings"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+ 	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
+ )
+ 
+ // 领域仓储：上游账户池与上游 Key。
+@@ -143,7 +145,12 @@ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
+ 	}
+ 	key.AliveFlag = AliveFlagAlive
+ 	touchTimestamps(true, &key.CreatedAt, &key.UpdatedAt)
+-	return db.Create(key).Error
++	return db.Transaction(func(tx *gorm.DB) error {
++		if err := tx.Create(key).Error; err != nil {
++			return err
++		}
++		return createUpstreamKeyCredential(tx, key, 0)
++	})
+ }
+ 
+ // Weights 返回用于加权挑选的权重（0 视为未设置）。
+@@ -222,6 +229,120 @@ func DeleteUpstreamKey(db *gorm.DB, ownerUserID, keyID int64) error {
+ 	return nil
+ }
+ 
++// RotateUpstreamKeyCredential 原子保存新凭据版本并更新当前 Key。旧版本继续保留给已提交任务。
++func RotateUpstreamKeyCredential(db *gorm.DB, ownerUserID, keyID int64, secretRef, fingerprint string) (*UpstreamKey, error) {
++	if strings.TrimSpace(secretRef) == "" || strings.TrimSpace(fingerprint) == "" {
++		return nil, fmt.Errorf("%w: secret_ref and secret_fingerprint are required", ErrInvalidArgument)
++	}
++	var updated UpstreamKey
++	err := db.Transaction(func(tx *gorm.DB) error {
++		key, err := getUpstreamKeyWithOwnershipLocked(tx, ownerUserID, keyID)
++		if err != nil {
++			return err
++		}
++		now := common.GetTimestamp()
++		// 升级旧数据时先把当前版本补进历史表；已存在时 OnConflict 保持幂等。
++		if err := createUpstreamKeyCredential(tx, key, 0); err != nil {
++			return err
++		}
++		if err := tx.Model(&UpstreamKeyCredential{}).
++			Where("upstream_key_id = ? AND credential_version = ? AND retired_at = 0", key.ID, key.CredentialVersion).
++			Update("retired_at", now).Error; err != nil {
++			return err
++		}
++		nextVersion := key.CredentialVersion + 1
++		credential := &UpstreamKeyCredential{
++			UpstreamKeyID: key.ID, CredentialVersion: nextVersion,
++			SecretRef: secretRef, SecretFingerprint: fingerprint,
++			StartedAt: now, CreatedAt: now,
++		}
++		if err := tx.Create(credential).Error; err != nil {
++			return err
++		}
++		if err := tx.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
++			Updates(map[string]any{
++				"secret_ref": secretRef, "secret_fingerprint": fingerprint,
++				"credential_version": nextVersion, "credential_started_at": now,
++				"status": UpstreamKeyStatusEnabled, "updated_at": now,
++			}).Error; err != nil {
++			return err
++		}
++		key.SecretRef = secretRef
++		key.SecretFingerprint = fingerprint
++		key.CredentialVersion = nextVersion
++		key.CredentialStartedAt = now
++		key.Status = UpstreamKeyStatusEnabled
++		key.UpdatedAt = now
++		updated = *key
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return &updated, nil
++}
++
++// ResolveUpstreamKeyCredential 读取任务提交时绑定的凭据版本。Key 已轮换或软删除仍可读取。
++func ResolveUpstreamKeyCredential(db *gorm.DB, keyID, credentialVersion int64) (*UpstreamKeyCredential, error) {
++	if db == nil || keyID <= 0 || credentialVersion <= 0 {
++		return nil, ErrNotFound
++	}
++	var credential UpstreamKeyCredential
++	err := db.Where("upstream_key_id = ? AND credential_version = ?", keyID, credentialVersion).
++		First(&credential).Error
++	if err == nil {
++		return &credential, nil
++	}
++	if !errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, err
++	}
++	// 兼容升级前尚未建立历史行的当前版本，并立即补写，之后即使删除也能继续查询。
++	var key UpstreamKey
++	if err := db.Unscoped().Where("id = ? AND credential_version = ?", keyID, credentialVersion).First(&key).Error; err != nil {
++		return nil, ErrNotFound
++	}
++	if err := createUpstreamKeyCredential(db, &key, 0); err != nil {
++		return nil, err
++	}
++	return &UpstreamKeyCredential{
++		UpstreamKeyID: key.ID, CredentialVersion: key.CredentialVersion,
++		SecretRef: key.SecretRef, SecretFingerprint: key.SecretFingerprint,
++		StartedAt: key.CredentialStartedAt, CreatedAt: key.CreatedAt,
++	}, nil
++}
++
++func createUpstreamKeyCredential(db *gorm.DB, key *UpstreamKey, retiredAt int64) error {
++	if key == nil || key.ID <= 0 || key.CredentialVersion <= 0 || key.SecretRef == "" {
++		return fmt.Errorf("%w: complete upstream key credential is required", ErrInvalidArgument)
++	}
++	credential := &UpstreamKeyCredential{
++		UpstreamKeyID: key.ID, CredentialVersion: key.CredentialVersion,
++		SecretRef: key.SecretRef, SecretFingerprint: key.SecretFingerprint,
++		StartedAt: key.CredentialStartedAt, RetiredAt: retiredAt, CreatedAt: key.CreatedAt,
++	}
++	if credential.StartedAt == 0 {
++		credential.StartedAt = common.GetTimestamp()
++	}
++	if credential.CreatedAt == 0 {
++		credential.CreatedAt = credential.StartedAt
++	}
++	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(credential).Error
++}
++
++func getUpstreamKeyWithOwnershipLocked(db *gorm.DB, ownerUserID, keyID int64) (*UpstreamKey, error) {
++	var key UpstreamKey
++	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", keyID).First(&key).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil, ErrNotFound
++		}
++		return nil, err
++	}
++	if _, err := GetChannel(db, ownerUserID, key.ChannelID); err != nil {
++		return nil, ErrNotFound
++	}
++	return &key, nil
++}
++
+ // getUpstreamKeyWithOwnership 取出 Key 并校验其所属渠道属于该所有者。
+ func getUpstreamKeyWithOwnership(db *gorm.DB, ownerUserID, keyID int64) (*UpstreamKey, error) {
+ 	var key UpstreamKey
+diff --git a/apigx/relayhook/async_task.go b/apigx/relayhook/async_task.go
+index 05a1fcd..526f431 100644
+--- a/apigx/relayhook/async_task.go
++++ b/apigx/relayhook/async_task.go
+@@ -1,74 +1,478 @@
+ package relayhook
+ 
+ import (
++	"context"
++	"errors"
++	"fmt"
++	"net/http"
+ 	"strconv"
++	"strings"
+ 
+ 	"github.com/gin-gonic/gin"
++	"gorm.io/gorm"
+ 
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/secretbox"
+ 	"github.com/QuantumNous/new-api/common"
+ 	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+ )
+ 
+-// AsyncTask 状态（依据 docs/stage0/schema-draft.md §5.23）。
+ const (
+-	AsyncTaskStatusPendingSubmit int = 0
+-	AsyncTaskStatusRunning       int = 1
+-	AsyncTaskStatusSucceeded     int = 2
+-	AsyncTaskStatusFailed        int = 3
+-	AsyncTaskStatusCanceled      int = 4
+-	AsyncTaskStatusUnknown       int = 5
+-	AsyncTaskStatusReconciling   int = 6
++	AsyncTaskStatusPendingSubmit = apigxmodel.AsyncTaskStatusPendingSubmit
++	AsyncTaskStatusRunning       = apigxmodel.AsyncTaskStatusRunning
++	AsyncTaskStatusSucceeded     = apigxmodel.AsyncTaskStatusSucceeded
++	AsyncTaskStatusFailed        = apigxmodel.AsyncTaskStatusFailed
++	AsyncTaskStatusCanceled      = apigxmodel.AsyncTaskStatusCanceled
++	AsyncTaskStatusUnknown       = apigxmodel.AsyncTaskStatusUnknown
++	AsyncTaskStatusReconciling   = apigxmodel.AsyncTaskStatusReconciling
+ )
+ 
+-// RecordAsyncTaskSnapshot 在**任务提交并结算成功之后**写入我们自己的任务归属快照。
+-//
+-// 为什么需要它（§5.23 的注释即为此）：底座的 tasks 表只记它自己关心的字段；
+-// 一旦上游 Key 轮换、授权被撤、分享者被封禁，我们仍要能**定位原任务**——
+-// 因此这里把"当时是谁的、哪个渠道/供给、哪把 Key、哪个价格版本"固化成快照。
+-//
+-// 纪律（与 usage_record 一致）：
+-//   - 只**追加**我们自己的行，绝不触碰底座扣费；
+-//   - base_task_id 唯一 ⇒ 幂等，重复提交不产生第二行；
+-//   - 快照列只写一次，**不回写**；状态列只允许单向推进；
+-//   - 解析不到归属就留 0（如实表达"当时没记录到"），不猜；
+-//   - 任何失败只记日志，**不影响任务结果**。
+-func RecordAsyncTaskSnapshot(c *gin.Context, relayInfo *relaycommon.RelayInfo, baseTaskID int64, upstreamTaskID, action string) {
++type AsyncTaskCredential struct {
++	Snapshot *apigxmodel.AsyncTask
++	Secret   string
++}
++
++var asyncTaskDBProvider = func() *gorm.DB { return apigxmodel.DefaultDB() }
++
++// RecordAsyncTaskSnapshot 在任务持久化且提交结算成功后创建完整归属快照，
++// 随后把请求租约移交给任务。响应结束不释放该租约，只有终态处理能幂等释放。
++func RecordAsyncTaskSnapshot(
++	c *gin.Context,
++	relayInfo *relaycommon.RelayInfo,
++	baseTaskID int64,
++	upstreamTaskID, action, baseStatus string,
++	startAt, finishAt int64,
++) {
+ 	if c == nil || relayInfo == nil || baseTaskID <= 0 {
+ 		return
+ 	}
+-	db := apigxmodel.DefaultDB()
++	db := asyncTaskDBProvider()
+ 	if db == nil {
+ 		return
+ 	}
+ 
+-	// 幂等：已有该底座任务的快照就不再写（唯一约束兜底）
+-	var existing apigxmodel.AsyncTask
+-	if err := db.Where("base_task_id = ?", baseTaskID).First(&existing).Error; err == nil {
++	owner, channelID, offeringID, keyID := resolveUsageAttribution(db, c)
++	if channelID <= 0 {
++		// This is a regular New API channel. Creating a zero-attribution APIGX
++		// snapshot would make later polling treat the task as managed and fail its
++		// credential lookup, so unmanaged tasks deliberately stay on the base path.
+ 		return
+ 	}
+-
+-	owner, channelID, offeringID, keyID := resolveUsageAttribution(db, c)
+ 	now := common.GetTimestamp()
+-
+-	task := &apigxmodel.AsyncTask{
++	snapshot := &apigxmodel.AsyncTask{
+ 		PublicTaskID:   "apigx_" + strconv.FormatInt(baseTaskID, 10),
+ 		BaseTaskID:     baseTaskID,
+ 		UpstreamTaskID: upstreamTaskID,
+ 		UserID:         int64(relayInfo.UserId),
+-		ApiKeyID:       int64(relayInfo.TokenId),
++		BaseTokenID:    int64(relayInfo.TokenId),
+ 		OfferingID:     offeringID,
+ 		ChannelID:      channelID,
+ 		UpstreamKeyID:  keyID,
+ 		OwnerUserID:    owner,
+ 		Action:         action,
+-		Status:         AsyncTaskStatusRunning, // 提交并结算成功那一刻，如实记为"运行中"
++		Capability:     asyncTaskCapability(relayInfo, action),
++		Status:         asyncStatusFromBase(baseStatus),
+ 		SubmitAt:       now,
+-		BillingSettled: true, // 提交时已完成结算（这是本快照的写入时机）
++		StartAt:        startAt,
++		FinishAt:       finishAt,
++		TimeoutAt:      now + int64(common.GetEnvOrDefault("APIGX_ASYNC_TASK_TIMEOUT_SECONDS", 86400)),
++		BillingSettled: true,
++		ReservationUID: leaseIDFromContext(c),
+ 		CreatedAt:      now,
+ 		UpdatedAt:      now,
+ 	}
+-	if err := db.Create(task).Error; err != nil {
++	fillAsyncTaskAttribution(db, relayInfo, snapshot)
++	stored, _, err := apigxmodel.CreateAsyncTaskSnapshot(db, snapshot)
++	if err != nil {
+ 		common.SysError("relayhook: record async task snapshot failed: " + err.Error())
++		if queueErr := apigxmodel.QueueAsyncTaskSnapshotRepair(db, snapshot, "snapshot_insert_failed"); queueErr != nil {
++			common.SysError("relayhook: queue async task snapshot repair failed: " + queueErr.Error())
++			return
++		}
++		// The repair payload is now durable. Keep renewing the same reservation
++		// until reconciliation materializes the snapshot; the request defer must
++		// not release capacity while the upstream task is still running.
++		if snapshot.ReservationUID != "" && !TransferLeaseToAsyncTask(c, snapshot.ReservationUID) {
++			common.SysError("relayhook: async task repair lease transfer failed; reconciliation will restore it")
++		}
++		return
++	}
++	if stored == nil {
++		return
++	}
++	if apigxmodel.IsAsyncTaskTerminal(stored.Status) {
++		if err := releaseAsyncTaskReservation(stored.BaseTaskID); err != nil {
++			common.SysError("relayhook: release immediate async task reservation failed: " + err.Error())
++		}
++		return
++	}
++	if stored.ReservationUID != "" && !TransferLeaseToAsyncTask(c, stored.ReservationUID) {
++		common.SysError("relayhook: async task lease transfer failed; reconciliation will recover it")
++	}
++}
++
++func fillAsyncTaskAttribution(db *gorm.DB, relayInfo *relaycommon.RelayInfo, task *apigxmodel.AsyncTask) {
++	if db == nil || relayInfo == nil || task == nil {
++		return
++	}
++	var channel apigxmodel.Channel
++	if task.ChannelID > 0 && db.Unscoped().Where("id = ?", task.ChannelID).First(&channel).Error == nil {
++		task.ShareGroupID = channel.ShareGroupID
++		task.CapacityPolicyID = channel.CapacityPolicyID
++	}
++	var key apigxmodel.UpstreamKey
++	if task.UpstreamKeyID > 0 && db.Unscoped().Where("id = ?", task.UpstreamKeyID).First(&key).Error == nil {
++		task.UpstreamKeyCredentialVersion = key.CredentialVersion
++		task.UpstreamAccountID = key.UpstreamAccountID
++		if key.CapacityPolicyID > 0 {
++			task.CapacityPolicyID = key.CapacityPolicyID
++		}
++		if key.PriceRuleID > 0 {
++			task.PriceRuleID = key.PriceRuleID
++		}
++		_, _ = apigxmodel.ResolveUpstreamKeyCredential(db, key.ID, key.CredentialVersion)
++	}
++	modelName := strings.TrimSpace(relayInfo.OriginModelName)
++	if relayInfo.ChannelMeta != nil && strings.TrimSpace(relayInfo.UpstreamModelName) != "" {
++		modelName = strings.TrimSpace(relayInfo.UpstreamModelName)
++	}
++	if task.OfferingID == 0 && task.ChannelID > 0 && modelName != "" {
++		if offeringID, found, err := apigxmodel.FindOfferingByUpstreamModel(db, task.ChannelID, modelName); err == nil && found {
++			task.OfferingID = offeringID
++		}
++	}
++	if task.OfferingID > 0 {
++		var offering apigxmodel.ModelOffering
++		if db.Unscoped().Where("id = ?", task.OfferingID).First(&offering).Error == nil {
++			if task.PriceRuleID == 0 {
++				task.PriceRuleID = offering.PriceRuleID
++			}
++			if task.CapacityPolicyID == 0 {
++				task.CapacityPolicyID = offering.CapacityPolicyID
++			}
++		}
++	}
++	if task.UserID > 0 && task.BaseTokenID > 0 {
++		if platformKey, err := apigxmodel.GetAPIKeyByToken(db, task.UserID, task.BaseTokenID); err == nil {
++			task.ApiKeyID = platformKey.ID
++		}
++	}
++	if task.CapacityPolicyID > 0 {
++		var policy apigxmodel.CapacityPolicy
++		if db.Where("id = ?", task.CapacityPolicyID).First(&policy).Error == nil {
++			task.PolicyVersion = policy.PolicyVersion
++		}
++	}
++	if task.PriceRuleID > 0 {
++		var rule apigxmodel.PriceRule
++		if db.Where("id = ?", task.PriceRuleID).First(&rule).Error == nil {
++			task.FxRateMicro = rule.FxRateMicro
++		}
++	}
++	task.GrantVersion = resolveAsyncTaskGrantVersion(db, task)
++}
++
++func resolveAsyncTaskGrantVersion(db *gorm.DB, task *apigxmodel.AsyncTask) int64 {
++	if db == nil || task == nil || task.UserID <= 0 || (task.ShareGroupID <= 0 && task.OfferingID <= 0) {
++		return 0
++	}
++	now := common.GetTimestamp()
++	subjectSQL := "(subject_type = ? AND subject_id = ?)"
++	subjectArgs := []any{apigxmodel.GrantSubjectUser, task.UserID}
++	if task.ApiKeyID > 0 {
++		subjectSQL = "(" + subjectSQL + " OR (subject_type = ? AND subject_id = ?))"
++		subjectArgs = append(subjectArgs, apigxmodel.GrantSubjectAPIKey, task.ApiKeyID)
++	}
++	resourceClauses := make([]string, 0, 2)
++	resourceArgs := make([]any, 0, 4)
++	if task.ShareGroupID > 0 {
++		resourceClauses = append(resourceClauses, "(resource_type = ? AND resource_id = ?)")
++		resourceArgs = append(resourceArgs, apigxmodel.GrantResourceGroup, task.ShareGroupID)
++	}
++	if task.OfferingID > 0 {
++		resourceClauses = append(resourceClauses, "(resource_type = ? AND resource_id = ?)")
++		resourceArgs = append(resourceArgs, apigxmodel.GrantResourceOffering, task.OfferingID)
++	}
++	var version int64
++	query := db.Model(&apigxmodel.Grant{}).
++		Select("COALESCE(MAX(gift_version), 0)").
++		Where(subjectSQL, subjectArgs...).
++		Where("("+strings.Join(resourceClauses, " OR ")+")", resourceArgs...).
++		Where("revoked_at = 0 AND (expires_at = 0 OR expires_at > ?)", now)
++	if query.Scan(&version).Error != nil {
++		return 0
++	}
++	return version
++}
++
++func asyncTaskCapability(relayInfo *relaycommon.RelayInfo, action string) int {
++	if relayInfo == nil {
++		return 0
++	}
++	switch relayInfo.RelayMode {
++	case relayconstant.RelayModeVideoSubmit, relayconstant.RelayModeMidjourneyVideo:
++		return 8
++	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeMidjourneyImagine:
++		return 3
++	case relayconstant.RelayModeImagesEdits, relayconstant.RelayModeMidjourneyEdits:
++		return 4
++	case relayconstant.RelayModeAudioTranscription, relayconstant.RelayModeAudioTranslation:
++		return 5
++	case relayconstant.RelayModeAudioSpeech:
++		return 6
++	}
++	identity := strings.ToLower(strings.Join([]string{relayInfo.RequestURLPath, action}, " "))
++	switch {
++	case strings.Contains(identity, "video"):
++		return 8
++	case strings.Contains(identity, "image"), strings.Contains(identity, "midjourney"), strings.Contains(identity, "/mj"):
++		return 3
++	case strings.Contains(identity, "audio"), strings.Contains(identity, "music"), strings.Contains(identity, "suno"):
++		return 6
++	default:
++		return 0
++	}
++}
++
++func asyncStatusFromBase(status string) int {
++	switch strings.ToUpper(strings.TrimSpace(status)) {
++	case "SUCCESS":
++		return AsyncTaskStatusSucceeded
++	case "FAILURE":
++		return AsyncTaskStatusFailed
++	case "UNKNOWN":
++		return AsyncTaskStatusUnknown
++	default:
++		return AsyncTaskStatusRunning
++	}
++}
++
++// ResolveAsyncTaskCredential 返回任务提交时绑定的凭据版本。存在 APIGX 快照时任何缺失都失败关闭，
++// 调用方不得退回当前渠道 Key；没有快照表示底座历史/非 APIGX 任务，可沿用兼容路径。
++func ResolveAsyncTaskCredential(baseTaskID int64, baseChannelID ...int) (*AsyncTaskCredential, bool, error) {
++	db := asyncTaskDBProvider()
++	if db == nil {
++		return nil, false, nil
++	}
++	task, err := apigxmodel.GetAsyncTaskByBaseTaskID(db, baseTaskID)
++	if errors.Is(err, apigxmodel.ErrNotFound) {
++		if repaired, found, repairErr := repairAsyncTaskSnapshot(db, baseTaskID); repairErr != nil {
++			return nil, true, repairErr
++		} else if found {
++			task = repaired
++			err = nil
++		}
++	}
++	if errors.Is(err, apigxmodel.ErrNotFound) {
++		if len(baseChannelID) > 0 && baseChannelID[0] > 0 {
++			var count int64
++			channelErr := db.Model(&apigxmodel.Channel{}).
++				Where("base_channel_id = ?", baseChannelID[0]).Count(&count).Error
++			if channelErr != nil {
++				if common.GetEnvOrDefaultBool("APIGX_SHARED_MODE", false) {
++					return nil, true, channelErr
++				}
++				return nil, false, nil
++			}
++			if count > 0 {
++				return nil, true, errors.New("apigx: managed async task credential snapshot missing")
++			}
++		}
++		return nil, false, nil
++	}
++	if err != nil {
++		// A regular New API deployment may never initialize APIGX and older tests may
++		// leave its optional handle closed. Preserve that compatibility only while
++		// shared mode is disabled. In shared mode, an unreadable snapshot store must
++		// fail closed because falling back to the channel's current key can cross a
++		// credential rotation boundary.
++		if !common.GetEnvOrDefaultBool("APIGX_SHARED_MODE", false) {
++			return nil, false, nil
++		}
++		return nil, true, err
++	}
++	credential, err := apigxmodel.ResolveUpstreamKeyCredential(db, task.UpstreamKeyID, task.UpstreamKeyCredentialVersion)
++	if err != nil {
++		return nil, true, fmt.Errorf("resolve credential snapshot: %w", err)
++	}
++	secret, err := secretbox.Decrypt(credential.SecretRef)
++	if err != nil {
++		return nil, true, fmt.Errorf("decrypt credential snapshot: %w", err)
++	}
++	return &AsyncTaskCredential{Snapshot: task, Secret: secret}, true, nil
++}
++
++// SyncAsyncTaskFromBase 把底座轮询结果单向推进到 APIGX 状态机，并在终态只释放一次租约。
++func SyncAsyncTaskFromBase(baseTaskID int64, baseStatus, reason string, startAt, finishAt int64) error {
++	db := asyncTaskDBProvider()
++	if db == nil || baseTaskID <= 0 {
++		return nil
++	}
++	next := asyncStatusFromBase(baseStatus)
++	_, _, err := apigxmodel.AdvanceAsyncTaskStatus(db, baseTaskID, next, sanitizeAsyncReason(reason), startAt, finishAt)
++	if errors.Is(err, apigxmodel.ErrNotFound) {
++		return nil
++	}
++	if err != nil && !errors.Is(err, apigxmodel.ErrAsyncTaskTransition) &&
++		!common.GetEnvOrDefaultBool("APIGX_SHARED_MODE", false) {
++		// APIGX is optional outside shared mode; a stale/closed optional handle
++		// must not break the base task polling loop.
++		return nil
++	}
++	if err != nil && !errors.Is(err, apigxmodel.ErrAsyncTaskTransition) {
++		return err
++	}
++	if apigxmodel.IsAsyncTaskTerminal(next) {
++		return releaseAsyncTaskReservation(baseTaskID)
++	}
++	return nil
++}
++
++// SyncAsyncTaskCanceled records a cancellation only after the selected adaptor
++// confirms the upstream terminal state. It shares the same idempotent release
++// path as success/failure callbacks.
++func SyncAsyncTaskCanceled(baseTaskID int64, reason string, finishAt int64) error {
++	db := asyncTaskDBProvider()
++	if db == nil || baseTaskID <= 0 {
++		return nil
++	}
++	_, _, err := apigxmodel.AdvanceAsyncTaskStatus(db, baseTaskID, AsyncTaskStatusCanceled,
++		sanitizeAsyncReason(reason), 0, finishAt)
++	if errors.Is(err, apigxmodel.ErrNotFound) {
++		return nil
++	}
++	if err != nil && !errors.Is(err, apigxmodel.ErrAsyncTaskTransition) &&
++		!common.GetEnvOrDefaultBool("APIGX_SHARED_MODE", false) {
++		return nil
++	}
++	if err != nil && !errors.Is(err, apigxmodel.ErrAsyncTaskTransition) {
++		return err
++	}
++	return releaseAsyncTaskReservation(baseTaskID)
++}
++
++func releaseAsyncTaskReservation(baseTaskID int64) error {
++	db := asyncTaskDBProvider()
++	if db == nil {
++		return nil
++	}
++	task, claimed, err := apigxmodel.ClaimAsyncTaskReservationRelease(db, baseTaskID)
++	if err != nil || !claimed || task == nil {
++		return err
++	}
++	if err := releaseAsyncTaskLease(task.ReservationUID); err != nil {
++		return err
++	}
++	attemptState := apigxmodel.AttemptStateSucceeded
++	httpStatus := http.StatusOK
++	if task.Status != AsyncTaskStatusSucceeded {
++		attemptState = apigxmodel.AttemptStateFailed
++		httpStatus = http.StatusBadGateway
++	}
++	if task.Status == AsyncTaskStatusCanceled {
++		httpStatus = 499
++	}
++	if err := apigxmodel.CompleteAttempt(db, task.ReservationUID, attemptState, httpStatus); err != nil {
++		common.SysError("relayhook: complete async attempt failed: " + err.Error())
++	}
++	return apigxmodel.MarkAsyncTaskReservationReleased(db, baseTaskID)
++}
++
++// ReconcileAsyncTasks 恢复进程重启后的租约续期，并补做终态释放。超时任务进入对账态，
++// 仍由同一轮询链查询真实上游终态，不能因本地超时就假设上游已经停止。
++func ReconcileAsyncTasks(ctx context.Context) error {
++	db := asyncTaskDBProvider()
++	if db == nil {
++		return nil
++	}
++	pending, err := apigxmodel.ListPendingAsyncTaskSnapshotRepairs(db, 500)
++	if err != nil {
++		return err
++	}
++	for i := range pending {
++		if ctx != nil {
++			select {
++			case <-ctx.Done():
++				return ctx.Err()
++			default:
++			}
++		}
++		if _, _, repairErr := repairAsyncTaskSnapshot(db, pending[i].BaseTaskID); repairErr != nil {
++			common.SysError("relayhook: repair async task snapshot failed: " + repairErr.Error())
++		}
++	}
++	now := common.GetTimestamp()
++	tasks, err := apigxmodel.ListAsyncTasksForReconciliation(db, now, 500)
++	if err != nil {
++		return err
++	}
++	for i := range tasks {
++		if ctx != nil {
++			select {
++			case <-ctx.Done():
++				return ctx.Err()
++			default:
++			}
++		}
++		task := &tasks[i]
++		if apigxmodel.IsAsyncTaskTerminal(task.Status) || task.ReservationReleaseState == apigxmodel.AsyncTaskReservationReleasing {
++			if err := releaseAsyncTaskReservation(task.BaseTaskID); err != nil {
++				common.SysError("relayhook: reconcile async task release failed: " + err.Error())
++			}
++			continue
++		}
++		if task.TimeoutAt > 0 && task.TimeoutAt <= now && task.Status != AsyncTaskStatusReconciling {
++			_, _, _ = apigxmodel.AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusReconciling, "timeout_pending_upstream_reconciliation", 0, 0)
++		}
++		if err := restoreAsyncTaskLease(task); err != nil {
++			_, _, _ = apigxmodel.AdvanceAsyncTaskStatus(db, task.BaseTaskID, AsyncTaskStatusReconciling, "capacity_restore_failed", 0, 0)
++			common.SysError("relayhook: restore async task lease failed: " + err.Error())
++		}
++	}
++	return nil
++}
++
++func HasAsyncTasksForReconciliation() bool {
++	db := asyncTaskDBProvider()
++	if db == nil {
++		return false
++	}
++	if apigxmodel.HasPendingAsyncTaskSnapshotRepairs(db) {
++		return true
++	}
++	var count int64
++	err := db.Model(&apigxmodel.AsyncTask{}).
++		Where("reservation_release_state = ? OR status IN ?", apigxmodel.AsyncTaskReservationReleasing,
++			[]int{AsyncTaskStatusRunning, AsyncTaskStatusUnknown, AsyncTaskStatusReconciling}).
++		Count(&count).Error
++	return err == nil && count > 0
++}
++
++func repairAsyncTaskSnapshot(db *gorm.DB, baseTaskID int64) (*apigxmodel.AsyncTask, bool, error) {
++	pending, found, err := apigxmodel.GetPendingAsyncTaskSnapshotRepair(db, baseTaskID)
++	if err != nil || !found {
++		return nil, found, err
++	}
++	stored, _, err := apigxmodel.CreateAsyncTaskSnapshot(db, pending)
++	if err != nil {
++		return nil, true, err
++	}
++	if err := apigxmodel.MarkAsyncTaskSnapshotRepairCompleted(db, stored); err != nil {
++		return nil, true, err
++	}
++	if apigxmodel.IsAsyncTaskTerminal(stored.Status) {
++		if err := releaseAsyncTaskReservation(stored.BaseTaskID); err != nil {
++			return nil, true, err
++		}
++	}
++	return stored, true, nil
++}
++
++func sanitizeAsyncReason(reason string) string {
++	reason = strings.TrimSpace(reason)
++	if len(reason) > 128 {
++		reason = reason[:128]
+ 	}
++	return reason
+ }
+diff --git a/apigx/relayhook/async_task_test.go b/apigx/relayhook/async_task_test.go
+new file mode 100644
+index 0000000..40c0000
+--- /dev/null
++++ b/apigx/relayhook/async_task_test.go
+@@ -0,0 +1,352 @@
++package relayhook
++
++import (
++	"context"
++	"errors"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/QuantumNous/new-api/apigx/capacity"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/secretbox"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	relayconstant "github.com/QuantumNous/new-api/relay/constant"
++	"github.com/alicebob/miniredis/v2"
++	"github.com/gin-gonic/gin"
++	"github.com/glebarez/sqlite"
++	"github.com/go-redis/redis/v8"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func withAsyncTaskDB(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	previous := asyncTaskDBProvider
++	asyncTaskDBProvider = func() *gorm.DB { return db }
++	t.Cleanup(func() { asyncTaskDBProvider = previous })
++}
++
++func TestResolveAsyncTaskCredentialOptionalDatabaseCompatibility(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "closed.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	require.NoError(t, sqlDB.Close())
++	withAsyncTaskDB(t, db)
++
++	t.Run("ordinary mode treats unavailable optional store as unmanaged", func(t *testing.T) {
++		t.Setenv("APIGX_SHARED_MODE", "false")
++		credential, managed, resolveErr := ResolveAsyncTaskCredential(101)
++		assert.NoError(t, resolveErr)
++		assert.False(t, managed)
++		assert.Nil(t, credential)
++	})
++
++	t.Run("shared mode fails closed", func(t *testing.T) {
++		t.Setenv("APIGX_SHARED_MODE", "true")
++		credential, managed, resolveErr := ResolveAsyncTaskCredential(101)
++		assert.Error(t, resolveErr)
++		assert.True(t, managed)
++		assert.Nil(t, credential)
++	})
++}
++
++func TestResolveAsyncTaskCredentialNeverFallsBackAfterSnapshotExists(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "snapshot.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}, &apigxmodel.UpstreamKey{}, &apigxmodel.UpstreamKeyCredential{}))
++	require.NoError(t, db.Create(&apigxmodel.AsyncTask{
++		PublicTaskID: "apigx_202", BaseTaskID: 202,
++		UpstreamKeyID: 303, UpstreamKeyCredentialVersion: 4,
++	}).Error)
++	withAsyncTaskDB(t, db)
++	t.Setenv("APIGX_SHARED_MODE", "false")
++
++	credential, managed, resolveErr := ResolveAsyncTaskCredential(202)
++	assert.Error(t, resolveErr)
++	assert.True(t, managed, "an existing snapshot must never fall back to the channel's current key")
++	assert.Nil(t, credential)
++}
++
++func TestResolveAsyncTaskCredentialFailsClosedForManagedChannelWithoutSnapshot(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "managed.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}, &apigxmodel.Channel{}, &apigxmodel.AuditEvent{}))
++	require.NoError(t, db.Create(&apigxmodel.Channel{BaseChannelID: 404, PublicID: "managed-404"}).Error)
++	withAsyncTaskDB(t, db)
++	t.Setenv("APIGX_SHARED_MODE", "false")
++
++	credential, managed, resolveErr := ResolveAsyncTaskCredential(999, 404)
++	assert.Error(t, resolveErr)
++	assert.True(t, managed)
++	assert.Nil(t, credential)
++
++	credential, managed, resolveErr = ResolveAsyncTaskCredential(999, 405)
++	assert.NoError(t, resolveErr)
++	assert.False(t, managed)
++	assert.Nil(t, credential)
++}
++
++func TestAsyncTaskCapabilityUsesProtocolEvidence(t *testing.T) {
++	assert.Equal(t, 8, asyncTaskCapability(&relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeVideoSubmit}, ""))
++	assert.Equal(t, 4, asyncTaskCapability(&relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesEdits}, ""))
++	assert.Equal(t, 6, asyncTaskCapability(&relaycommon.RelayInfo{RequestURLPath: "/suno/submit/music"}, "generate"))
++	assert.Equal(t, 0, asyncTaskCapability(&relaycommon.RelayInfo{RequestURLPath: "/v1/tasks/custom"}, "generate"),
++		"unknown plugin capabilities must remain unknown rather than being mislabeled as video")
++}
++
++func TestRecordAsyncTaskSnapshotQueuesRepairAndKeepsLease(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "record-repair.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(apigxmodel.AllModels()...))
++	withAsyncTaskDB(t, db)
++
++	channel := &apigxmodel.Channel{PublicID: "repair-channel", OwnerUserID: 91, BaseChannelID: 9191}
++	require.NoError(t, db.Create(channel).Error)
++	const leaseID = "snapshot-repair-lease"
++	lease := &Lease{id: leaseID, stop: make(chan struct{})}
++	c, _ := gin.CreateTestContext(nil)
++	common.SetContextKey(c, constant.ContextKeyChannelId, int(channel.BaseChannelID))
++	c.Set(leaseContextKey, lease)
++
++	callbackName := "test:fail_async_snapshot_only"
++	require.NoError(t, db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
++		if tx.Statement.Table == (apigxmodel.AsyncTask{}).TableName() {
++			tx.AddError(errors.New("injected async snapshot failure"))
++		}
++	}))
++	RecordAsyncTaskSnapshot(c, &relaycommon.RelayInfo{
++		UserId: 77, TokenId: 88,
++		ChannelMeta: &relaycommon.ChannelMeta{ChannelId: int(channel.BaseChannelID)},
++	}, 76001, "upstream-76001", "generate", "IN_PROGRESS", 0, 0)
++	require.NoError(t, db.Callback().Create().Remove(callbackName))
++
++	_, err = apigxmodel.GetAsyncTaskByBaseTaskID(db, 76001)
++	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
++	assert.True(t, apigxmodel.HasPendingAsyncTaskSnapshotRepairs(db))
++	_, transferred := asyncLeases.Load(leaseID)
++	assert.True(t, transferred)
++	assert.Empty(t, leaseIDFromContext(c), "request lifecycle must no longer own the durable task lease")
++
++	require.NoError(t, ReconcileAsyncTasks(context.Background()))
++	stored, err := apigxmodel.GetAsyncTaskByBaseTaskID(db, 76001)
++	require.NoError(t, err)
++	assert.Equal(t, "upstream-76001", stored.UpstreamTaskID)
++	assert.False(t, apigxmodel.HasPendingAsyncTaskSnapshotRepairs(db))
++	asyncLeases.Delete(leaseID)
++}
++
++func TestResolveAsyncTaskGrantVersionIsScopedToSelectedResource(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "grant.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(&apigxmodel.Grant{}))
++	active := []apigxmodel.Grant{
++		{SubjectType: apigxmodel.GrantSubjectUser, SubjectID: 77, ResourceType: apigxmodel.GrantResourceGroup, ResourceID: 88, GiftVersion: 3},
++		{SubjectType: apigxmodel.GrantSubjectAPIKey, SubjectID: 99, ResourceType: apigxmodel.GrantResourceOffering, ResourceID: 111, GiftVersion: 4},
++		{SubjectType: apigxmodel.GrantSubjectUser, SubjectID: 77, ResourceType: apigxmodel.GrantResourceGroup, ResourceID: 999, GiftVersion: 90},
++		{SubjectType: apigxmodel.GrantSubjectUser, SubjectID: 77, ResourceType: apigxmodel.GrantResourceOffering, ResourceID: 111, GiftVersion: 80, RevokedAt: 1},
++	}
++	require.NoError(t, db.Create(&active).Error)
++
++	version := resolveAsyncTaskGrantVersion(db, &apigxmodel.AsyncTask{
++		UserID: 77, ApiKeyID: 99, ShareGroupID: 88, OfferingID: 111,
++	})
++	assert.EqualValues(t, 4, version)
++}
++
++func TestReconcileAsyncTaskRestoresLeaseAndWaitsForRealTerminalState(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "reconcile.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}, &apigxmodel.Attempt{}, &apigxmodel.AuditEvent{}))
++	withAsyncTaskDB(t, db)
++
++	mini := miniredis.RunT(t)
++	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
++	previousRedis := common.RDB
++	common.RDB = rdb
++	t.Cleanup(func() {
++		common.RDB = previousRedis
++		_ = rdb.Close()
++	})
++
++	const leaseID = "async-recovery-lease"
++	dimension := capacity.AsyncTaskSlot("channel", 7001)
++	ctrl := capacity.New(rdb)
++	require.NoError(t, ctrl.Reserve(context.Background(), leaseID, []capacity.Dimension{
++		{Key: dimension, Limit: 1, Amount: 1},
++	}, 90*time.Second))
++	require.NoError(t, db.Create(&apigxmodel.AsyncTask{
++		PublicTaskID: "apigx_recovery", BaseTaskID: 72001,
++		Status: apigxmodel.AsyncTaskStatusRunning, TimeoutAt: common.GetTimestamp() - 1,
++		ReservationUID: leaseID,
++	}).Error)
++
++	require.NoError(t, ReconcileAsyncTasks(context.Background()))
++	_, restored := asyncLeases.Load(leaseID)
++	require.True(t, restored, "reconciliation must resume renewal for a live task lease")
++	usage, err := ctrl.Usage(context.Background(), dimension)
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, usage)
++	reloaded, err := apigxmodel.GetAsyncTaskByBaseTaskID(db, 72001)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AsyncTaskStatusReconciling, reloaded.Status)
++	assert.False(t, apigxmodel.IsAsyncTaskTerminal(reloaded.Status), "local timeout must not pretend the upstream stopped")
++
++	require.NoError(t, SyncAsyncTaskFromBase(72001, "SUCCESS", "completed", 0, common.GetTimestamp()))
++	usage, err = ctrl.Usage(context.Background(), dimension)
++	require.NoError(t, err)
++	assert.Zero(t, usage)
++	_, restored = asyncLeases.Load(leaseID)
++	assert.False(t, restored)
++
++	// A duplicate terminal callback cannot release another task's capacity or
++	// move the state again.
++	require.NoError(t, SyncAsyncTaskFromBase(72001, "SUCCESS", "duplicate", 0, common.GetTimestamp()))
++	usage, err = ctrl.Usage(context.Background(), dimension)
++	require.NoError(t, err)
++	assert.Zero(t, usage)
++}
++
++func TestResolveAsyncTaskCredentialSurvivesKeyRotationAndDeletion(t *testing.T) {
++	t.Setenv(secretbox.KeyEnvVar, strings.Repeat("4a", secretbox.KeyBytes))
++	secretbox.ResetKeyCacheForTest()
++	t.Cleanup(secretbox.ResetKeyCacheForTest)
++
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "history.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(
++		&apigxmodel.ShareGroup{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{},
++		&apigxmodel.UpstreamKeyCredential{}, &apigxmodel.AsyncTask{},
++	))
++	withAsyncTaskDB(t, db)
++
++	const owner = int64(88)
++	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "history"}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	channel := &apigxmodel.Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "history", BaseChannelID: 808}
++	require.NoError(t, apigxmodel.CreateChannel(db, channel))
++	v1Envelope, err := secretbox.Encrypt("upstream-secret-v1")
++	require.NoError(t, err)
++	v1Fingerprint, err := secretbox.Fingerprint("upstream-secret-v1")
++	require.NoError(t, err)
++	key := &apigxmodel.UpstreamKey{
++		ChannelID: channel.ID, StableKeyID: "stable-history", SecretRef: v1Envelope,
++		SecretFingerprint: v1Fingerprint, Status: apigxmodel.UpstreamKeyStatusEnabled,
++	}
++	require.NoError(t, apigxmodel.CreateUpstreamKey(db, owner, key))
++	require.NoError(t, db.Create(&apigxmodel.AsyncTask{
++		PublicTaskID: "history-v1", BaseTaskID: 73001,
++		UpstreamKeyID: key.ID, UpstreamKeyCredentialVersion: 1,
++	}).Error)
++
++	v2Envelope, err := secretbox.Encrypt("upstream-secret-v2")
++	require.NoError(t, err)
++	v2Fingerprint, err := secretbox.Fingerprint("upstream-secret-v2")
++	require.NoError(t, err)
++	rotated, err := apigxmodel.RotateUpstreamKeyCredential(db, owner, key.ID, v2Envelope, v2Fingerprint)
++	require.NoError(t, err)
++	require.EqualValues(t, 2, rotated.CredentialVersion)
++	require.NoError(t, db.Create(&apigxmodel.AsyncTask{
++		PublicTaskID: "history-v2", BaseTaskID: 73002,
++		UpstreamKeyID: key.ID, UpstreamKeyCredentialVersion: 2,
++	}).Error)
++	require.NoError(t, apigxmodel.DeleteUpstreamKey(db, owner, key.ID))
++
++	v1, managed, err := ResolveAsyncTaskCredential(73001, 808)
++	require.NoError(t, err)
++	require.True(t, managed)
++	require.NotNil(t, v1)
++	assert.Equal(t, "upstream-secret-v1", v1.Secret)
++	v2, managed, err := ResolveAsyncTaskCredential(73002, 808)
++	require.NoError(t, err)
++	require.True(t, managed)
++	require.NotNil(t, v2)
++	assert.Equal(t, "upstream-secret-v2", v2.Secret)
++}
++
++func TestResolveAsyncTaskCredentialRepairsDurableMissingSnapshot(t *testing.T) {
++	t.Setenv(secretbox.KeyEnvVar, strings.Repeat("5b", secretbox.KeyBytes))
++	secretbox.ResetKeyCacheForTest()
++	t.Cleanup(secretbox.ResetKeyCacheForTest)
++
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "repair.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(
++		&apigxmodel.AuditEvent{}, &apigxmodel.AsyncTask{},
++		&apigxmodel.UpstreamKey{}, &apigxmodel.UpstreamKeyCredential{},
++	))
++	withAsyncTaskDB(t, db)
++
++	envelope, err := secretbox.Encrypt("repair-secret")
++	require.NoError(t, err)
++	require.NoError(t, db.Create(&apigxmodel.UpstreamKeyCredential{
++		UpstreamKeyID: 909, CredentialVersion: 3, SecretRef: envelope,
++	}).Error)
++	snapshot := &apigxmodel.AsyncTask{
++		PublicTaskID: "apigx_repair_909", BaseTaskID: 75001,
++		UpstreamKeyID: 909, UpstreamKeyCredentialVersion: 3,
++		Status: apigxmodel.AsyncTaskStatusRunning,
++	}
++	require.NoError(t, apigxmodel.QueueAsyncTaskSnapshotRepair(db, snapshot, "snapshot_insert_failed"))
++
++	credential, managed, err := ResolveAsyncTaskCredential(snapshot.BaseTaskID)
++	require.NoError(t, err)
++	require.True(t, managed)
++	require.NotNil(t, credential)
++	assert.Equal(t, "repair-secret", credential.Secret)
++	stored, err := apigxmodel.GetAsyncTaskByBaseTaskID(db, snapshot.BaseTaskID)
++	require.NoError(t, err)
++	assert.EqualValues(t, 909, stored.UpstreamKeyID)
++	assert.False(t, apigxmodel.HasPendingAsyncTaskSnapshotRepairs(db))
++}
++
++func TestSyncAsyncTaskCanceledKeepsDistinctTerminalState(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "canceled.db")), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := db.DB()
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = sqlDB.Close() })
++	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}))
++	withAsyncTaskDB(t, db)
++	require.NoError(t, db.Create(&apigxmodel.AsyncTask{
++		PublicTaskID: "apigx_canceled", BaseTaskID: 74001,
++		Status: apigxmodel.AsyncTaskStatusRunning,
++	}).Error)
++
++	require.NoError(t, SyncAsyncTaskCanceled(74001, "user_canceled", common.GetTimestamp()))
++	stored, err := apigxmodel.GetAsyncTaskByBaseTaskID(db, 74001)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AsyncTaskStatusCanceled, stored.Status)
++	assert.Equal(t, "user_canceled", stored.StatusReason)
++
++	require.NoError(t, SyncAsyncTaskCanceled(74001, "duplicate", common.GetTimestamp()))
++	stored, err = apigxmodel.GetAsyncTaskByBaseTaskID(db, 74001)
++	require.NoError(t, err)
++	assert.Equal(t, "user_canceled", stored.StatusReason, "duplicate callbacks must not rewrite terminal evidence")
++}
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+index d070e51..1a7fdec 100644
+--- a/apigx/relayhook/breaker_guard.go
++++ b/apigx/relayhook/breaker_guard.go
+@@ -189,43 +189,42 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
+ //
+ // # 恢复
+ //
+-// 熔断不再打开时调用本函数即可**回收我们自己的标记**（只删值等于 StatusBreakerOpen 的格子，
+-// 不碰底座自己的禁用原因，也不碰容量饱和标记）。
++// 熔断不再打开时调用本函数即可**回收熔断来源**，不碰底座自己的禁用原因，
++// 也不碰容量饱和来源；兼容单值表由 ChannelInfo 重新合并。
+ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 	var channel basemodel.Channel
+ 	if err := db.Where("id = ?", channelID).First(&channel).Error; err != nil {
+ 		return
+ 	}
+-	indices := channel.ChannelInfo.MultiKeyStatusList
+ 	keyCount := channel.ChannelInfo.MultiKeySize
+ 	if !channel.ChannelInfo.IsMultiKey || keyCount <= 0 {
+ 		return // 非多 Key 渠道：没有可标记的条目（这类渠道的改道由底座自身的失败处理负责）
+ 	}
++	hadOurMark := channel.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen)
++	if !open {
++		if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
++			// 冷却未过时保持当前不可用状态；不能先删标记再返回，否则后续无法识别并恢复渠道。
++			if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
++				return
++			}
++			breakerOpenedAt.Delete(channelID)
++		}
++		if !hadOurMark {
++			return
++		}
++	}
+ 
+-	// 复用 `channelpool.MergeKeyStatusList`：那份"只回收自己写过的格子、保留别人标记"
+-	// 的逻辑已经有纯函数级用例（T2.6），在这里再写一遍等于把同一件事实现两次，
+-	// 而且第二份不会有测试覆盖。
+-	var next map[int]int
++	// 复用 ChannelInfo 的来源合并：熔断、容量和底座健康分别持有标记，
++	// 恢复某个来源后重新生成兼容单值表。
+ 	if open {
+ 		all := make([]int, 0, keyCount)
+ 		for index := range keyCount {
+ 			all = append(all, index)
+ 		}
+-		next = channelpool.MergeKeyStatusList(indices, nil, all, apigxmodel.StatusBreakerOpen)
++		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, all)
+ 	} else {
+-		// 恢复：把"上一轮我们标记过的索引"交给它回收（只删值等于我们标记的格子）
+-		ours := make([]int, 0, len(indices))
+-		for index, status := range indices {
+-			if status == apigxmodel.StatusBreakerOpen {
+-				ours = append(ours, index)
+-			}
+-		}
+-		if len(ours) == 0 {
+-			return
+-		}
+-		next = channelpool.MergeKeyStatusList(indices, ours, nil, apigxmodel.StatusBreakerOpen)
++		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
+ 	}
+-	channel.ChannelInfo.MultiKeyStatusList = next
+ 
+ 	// **刻意不动权重**：曾经的方案是"把熔断渠道的权重压到接近零"，但实测与底座语义相冲突——
+ 	// 底座对权重有 **+10 平滑**，权重 1 与 1 之间的分配是 11:11（≈50%），
+@@ -241,12 +240,6 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 		if _, loaded := breakerOpenedAt.Load(channelID); !loaded {
+ 			breakerOpenedAt.Store(channelID, time.Now())
+ 		}
+-	} else if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
+-		// 冷却未过：**保持不可用**，不因为"窗口里没有新失败"就恢复（那会造成抖动）
+-		if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
+-			return
+-		}
+-		breakerOpenedAt.Delete(channelID)
+ 	}
+ 
+ 	// **真正让底座不选中它**（修法①）：标记只让"选中后立刻失败"，不足以改道；
+@@ -271,7 +264,7 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 		// 避免把底座因鉴权失败等原因禁用的渠道顺手恢复。
+ 		var now basemodel.Channel
+ 		if err := db.Where("id = ?", channelID).First(&now).Error; err == nil {
+-			if now.Status == common.ChannelStatusAutoDisabled && hasOurBreakerMark(now.ChannelInfo.MultiKeyStatusList) {
++			if now.Status == common.ChannelStatusAutoDisabled && hadOurMark {
+ 				if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+ 					Update("status", common.ChannelStatusEnabled).Error; err != nil {
+ 					common.SysError("apigx breaker: restore channel status failed: " + err.Error())
+@@ -292,13 +285,3 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 		basemodel.InitChannelCache()
+ 	}
+ }
+-
+-// hasOurBreakerMark 判断状态表里是否还有我们写的熔断标记。
+-func hasOurBreakerMark(statusList map[int]int) bool {
+-	for _, status := range statusList {
+-		if status == apigxmodel.StatusBreakerOpen {
+-			return true
+-		}
+-	}
+-	return false
+-}
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+index 74de862..651530d 100644
+--- a/apigx/relayhook/breaker_guard_test.go
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -380,38 +380,48 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
+ 	var prep basemodel.Channel
+ 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&prep).Error)
+ 	prep.ChannelInfo = basemodel.ChannelInfo{
+-		IsMultiKey:   true,
+-		MultiKeySize: 3,
++		IsMultiKey:        true,
++		MultiKeySize:      3,
++		MultiKeyStableIDs: []string{"stable-a", "stable-b", "stable-c"},
+ 		MultiKeyStatusList: map[int]int{
+ 			1: common.ChannelStatusAutoDisabled,   // 底座因鉴权失败自动禁用
+ 			2: apigxmodel.StatusCapacitySaturated, // 容量饱和（另一个功能写的）
+ 		},
++		MultiKeyStatusByStableID: map[string]int{
++			"stable-b": common.ChannelStatusAutoDisabled,
++			"stable-c": apigxmodel.StatusCapacitySaturated,
++		},
+ 	}
+ 	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", env.baseChannelID).
+ 		Update("channel_info", prep.ChannelInfo).Error)
+ 
+-	// 打开：三个条目全部标记为熔断
++	// 打开：三个稳定 Key 都持有熔断来源；已有底座健康/容量状态仍独立保留。
+ 	syncBreakerMarks(env.db, env.baseChannelID, true)
+ 	var marked basemodel.Channel
+ 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&marked).Error)
+ 	for index := range 3 {
+-		assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusList[index],
+-			"索引 %d 应被标记为熔断（底座据此跳过该渠道的所有 Key）", index)
++		assert.NotEqual(t, common.ChannelStatusEnabled, marked.ChannelInfo.MultiKeyStatusAt(index),
++			"索引 %d 应被熔断来源标记为不可用", index)
++		stableID, ok := marked.ChannelInfo.MultiKeyStableIDAt(index)
++		require.True(t, ok)
++		assert.Equal(t, apigxmodel.StatusBreakerOpen,
++			marked.ChannelInfo.MultiKeyStatusSourcesByStableID[stableID]["mark:91"])
+ 	}
++	assert.Equal(t, common.ChannelStatusAutoDisabled, marked.ChannelInfo.MultiKeyStatusAt(1))
++	assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusAt(2),
++		"容量和熔断并存时兼容镜像应确定地展示更高标记")
+ 
+ 	// 恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
++	breakerOpenedAt.Store(env.baseChannelID, time.Now().Add(-breakerCooldown-time.Second))
+ 	syncBreakerMarks(env.db, env.baseChannelID, false)
+ 	var restored basemodel.Channel
+ 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&restored).Error)
+-	// 恢复后**我们的**标记必须消失（缺失即启用）。
+-	//
+-	// "不误删底座自己的禁用原因、也不误删容量饱和标记"这条由 `channelpool.MergeKeyStatusList`
+-	// 的纯函数用例覆盖（本函数就是复用它）；这里不重复断言在 SQLite 测试环境里
+-	// 读回其他状态值（该环境对 map 字段的写回有已知限制，见上方 setup 注释）。
+-	for index := range 3 {
+-		_, stillMarked := restored.ChannelInfo.MultiKeyStatusList[index]
+-		assert.False(t, stillMarked, "索引 %d 的熔断标记应被回收", index)
+-	}
++	assert.False(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
++	assert.Equal(t, common.ChannelStatusEnabled, restored.ChannelInfo.MultiKeyStatusAt(0))
++	assert.Equal(t, common.ChannelStatusAutoDisabled, restored.ChannelInfo.MultiKeyStatusAt(1),
++		"熔断恢复不得复活底座已经因鉴权失败禁用的 Key")
++	assert.Equal(t, apigxmodel.StatusCapacitySaturated, restored.ChannelInfo.MultiKeyStatusAt(2),
++		"熔断恢复不得清掉容量来源")
+ }
+ 
+ // 非多 Key 渠道不标记（没有可标记的条目）。
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index 7b79a08..605e174 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -48,6 +48,7 @@ type Config struct {
+ 
+ var (
+ 	currentConfig atomic.Value // 存 Config
++	asyncLeases   sync.Map     // reservation UID -> *Lease，任务终态后幂等释放
+ 	// leaseTTL 是容量租约时长，长流由后台协程续租。
+ 	//
+ 	// 注意粒度：TTL 以**秒**为单位下发（`ttl/time.Second`），因此小于 1 秒的值会被截断为 0
+@@ -437,6 +438,119 @@ func ReleaseFromContext(c *gin.Context) {
+ 	c.Set(leaseContextKey, (*Lease)(nil))
+ }
+ 
++func leaseIDFromContext(c *gin.Context) string {
++	if c == nil {
++		return ""
++	}
++	value, exists := c.Get(leaseContextKey)
++	if !exists {
++		return ""
++	}
++	lease, ok := value.(*Lease)
++	if !ok || lease == nil {
++		return ""
++	}
++	return lease.ID()
++}
++
++// TransferLeaseToAsyncTask 把请求租约从 Gin 生命周期移交给任务生命周期。
++// 移交后 Distributor 的 defer 看见空上下文，不会在提交响应结束时释放。
++func TransferLeaseToAsyncTask(c *gin.Context, expectedUID string) bool {
++	if c == nil || expectedUID == "" {
++		return false
++	}
++	value, exists := c.Get(leaseContextKey)
++	if !exists {
++		return false
++	}
++	lease, ok := value.(*Lease)
++	if !ok || lease == nil || lease.ID() != expectedUID {
++		return false
++	}
++	asyncLeases.Store(expectedUID, lease)
++	c.Set(leaseContextKey, (*Lease)(nil))
++	return true
++}
++
++func releaseAsyncTaskLease(uid string) error {
++	if uid == "" {
++		return nil
++	}
++	if value, ok := asyncLeases.LoadAndDelete(uid); ok {
++		if lease, valid := value.(*Lease); valid && lease != nil {
++			lease.Release()
++			return nil
++		}
++	}
++	if common.RDB == nil {
++		return capacity.ErrRedisUnavailable
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	return capacity.New(common.RDB).Release(ctx, uid)
++}
++
++func restoreAsyncTaskLease(task *apigxmodel.AsyncTask) error {
++	if task == nil || task.ReservationUID == "" {
++		return nil
++	}
++	if _, exists := asyncLeases.Load(task.ReservationUID); exists {
++		return nil
++	}
++	if common.RDB == nil {
++		return capacity.ErrRedisUnavailable
++	}
++	ctrl := capacity.New(common.RDB)
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	if alive, err := ctrl.Renew(ctx, task.ReservationUID, leaseTTL); err != nil {
++		return err
++	} else if !alive {
++		db := channelpool.CurrentDB()
++		if db == nil {
++			return errors.New("apigx capacity: database unavailable while restoring async task")
++		}
++		var shareChannel apigxmodel.Channel
++		if err := db.Unscoped().Where("id = ?", task.ChannelID).First(&shareChannel).Error; err != nil {
++			return err
++		}
++		fake := &gin.Context{}
++		common.SetContextKey(fake, constant.ContextKeyUserId, int(task.UserID))
++		tokenID := task.BaseTokenID
++		if tokenID == 0 {
++			// Compatibility for stage-C preview rows written before BaseTokenID was
++			// split from the APIGX API key identity.
++			tokenID = task.ApiKeyID
++		}
++		common.SetContextKey(fake, constant.ContextKeyTokenId, int(tokenID))
++		dims, err := buildDimensions(fake, int(shareChannel.BaseChannelID))
++		if err != nil {
++			return err
++		}
++		cfg := getConfig()
++		if cfg.UpstreamKeyLimit > 0 && task.UpstreamKeyID > 0 {
++			dims = append(dims, capacity.Dimension{Key: capacity.UpstreamKeyConcurrency(task.UpstreamKeyID), Limit: cfg.UpstreamKeyLimit, Amount: 1})
++		}
++		if cfg.UpstreamAccountLimit > 0 && task.UpstreamAccountID > 0 {
++			dims = append(dims, capacity.Dimension{Key: capacity.UpstreamAccountConcurrency(task.UpstreamAccountID), Limit: cfg.UpstreamAccountLimit, Amount: 1})
++		}
++		if len(dims) == 0 {
++			return errors.New("apigx capacity: async task dimensions unavailable")
++		}
++		if err := ctrl.Reserve(ctx, task.ReservationUID, dims, leaseTTL); err != nil {
++			return err
++		}
++	}
++	lease := &Lease{ctrl: ctrl, id: task.ReservationUID, ttl: leaseTTL, stop: make(chan struct{})}
++	actual, loaded := asyncLeases.LoadOrStore(task.ReservationUID, lease)
++	if loaded {
++		_ = actual
++		return nil
++	}
++	lease.startRenew()
++	return nil
++}
++
+ // admissionCycleKey 是"本次预留所属周期"的上下文键。
+ const admissionCycleKey = "apigx_admission_cycle_key"
+ 
+diff --git a/apigx/relayhook/key_saturation.go b/apigx/relayhook/key_saturation.go
+index 10fee74..498ec9f 100644
+--- a/apigx/relayhook/key_saturation.go
++++ b/apigx/relayhook/key_saturation.go
+@@ -22,8 +22,8 @@ import (
+ // 底座仍会把请求交给已满载的 Key，然后由准入拒绝——表现为"明明还有另一把可用的 Key，
+ // 请求却被拒"（用户在容量充足时看到 429）。
+ //
+-// 实现直接复用已有机制：`SaturatedKeyIndexes` 判定 + `MergeKeyStatusList` 合并
+-// （只回收我们自己写的格子），底座的 `GetNextEnabledKey` 会跳过被标记的索引。
++// 实现直接复用已有机制：`SaturatedKeyIndexes` 判定 + ChannelInfo 的独立来源标记。
++// 容量恢复只清容量来源，底座健康和熔断来源仍保留；`GetNextEnabledKey` 跳过合并后不可用的索引。
+ //
+ // # 为什么要节流
+ //
+@@ -126,18 +126,9 @@ func applyKeySaturationMarks(db *gorm.DB, baseChannelID int, saturated []int) {
+ 	if !channel.ChannelInfo.IsMultiKey || channel.ChannelInfo.MultiKeySize <= 0 {
+ 		return
+ 	}
+-	current := channel.ChannelInfo.MultiKeyStatusList
+-	ours := make([]int, 0, len(current))
+-	for index, status := range current {
+-		if status == apigxmodel.StatusCapacitySaturated {
+-			ours = append(ours, index)
+-		}
+-	}
+-	next := channelpool.MergeKeyStatusList(current, ours, saturated, apigxmodel.StatusCapacitySaturated)
+-	if equalStatusLists(current, next) {
++	if !channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusCapacitySaturated, saturated) {
+ 		return
+ 	}
+-	channel.ChannelInfo.MultiKeyStatusList = next
+ 	if err := db.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
+ 		Update("channel_info", channel.ChannelInfo).Error; err != nil {
+ 		common.SysError("apigx capacity: update key saturation marks failed: " + err.Error())
+@@ -147,16 +138,3 @@ func applyKeySaturationMarks(db *gorm.DB, baseChannelID int, saturated []int) {
+ 		basemodel.CacheUpdateChannel(refreshed)
+ 	}
+ }
+-
+-// equalStatusLists 判断两份状态表是否等价（nil 与空视为相同）。
+-func equalStatusLists(a, b map[int]int) bool {
+-	if len(a) != len(b) {
+-		return false
+-	}
+-	for index, status := range a {
+-		if other, ok := b[index]; !ok || other != status {
+-			return false
+-		}
+-	}
+-	return true
+-}
+diff --git a/apigx/relayhook/key_saturation_test.go b/apigx/relayhook/key_saturation_test.go
+index 032d4b3..0b50dac 100644
+--- a/apigx/relayhook/key_saturation_test.go
++++ b/apigx/relayhook/key_saturation_test.go
+@@ -83,10 +83,40 @@ func TestApplyKeySaturationSkipsRedundantWrite(t *testing.T) {
+ 	applyKeySaturationMarks(db, baseChannelID, []int{1})
+ 	var second basemodel.Channel
+ 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&second).Error)
+-	assert.True(t, equalStatusLists(first.ChannelInfo.MultiKeyStatusList, second.ChannelInfo.MultiKeyStatusList))
++	assert.Equal(t, first.ChannelInfo.MultiKeyStatusList, second.ChannelInfo.MultiKeyStatusList)
++	assert.Equal(t, first.ChannelInfo.MultiKeyStatusSources, second.ChannelInfo.MultiKeyStatusSources)
+ 	assert.Equal(t, apigxmodel.StatusCapacitySaturated, second.ChannelInfo.MultiKeyStatusList[1])
+ }
+ 
++func TestApplyKeySaturationUsesStableIDAndPreservesBreaker(t *testing.T) {
++	db, baseChannelID := setupKeySaturationEnv(t, 2)
++	var prepared basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&prepared).Error)
++	prepared.ChannelInfo = basemodel.ChannelInfo{
++		IsMultiKey:        true,
++		MultiKeySize:      2,
++		MultiKeyStableIDs: []string{"stable-a", "stable-b"},
++	}
++	prepared.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, []int{1})
++	require.NoError(t, db.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
++		Update("channel_info", prepared.ChannelInfo).Error)
++
++	applyKeySaturationMarks(db, baseChannelID, []int{1})
++	var both basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&both).Error)
++	assert.True(t, both.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
++	assert.True(t, both.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusCapacitySaturated))
++	assert.Equal(t, apigxmodel.StatusBreakerOpen, both.ChannelInfo.MultiKeyStatusAt(1))
++
++	applyKeySaturationMarks(db, baseChannelID, nil)
++	var restored basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&restored).Error)
++	assert.False(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusCapacitySaturated))
++	assert.True(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
++	assert.Equal(t, apigxmodel.StatusBreakerOpen, restored.ChannelInfo.MultiKeyStatusAt(1),
++		"容量恢复不得清掉同一稳定 Key 上的熔断来源")
++}
++
+ // 非多 Key 渠道不标记（没有可标记的条目）。
+ func TestApplyKeySaturationSkipsNonMultiKeyChannel(t *testing.T) {
+ 	db, baseChannelID := setupKeySaturationEnv(t, 0)
+diff --git a/controller/relay.go b/controller/relay.go
+index 68fa434..fcd0e75 100644
+--- a/controller/relay.go
++++ b/controller/relay.go
+@@ -649,7 +649,8 @@ func executeTaskSubmissionWith(
+ 	}
+ 	service.LogTaskConsumption(c, relayInfo, task)
+ 	// #21：结算成功后写入我们自己的**任务归属快照**（只追加记录，不触碰扣费）
+-	relayhook.RecordAsyncTaskSnapshot(c, relayInfo, int64(task.ID), task.TaskID, task.Action)
++	relayhook.RecordAsyncTaskSnapshot(c, relayInfo, int64(task.ID), task.TaskID, task.Action,
++		string(task.Status), task.StartTime, task.FinishTime)
+ 	diagnostics.complete(task, result.Quota)
+ 
+ 	return &taskSubmissionOutcome{Result: result, Task: task, RelayInfo: relayInfo}, nil
+diff --git a/controller/system_task_handlers.go b/controller/system_task_handlers.go
+index c31059d..c7ec0b4 100644
+--- a/controller/system_task_handlers.go
++++ b/controller/system_task_handlers.go
+@@ -5,6 +5,7 @@ import (
+ 	"fmt"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/model"
+@@ -140,7 +141,7 @@ type asyncTaskPollHandler struct{}
+ func (asyncTaskPollHandler) Type() string { return model.SystemTaskTypeAsyncTaskPoll }
+ 
+ func (asyncTaskPollHandler) Enabled() bool {
+-	return constant.UpdateTask && model.HasUnfinishedSyncTasks()
++	return constant.UpdateTask && (model.HasUnfinishedSyncTasks() || relayhook.HasAsyncTasksForReconciliation())
+ }
+ 
+ func (asyncTaskPollHandler) Interval() time.Duration { return 15 * time.Second }
+@@ -148,6 +149,9 @@ func (asyncTaskPollHandler) Interval() time.Duration { return 15 * time.Second }
+ func (asyncTaskPollHandler) NewPayload() any { return nil }
+ 
+ func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
++	if err := relayhook.ReconcileAsyncTasks(ctx); err != nil {
++		common.SysLog(fmt.Sprintf("async task reconciliation failed: %v", err))
++	}
+ 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+ 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+ }
+diff --git a/controller/task_cancel.go b/controller/task_cancel.go
+new file mode 100644
+index 0000000..0aace15
+--- /dev/null
++++ b/controller/task_cancel.go
+@@ -0,0 +1,114 @@
++package controller
++
++import (
++	"net/http"
++	"strings"
++
++	"github.com/QuantumNous/new-api/apigx/relayhook"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/QuantumNous/new-api/relay"
++	relaychannel "github.com/QuantumNous/new-api/relay/channel"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/gin-gonic/gin"
++)
++
++var taskCancelAdaptorProvider = func(task *model.Task) relaychannel.TaskAdaptor {
++	if task == nil {
++		return nil
++	}
++	return relay.GetTaskAdaptor(task.Platform)
++}
++
++var taskCancelCredentialResolver = relayhook.ResolveAsyncTaskCredential
++
++// CancelTask cancels only through an adaptor that explicitly implements
++// TaskCancellationAdaptor. Unsupported channels return a stable capability
++// error; they are never marked canceled locally.
++func CancelTask(c *gin.Context) {
++	taskID := strings.TrimSpace(c.Param("task_id"))
++	if taskID == "" {
++		taskID = strings.TrimSpace(c.Param("video_id"))
++	}
++	if taskID == "" {
++		taskID = strings.TrimSpace(c.Param("key"))
++	}
++	task, exists, err := model.GetByTaskId(c.GetInt("id"), taskID)
++	if err != nil {
++		writeTaskCancelError(c, http.StatusInternalServerError, "task_cancel_query_failed", "Failed to query task")
++		return
++	}
++	if !exists || task == nil {
++		writeTaskCancelError(c, http.StatusNotFound, "task_not_found", "Task not found")
++		return
++	}
++	if task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure {
++		writeTaskCancelError(c, http.StatusConflict, "task_already_terminal", "Task is already terminal")
++		return
++	}
++	if relayhook.CheckSourceAllowed(c, task.ChannelId, taskSourceModelName(task)) != nil {
++		writeTaskCancelError(c, http.StatusServiceUnavailable, "no_available_source", "No available source for the requested model")
++		return
++	}
++	adaptor := taskCancelAdaptorProvider(task)
++	canceler, supported := adaptor.(relaychannel.TaskCancellationAdaptor)
++	if !supported {
++		writeTaskCancelError(c, http.StatusNotImplemented, "task_cancellation_not_supported", "This channel does not support task cancellation")
++		return
++	}
++	channel, err := model.CacheGetChannel(task.ChannelId)
++	if err != nil {
++		writeTaskCancelError(c, http.StatusServiceUnavailable, "task_channel_unavailable", "Task channel is unavailable")
++		return
++	}
++	key := channel.Key
++	if task.PrivateData.Key != "" {
++		key = task.PrivateData.Key
++	}
++	credential, managed, err := taskCancelCredentialResolver(task.ID, task.ChannelId)
++	if err != nil {
++		writeTaskCancelError(c, http.StatusServiceUnavailable, "task_credential_unavailable", "Task credential snapshot is unavailable")
++		return
++	}
++	if managed {
++		key = credential.Secret
++	}
++	baseURL := channel.GetBaseURL()
++	if baseURL == "" {
++		baseURL = constant.GetChannelBaseURL(channel.Type)
++	}
++	adaptor.Init(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
++		ChannelType: channel.Type, ChannelId: channel.Id, ChannelBaseUrl: baseURL,
++		ApiKey: key, ChannelSetting: channel.GetSetting(),
++	}})
++	confirmed, err := canceler.CancelTask(c.Request.Context(), baseURL, key, task, channel.GetSetting().Proxy)
++	if err != nil {
++		writeTaskCancelError(c, http.StatusBadGateway, "task_cancel_upstream_failed", "Upstream cancellation failed")
++		return
++	}
++	if !confirmed {
++		c.JSON(http.StatusAccepted, gin.H{"id": task.TaskID, "status": "cancel_pending"})
++		return
++	}
++	won, err := service.FinalizeCanceledTask(c.Request.Context(), adaptor, task)
++	if err != nil {
++		writeTaskCancelError(c, http.StatusInternalServerError, "task_cancel_finalize_failed", "Failed to finalize cancellation")
++		return
++	}
++	if !won {
++		writeTaskCancelError(c, http.StatusConflict, "task_already_terminal", "Task is already terminal")
++		return
++	}
++	c.JSON(http.StatusOK, gin.H{"id": task.TaskID, "status": "canceled"})
++}
++
++func writeTaskCancelError(c *gin.Context, status int, code, message string) {
++	if c == nil {
++		return
++	}
++	if message == "" {
++		message = http.StatusText(status)
++	}
++	c.JSON(status, gin.H{"error": gin.H{"message": message, "type": code, "code": code}})
++}
+diff --git a/controller/task_cancel_test.go b/controller/task_cancel_test.go
+new file mode 100644
+index 0000000..2f48d81
+--- /dev/null
++++ b/controller/task_cancel_test.go
+@@ -0,0 +1,131 @@
++package controller
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/QuantumNous/new-api/apigx/relayhook"
++	"github.com/QuantumNous/new-api/model"
++	relaychannel "github.com/QuantumNous/new-api/relay/channel"
++	relaycommon "github.com/QuantumNous/new-api/relay/common"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++type cancellationTestAdaptor struct {
++	relaychannel.TaskAdaptor
++	confirmed bool
++	err       error
++	key       string
++}
++
++func (a *cancellationTestAdaptor) Init(*relaycommon.RelayInfo) {}
++func (a *cancellationTestAdaptor) AdjustBillingOnComplete(*model.Task, *relaycommon.TaskInfo) int {
++	return 0
++}
++func (a *cancellationTestAdaptor) CancelTask(_ context.Context, _ string, key string, _ *model.Task, _ string) (bool, error) {
++	a.key = key
++	return a.confirmed, a.err
++}
++
++func newTaskCancelContext(task *model.Task) (*gin.Context, *httptest.ResponseRecorder) {
++	recorder := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Set("id", task.UserId)
++	c.Params = gin.Params{{Key: "key", Value: task.TaskID}}
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/"+task.TaskID+"/cancel", nil)
++	return c, recorder
++}
++
++func setupCancelableTask(t *testing.T) *model.Task {
++	t.Helper()
++	task := setupGenericTaskTest(t)
++	task.Status = model.TaskStatusInProgress
++	task.Progress = "50%"
++	task.FinishTime = 0
++	task.PrivateData.Key = "historical-base-key"
++	require.NoError(t, model.DB.Save(task).Error)
++	previousGuard := relayhook.IsSourceGuardEnabled()
++	relayhook.SetSourceGuardEnabled(false)
++	t.Cleanup(func() { relayhook.SetSourceGuardEnabled(previousGuard) })
++	previousResolver := taskCancelCredentialResolver
++	taskCancelCredentialResolver = func(int64, ...int) (*relayhook.AsyncTaskCredential, bool, error) {
++		return nil, false, nil
++	}
++	t.Cleanup(func() { taskCancelCredentialResolver = previousResolver })
++	return task
++}
++
++func TestCancelTaskRejectsUnsupportedAdaptorWithoutChangingTask(t *testing.T) {
++	task := setupCancelableTask(t)
++	previous := taskCancelAdaptorProvider
++	taskCancelAdaptorProvider = func(*model.Task) relaychannel.TaskAdaptor { return nil }
++	t.Cleanup(func() { taskCancelAdaptorProvider = previous })
++	c, recorder := newTaskCancelContext(task)
++
++	CancelTask(c)
++
++	assert.Equal(t, http.StatusNotImplemented, recorder.Code)
++	assert.Contains(t, recorder.Body.String(), "task_cancellation_not_supported")
++	var persisted model.Task
++	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
++	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), persisted.Status)
++}
++
++func TestCancelTaskWaitsForUpstreamConfirmation(t *testing.T) {
++	task := setupCancelableTask(t)
++	adaptor := &cancellationTestAdaptor{confirmed: false}
++	previous := taskCancelAdaptorProvider
++	taskCancelAdaptorProvider = func(*model.Task) relaychannel.TaskAdaptor { return adaptor }
++	t.Cleanup(func() { taskCancelAdaptorProvider = previous })
++	c, recorder := newTaskCancelContext(task)
++
++	CancelTask(c)
++
++	assert.Equal(t, http.StatusAccepted, recorder.Code)
++	assert.Contains(t, recorder.Body.String(), "cancel_pending")
++	var persisted model.Task
++	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
++	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), persisted.Status)
++}
++
++func TestCancelTaskDoesNotExposeUpstreamError(t *testing.T) {
++	task := setupCancelableTask(t)
++	adaptor := &cancellationTestAdaptor{err: errors.New("provider body contains sk-upstream-secret")}
++	previous := taskCancelAdaptorProvider
++	taskCancelAdaptorProvider = func(*model.Task) relaychannel.TaskAdaptor { return adaptor }
++	t.Cleanup(func() { taskCancelAdaptorProvider = previous })
++	c, recorder := newTaskCancelContext(task)
++
++	CancelTask(c)
++
++	assert.Equal(t, http.StatusBadGateway, recorder.Code)
++	assert.Contains(t, recorder.Body.String(), "task_cancel_upstream_failed")
++	assert.NotContains(t, recorder.Body.String(), "sk-upstream-secret")
++	var persisted model.Task
++	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
++	assert.Equal(t, model.TaskStatus(model.TaskStatusInProgress), persisted.Status)
++}
++
++func TestCancelTaskFinalizesOnlyAfterUpstreamConfirmation(t *testing.T) {
++	task := setupCancelableTask(t)
++	adaptor := &cancellationTestAdaptor{confirmed: true}
++	previous := taskCancelAdaptorProvider
++	taskCancelAdaptorProvider = func(*model.Task) relaychannel.TaskAdaptor { return adaptor }
++	t.Cleanup(func() { taskCancelAdaptorProvider = previous })
++	c, recorder := newTaskCancelContext(task)
++
++	CancelTask(c)
++
++	assert.Equal(t, http.StatusOK, recorder.Code)
++	assert.Contains(t, recorder.Body.String(), `"status":"canceled"`)
++	assert.Equal(t, "historical-base-key", adaptor.key)
++	var persisted model.Task
++	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
++	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), persisted.Status)
++	assert.Equal(t, "user_canceled", persisted.FailReason)
++}
+diff --git a/model/channel.go b/model/channel.go
+index bb192a3..e18e493 100644
+--- a/model/channel.go
++++ b/model/channel.go
+@@ -69,6 +69,289 @@ type ChannelInfo struct {
+ 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
+ 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
+ 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
++	// MultiKeyStableIDs 与真实 Key 列表一一对齐。APIGX 用它让健康、容量和统计锚定稳定身份，
++	// 避免增删、重排或权重变化后把按位置保存的状态套到另一把 Key 上。
++	MultiKeyStableIDs []string `json:"multi_key_stable_ids,omitempty"`
++	// MultiKeyWeights 与真实 Key 列表一一对齐；权重直接参与选择，不再通过复制明文槽位表达。
++	MultiKeyWeights []int64 `json:"multi_key_weights,omitempty"`
++	// 以下三张表是带稳定身份渠道的权威运行期状态。旧索引表仍保留并镜像写入，
++	// 以兼容未提供稳定 ID 的原生 New API 渠道与既有管理接口。
++	MultiKeyStatusByStableID         map[string]int    `json:"multi_key_status_by_stable_id,omitempty"`
++	MultiKeyDisabledReasonByStableID map[string]string `json:"multi_key_disabled_reason_by_stable_id,omitempty"`
++	MultiKeyDisabledTimeByStableID   map[string]int64  `json:"multi_key_disabled_time_by_stable_id,omitempty"`
++	// 状态来源表让底座健康、容量和熔断分别持有自己的标记。MultiKeyStatusList 与
++	// MultiKeyStatusByStableID 只是给既有接口读取的合并镜像，恢复一个来源不会误删另一个来源。
++	MultiKeyStatusSources           map[int]map[string]int    `json:"multi_key_status_sources,omitempty"`
++	MultiKeyStatusSourcesByStableID map[string]map[string]int `json:"multi_key_status_sources_by_stable_id,omitempty"`
++}
++
++const maxMultiKeyWeight int64 = 16
++
++const multiKeyStatusSourceBase = "base"
++
++// MultiKeyStableIDAt 返回指定真实 Key 槽位的稳定身份。
++func (c *ChannelInfo) MultiKeyStableIDAt(index int) (string, bool) {
++	if c == nil || index < 0 || index >= len(c.MultiKeyStableIDs) {
++		return "", false
++	}
++	stableID := strings.TrimSpace(c.MultiKeyStableIDs[index])
++	return stableID, stableID != ""
++}
++
++func (c *ChannelInfo) multiKeyWeightAt(index int) int64 {
++	weight := int64(1)
++	if c != nil && index >= 0 && index < len(c.MultiKeyWeights) {
++		weight = c.MultiKeyWeights[index]
++	}
++	if weight <= 0 {
++		return 1
++	}
++	if weight > maxMultiKeyWeight {
++		return maxMultiKeyWeight
++	}
++	return weight
++}
++
++// MultiKeyStatusAt 返回真实 Key 槽位当前是否可选。带稳定 ID 时只读取稳定状态，
++// 避免增删/重排后旧索引镜像误伤另一把 Key；没有稳定元数据的原生渠道继续读取旧索引表。
++func (c *ChannelInfo) MultiKeyStatusAt(index int) int {
++	if c == nil {
++		return common.ChannelStatusEnabled
++	}
++	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++		if sources := c.MultiKeyStatusSourcesByStableID[stableID]; len(sources) > 0 {
++			return mergedMultiKeyStatus(sources)
++		}
++		if c.MultiKeyStatusByStableID != nil {
++			if status, exists := c.MultiKeyStatusByStableID[stableID]; exists {
++				return status
++			}
++		}
++		return common.ChannelStatusEnabled
++	}
++	if sources := c.MultiKeyStatusSources[index]; len(sources) > 0 {
++		return mergedMultiKeyStatus(sources)
++	}
++	if c.MultiKeyStatusList != nil {
++		if status, exists := c.MultiKeyStatusList[index]; exists {
++			return status
++		}
++	}
++	return common.ChannelStatusEnabled
++}
++
++func multiKeyStatusMarkSource(markValue int) string {
++	return fmt.Sprintf("mark:%d", markValue)
++}
++
++func inferredMultiKeyStatusSource(status int) string {
++	if status >= 90 {
++		return multiKeyStatusMarkSource(status)
++	}
++	return multiKeyStatusSourceBase
++}
++
++// mergedMultiKeyStatus 合并同一 Key 的独立状态来源。底座自身状态优先用于兼容展示；
++// 其余标记取最大值以保证结果确定。任一非启用来源都会让该 Key 不可选。
++func mergedMultiKeyStatus(sources map[string]int) int {
++	if status, ok := sources[multiKeyStatusSourceBase]; ok && status != common.ChannelStatusEnabled {
++		return status
++	}
++	merged := common.ChannelStatusEnabled
++	for _, status := range sources {
++		if status != common.ChannelStatusEnabled && status > merged {
++			merged = status
++		}
++	}
++	return merged
++}
++
++// statusSourcesAt 返回指定真实槽位的权威来源表，并把升级前的单值状态迁入来源表。
++func (c *ChannelInfo) statusSourcesAt(index int) (map[string]int, bool) {
++	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++		if c.MultiKeyStatusSourcesByStableID == nil {
++			c.MultiKeyStatusSourcesByStableID = make(map[string]map[string]int)
++		}
++		sources := c.MultiKeyStatusSourcesByStableID[stableID]
++		changed := false
++		if sources == nil {
++			sources = make(map[string]int)
++			c.MultiKeyStatusSourcesByStableID[stableID] = sources
++			changed = true
++		}
++		if len(sources) == 0 {
++			if status, exists := c.MultiKeyStatusByStableID[stableID]; exists && status != common.ChannelStatusEnabled {
++				sources[inferredMultiKeyStatusSource(status)] = status
++				changed = true
++			}
++		}
++		return sources, changed
++	}
++	if c.MultiKeyStatusSources == nil {
++		c.MultiKeyStatusSources = make(map[int]map[string]int)
++	}
++	sources := c.MultiKeyStatusSources[index]
++	changed := false
++	if sources == nil {
++		sources = make(map[string]int)
++		c.MultiKeyStatusSources[index] = sources
++		changed = true
++	}
++	if len(sources) == 0 {
++		if status, exists := c.MultiKeyStatusList[index]; exists && status != common.ChannelStatusEnabled {
++			sources[inferredMultiKeyStatusSource(status)] = status
++			changed = true
++		}
++	}
++	return sources, changed
++}
++
++func (c *ChannelInfo) refreshMultiKeyStatusAt(index int, sources map[string]int) {
++	status := mergedMultiKeyStatus(sources)
++	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++		if status == common.ChannelStatusEnabled {
++			delete(c.MultiKeyStatusByStableID, stableID)
++		} else {
++			if c.MultiKeyStatusByStableID == nil {
++				c.MultiKeyStatusByStableID = make(map[string]int)
++			}
++			c.MultiKeyStatusByStableID[stableID] = status
++		}
++	}
++	if status == common.ChannelStatusEnabled {
++		delete(c.MultiKeyStatusList, index)
++	} else {
++		if c.MultiKeyStatusList == nil {
++			c.MultiKeyStatusList = make(map[int]int)
++		}
++		c.MultiKeyStatusList[index] = status
++	}
++}
++
++func (c *ChannelInfo) compactMultiKeyStatusSources(index int, sources map[string]int) {
++	if len(sources) != 0 {
++		return
++	}
++	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++		delete(c.MultiKeyStatusSourcesByStableID, stableID)
++		if len(c.MultiKeyStatusSourcesByStableID) == 0 {
++			c.MultiKeyStatusSourcesByStableID = nil
++		}
++		return
++	}
++	delete(c.MultiKeyStatusSources, index)
++	if len(c.MultiKeyStatusSources) == 0 {
++		c.MultiKeyStatusSources = nil
++	}
++}
++
++// SetMultiKeyStatusAt 只更新底座健康来源，同时维护稳定身份状态和兼容索引镜像。
++func (c *ChannelInfo) SetMultiKeyStatusAt(index, status int, reason string, at int64) {
++	if c == nil || index < 0 {
++		return
++	}
++	sources, _ := c.statusSourcesAt(index)
++	if status == common.ChannelStatusEnabled {
++		delete(sources, multiKeyStatusSourceBase)
++		delete(c.MultiKeyDisabledReason, index)
++		delete(c.MultiKeyDisabledTime, index)
++		if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++			delete(c.MultiKeyDisabledReasonByStableID, stableID)
++			delete(c.MultiKeyDisabledTimeByStableID, stableID)
++		}
++		c.refreshMultiKeyStatusAt(index, sources)
++		c.compactMultiKeyStatusSources(index, sources)
++		return
++	}
++	sources[multiKeyStatusSourceBase] = status
++	if c.MultiKeyDisabledReason == nil {
++		c.MultiKeyDisabledReason = make(map[int]string)
++	}
++	if c.MultiKeyDisabledTime == nil {
++		c.MultiKeyDisabledTime = make(map[int]int64)
++	}
++	c.MultiKeyDisabledReason[index] = reason
++	c.MultiKeyDisabledTime[index] = at
++	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++		if c.MultiKeyDisabledReasonByStableID == nil {
++			c.MultiKeyDisabledReasonByStableID = make(map[string]string)
++		}
++		if c.MultiKeyDisabledTimeByStableID == nil {
++			c.MultiKeyDisabledTimeByStableID = make(map[string]int64)
++		}
++		c.MultiKeyDisabledReasonByStableID[stableID] = reason
++		c.MultiKeyDisabledTimeByStableID[stableID] = at
++	}
++	c.refreshMultiKeyStatusAt(index, sources)
++}
++
++// ReplaceMultiKeyStatusMarks 原子替换某一来源写入的状态标记，保留其他来源的状态。
++// 稳定 ID 表是权威数据，索引表只作为旧接口可见的镜像。
++func (c *ChannelInfo) ReplaceMultiKeyStatusMarks(markValue int, indexes []int) bool {
++	if c == nil {
++		return false
++	}
++	targets := make(map[int]struct{}, len(indexes))
++	for _, index := range indexes {
++		if index >= 0 && index < c.MultiKeySize {
++			targets[index] = struct{}{}
++		}
++	}
++	source := multiKeyStatusMarkSource(markValue)
++	changed := false
++	for index := 0; index < c.MultiKeySize; index++ {
++		sources, migrated := c.statusSourcesAt(index)
++		changed = changed || migrated
++		_, wanted := targets[index]
++		if wanted {
++			if current, exists := sources[source]; !exists || current != markValue {
++				sources[source] = markValue
++				changed = true
++			}
++		} else if _, exists := sources[source]; exists {
++			delete(sources, source)
++			changed = true
++		}
++		c.refreshMultiKeyStatusAt(index, sources)
++		c.compactMultiKeyStatusSources(index, sources)
++	}
++	if len(c.MultiKeyStatusList) == 0 {
++		c.MultiKeyStatusList = nil
++	}
++	if len(c.MultiKeyStatusByStableID) == 0 {
++		c.MultiKeyStatusByStableID = nil
++	}
++	return changed
++}
++
++// HasMultiKeyStatusMark 报告任一独立来源是否仍持有指定标记。
++func (c *ChannelInfo) HasMultiKeyStatusMark(markValue int) bool {
++	if c == nil {
++		return false
++	}
++	source := multiKeyStatusMarkSource(markValue)
++	for _, sources := range c.MultiKeyStatusSourcesByStableID {
++		if sources[source] == markValue {
++			return true
++		}
++	}
++	for _, sources := range c.MultiKeyStatusSources {
++		if sources[source] == markValue {
++			return true
++		}
++	}
++	// 兼容升级前尚未拆分来源的持久化单值。
++	for _, status := range c.MultiKeyStatusByStableID {
++		if status == markValue {
++			return true
++		}
++	}
++	for _, status := range c.MultiKeyStatusList {
++		if status == markValue {
++			return true
++		}
++	}
++	return false
+ }
+ 
+ type ChannelSortOptions struct {
+@@ -220,22 +503,10 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+ 	lock.Lock()
+ 	defer lock.Unlock()
+ 
+-	statusList := channel.ChannelInfo.MultiKeyStatusList
+-	// helper to get key status, default to enabled when missing
+-	getStatus := func(idx int) int {
+-		if statusList == nil {
+-			return common.ChannelStatusEnabled
+-		}
+-		if status, ok := statusList[idx]; ok {
+-			return status
+-		}
+-		return common.ChannelStatusEnabled
+-	}
+-
+ 	// Collect indexes of enabled keys
+ 	enabledIdx := make([]int, 0, len(keys))
+ 	for i := range keys {
+-		if getStatus(i) == common.ChannelStatusEnabled {
++		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled {
+ 			enabledIdx = append(enabledIdx, i)
+ 		}
+ 	}
+@@ -248,9 +519,19 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+ 
+ 	switch channel.ChannelInfo.MultiKeyMode {
+ 	case constant.MultiKeyModeRandom:
+-		// Randomly pick one enabled key
+-		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
+-		return keys[selectedIdx], selectedIdx, nil
++		// 按每把真实 Key 的权重随机选择；权重不再通过复制明文槽位表达。
++		totalWeight := int64(0)
++		for _, idx := range enabledIdx {
++			totalWeight += channel.ChannelInfo.multiKeyWeightAt(idx)
++		}
++		cursor := int64(rand.Intn(int(totalWeight)))
++		for _, idx := range enabledIdx {
++			cursor -= channel.ChannelInfo.multiKeyWeightAt(idx)
++			if cursor < 0 {
++				return keys[idx], idx, nil
++			}
++		}
++		return keys[enabledIdx[0]], enabledIdx[0], nil
+ 	case constant.MultiKeyModePolling:
+ 		// Use channel-specific lock to ensure thread-safe polling
+ 
+@@ -268,20 +549,27 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+ 				// CacheUpdateChannel(channel)
+ 			}
+ 		}()
+-		// Start from the saved polling index and look for the next enabled key
+-		start := channelInfo.MultiKeyPollingIndex
+-		if start < 0 || start >= len(keys) {
++		// MultiKeyPollingIndex 是加权轮询单元游标。只在当前可用集合上求和，
++		// 因而禁用/冷却/满载一把 Key 后会立刻把份额重新归一到剩余 Key。
++		totalWeight := int64(0)
++		for _, idx := range enabledIdx {
++			totalWeight += channel.ChannelInfo.multiKeyWeightAt(idx)
++		}
++		start := int64(channelInfo.MultiKeyPollingIndex)
++		if start < 0 {
+ 			start = 0
+ 		}
+-		for i := range keys {
+-			idx := (start + i) % len(keys)
+-			if getStatus(idx) == common.ChannelStatusEnabled {
+-				// update polling index for next call (point to the next position)
+-				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
++		start %= totalWeight
++		cursor := start
++		for _, idx := range enabledIdx {
++			weight := channel.ChannelInfo.multiKeyWeightAt(idx)
++			if cursor < weight {
++				channel.ChannelInfo.MultiKeyPollingIndex = int((start + 1) % totalWeight)
+ 				return keys[idx], idx, nil
+ 			}
++			cursor -= weight
+ 		}
+-		// Fallback – should not happen, but return first enabled key
++		// Fallback – should not happen, but return first enabled key.
+ 		return keys[enabledIdx[0]], enabledIdx[0], nil
+ 	default:
+ 		// Unknown mode, default to first enabled key (or original key string)
+@@ -585,6 +873,17 @@ func (channel *Channel) Update() error {
+ 			}
+ 		}
+ 		channel.ChannelInfo.MultiKeySize = len(keys)
++		// 稳定身份元数据必须与真实 Key 槽位一一对齐。普通 New API 渠道若直接编辑了
++		// Key 列表而没有同步这份元数据，就退回原生索引语义，禁止错绑身份。
++		if len(channel.ChannelInfo.MultiKeyStableIDs) > 0 && len(channel.ChannelInfo.MultiKeyStableIDs) != len(keys) {
++			channel.ChannelInfo.MultiKeyStableIDs = nil
++			channel.ChannelInfo.MultiKeyWeights = nil
++			channel.ChannelInfo.MultiKeyStatusByStableID = nil
++			channel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
++			channel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
++			channel.ChannelInfo.MultiKeyStatusSources = nil
++			channel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
++		}
+ 		// Clean up status data that exceeds the new key count to prevent index out of range
+ 		if channel.ChannelInfo.MultiKeyStatusList != nil {
+ 			for idx := range channel.ChannelInfo.MultiKeyStatusList {
+@@ -593,6 +892,13 @@ func (channel *Channel) Update() error {
+ 				}
+ 			}
+ 		}
++		if channel.ChannelInfo.MultiKeyStatusSources != nil {
++			for idx := range channel.ChannelInfo.MultiKeyStatusSources {
++				if idx >= channel.ChannelInfo.MultiKeySize {
++					delete(channel.ChannelInfo.MultiKeyStatusSources, idx)
++				}
++			}
++		}
+ 	}
+ 	var err error
+ 	err = DB.Model(channel).Updates(channel).Error
+@@ -694,23 +1000,8 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
+ 			channel.SetOtherInfo(info)
+ 			return
+ 		}
+-		if channel.ChannelInfo.MultiKeyStatusList == nil {
+-			channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+-		}
+-		if status == common.ChannelStatusEnabled {
+-			delete(channel.ChannelInfo.MultiKeyStatusList, keyIndex)
+-		} else {
+-			channel.ChannelInfo.MultiKeyStatusList[keyIndex] = status
+-			if channel.ChannelInfo.MultiKeyDisabledReason == nil {
+-				channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+-			}
+-			if channel.ChannelInfo.MultiKeyDisabledTime == nil {
+-				channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
+-			}
+-			channel.ChannelInfo.MultiKeyDisabledReason[keyIndex] = reason
+-			channel.ChannelInfo.MultiKeyDisabledTime[keyIndex] = common.GetTimestamp()
+-		}
+-		if !hasEnabledMultiKey(keys, channel.ChannelInfo.MultiKeyStatusList) {
++		channel.ChannelInfo.SetMultiKeyStatusAt(keyIndex, status, reason, common.GetTimestamp())
++		if !hasEnabledMultiKey(keys, &channel.ChannelInfo) {
+ 			channel.Status = common.ChannelStatusAutoDisabled
+ 			info := channel.GetOtherInfo()
+ 			info["status_reason"] = ChannelStatusReasonAllKeysDisabled
+@@ -722,13 +1013,9 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
+ 	}
+ }
+ 
+-func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
++func hasEnabledMultiKey(keys []string, info *ChannelInfo) bool {
+ 	for i := range keys {
+-		if statusList == nil {
+-			return true
+-		}
+-		status, ok := statusList[i]
+-		if !ok || status == common.ChannelStatusEnabled {
++		if info == nil || info.MultiKeyStatusAt(i) == common.ChannelStatusEnabled {
+ 			return true
+ 		}
+ 	}
+diff --git a/model/channel_status_test.go b/model/channel_status_test.go
+index 57e44f7..f958e70 100644
+--- a/model/channel_status_test.go
++++ b/model/channel_status_test.go
+@@ -51,6 +51,83 @@ func TestUpdateChannelStatusPersistsMultiKeyState(t *testing.T) {
+ 	assert.Equal(t, 1, stored.ChannelInfo.MultiKeyPollingIndex)
+ }
+ 
++func TestWeightedPollingAndStableStatusSurviveReorder(t *testing.T) {
++	setupChannelStatusTest(t)
++
++	channel := Channel{
++		Name:   "stable-weighted-pool",
++		Key:    "key-a\nkey-b",
++		Status: common.ChannelStatusEnabled,
++		ChannelInfo: ChannelInfo{
++			IsMultiKey:        true,
++			MultiKeySize:      2,
++			MultiKeyMode:      constant.MultiKeyModePolling,
++			MultiKeyStableIDs: []string{"stable-a", "stable-b"},
++			MultiKeyWeights:   []int64{3, 1},
++		},
++	}
++	require.NoError(t, DB.Create(&channel).Error)
++
++	counts := map[string]int{}
++	for range 8 {
++		key, _, apiErr := channel.GetNextEnabledKey()
++		require.Nil(t, apiErr)
++		counts[key]++
++	}
++	assert.Equal(t, 6, counts["key-a"])
++	assert.Equal(t, 2, counts["key-b"])
++
++	require.True(t, UpdateChannelStatus(channel.Id, "key-a", common.ChannelStatusAutoDisabled, "provider rejected key"))
++	var stored Channel
++	require.NoError(t, DB.First(&stored, channel.Id).Error)
++	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.ChannelInfo.MultiKeyStatusByStableID["stable-a"])
++
++	// 重排真实槽位后故障仍跟随 stable-a；旧索引镜像指向 0 也不能误伤现在位于 0 的 stable-b。
++	stored.Key = "key-b\nkey-a"
++	stored.ChannelInfo.MultiKeyStableIDs = []string{"stable-b", "stable-a"}
++	stored.ChannelInfo.MultiKeyWeights = []int64{1, 3}
++	stored.ChannelInfo.MultiKeyPollingIndex = 0
++	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).
++		Select("key", "channel_info").Updates(&stored).Error)
++
++	for range 4 {
++		key, index, apiErr := stored.GetNextEnabledKey()
++		require.Nil(t, apiErr)
++		assert.Equal(t, "key-b", key)
++		assert.Equal(t, 0, index)
++	}
++}
++
++func TestMultiKeyStatusSourcesRestoreIndependently(t *testing.T) {
++	info := ChannelInfo{
++		IsMultiKey:        true,
++		MultiKeySize:      1,
++		MultiKeyStableIDs: []string{"stable-a"},
++	}
++
++	info.SetMultiKeyStatusAt(0, common.ChannelStatusAutoDisabled, "provider rejected key", 100)
++	require.True(t, info.ReplaceMultiKeyStatusMarks(90, []int{0}))
++	require.True(t, info.ReplaceMultiKeyStatusMarks(91, []int{0}))
++	assert.Equal(t, common.ChannelStatusAutoDisabled, info.MultiKeyStatusAt(0),
++		"底座健康状态优先作为兼容镜像，但两个 APIGX 来源都必须被保留")
++	assert.True(t, info.HasMultiKeyStatusMark(90))
++	assert.True(t, info.HasMultiKeyStatusMark(91))
++
++	info.SetMultiKeyStatusAt(0, common.ChannelStatusEnabled, "", 0)
++	assert.Equal(t, 91, info.MultiKeyStatusAt(0), "恢复底座健康不得清掉熔断和容量来源")
++
++	require.True(t, info.ReplaceMultiKeyStatusMarks(91, nil))
++	assert.Equal(t, 90, info.MultiKeyStatusAt(0), "熔断恢复后容量来源仍应让 Key 不可选")
++	assert.False(t, info.HasMultiKeyStatusMark(91))
++	assert.True(t, info.HasMultiKeyStatusMark(90))
++
++	require.True(t, info.ReplaceMultiKeyStatusMarks(90, nil))
++	assert.Equal(t, common.ChannelStatusEnabled, info.MultiKeyStatusAt(0))
++	assert.Empty(t, info.MultiKeyStatusList)
++	assert.Empty(t, info.MultiKeyStatusByStableID)
++	assert.Empty(t, info.MultiKeyStatusSourcesByStableID)
++}
++
+ func TestSaveStatusStateFromSingleKeySnapshotPreservesUnownedColumns(t *testing.T) {
+ 	setupChannelStatusTest(t)
+ 
+diff --git a/relay/channel/adapter.go b/relay/channel/adapter.go
+index 5826e0e..49953fc 100644
+--- a/relay/channel/adapter.go
++++ b/relay/channel/adapter.go
+@@ -1,6 +1,7 @@
+ package channel
+ 
+ import (
++	"context"
+ 	"io"
+ 	"net/http"
+ 
+@@ -80,6 +81,15 @@ type TaskAdaptor interface {
+ 	ParseTaskResult(task *model.Task, resp *http.Response, respBody []byte) (*relaycommon.TaskInfo, error)
+ }
+ 
++// TaskCancellationAdaptor is optional. A task channel must implement this
++// contract explicitly before the gateway exposes cancellation as available.
++// The boolean result means the upstream confirmed a terminal cancellation;
++// false means the request was accepted/pending and the normal poller must keep
++// observing the task. Callers must never fabricate a canceled state locally.
++type TaskCancellationAdaptor interface {
++	CancelTask(ctx context.Context, baseURL, key string, task *model.Task, proxy string) (confirmed bool, err error)
++}
++
+ // TaskSubmitResponse is the transport-independent result of parsing an
+ // upstream task submission. Parsing must not write to the client response.
+ type TaskSubmitResponse struct {
+diff --git a/relay/relay_task.go b/relay/relay_task.go
+index 6cc973c..301ba51 100644
+--- a/relay/relay_task.go
++++ b/relay/relay_task.go
+@@ -567,7 +567,16 @@ func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) [
+ 		return nil
+ 	}
+ 
+-	resp, err := adaptor.FetchTask(baseURL, channelModel.Key, task, proxy)
++	credentialKey := channelModel.Key
++	credential, managed, credentialErr := relayhook.ResolveAsyncTaskCredential(task.ID, task.ChannelId)
++	if credentialErr != nil {
++		_ = relayhook.SyncAsyncTaskFromBase(task.ID, "UNKNOWN", "credential_snapshot_unavailable", task.StartTime, task.FinishTime)
++		return nil
++	}
++	if managed {
++		credentialKey = credential.Secret
++	}
++	resp, err := adaptor.FetchTask(baseURL, credentialKey, task, proxy)
+ 	if err != nil || resp == nil {
+ 		return nil
+ 	}
+@@ -603,6 +612,7 @@ func tryRealtimeFetch(c *gin.Context, task *model.Task, isOpenAIVideoAPI bool) [
+ 	if !snap.Equal(task.Snapshot()) {
+ 		_, _ = task.UpdateWithStatus(snap.Status)
+ 	}
++	_ = relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime)
+ 
+ 	// OpenAI Video API 由调用者的 ConvertToOpenAIVideo 分支处理
+ 	if isOpenAIVideoAPI {
+diff --git a/router/task-router.go b/router/task-router.go
+index 6d63215..0847010 100644
+--- a/router/task-router.go
++++ b/router/task-router.go
+@@ -23,6 +23,7 @@ func SetTaskRouter(router *gin.Engine) {
+ 	{
+ 		taskReadRouter.GET("/:key", controller.GetTask)
+ 		taskReadRouter.GET("/:key/artifacts", controller.GetTaskArtifacts)
++		taskReadRouter.POST("/:key/cancel", controller.CancelTask)
+ 	}
+ 
+ 	taskContentRouter := router.Group("/v1/tasks")
+diff --git a/router/task_plugin_protocol_router_test.go b/router/task_plugin_protocol_router_test.go
+index 811c641..c226d3a 100644
+--- a/router/task_plugin_protocol_router_test.go
++++ b/router/task_plugin_protocol_router_test.go
+@@ -29,3 +29,17 @@ func TestHostProtocolRegistryDrivesProtocolRoutesOnce(t *testing.T) {
+ 	sort.Strings(actual)
+ 	assert.Equal(t, expected, actual)
+ }
++
++func TestTaskAndVideoRoutersExposeExplicitCancellationEndpoints(t *testing.T) {
++	engine := gin.New()
++	SetTaskRouter(engine)
++	SetVideoRouter(engine)
++	routes := make(map[string]struct{}, len(engine.Routes()))
++	for _, route := range engine.Routes() {
++		routes[route.Method+" "+route.Path] = struct{}{}
++	}
++	_, generic := routes["POST /v1/tasks/:key/cancel"]
++	_, video := routes["POST /v1/videos/:video_id/cancel"]
++	assert.True(t, generic)
++	assert.True(t, video)
++}
+diff --git a/router/task_router_test.go b/router/task_router_test.go
+index 986b9b4..40dfdf0 100644
+--- a/router/task_router_test.go
++++ b/router/task_router_test.go
+@@ -36,12 +36,13 @@ func TestSetTaskRouterRegistersWithoutConflict(t *testing.T) {
+ 	require.NotPanics(t, func() { SetTaskRouter(engine) })
+ 
+ 	routes := engine.Routes()
+-	require.Len(t, routes, 5)
++	require.Len(t, routes, 6)
+ 	actual := make(map[string]struct{}, len(routes))
+ 	for _, route := range routes {
+ 		actual[route.Method+" "+route.Path] = struct{}{}
+ 	}
+ 	assert.Contains(t, actual, http.MethodPost+" /v1/tasks/:key")
++	assert.Contains(t, actual, http.MethodPost+" /v1/tasks/:key/cancel")
+ 	assert.Contains(t, actual, http.MethodGet+" /v1/tasks/:key")
+ 	assert.Contains(t, actual, http.MethodGet+" /v1/tasks/:key/artifacts")
+ 	assert.Contains(t, actual, http.MethodGet+" /v1/tasks/:key/artifacts/:artifact_key/content")
+diff --git a/router/video-router.go b/router/video-router.go
+index 3bd007c..4d80775 100644
+--- a/router/video-router.go
++++ b/router/video-router.go
+@@ -30,4 +30,8 @@ func SetVideoRouter(router *gin.Engine) {
+ 		videoV1Router.GET("/video/generations/:task_id", controller.RelayTaskFetch)
+ 		videoV1Router.POST("/videos/:video_id/remix", controller.RelayTask)
+ 	}
++
++	videoCancelRouter := router.Group("/v1")
++	videoCancelRouter.Use(middleware.RouteTag("relay"), middleware.TokenAuth())
++	videoCancelRouter.POST("/videos/:video_id/cancel", controller.CancelTask)
+ }
+diff --git a/service/task_polling.go b/service/task_polling.go
+index 2270034..92cf939 100644
+--- a/service/task_polling.go
++++ b/service/task_polling.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"net/http"
+@@ -10,6 +11,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	taskdto "github.com/QuantumNous/new-api/dto"
+@@ -22,6 +24,8 @@ import (
+ 	"github.com/samber/lo"
+ )
+ 
++var resolveAsyncTaskCredential = relayhook.ResolveAsyncTaskCredential
++
+ // TaskPollingAdaptor 定义轮询所需的最小适配器接口，避免 service -> relay 的循环依赖
+ type TaskPollingAdaptor interface {
+ 	Init(info *relaycommon.RelayInfo)
+@@ -262,22 +266,44 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
+ 		}
+ 		return err
+ 	}
+-	proxy := ch.GetSetting().Proxy
+-	baseURL := ch.GetBaseURL()
+-	if baseURL == "" {
+-		baseURL = constant.GetChannelBaseURL(ch.Type)
+-	}
+ 	tasks := make([]*model.Task, 0, len(taskIds))
+ 	for _, upstreamID := range taskIds {
+ 		if task := taskM[upstreamID]; task != nil {
+ 			tasks = append(tasks, task)
+ 		}
+ 	}
++	credentialGroups := make(map[string][]*model.Task)
++	for _, task := range tasks {
++		credential, managed, credentialErr := resolveAsyncTaskCredential(task.ID, task.ChannelId)
++		if credentialErr != nil {
++			_ = relayhook.SyncAsyncTaskFromBase(task.ID, "UNKNOWN", "credential_snapshot_unavailable", task.StartTime, task.FinishTime)
++			logger.LogError(ctx, fmt.Sprintf("task %s credential snapshot unavailable: %v", task.TaskID, credentialErr))
++			continue
++		}
++		key := ch.Key
++		if managed {
++			key = credential.Secret
++		}
++		credentialGroups[key] = append(credentialGroups[key], task)
++	}
++	for key, group := range credentialGroups {
++		if err := updateBatchTasksWithCredential(ctx, adaptor, ch, channelId, key, group, taskM); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func updateBatchTasksWithCredential(ctx context.Context, adaptor BatchTaskPollingAdaptor, ch *model.Channel, channelId int, key string, tasks []*model.Task, taskM map[string]*model.Task) error {
++	proxy := ch.GetSetting().Proxy
++	baseURL := ch.GetBaseURL()
++	if baseURL == "" {
++		baseURL = constant.GetChannelBaseURL(ch.Type)
++	}
+ 	info := &relaycommon.RelayInfo{}
+-	info.ChannelMeta = &relaycommon.ChannelMeta{ChannelBaseUrl: baseURL}
+-	info.ApiKey = ch.Key
++	info.ChannelMeta = &relaycommon.ChannelMeta{ChannelBaseUrl: baseURL, ApiKey: key}
+ 	adaptor.Init(info)
+-	resp, err := adaptor.FetchBatchTasks(baseURL, ch.Key, tasks, proxy)
++	resp, err := adaptor.FetchBatchTasks(baseURL, key, tasks, proxy)
+ 	if err != nil {
+ 		common.SysLog(fmt.Sprintf("Get Task Do req error: %v", err))
+ 		return recordPollFailureForTasks(ctx, adaptor, tasks, pollClassTransport, 0, err.Error())
+@@ -370,6 +396,9 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
+ 			logger.LogWarn(ctx, fmt.Sprintf("Batch task %s already transitioned by another process, skip billing", task.TaskID))
+ 			continue
+ 		}
++		if syncErr := relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime); syncErr != nil {
++			common.SysError("sync APIGX async task error: " + syncErr.Error())
++		}
+ 		if terminalTransition {
+ 			billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, &responseItem.TaskInfo)
+ 			if task.Status == model.TaskStatusFailure && !billingSettled && task.Quota != 0 {
+@@ -491,6 +520,14 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
+ 	if privateData.Key != "" {
+ 		key = privateData.Key
+ 	}
++	credential, managed, credentialErr := resolveAsyncTaskCredential(task.ID, task.ChannelId)
++	if credentialErr != nil {
++		_ = relayhook.SyncAsyncTaskFromBase(task.ID, "UNKNOWN", "credential_snapshot_unavailable", task.StartTime, task.FinishTime)
++		return credentialErr
++	}
++	if managed {
++		key = credential.Secret
++	}
+ 	snap := task.Snapshot()
+ 	resp, err := adaptor.FetchTask(baseURL, key, task, proxy)
+ 	if err != nil {
+@@ -612,6 +649,9 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
+ 		// No changes, skip update
+ 		logger.LogDebug(ctx, "No update needed for task %s", task.TaskID)
+ 	}
++	if syncErr := relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime); syncErr != nil {
++		common.SysError("sync APIGX async task error: " + syncErr.Error())
++	}
+ 
+ 	if shouldFinalizeBilling {
+ 		billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+@@ -809,6 +849,9 @@ func failTaskFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, task *mod
+ 	if !won {
+ 		return nil
+ 	}
++	if syncErr := relayhook.SyncAsyncTaskFromBase(task.ID, string(task.Status), task.FailReason, task.StartTime, task.FinishTime); syncErr != nil {
++		common.SysError("sync APIGX async task error: " + syncErr.Error())
++	}
+ 	taskResult := relaycommon.FailTaskInfo(reason)
+ 	billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+ 	if !billingSettled && task.Quota != 0 {
+@@ -817,6 +860,40 @@ func failTaskFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, task *mod
+ 	return nil
+ }
+ 
++// FinalizeCanceledTask performs the base-task CAS, billing refund and APIGX
++// terminal release after an adaptor has confirmed upstream cancellation.
++// The base schema has no canceled status, so it persists FAILURE with a stable
++// reason code while APIGX keeps the distinct canceled state.
++func FinalizeCanceledTask(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task) (bool, error) {
++	if task == nil || adaptor == nil {
++		return false, errors.New("cancel task requires task and adaptor")
++	}
++	if task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure {
++		return false, nil
++	}
++	fromStatus := task.Status
++	now := time.Now().Unix()
++	task.Status = model.TaskStatusFailure
++	task.Progress = taskcommon.ProgressComplete
++	if task.FinishTime == 0 {
++		task.FinishTime = now
++	}
++	task.FailReason = "user_canceled"
++	won, err := task.UpdateWithStatus(fromStatus)
++	if err != nil || !won {
++		return won, err
++	}
++	if syncErr := relayhook.SyncAsyncTaskCanceled(task.ID, task.FailReason, task.FinishTime); syncErr != nil {
++		common.SysError("sync APIGX canceled task error: " + syncErr.Error())
++	}
++	taskResult := relaycommon.FailTaskInfo(task.FailReason)
++	billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
++	if !billingSettled && task.Quota != 0 {
++		RefundTaskQuota(ctx, task, task.FailReason)
++	}
++	return true, nil
++}
++
+ func failTasksFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, tasks []*model.Task, reason string) error {
+ 	var firstErr error
+ 	for _, task := range tasks {
+diff --git a/service/task_polling_test.go b/service/task_polling_test.go
+index b06b699..8f9acbb 100644
+--- a/service/task_polling_test.go
++++ b/service/task_polling_test.go
+@@ -10,6 +10,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	taskdto "github.com/QuantumNous/new-api/dto"
+@@ -39,6 +40,30 @@ type batchPollingAdaptor struct {
+ 	results    map[string]*BatchTaskResult
+ }
+ 
++type credentialGroupingBatchAdaptor struct {
++	taskPollingFetchAdaptor
++	groups map[string][]string
++}
++
++func (a *credentialGroupingBatchAdaptor) FetchMode() string { return "batch" }
++func (a *credentialGroupingBatchAdaptor) FetchBatchTasks(_ string, key string, tasks []*model.Task, _ string) (*http.Response, error) {
++	if a.groups == nil {
++		a.groups = map[string][]string{}
++	}
++	for _, task := range tasks {
++		a.groups[key] = append(a.groups[key], task.GetUpstreamTaskID())
++	}
++	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader([]byte(`{}`)))}, nil
++}
++func (a *credentialGroupingBatchAdaptor) ParseBatchResult(tasks []*model.Task, _ *http.Response, _ []byte) (map[string]*BatchTaskResult, error) {
++	results := make(map[string]*BatchTaskResult, len(tasks))
++	for _, task := range tasks {
++		id := task.GetUpstreamTaskID()
++		results[id] = &BatchTaskResult{TaskInfo: relaycommon.TaskInfo{TaskID: id, Status: model.TaskStatusInProgress}}
++	}
++	return results, nil
++}
++
+ func (a *batchPollingAdaptor) FetchMode() string { return "batch" }
+ func (a *batchPollingAdaptor) FetchBatchTasks(_ string, _ string, tasks []*model.Task, _ string) (*http.Response, error) {
+ 	a.batchCalls++
+@@ -253,6 +278,91 @@ func TestDispatchPlatformUpdateUsesFetchMode(t *testing.T) {
+ 	GetTaskAdaptorFunc = previousFactory
+ }
+ 
++func TestUpdateBatchTasksGroupsRequestsByCredentialSnapshot(t *testing.T) {
++	truncate(t)
++	const channelID = 110
++	seedTaskPollingChannel(t, channelID, true)
++	first := seedPollingTask(t, channelID, "task_credential_a", "upstream_credential_a")
++	second := seedPollingTask(t, channelID, "task_credential_b", "upstream_credential_b")
++
++	previousResolver := resolveAsyncTaskCredential
++	resolveAsyncTaskCredential = func(baseTaskID int64, _ ...int) (*relayhook.AsyncTaskCredential, bool, error) {
++		switch baseTaskID {
++		case first.ID:
++			return &relayhook.AsyncTaskCredential{Secret: "historical-key-v1"}, true, nil
++		case second.ID:
++			return &relayhook.AsyncTaskCredential{Secret: "historical-key-v2"}, true, nil
++		default:
++			return nil, false, nil
++		}
++	}
++	t.Cleanup(func() { resolveAsyncTaskCredential = previousResolver })
++
++	adaptor := &credentialGroupingBatchAdaptor{}
++	err := updateBatchTasks(context.Background(), adaptor, channelID,
++		[]string{first.GetUpstreamTaskID(), second.GetUpstreamTaskID()},
++		map[string]*model.Task{
++			first.GetUpstreamTaskID():  first,
++			second.GetUpstreamTaskID(): second,
++		})
++	require.NoError(t, err)
++	assert.Equal(t, map[string][]string{
++		"historical-key-v1": {first.GetUpstreamTaskID()},
++		"historical-key-v2": {second.GetUpstreamTaskID()},
++	}, adaptor.groups)
++}
++
++func TestFinalizeCanceledTaskUsesCASAndStableReason(t *testing.T) {
++	truncate(t)
++	task := makeTask(501, 0, 0, 0, BillingSourceWallet, 0)
++	task.TaskID = "cancel-finalize"
++	task.Status = model.TaskStatusInProgress
++	task.Progress = "50%"
++	require.NoError(t, model.DB.Create(task).Error)
++
++	won, err := FinalizeCanceledTask(context.Background(), &taskPollingFetchAdaptor{}, task)
++	require.NoError(t, err)
++	assert.True(t, won)
++	var persisted model.Task
++	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
++	assert.Equal(t, model.TaskStatus(model.TaskStatusFailure), persisted.Status)
++	assert.Equal(t, "user_canceled", persisted.FailReason)
++	assert.Equal(t, "100%", persisted.Progress)
++	assert.NotZero(t, persisted.FinishTime)
++
++	won, err = FinalizeCanceledTask(context.Background(), &taskPollingFetchAdaptor{}, &persisted)
++	require.NoError(t, err)
++	assert.False(t, won, "a terminal task must not be finalized or refunded twice")
++}
++
++func TestFinalizeCanceledTaskCASLossDoesNotRefund(t *testing.T) {
++	truncate(t)
++	const userID, initialQuota, taskQuota = 502, 10_000, 1_200
++	seedUser(t, userID, initialQuota)
++	task := makeTask(userID, 0, taskQuota, 0, BillingSourceWallet, 0)
++	task.TaskID = "cancel-cas-loss"
++	task.Status = model.TaskStatusInProgress
++	task.Progress = "50%"
++	require.NoError(t, model.DB.Create(task).Error)
++
++	// Simulate a polling worker winning the terminal transition after the
++	// cancellation request loaded its stale in-progress snapshot.
++	require.NoError(t, model.DB.Model(&model.Task{}).Where("id = ?", task.ID).
++		Updates(map[string]any{"status": model.TaskStatusSuccess, "progress": "100%"}).Error)
++	before, err := model.GetUserQuota(userID, true)
++	require.NoError(t, err)
++
++	won, err := FinalizeCanceledTask(context.Background(), &taskPollingFetchAdaptor{}, task)
++	require.NoError(t, err)
++	assert.False(t, won)
++	after, err := model.GetUserQuota(userID, true)
++	require.NoError(t, err)
++	assert.Equal(t, before, after, "a lost CAS must not refund billing")
++	var persisted model.Task
++	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
++	assert.Equal(t, model.TaskStatus(model.TaskStatusSuccess), persisted.Status)
++}
++
+ func TestUpdateBatchTasksSettlesTieredUsageForTerminalStates(t *testing.T) {
+ 	testCases := []struct {
+ 		name        string
+-- 
+2.53.0.windows.1
+

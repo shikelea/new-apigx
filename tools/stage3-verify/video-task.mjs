@@ -30,6 +30,12 @@ const pass = (s) => console.log('  \x1b[32mPASS\x1b[0m  ' + s);
 const fail = (s) => console.log('  \x1b[31mFAIL\x1b[0m  ' + s);
 const info = (s) => console.log('  \x1b[36mINFO\x1b[0m  ' + s);
 const decl = (s) => console.log('  \x1b[33mDECLARED\x1b[0m  ' + s);
+const expectOK = (response, label) => {
+  if (response.status !== 200 || response.json?.success === false || !response.json?.data) {
+    throw new Error(`${label}失败：HTTP ${response.status} ${response.text.slice(0, 180)}`);
+  }
+  return response.json.data;
+};
 
 async function call(url, { method = 'GET', body, auth, timeoutMs = 120000 } = {}) {
   const h = { accept: 'application/json' };
@@ -47,6 +53,7 @@ async function call(url, { method = 'GET', body, auth, timeoutMs = 120000 } = {}
 
 const fs = await import('node:fs');
 const path = await import('node:path');
+const crypto = await import('node:crypto');
 const STATE_DIR = path.join(process.cwd(), '.toolchain', '_state');
 const SESSION_FILE = path.join(STATE_DIR, 'sessions.json');
 const OUT_FILE = path.join(STATE_DIR, 'video-task.json');
@@ -104,23 +111,40 @@ async function main() {
     if (!base?.id) throw new Error('查不到底座渠道');
 
     const g = await call(`${BASE}/api/apigx/share-groups`, { method: 'POST', auth: root, body: { name: 'VID组-' + stamp, default_visibility: 2 } });
+    const group = expectOK(g, '创建视频分享分组');
     // U-1：分组新建后是「待审核」，本脚本代表"平台已审核通过"的正常状态
-    await call(`${BASE}/api/apigx/share-groups/${g.json.data.id}/publish-status`, {
+    const groupPublished = await call(`${BASE}/api/apigx/share-groups/${group.id}/publish-status`, {
       method: 'POST',
       auth: root,
       body: { status: 2 },
     });
+    expectOK(groupPublished, '发布视频分享分组');
     const ch = await call(`${BASE}/api/apigx/channels`, {
       method: 'POST', auth: root,
-      body: { share_group_id: g.json.data.id, base_channel_id: base.id, name: 'VID渠道-' + stamp, protocol: 'openai', base_url: STUB },
+      body: { share_group_id: group.id, base_channel_id: base.id, name: 'VID渠道-' + stamp, protocol: 'openai', base_url: STUB },
     });
-    const channelId = ch.json.data.id;
-    await call(`${BASE}/api/apigx/channels/${channelId}/keys`, { method: 'POST', auth: root, body: { stable_key_id: 'vid-' + stamp, name: 'k', key: STUB_KEY } });
-    await call(`${BASE}/api/apigx/channels/${channelId}/apply`, { method: 'POST', auth: root });
+    const channelId = expectOK(ch, '创建视频分享渠道').id;
+    const keyCreated = await call(`${BASE}/api/apigx/channels/${channelId}/keys`, { method: 'POST', auth: root, body: { stable_key_id: 'vid-' + stamp, name: 'k', key: STUB_KEY } });
+    expectOK(keyCreated, '创建视频上游 Key');
+    const capacity = await call(`${BASE}/api/apigx/channels/${channelId}/capacity-policy`, {
+      method: 'PUT', auth: root, body: { concurrency_mode: 4, concurrency_value: 8 },
+    });
+    expectOK(capacity, '配置异步任务容量租约');
+    const applied = await call(`${BASE}/api/apigx/channels/${channelId}/apply`, { method: 'POST', auth: root });
+    expectOK(applied, '投影视频分享渠道');
     const off = await call(`${BASE}/api/apigx/channels/${channelId}/offerings`, { method: 'POST', auth: root, body: { upstream_model_id: MODEL } });
-    const offeringId = off.json.data.id;
-    await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: root });
-    await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, { method: 'POST', auth: root });
+    const offeringId = expectOK(off, '创建视频供给').id;
+    const price = await call(`${BASE}/api/apigx/price-rules`, {
+      method: 'PUT', auth: root,
+      body: { scope_type: 0, scope_id: offeringId, input_usd_per_million: 1, output_usd_per_million: 2 },
+    });
+    expectOK(price, '配置视频供给参考价格');
+    const submitted = await call(`${BASE}/api/apigx/offerings/${offeringId}/submit`, { method: 'POST', auth: root });
+    expectOK(submitted, '提交视频供给');
+    const published = await call(`${BASE}/api/apigx/offerings/${offeringId}/publish`, {
+      method: 'POST', auth: root, body: { reason_code: 'stage_c_async_task_verification' },
+    });
+    expectOK(published, '发布视频供给');
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.writeFileSync(OUT_FILE, JSON.stringify({ stamp, model: MODEL, baseId: base.id, channelId, offeringId }, null, 2));
     info(`已建视频供给：base=${base.id}（类型 61 + task_plugin_key=kling）channel=${channelId} offering=${offeringId}`);
@@ -234,7 +258,14 @@ async function main() {
   }
   check('长时间未完成时保持"处理中"（不误报成功）', /process|pending|queue|submit|in_progress/i.test(hangStatus), `status=${hangStatus}`);
 
-  // ---- ⑤b 超时路径：平台把长期未完成的任务判定为失败 ----
+  // ---- ⑥ 取消能力（计划书：不支持取消的上游必须明确显示能力限制） ----
+  const cancel = await call(`${BASE}/v1/videos/${encodeURIComponent(hangId)}/cancel`, { method: 'POST', auth });
+  const cancelCode = String(cancel.json?.error?.code ?? '');
+  check('不支持取消的适配器返回稳定 501 能力错误',
+    cancel.status === 501 && cancelCode === 'task_cancellation_not_supported',
+    `HTTP ${cancel.status} code=${cancelCode || '(空)'}`);
+
+  // ---- ⑥a 超时路径：平台把长期未完成的任务判定为失败 ----
   if (EXPECT_TIMEOUT) {
     const deadline = Date.now() + 180000;
     let timedOut = '';
@@ -250,15 +281,59 @@ async function main() {
     info('（该检查要求平台以短超时运行；本次由 TASK_TIMEOUT_MINUTES 控制）');
   }
 
-  // ---- ⑥ 取消能力（计划书：不支持取消的上游必须明确显示能力限制） ----
-  const cancel = await call(`${BASE}/v1/videos/${encodeURIComponent(hangId)}/cancel`, { method: 'POST', auth });
-  if (cancel.status === 404 || cancel.status === 405 || cancel.status === 501) {
-    decl(`取消：平台/上游**不支持取消**（HTTP ${cancel.status}）——按计划书要求明确显示能力限制，而不是含糊地装作能取消`);
-    results.push({ name: '取消能力已明确声明', ok: true });
-  } else {
-    const after = await poll(hangId);
-    const cs = String(after.json?.status ?? after.json?.data?.task_status ?? '');
-    check('取消请求被处理（返回非错误且状态随之变化）', cancel.status < 400, `HTTP ${cancel.status}，取消后状态=${cs}`);
+  // ---- ⑥b Key 轮换/删除后，两份历史凭据仍各自推进原任务 ----
+  // 短超时模式只验证 timeout/reconciliation；它会让新建的历史凭据任务在后台轮询前
+  // 先超时，和凭据快照验证互相干扰。历史凭据链路由正常超时配置下的同一脚本覆盖。
+  if (!EXPECT_TIMEOUT) {
+  await setPlan(['IN_PROGRESS', 'SUCCESS']);
+  await call(`${STUB}/_control/reset`, { method: 'POST' });
+  const oldCredentialTask = await submit('historical credential before rotation');
+  const oldTaskId = oldCredentialTask.json?.id ?? oldCredentialTask.json?.task_id ?? oldCredentialTask.json?.data?.task_id;
+  check('轮换前任务提交', oldCredentialTask.status === 200 && Boolean(oldTaskId), `HTTP ${oldCredentialTask.status}`);
+
+  const keyList = await call(`${BASE}/api/apigx/channels/${state.channelId}/keys`, { auth: root });
+  const managedKey = keyList.json?.data?.items?.[0];
+  if (!managedKey?.id) throw new Error('找不到待轮换的视频上游 Key');
+  const rotatedSecret = `sk-stub-video-rotated-${state.stamp}`;
+  const rotated = await call(`${BASE}/api/apigx/keys/${managedKey.id}/rotate`, {
+    method: 'POST', auth: root, body: { key: rotatedSecret },
+  });
+  check('上游 Key 轮换', rotated.status === 200 && Number(rotated.json?.data?.credential_version) === 2,
+    `HTTP ${rotated.status} version=${rotated.json?.data?.credential_version ?? '(空)'}`);
+
+  const newCredentialTask = await submit('historical credential after rotation');
+  const newTaskId = newCredentialTask.json?.id ?? newCredentialTask.json?.task_id ?? newCredentialTask.json?.data?.task_id;
+  check('轮换后任务提交', newCredentialTask.status === 200 && Boolean(newTaskId), `HTTP ${newCredentialTask.status}`);
+
+  const deleted = await call(`${BASE}/api/apigx/keys/${managedKey.id}`, { method: 'DELETE', auth: root });
+  check('活动 Key 删除后只保留任务期历史凭据', deleted.status === 200 && Number(deleted.json?.data?.deleted) === Number(managedKey.id),
+    `HTTP ${deleted.status}`);
+
+  const waitTerminal = async (id) => {
+    let status = '';
+    for (let i = 0; i < 30; i++) {
+      const response = await poll(id);
+      status = String(response.json?.status ?? response.json?.data?.task_status ?? '');
+      if (/succeed|success|completed|fail/i.test(status)) return status;
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+    return status;
+  };
+  const [oldTerminal, newTerminal] = await Promise.all([waitTerminal(oldTaskId), waitTerminal(newTaskId)]);
+  check('Key 轮换/删除后旧版本任务仍成功', /succeed|success|completed/i.test(oldTerminal), `status=${oldTerminal}`);
+  check('Key 删除后新版本任务仍成功', /succeed|success|completed/i.test(newTerminal), `status=${newTerminal}`);
+
+  const requestLog = await call(`${STUB}/_control/requests?limit=200`);
+  const entries = requestLog.json?.requests ?? [];
+  const fingerprint = (secret) => {
+    const hash = crypto.createHash('sha256').update(secret).digest('hex').slice(0, 10);
+    return `sha256:${hash}/…${secret.slice(-4)}`;
+  };
+  const queryEntries = entries.filter((entry) => /\/v1\/videos\/(text2video|image2video)\/[^/]+$/.test(entry?.path ?? ''));
+  const oldQueryCount = queryEntries.filter((entry) => entry.upstreamKey === fingerprint(STUB_KEY)).length;
+  const newQueryCount = queryEntries.filter((entry) => entry.upstreamKey === fingerprint(rotatedSecret)).length;
+  check('轮询按任务快照分用旧/新凭据', oldQueryCount > 0 && newQueryCount > 0,
+    `旧凭据查询=${oldQueryCount} 新凭据查询=${newQueryCount}`);
   }
 
   // ---- ⑦ 绑定正确性：任务必须记在正确的用户与原渠道上 ----
