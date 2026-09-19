@@ -657,6 +657,91 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "软删除后应可重新发布")
 }
 
+func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, reviewer int64 = 8451, 8499
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "跨 owner 审核底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "待审核组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	createPending := func(modelID string) int64 {
+		t.Helper()
+		rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+			`{"upstream_model_id":"`+modelID+`"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		id := int64(body["data"].(map[string]any)["id"].(float64))
+		rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(id, 10)+"/submit", owner, "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return id
+	}
+
+	publishID := createPending("review-publish")
+	rec, _ := env.do(t, http.MethodPut, "/api/price-rules", reviewer,
+		`{"scope_type":0,"scope_id":`+strconv.FormatInt(publishID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 普通用户不能读取平台待审核队列；管理员能看到其他 owner 的资源。
+	rec, _ = env.doWithRole(t, http.MethodGet, "/api/reviews/offerings", owner, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	rec, body := env.do(t, http.MethodGet, "/api/reviews/offerings?page=1&page_size=10", reviewer, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	queue := body["data"].(map[string]any)
+	items := queue["items"].([]any)
+	require.Len(t, items, 1)
+	first := items[0].(map[string]any)
+	assert.Equal(t, float64(owner), first["owner_user_id"])
+	assert.Equal(t, "review-publish", first["upstream_model_id"])
+	assert.Equal(t, true, first["price_configured"])
+	assert.NotContains(t, rec.Body.String(), plainSecret)
+
+	// 分享者即使知道 ID，也不能用普通用户角色自行通过审核。
+	rec, _ = env.doWithRole(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(publishID, 10)+"/publish",
+		owner, `{"reason_code":"self_approval"}`, common.RoleCommonUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// 另一位管理员可发布 owner 的供给，并得到 owner 与前后状态；不需要伪装成资源 owner。
+	rec, body = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(publishID, 10)+"/publish",
+		reviewer, `{"reason_code":"manual_approval"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data := body["data"].(map[string]any)
+	assert.Equal(t, float64(owner), data["owner_user_id"])
+	assert.Equal(t, float64(apigxmodel.OfferingStatusPending), data["from_status"])
+	assert.Equal(t, float64(apigxmodel.OfferingStatusPublished), data["status"])
+
+	// 重复审核不能成功，也不能产生第二条审计事件。
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(publishID, 10)+"/publish", reviewer, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var publishEvents []apigxmodel.AuditEvent
+	require.NoError(t, env.db.Where("target_type = ? AND target_id = ?", "model_offering", publishID).Find(&publishEvents).Error)
+	require.Len(t, publishEvents, 1)
+	assert.Equal(t, reviewer, publishEvents[0].ActorUserID)
+	assert.Equal(t, "offering_publish", publishEvents[0].Action)
+	assert.Contains(t, publishEvents[0].ChangeSummary, `"owner_user_id":8451`)
+	assert.Contains(t, publishEvents[0].ChangeSummary, `"reason_code":"manual_approval"`)
+
+	rejectID := createPending("review-reject")
+	// 理由只接受脱敏码；自由文本在进入不可变审计表前被拒绝，状态保持待审核。
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(rejectID, 10)+"/reject",
+		reviewer, `{"reason_code":"contains a secret"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	var rejectOffering apigxmodel.ModelOffering
+	require.NoError(t, env.db.Where("id = ?", rejectID).First(&rejectOffering).Error)
+	assert.Equal(t, apigxmodel.OfferingStatusPending, rejectOffering.Status)
+
+	rec, body = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(rejectID, 10)+"/reject",
+		reviewer, `{"reason_code":"unsupported_claim"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, float64(owner), body["data"].(map[string]any)["owner_user_id"])
+	var rejectEvents []apigxmodel.AuditEvent
+	require.NoError(t, env.db.Where("target_type = ? AND target_id = ?", "model_offering", rejectID).Find(&rejectEvents).Error)
+	require.Len(t, rejectEvents, 1)
+	assert.Equal(t, "offering_reject", rejectEvents[0].Action)
+	assert.Contains(t, rejectEvents[0].ChangeSummary, `"reason_code":"unsupported_claim"`)
+}
+
 // ---- 广场与详情（T1.9） ----
 
 func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {

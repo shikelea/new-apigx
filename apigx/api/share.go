@@ -16,8 +16,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/QuantumNous/new-api/constant"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -29,12 +30,12 @@ import (
 	"github.com/QuantumNous/new-api/apigx/routing"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
-	"os"
 )
 
 // Register 注册全部分享者接口。调用方需已挂好认证中间件（UserAuth）。
@@ -77,6 +78,13 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		offerings.POST("/:id/publish", h.publishOffering)
 		offerings.POST("/:id/reject", h.rejectOffering)
 		offerings.DELETE("/:id", h.deleteOffering)
+	}
+
+	// 平台审核面：跨 owner 读取待审核队列。具体发布/驳回动作仍使用 offerings 下的端点，
+	// 但它们在服务端执行 reviewer-scoped 状态转换，不能复用分享者的 owner-scoped CRUD。
+	reviews := r.Group("/reviews")
+	{
+		reviews.GET("/offerings", h.listOfferingsForReview)
 	}
 
 	plaza := r.Group("/plaza")
@@ -1210,12 +1218,103 @@ func requirePlatformReviewer(c *gin.Context) bool {
 	return true
 }
 
+type reviewOfferingRequest struct {
+	// ReasonCode 是脱敏的运营理由码，只允许 a-z / 0-9 / 点 / 下划线 / 连字符。
+	// 不接受自由文本，避免把凭据或上游原始错误写入不可变审计表。
+	ReasonCode string `json:"reason_code"`
+}
+
+func readReviewReasonCode(c *gin.Context, fallback string) (string, bool) {
+	var req reviewOfferingRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return "", false
+	}
+	reason := strings.ToLower(strings.TrimSpace(req.ReasonCode))
+	if reason == "" {
+		reason = fallback
+	}
+	if len(reason) > 64 {
+		fail(c, http.StatusBadRequest, "invalid_reason_code", "reason_code must be at most 64 characters")
+		return "", false
+	}
+	for i := 0; i < len(reason); i++ {
+		ch := reason[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' {
+			continue
+		}
+		fail(c, http.StatusBadRequest, "invalid_reason_code", "reason_code contains unsupported characters")
+		return "", false
+	}
+	return reason, true
+}
+
+func offeringReviewContext(c *gin.Context, reviewerID int64, reasonCode string) apigxmodel.OfferingReviewContext {
+	ipHash := ""
+	if clientIP := strings.TrimSpace(c.ClientIP()); clientIP != "" {
+		sum := sha256.Sum256([]byte(clientIP))
+		ipHash = hex.EncodeToString(sum[:])
+	}
+	userAgent := []rune(strings.TrimSpace(c.Request.UserAgent()))
+	if len(userAgent) > 255 {
+		userAgent = userAgent[:255]
+	}
+	return apigxmodel.OfferingReviewContext{
+		ReviewerUserID: reviewerID,
+		ReviewerRole:   c.GetInt("role"),
+		ReviewerKeyID:  int64(c.GetInt("token_id")),
+		ReasonCode:     reasonCode,
+		RequestID:      c.GetString(common.RequestIdKey),
+		IPHash:         ipHash,
+		UserAgent:      string(userAgent),
+	}
+}
+
+func (h *handler) listOfferingsForReview(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
+		return
+	}
+	page, pageSize := 1, 20
+	if parsed, err := strconv.Atoi(c.Query("page")); err == nil && parsed > 0 {
+		page = parsed
+	}
+	if parsed, err := strconv.Atoi(c.Query("page_size")); err == nil && parsed > 0 && parsed <= 100 {
+		pageSize = parsed
+	}
+	items, total, err := apigxmodel.ListOfferingsForReview(h.db, apigxmodel.OfferingStatusPending, (page-1)*pageSize, pageSize)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	result := make([]gin.H, 0, len(items))
+	for _, item := range items {
+		var caps apigxmodel.Capability
+		_ = common.UnmarshalJsonStr(item.Capabilities, &caps)
+		result = append(result, gin.H{
+			"id": item.OfferingID, "public_id": item.OfferingPublicID,
+			"owner_user_id":  item.OwnerUserID,
+			"share_group_id": item.ShareGroupID, "share_group_public_id": item.ShareGroupPublicID,
+			"share_group_name": item.ShareGroupName, "group_visibility": item.GroupVisibility,
+			"channel_id": item.ChannelID, "channel_public_id": item.ChannelPublicID, "channel_name": item.ChannelName,
+			"upstream_model_id": item.UpstreamModelID, "capabilities": caps,
+			"status": item.Status, "revision": item.Revision,
+			"price_configured": h.offeringHasAcceptedPrice(item.OfferingID),
+			"created_at":       item.CreatedAt, "updated_at": item.UpdatedAt,
+		})
+	}
+	ok(c, gin.H{"items": result, "total": total, "page": page, "page_size": pageSize})
+}
+
 func (h *handler) publishOffering(c *gin.Context) {
-	owner, valid := h.ownerID(c)
+	reviewer, valid := h.ownerID(c)
 	if !valid || !requirePlatformReviewer(c) {
 		return
 	}
 	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	reasonCode, valid := readReviewReasonCode(c, "approved")
 	if !valid {
 		return
 	}
@@ -1227,7 +1326,9 @@ func (h *handler) publishOffering(c *gin.Context) {
 			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
 		return
 	}
-	if err := apigxmodel.PublishModelOffering(h.db, owner, id); err != nil {
+	reviewed, err := apigxmodel.ReviewModelOffering(h.db, id, apigxmodel.OfferingStatusPublished,
+		offeringReviewContext(c, reviewer, reasonCode))
+	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
@@ -1237,7 +1338,11 @@ func (h *handler) publishOffering(c *gin.Context) {
 	if err := h.syncBaseChannelServesModel(id); err != nil {
 		common.SysError("apigx api: sync base channel abilities failed: " + err.Error())
 	}
-	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPublished})
+	ok(c, gin.H{
+		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
+		"owner_user_id": reviewed.OwnerUserID,
+		"from_status":   reviewed.FromStatus, "status": reviewed.ToStatus,
+	})
 }
 
 // offeringHasAcceptedPrice 判断该供给是否已有**被接受**的价格（供给作用域或它所属渠道作用域）。
@@ -1267,7 +1372,7 @@ func (h *handler) offeringHasAcceptedPrice(offeringID int64) bool {
 }
 
 func (h *handler) rejectOffering(c *gin.Context) {
-	owner, valid := h.ownerID(c)
+	reviewer, valid := h.ownerID(c)
 	if !valid || !requirePlatformReviewer(c) {
 		return
 	}
@@ -1275,11 +1380,21 @@ func (h *handler) rejectOffering(c *gin.Context) {
 	if !valid {
 		return
 	}
-	if err := apigxmodel.RejectModelOffering(h.db, owner, id); err != nil {
+	reasonCode, valid := readReviewReasonCode(c, "policy_rejected")
+	if !valid {
+		return
+	}
+	reviewed, err := apigxmodel.ReviewModelOffering(h.db, id, apigxmodel.OfferingStatusRejected,
+		offeringReviewContext(c, reviewer, reasonCode))
+	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusRejected})
+	ok(c, gin.H{
+		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
+		"owner_user_id": reviewed.OwnerUserID,
+		"from_status":   reviewed.FromStatus, "status": reviewed.ToStatus,
+	})
 }
 
 func (h *handler) deleteOffering(c *gin.Context) {

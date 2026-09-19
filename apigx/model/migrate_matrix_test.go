@@ -1,9 +1,11 @@
 package apigxmodel
 
 import (
+	"errors"
 	"os"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,6 +35,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
+		assertOfferingReviewDialect(t, db)
 	})
 
 	t.Run("postgres", func(t *testing.T) {
@@ -56,6 +59,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+		assertOfferingReviewDialect(t, db)
 
 		// 存储引擎必须是 InnoDB。这不是洁癖：
 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
@@ -78,6 +82,56 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
 	require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+	assertOfferingReviewDialect(t, db)
+}
+
+var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
+
+// assertOfferingReviewDialect 在每个真实方言上执行 B2 的 JOIN、条件更新、嵌套事务和审计写入。
+// 外层事务最终主动回滚，矩阵库可反复使用且不会积累夹具。
+func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const owner, reviewer int64 = 9_810_001, 9_810_099
+		_, pendingBefore, listErr := ListOfferingsForReview(tx, OfferingStatusPending, 0, 1)
+		require.NoError(t, listErr)
+		group := &ShareGroup{
+			OwnerUserID: owner, Name: "review-matrix",
+			DefaultVisibility: ShareGroupVisibilityPublic, PublishStatus: ShareGroupPublishPublished,
+		}
+		require.NoError(t, CreateShareGroup(tx, group))
+		channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "review-matrix", BaseChannelID: 9_810_001}
+		require.NoError(t, CreateChannel(tx, channel))
+		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-matrix-model"}
+		require.NoError(t, CreateModelOffering(tx, owner, offering))
+		require.NoError(t, SubmitModelOffering(tx, owner, offering.ID))
+
+		items, total, listErr := ListOfferingsForReview(tx, OfferingStatusPending, int(pendingBefore), 20)
+		require.NoError(t, listErr)
+		require.EqualValues(t, pendingBefore+1, total)
+		require.NotEmpty(t, items)
+		assert.Equal(t, offering.ID, items[0].OfferingID)
+		assert.Equal(t, owner, items[0].OwnerUserID)
+
+		result, reviewErr := ReviewModelOffering(tx, offering.ID, OfferingStatusPublished, OfferingReviewContext{
+			ReviewerUserID: reviewer,
+			ReviewerRole:   common.RoleAdminUser,
+			ReasonCode:     "matrix_approval",
+			RequestID:      "matrix-request",
+		})
+		require.NoError(t, reviewErr)
+		assert.Equal(t, owner, result.OwnerUserID)
+		var event AuditEvent
+		require.NoError(t, tx.Where("target_type = ? AND target_id = ?", "model_offering", offering.ID).First(&event).Error)
+		assert.Equal(t, reviewer, event.ActorUserID)
+		assert.Equal(t, "offering_publish", event.Action)
+		_, reviewErr = ReviewModelOffering(tx, offering.ID, OfferingStatusRejected, OfferingReviewContext{
+			ReviewerUserID: reviewer, ReviewerRole: common.RoleAdminUser, ReasonCode: "duplicate",
+		})
+		assert.ErrorIs(t, reviewErr, ErrInvalidArgument)
+		return errRollbackOfferingReviewMatrix
+	})
+	require.ErrorIs(t, err, errRollbackOfferingReviewMatrix)
 }
 
 // informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，

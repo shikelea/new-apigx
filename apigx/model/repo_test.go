@@ -480,6 +480,65 @@ func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
 	assert.Equal(t, OfferingStatusDraft, again.Status)
 }
 
+func TestReviewerScopedOfferingReviewIsCrossOwnerAtomicAndAudited(t *testing.T) {
+	const owner, reviewer int64 = 7101, 7199
+	db := newRepoDB(t)
+	group := &ShareGroup{
+		OwnerUserID: owner, Name: "跨 owner 审核组",
+		DefaultVisibility: ShareGroupVisibilityPublic, PublishStatus: ShareGroupPublishPublished,
+	}
+	require.NoError(t, CreateShareGroup(db, group))
+	channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "审核渠道", BaseChannelID: 98001}
+	require.NoError(t, CreateChannel(db, channel))
+	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-model"}
+	require.NoError(t, CreateModelOffering(db, owner, offering))
+	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
+
+	items, total, err := ListOfferingsForReview(db, OfferingStatusPending, 0, 20)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, total)
+	require.Len(t, items, 1)
+	assert.Equal(t, owner, items[0].OwnerUserID)
+	assert.Equal(t, offering.ID, items[0].OfferingID)
+
+	reviewed, err := ReviewModelOffering(db, offering.ID, OfferingStatusPublished, OfferingReviewContext{
+		ReviewerUserID: reviewer,
+		ReviewerRole:   common.RoleAdminUser,
+		ReasonCode:     "manual_approval",
+		RequestID:      "req-review-1",
+		IPHash:         strings.Repeat("a", 64),
+		UserAgent:      "review-test",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, owner, reviewed.OwnerUserID)
+	assert.Equal(t, OfferingStatusPending, reviewed.FromStatus)
+	assert.Equal(t, OfferingStatusPublished, reviewed.ToStatus)
+
+	// 条件更新保证同一供给只能审核一次；第二次不得再写审计。
+	_, err = ReviewModelOffering(db, offering.ID, OfferingStatusRejected, OfferingReviewContext{
+		ReviewerUserID: reviewer, ReviewerRole: common.RoleAdminUser, ReasonCode: "duplicate_review",
+	})
+	assert.ErrorIs(t, err, ErrInvalidArgument)
+
+	var events []AuditEvent
+	require.NoError(t, db.Where("target_type = ? AND target_id = ?", "model_offering", offering.ID).Find(&events).Error)
+	require.Len(t, events, 1)
+	event := events[0]
+	assert.Equal(t, reviewer, event.ActorUserID)
+	assert.Equal(t, "admin", event.Category)
+	assert.Equal(t, "offering_publish", event.Action)
+	assert.Equal(t, offering.PublicID, event.TargetPublicID)
+	assert.Equal(t, "req-review-1", event.RequestID)
+	assert.NotEqual(t, event.BeforeDigest, event.AfterDigest)
+	assert.Contains(t, event.ChangeSummary, `"owner_user_id":7101`)
+	assert.Contains(t, event.ChangeSummary, `"reason_code":"manual_approval"`)
+
+	items, total, err = ListOfferingsForReview(db, OfferingStatusPending, 0, 20)
+	require.NoError(t, err)
+	assert.Zero(t, total)
+	assert.Empty(t, items)
+}
+
 func TestListModelOfferingsByChannelScopesByOwner(t *testing.T) {
 	db := newRepoDB(t)
 	const ownerA, ownerB int64 = 13101, 13102

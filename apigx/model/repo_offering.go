@@ -40,6 +40,48 @@ type Capability struct {
 	Reasoning bool `json:"reasoning"`
 }
 
+// OfferingReviewContext 是平台审核动作的脱敏上下文。
+// ReasonCode 只接受短理由码，不接收自由文本，避免管理员误把凭据写入不可变审计表。
+type OfferingReviewContext struct {
+	ReviewerUserID int64
+	ReviewerRole   int
+	ReviewerKeyID  int64
+	ReasonCode     string
+	RequestID      string
+	IPHash         string
+	UserAgent      string
+}
+
+// OfferingReviewResult 返回审核对象的 owner 与状态变化，供 API 响应和后续投影使用。
+type OfferingReviewResult struct {
+	OfferingID       int64
+	OfferingPublicID string
+	OwnerUserID      int64
+	FromStatus       int
+	ToStatus         int
+}
+
+// OfferingReviewItem 是管理员待审核队列所需的最小跨 owner 投影。
+// 不包含上游地址、Key、账户池或任何凭据材料。
+type OfferingReviewItem struct {
+	OfferingID         int64
+	OfferingPublicID   string
+	OwnerUserID        int64
+	ShareGroupID       int64
+	ShareGroupPublicID string
+	ShareGroupName     string
+	GroupVisibility    int
+	ChannelID          int64
+	ChannelPublicID    string
+	ChannelName        string
+	UpstreamModelID    string
+	Capabilities       string
+	Status             int
+	Revision           int64
+	CreatedAt          int64
+	UpdatedAt          int64
+}
+
 // OfferingKeyHashFor 计算供给的业务键哈希（渠道 + 上游模型名）。
 //
 // 用哈希而不是把两列一起放进唯一索引，是为了让「墓碑」语义只依赖一个列：
@@ -150,6 +192,170 @@ func PublishModelOffering(db *gorm.DB, ownerUserID, id int64) error {
 // RejectModelOffering 平台驳回（待审核 → 已驳回）。
 func RejectModelOffering(db *gorm.DB, ownerUserID, id int64) error {
 	return transitionOffering(db, ownerUserID, id, []int{OfferingStatusPending}, OfferingStatusRejected)
+}
+
+// ListOfferingsForReview 返回平台审核队列。它是 reviewer-scoped 读取，因此刻意不接 owner 参数；
+// API 层必须先验证管理员角色。分享者自己的列表仍走 ListModelOfferingsByChannel 的 owner 约束。
+func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingReviewItem, int64, error) {
+	if db == nil {
+		return nil, 0, errors.New("apigxmodel: nil db")
+	}
+	if status < OfferingStatusDraft || status > OfferingStatusRejected {
+		return nil, 0, fmt.Errorf("%w: invalid offering review status", ErrInvalidArgument)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+
+	offeringTable := ModelOffering{}.TableName()
+	channelTable := Channel{}.TableName()
+	groupTable := ShareGroup{}.TableName()
+	base := db.Table(offeringTable+" AS o").
+		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
+		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
+		Where("o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ?", status, AliveFlagAlive)
+
+	var total int64
+	if err := base.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var items []OfferingReviewItem
+	err := base.Select("o.id AS offering_id, o.public_id AS offering_public_id, " +
+		"c.owner_user_id AS owner_user_id, g.id AS share_group_id, g.public_id AS share_group_public_id, " +
+		"g.name AS share_group_name, g.default_visibility AS group_visibility, " +
+		"c.id AS channel_id, c.public_id AS channel_public_id, c.name AS channel_name, " +
+		"o.upstream_model_id AS upstream_model_id, o.capabilities AS capabilities, " +
+		"o.status AS status, o.revision AS revision, o.created_at AS created_at, o.updated_at AS updated_at").
+		Order("o.updated_at ASC, o.id ASC").Offset(offset).Limit(limit).Scan(&items).Error
+	return items, total, err
+}
+
+// ReviewModelOffering 执行跨 owner 的平台审核，并把状态变化与脱敏审核上下文写入同一事务。
+// 条件更新保证两个管理员同时审核同一条供给时最多一个成功；审计写入失败会回滚状态变化。
+func ReviewModelOffering(db *gorm.DB, id int64, toStatus int, review OfferingReviewContext) (*OfferingReviewResult, error) {
+	if db == nil {
+		return nil, errors.New("apigxmodel: nil db")
+	}
+	if id <= 0 || review.ReviewerUserID <= 0 || review.ReviewerRole < common.RoleAdminUser {
+		return nil, fmt.Errorf("%w: offering and reviewer are required", ErrInvalidArgument)
+	}
+	if toStatus != OfferingStatusPublished && toStatus != OfferingStatusRejected {
+		return nil, fmt.Errorf("%w: unsupported review decision", ErrInvalidArgument)
+	}
+	reasonCode := strings.TrimSpace(review.ReasonCode)
+	if !validOfferingReviewReasonCode(reasonCode) {
+		return nil, fmt.Errorf("%w: review reason code is required", ErrInvalidArgument)
+	}
+	if len(review.RequestID) > 64 || (review.IPHash != "" && len(review.IPHash) != 64) || len([]rune(review.UserAgent)) > 255 {
+		return nil, fmt.Errorf("%w: invalid review audit context", ErrInvalidArgument)
+	}
+
+	result := &OfferingReviewResult{}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var offering ModelOffering
+		if err := tx.Where("id = ? AND alive_flag = ?", id, AliveFlagAlive).First(&offering).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		var channel Channel
+		if err := tx.Select("id", "owner_user_id").Where("id = ? AND alive_flag = ?", offering.ChannelID, AliveFlagAlive).First(&channel).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if offering.Status != OfferingStatusPending {
+			return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, toStatus)
+		}
+
+		now := common.GetTimestamp()
+		updates := map[string]any{"status": toStatus, "updated_at": now}
+		if toStatus == OfferingStatusPublished {
+			updates["verified_at"] = now
+		}
+		updated := tx.Model(&ModelOffering{}).
+			Where("id = ? AND alive_flag = ? AND status = ?", offering.ID, AliveFlagAlive, OfferingStatusPending).
+			Updates(updates)
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return fmt.Errorf("%w: offering was already reviewed", ErrInvalidArgument)
+		}
+
+		action := "offering_reject"
+		if toStatus == OfferingStatusPublished {
+			action = "offering_publish"
+		}
+		summary, err := common.Marshal(map[string]any{
+			"owner_user_id": channel.OwnerUserID,
+			"from_status":   OfferingStatusPending,
+			"to_status":     toStatus,
+			"reason_code":   reasonCode,
+		})
+		if err != nil {
+			return err
+		}
+		event := &AuditEvent{
+			EventUID:       common.NewRequestId(),
+			ActorUserID:    review.ReviewerUserID,
+			ActorRole:      review.ReviewerRole,
+			ActorApiKeyID:  review.ReviewerKeyID,
+			Category:       "admin",
+			Action:         action,
+			TargetType:     "model_offering",
+			TargetID:       offering.ID,
+			TargetPublicID: offering.PublicID,
+			BeforeDigest:   offeringReviewDigest(offering.ID, channel.OwnerUserID, OfferingStatusPending, offering.Revision),
+			AfterDigest:    offeringReviewDigest(offering.ID, channel.OwnerUserID, toStatus, offering.Revision),
+			ChangeSummary:  string(summary),
+			RequestID:      review.RequestID,
+			IpHash:         review.IPHash,
+			UserAgent:      review.UserAgent,
+			OccurredAt:     now,
+			CreatedAt:      now,
+		}
+		if err := tx.Create(event).Error; err != nil {
+			return err
+		}
+
+		result = &OfferingReviewResult{
+			OfferingID:       offering.ID,
+			OfferingPublicID: offering.PublicID,
+			OwnerUserID:      channel.OwnerUserID,
+			FromStatus:       OfferingStatusPending,
+			ToStatus:         toStatus,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func offeringReviewDigest(offeringID, ownerUserID int64, status int, revision int64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("offering:%d:owner:%d:status:%d:revision:%d", offeringID, ownerUserID, status, revision)))
+	return hex.EncodeToString(sum[:])
+}
+
+func validOfferingReviewReasonCode(reason string) bool {
+	if reason == "" || len(reason) > 64 {
+		return false
+	}
+	for i := 0; i < len(reason); i++ {
+		ch := reason[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func transitionOffering(db *gorm.DB, ownerUserID, id int64, from []int, to int) error {
