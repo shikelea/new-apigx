@@ -1,10 +1,7 @@
 package relayhook
 
 import (
-	"fmt"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/apigx/channelpool"
@@ -35,27 +32,6 @@ import (
 //
 // 本函数**不引入对 service 的依赖**（那会形成 import 循环）：只返回渠道 ID，加过滤器由 middleware 完成。
 
-// routeStrategyCacheTTL 是"合格集合"的缓存时长：算一次要读候选+质量+价格，
-// 属每请求路径，故按 (模型, 策略) 缓存。
-const routeStrategyCacheTTL = 30 * time.Second
-
-type cachedStrategyChannels struct {
-	channelIDs []int
-	expiresAt  time.Time
-}
-
-var (
-	routeStrategyCacheMu sync.RWMutex
-	routeStrategyCache   = map[string]cachedStrategyChannels{}
-)
-
-// InvalidateRouteStrategyCache 清空策略合格集合缓存（策略变化或测试时用）。
-func InvalidateRouteStrategyCache() {
-	routeStrategyCacheMu.Lock()
-	routeStrategyCache = map[string]cachedStrategyChannels{}
-	routeStrategyCacheMu.Unlock()
-}
-
 // routeStrategyFilterEnabled 是"按 Key 的默认路由策略限定候选"的开关（默认关闭）。
 func routeStrategyFilterEnabled() bool {
 	return common.GetEnvOrDefaultBool("APIGX_ROUTE_STRATEGY_ENABLED", false)
@@ -63,8 +39,9 @@ func routeStrategyFilterEnabled() bool {
 
 // EligibleBaseChannelsForStrategy 按调用者平台 Key 的默认路由策略算出本次的合格渠道集合。
 //
-// 返回 ok=false 表示**不要加限定**（未开启、未配置策略、策略为 auto、或算不出候选）——
-// 宁可退回底座默认选路，也不要因为算不出来就把请求打成"没有合格渠道"。
+// 返回 ok=false 只表示功能未开启、没有平台 Key 偏好或当前不是 APIGX 请求。
+// 一旦平台 Key 选择了策略（空值也表示默认 auto），即使没有合格候选也返回 ok=true
+// 和空列表，让请求明确失败；不能静默退回底座随机而伪装成策略已经生效。
 func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, bool, error) {
 	if !routeStrategyFilterEnabled() || c == nil || strings.TrimSpace(modelName) == "" {
 		return nil, false, nil
@@ -88,7 +65,7 @@ func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, b
 	}
 	strategy, ok := parseRouteStrategy(key.DefaultRouteMode)
 	if !ok {
-		return nil, false, nil // 空/auto/无法识别：不加限定
+		return nil, true, nil // 数据库中出现未知旧值时失败关闭，避免静默随机
 	}
 	allowedOfferingIDs, accessActive, err := AllowedOfferingIDsForRequest(c, modelName)
 	if err != nil {
@@ -98,25 +75,11 @@ func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, b
 		allowedOfferingIDs = nil
 	}
 
-	// ACL 因主体而异，策略缓存必须至少隔离 user/token；最终候选过滤和出站守卫仍会实时复验。
-	cacheKey := fmt.Sprintf("%s|%s|%d|%d", modelName, key.DefaultRouteMode, userID, tokenID)
-	now := time.Now()
-	routeStrategyCacheMu.RLock()
-	cached, exists := routeStrategyCache[cacheKey]
-	routeStrategyCacheMu.RUnlock()
-	if exists && now.Before(cached.expiresAt) {
-		if len(cached.channelIDs) == 0 {
-			return nil, false, nil
-		}
-		return cached.channelIDs, true, nil
-	}
-
+	// 候选包含 Redis 中的当前并发占用，不能缓存最终优胜集合；否则渠道在缓存期内满载后，
+	// 请求仍会不断命中它并在原子预留处 429，而不会改选仍有余量的渠道。
 	channelIDs := computeEligibleBaseChannels(db, modelName, strategy, allowedOfferingIDs)
-	routeStrategyCacheMu.Lock()
-	routeStrategyCache[cacheKey] = cachedStrategyChannels{channelIDs: channelIDs, expiresAt: now.Add(routeStrategyCacheTTL)}
-	routeStrategyCacheMu.Unlock()
 	if len(channelIDs) == 0 {
-		return nil, false, nil
+		return []int{}, true, nil
 	}
 	return channelIDs, true, nil
 }
@@ -181,9 +144,11 @@ func baseChannelIDForShareChannel(db *gorm.DB, shareChannelID int64) int {
 
 // parseRouteStrategy 把平台 Key 上的默认路由模式解析为策略。
 //
-// 「空」与「auto」都表示**不加限定**（计划书：最后使用系统默认 auto）。
+// 「空」与「auto」都表示综合自动；空值是历史平台 Key 的默认存储形式。
 func parseRouteStrategy(mode string) (routing.Strategy, bool) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return routing.StrategyAuto, true
 	case "latency":
 		return routing.StrategyLatency, true
 	case "throughput":

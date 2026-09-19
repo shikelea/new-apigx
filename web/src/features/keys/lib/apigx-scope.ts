@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */import type { PlatformKeyPreferencesPayload } from '../types'
 
-/** 路由策略选项（空串与 auto 同义：不加限定，由后端统一解释）。 */
+/** 路由策略选项（空串与 auto 同义：综合质量路由，由后端统一解释）。 */
 export const ROUTE_MODE_OPTIONS: { value: string; labelKey: string }[] = [
   { value: 'auto', labelKey: 'apigxKey.routeMode.auto' },
   { value: 'latency', labelKey: 'apigxKey.routeMode.latency' },

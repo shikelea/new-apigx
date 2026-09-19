@@ -91,6 +91,11 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
 		view, viewErr := apigxmodel.ResolveQualityView(db, offering.ID, opts.WindowKind, opts.Now)
 		if viewErr == nil {
 			candidate.Quality = view
+			if view.OutputTokensSum > 0 && view.GenerationMsSum > 0 {
+				candidate.ThroughputKnown = true
+				candidate.OutputTokensPerSecond = float64(view.OutputTokensSum) /
+					(float64(view.GenerationMsSum) / 1000)
+			}
 		}
 
 		// 熔断（T2.8）：失败率过高且冷却未过 → **从候选中摘除**（原因写清，便于解释）；

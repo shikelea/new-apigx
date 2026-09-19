@@ -6631,7 +6631,7 @@
     "apigxKey.scope.title": "Source scope & routing",
     "apigxKey.scope.hint": "Saved on this API key. Leave a list empty to keep no restriction on that dimension.",
     "apigxKey.scope.routeMode": "Default routing strategy",
-    "apigxKey.scope.routeMode.auto": "Auto (no restriction)",
+    "apigxKey.scope.routeMode.auto": "Auto (quality and capacity)",
     "apigxKey.scope.routeMode.latency": "Prefer low latency",
     "apigxKey.scope.routeMode.throughput": "Prefer high throughput",
     "apigxKey.scope.routeMode.reliability": "Prefer high reliability",

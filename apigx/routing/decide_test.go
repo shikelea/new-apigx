@@ -374,6 +374,33 @@ func TestAssembleCandidatesAppliesACLBeforeQualityAndCapacity(t *testing.T) {
 	assert.Empty(t, public)
 }
 
+func TestAssembleCandidatesCarriesSixHourTextThroughput(t *testing.T) {
+	env := newRoutingTestEnv(t)
+	seeded := env.seedChannelWithOffering(t, 1, "gpt-throughput-view")
+	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", seeded.OfferingID).
+		Update("status", apigxmodel.OfferingStatusPublished).Error)
+	var channel apigxmodel.Channel
+	require.NoError(t, env.db.Where("id = ?", seeded.ShareChannelID).First(&channel).Error)
+	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", channel.ShareGroupID).
+		Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
+
+	now := common.GetTimestamp()
+	bucketTs := now - now%60
+	for range apigxmodel.MinSamplesForQuality {
+		require.NoError(t, apigxmodel.RecordQualitySample(env.db, apigxmodel.QualitySample{
+			OfferingID: seeded.OfferingID, BucketTs: bucketTs,
+			Outcome: apigxmodel.QualityOutcomeSuccess, LatencyMs: 1000,
+			OutputTokens: 120, GenerationMs: 1000,
+		}))
+	}
+
+	candidates, _, err := AssembleCandidates(env.db, nil, "gpt-throughput-view", AssembleOptions{Now: now})
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	assert.True(t, candidates[0].ThroughputKnown)
+	assert.InDelta(t, 120, candidates[0].OutputTokensPerSecond, 0.001)
+}
+
 // ---- fixture（投影测试需要真实库 + 我们的分享渠道） ----
 
 type routingTestEnv struct {

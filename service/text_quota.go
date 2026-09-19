@@ -460,6 +460,16 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
 
+	// 只有会生成文本的协议才把 completion token 作为质量吞吐分子。
+	// 图片、向量、重排等接口即使复用文本计费结构，也不能伪装成 token/s 吞吐。
+	switch relayInfo.RelayMode {
+	case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeCompletions,
+		relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact,
+		relayconstant.RelayModeGemini:
+		relayInfo.APIGXQualityOutputTokens = int64(summary.CompletionTokens)
+	default:
+		relayInfo.APIGXQualityOutputTokens = 0
+	}
 	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
 		logger.LogError(ctx, "error settling billing: "+err.Error())
 	}

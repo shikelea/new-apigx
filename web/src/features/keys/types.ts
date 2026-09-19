@@ -127,7 +127,7 @@ export interface PlatformKeyPreferences {
   allowed_model_ids: string[]
   allowed_owner_user_ids: number[]
   allow_fallback: boolean
-  /** 空串与 `auto` 都表示自动（不加限定） */
+  /** 空串与 `auto` 都表示综合自动质量路由 */
   default_route_mode: string
 }
 

@@ -537,7 +537,6 @@ func (h *handler) deleteChannel(c *gin.Context) {
 	if baseExists {
 		basemodel.CacheUpdateChannelStatus(int(shareChannel.BaseChannelID), common.ChannelStatusManuallyDisabled)
 	}
-	relayhook.InvalidateRouteStrategyCache()
 
 	// 第二步撤销明文 Key、多 Key 状态、模型和能力投影。底座行保留为停用墓碑，
 	// 使历史任务仍能识别原渠道，同时没有任何可再次出站的凭据或能力。
@@ -915,6 +914,9 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 			failFromRepo(c, linkErr)
 			return
 		}
+		// 准入热路径缓存了渠道策略链。写入成功后必须立即失效，否则质量路由会按新上限
+		// 判断容量，而最终原子预留仍按旧策略执行，产生“看起来已满但仍继续选中”的窗口。
+		channelpool.InvalidatePolicyCache(shareChannel.ID)
 		ok(c, gin.H{"id": existing.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
 	case errors.Is(err, apigxmodel.ErrNotFound):
 		created := &apigxmodel.CapacityPolicy{
@@ -934,6 +936,7 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 			failFromRepo(c, linkErr)
 			return
 		}
+		channelpool.InvalidatePolicyCache(shareChannel.ID)
 		ok(c, gin.H{"id": created.ID, "concurrency_mode": policy.Mode, "concurrency_value": policy.Value})
 	default:
 		failFromRepo(c, err)
@@ -951,7 +954,7 @@ type platformKeyPreferencesRequest struct {
 	AllowedOwnerUserIDs []int64  `json:"allowed_owner_user_ids"`
 	AllowFallback       *bool    `json:"allow_fallback"`
 	// DefaultRouteMode 是「默认路由策略」（计划书 §9.1：保存到平台 Key 的偏好）。
-	// 空串与 "auto" 都表示自动（不加限定）；latency / throughput / reliability 会把它
+	// 空串与 "auto" 都表示综合自动；latency / throughput / reliability 会把它
 	// 变成**请求级候选限定**（见 relayhook.EligibleBaseChannelsForStrategy）。
 	DefaultRouteMode *string `json:"default_route_mode"`
 }
@@ -1407,7 +1410,6 @@ func (h *handler) publishOffering(c *gin.Context) {
 	if basemodel.DB != nil {
 		basemodel.InitChannelCache()
 	}
-	relayhook.InvalidateRouteStrategyCache()
 	ok(c, gin.H{
 		"id": reviewed.OfferingID, "public_id": reviewed.OfferingPublicID,
 		"owner_user_id": reviewed.OwnerUserID,

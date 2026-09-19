@@ -39,7 +39,7 @@ func TestRecordQualitySampleAccumulatesExactly(t *testing.T) {
 
 	view, err := ResolveQualityView(db, offeringID, QualityWindowMinute, at)
 	require.NoError(t, err)
-	assert.EqualValues(t, 30, view.SampleCount)
+	assert.EqualValues(t, 27, view.SampleCount, "平台拒绝不进入上游质量分母")
 	assert.EqualValues(t, 21, view.SuccessCount)
 	assert.EqualValues(t, 3, view.TimeoutCount)
 	assert.EqualValues(t, 3, view.UpstreamFailures)
@@ -47,6 +47,55 @@ func TestRecordQualitySampleAccumulatesExactly(t *testing.T) {
 	assert.False(t, view.Insufficient)
 	assert.False(t, view.Stale)
 	assert.Greater(t, view.LatencyMsP50, int64(0), "P50 应有估计值")
+}
+
+// 文本吞吐只在分子和分母都可观测时成立；6 小时视图应原样汇总，不能把未知写成 0 token/s。
+func TestQualityViewAggregatesThroughputInputs(t *testing.T) {
+	db := newRepoDB(t)
+	const offeringID int64 = 8804
+	at := int64(1_700_000_000)
+	bucketTs := at - at%60
+
+	require.NoError(t, RecordQualitySample(db, QualitySample{
+		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
+		LatencyMs: 1000, OutputTokens: 80, GenerationMs: 800,
+	}))
+	require.NoError(t, RecordQualitySample(db, QualitySample{
+		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
+		LatencyMs: 1200, OutputTokens: 20, GenerationMs: 200,
+	}))
+
+	view, err := ResolveQualityView(db, offeringID, QualityWindowSixHour, at)
+	require.NoError(t, err)
+	assert.EqualValues(t, 100, view.OutputTokensSum)
+	assert.EqualValues(t, 1000, view.GenerationMsSum)
+
+	unknown, err := ResolveQualityView(db, 8898, QualityWindowSixHour, at)
+	require.NoError(t, err)
+	assert.Zero(t, unknown.OutputTokensSum)
+	assert.Zero(t, unknown.GenerationMsSum)
+}
+
+func TestQualityViewIgnoresPartialThroughputSamples(t *testing.T) {
+	db := newRepoDB(t)
+	const offeringID int64 = 8805
+	at := int64(1_700_000_000)
+	bucketTs := at - at%60
+
+	// 两条成功样本分别只带分子和分母。它们不能被拼成一条虚假的 100 token/s 观测。
+	require.NoError(t, RecordQualitySample(db, QualitySample{
+		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
+		LatencyMs: 1000, OutputTokens: 100,
+	}))
+	require.NoError(t, RecordQualitySample(db, QualitySample{
+		OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
+		LatencyMs: 1000, GenerationMs: 1000,
+	}))
+
+	view, err := ResolveQualityView(db, offeringID, QualityWindowSixHour, at)
+	require.NoError(t, err)
+	assert.Zero(t, view.OutputTokensSum)
+	assert.Zero(t, view.GenerationMsSum)
 }
 
 // **样本不足不给结论**：样本数不够时，不能把成功率当成质量评分。
@@ -158,6 +207,8 @@ func TestQualitySampleSeparatesProbesAndRejectsUnknownOutcome(t *testing.T) {
 	require.NoError(t, db.Where("offering_id = ?", offeringID).First(&bucket).Error)
 	assert.EqualValues(t, 1, bucket.ProbeCount, "探测请求单独计数")
 	assert.EqualValues(t, 1, bucket.NaturalRequestCount)
+	assert.EqualValues(t, 1, bucket.CompleteSuccessCount, "探测成功不得混入自然流量成功数")
+	assert.EqualValues(t, 1, bucket.SampleOkCount, "只有自然流量的合格上游尝试进入质量分母")
 
 	// 失效请求数（平台拒绝）不参与成功率分母之外的"上游质量"：这里只验证计数分开
 	assert.ErrorIs(t, RecordQualitySample(db, QualitySample{

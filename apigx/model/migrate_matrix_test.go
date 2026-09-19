@@ -36,6 +36,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
 		assertOfferingReviewDialect(t, db)
+		assertQualityRoutingDialect(t, db)
 	})
 
 	t.Run("postgres", func(t *testing.T) {
@@ -60,6 +61,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
 		assertOfferingReviewDialect(t, db)
+		assertQualityRoutingDialect(t, db)
 
 		// 存储引擎必须是 InnoDB。这不是洁癖：
 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
@@ -83,6 +85,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
 	assertOfferingReviewDialect(t, db)
+	assertQualityRoutingDialect(t, db)
 }
 
 var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
@@ -132,6 +135,46 @@ func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
 		return errRollbackOfferingReviewMatrix
 	})
 	require.ErrorIs(t, err, errRollbackOfferingReviewMatrix)
+}
+
+var errRollbackQualityRoutingMatrix = errors.New("rollback quality routing matrix fixture")
+
+// assertQualityRoutingDialect 覆盖 B4 新依赖的原子桶累加与 6 小时汇总：
+// 平台拒绝和探测不进入可靠性分母，吞吐分子/分母在三种方言上保持一致。
+func assertQualityRoutingDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const offeringID int64 = 9_820_001
+		const bucketTs int64 = 1_700_000_000 - 1_700_000_000%60
+		for range MinSamplesForQuality {
+			require.NoError(t, RecordQualitySample(tx, QualitySample{
+				OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
+				LatencyMs: 1000, OutputTokens: 100, GenerationMs: 1000,
+			}))
+		}
+		for range 5 {
+			require.NoError(t, RecordQualitySample(tx, QualitySample{
+				OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeRejected,
+				LatencyMs: 1,
+			}))
+		}
+		for range 3 {
+			require.NoError(t, RecordQualitySample(tx, QualitySample{
+				OfferingID: offeringID, BucketTs: bucketTs, Outcome: QualityOutcomeSuccess,
+				LatencyMs: 1, OutputTokens: 999, GenerationMs: 1, IsProbe: true,
+			}))
+		}
+
+		view, viewErr := ResolveQualityView(tx, offeringID, QualityWindowSixHour, bucketTs+30)
+		require.NoError(t, viewErr)
+		assert.EqualValues(t, MinSamplesForQuality, view.SampleCount)
+		assert.EqualValues(t, MinSamplesForQuality, view.SuccessCount)
+		assert.EqualValues(t, 5, view.PlatformRejects)
+		assert.EqualValues(t, 2_000, view.OutputTokensSum)
+		assert.EqualValues(t, 20_000, view.GenerationMsSum)
+		return errRollbackQualityRoutingMatrix
+	})
+	require.ErrorIs(t, err, errRollbackQualityRoutingMatrix)
 }
 
 // informationSchemaApigxTables 通过 information_schema 统计 apigx_ 表，

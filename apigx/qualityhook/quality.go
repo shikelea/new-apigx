@@ -96,18 +96,29 @@ func RecordFromRelay(relayInfo *relaycommon.RelayInfo, apiErr *types.NewAPIError
 		OfferingID: offeringID,
 		Outcome:    ClassifyOutcome(apiErr, statusCode),
 	}
+	if apiErr == nil && relayInfo.APIGXQualityOutputTokens > 0 {
+		sample.OutputTokens = relayInfo.APIGXQualityOutputTokens
+	}
 	// 真实毫秒精度（`StartTime` / `FirstResponseTime` 都是 time.Time）
 	if !relayInfo.StartTime.IsZero() {
 		now := time.Now()
 		if elapsed := now.Sub(relayInfo.StartTime).Milliseconds(); elapsed > 0 {
 			sample.LatencyMs = elapsed
+			// 非流式响应没有可观察的首 token 时刻，使用完整上游耗时作为保守生成时段；
+			// 流式响应则在下面改成首个有效输出之后的时段。
+			if sample.OutputTokens > 0 {
+				sample.GenerationMs = elapsed
+			}
 			if !relayInfo.FirstResponseTime.IsZero() && relayInfo.FirstResponseTime.After(relayInfo.StartTime) {
 				ttft := relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()
 				if ttft > 0 {
 					sample.TtftMs = ttft
 					// 生成阶段 = 总时长 - 首字延迟（近似：中间的网络往返不计入）
-					if generation := elapsed - ttft; generation > 0 {
-						sample.GenerationMs = generation
+					if sample.OutputTokens > 0 {
+						generation := elapsed - ttft
+						if generation > 0 {
+							sample.GenerationMs = generation
+						}
 					}
 				}
 			}

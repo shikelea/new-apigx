@@ -4,11 +4,19 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/common"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // 归因的核心要求（计划书验收：「6 小时窗口内有错误、取消和少样本 | 归因正确」）：
@@ -57,4 +65,41 @@ func TestQualityStatsDisabledByDefault(t *testing.T) {
 
 	t.Setenv("APIGX_QUALITY_STATS_ENABLED", "true")
 	assert.True(t, Enabled())
+}
+
+func TestRecordFromRelayPersistsTextThroughput(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "quality-hook.db")), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	require.NoError(t, apigxmodel.Migrate(db))
+
+	group := &apigxmodel.ShareGroup{OwnerUserID: 1001, Name: "quality", PublicID: "quality-group"}
+	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
+	channel := &apigxmodel.Channel{
+		OwnerUserID: 1001, ShareGroupID: group.ID, PublicID: "quality-channel",
+		Name: "quality", BaseChannelID: 7001,
+	}
+	require.NoError(t, apigxmodel.CreateChannel(db, channel))
+	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "quality-model"}
+	require.NoError(t, apigxmodel.CreateModelOffering(db, 1001, offering))
+
+	previousDB := channelpool.CurrentDB
+	channelpool.SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { channelpool.SetDBProvider(previousDB) })
+	t.Setenv("APIGX_QUALITY_STATS_ENABLED", "true")
+
+	start := time.Now().Add(-time.Second)
+	RecordFromRelay(&relaycommon.RelayInfo{
+		ChannelMeta:     &relaycommon.ChannelMeta{ChannelId: 7001},
+		OriginModelName: "quality-model", StartTime: start,
+		FirstResponseTime: start.Add(200 * time.Millisecond), APIGXQualityOutputTokens: 80,
+	}, nil)
+
+	view, err := apigxmodel.ResolveQualityView(db, offering.ID, apigxmodel.QualityWindowSixHour, common.GetTimestamp())
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, view.SuccessCount)
+	assert.EqualValues(t, 80, view.OutputTokensSum)
+	assert.Greater(t, view.GenerationMsSum, int64(0))
 }

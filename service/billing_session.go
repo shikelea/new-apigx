@@ -34,6 +34,7 @@ type BillingSession struct {
 	trusted          bool // 是否命中信任额度旁路
 	fundingSettled   bool // funding.Settle 已成功，资金来源已提交
 	settled          bool // Settle 全部完成（资金 + 令牌）
+	qualityRecorded  bool // 上游成功质量样本已安排写入；结算重试不得重复计数
 	refunded         bool // Refund 已调用
 	mu               sync.Mutex
 }
@@ -48,10 +49,19 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	//
 	// defer 必须注册在 `s.mu.Lock()` **之前**：defer 是后注册先执行，
 	// 若放在加锁之后就会在**持锁期间写库**。
-	defer qualityhook.RecordFromRelay(s.relayInfo, nil)
+	shouldRecordQuality := false
+	defer func() {
+		if shouldRecordQuality {
+			qualityhook.RecordFromRelay(s.relayInfo, nil)
+		}
+	}()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.qualityRecorded {
+		s.qualityRecorded = true
+		shouldRecordQuality = true
+	}
 	if s.settled {
 		return nil
 	}

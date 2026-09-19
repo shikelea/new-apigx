@@ -91,7 +91,10 @@ type RelayInfo struct {
 	TokenUnlimited    bool
 	StartTime         time.Time
 	FirstResponseTime time.Time
-	isFirstResponse   bool
+	// APIGXQualityOutputTokens 是本次成功请求可确认的有效输出 token 数。
+	// 只由结算路径在质量样本落桶前填写；0 表示上游未返回可用 usage，不能据此推断吞吐。
+	APIGXQualityOutputTokens int64
+	isFirstResponse          bool
 	//SendLastReasoningResponse bool
 	IsStream               bool
 	IsGeminiBatchEmbedding bool

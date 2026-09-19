@@ -3,7 +3,6 @@ package apigxapi
 import (
 	"encoding/json"
 	"errors"
-	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,7 +12,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/QuantumNous/new-api/apigx/capacity"
+	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
 	basemodel "github.com/QuantumNous/new-api/model"
@@ -800,6 +802,10 @@ func TestSetChannelCapacityPolicy(t *testing.T) {
 	assert.EqualValues(t, 4, stored.MaxConcurrencyMode)
 	assert.EqualValues(t, 3, stored.MaxConcurrency)
 	assert.EqualValues(t, 1, stored.PolicyVersion)
+	firstChain := channelpool.ChannelConcurrencyChain(env.db, channelID, 0, 0, 0)
+	firstResolution, err := capacity.Resolve(firstChain...)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, firstResolution.Value)
 
 	// 再次设置：应更新同一条（不新建），版本号递增
 	rec, body = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,
@@ -814,6 +820,10 @@ func TestSetChannelCapacityPolicy(t *testing.T) {
 	require.NoError(t, env.db.Where("id = ?", policyID).First(&stored).Error)
 	assert.EqualValues(t, 9, stored.MaxConcurrency)
 	assert.EqualValues(t, 2, stored.PolicyVersion)
+	secondChain := channelpool.ChannelConcurrencyChain(env.db, channelID, 0, 0, 0)
+	secondResolution, err := capacity.Resolve(secondChain...)
+	require.NoError(t, err)
+	assert.EqualValues(t, 9, secondResolution.Value, "策略更新后准入缓存必须立即失效")
 
 	// 四态非法组合必须被拒（明确值要求 > 0）
 	rec, _ = env.do(t, http.MethodPut, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/capacity-policy", owner,

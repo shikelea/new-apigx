@@ -99,6 +99,9 @@ func RecordQualitySample(db *gorm.DB, sample QualitySample) error {
 	if db == nil || sample.OfferingID <= 0 {
 		return fmt.Errorf("%w: offering_id is required", ErrInvalidArgument)
 	}
+	if !validQualityOutcome(sample.Outcome) {
+		return fmt.Errorf("%w: unknown outcome %d", ErrInvalidArgument, sample.Outcome)
+	}
 	if sample.BucketTs == 0 {
 		sample.BucketTs = alignToMinute(common.GetTimestamp())
 	}
@@ -132,34 +135,30 @@ func RecordQualitySample(db *gorm.DB, sample QualitySample) error {
 		} else {
 			updates["natural_request_count"] = gorm.Expr("natural_request_count + 1")
 		}
-		switch sample.Outcome {
-		case QualityOutcomeSuccess:
-			updates["complete_success_count"] = gorm.Expr("complete_success_count + 1")
-		case QualityOutcomeTimeout:
-			updates["timeout_count"] = gorm.Expr("timeout_count + 1")
-		case QualityOutcomeUpstream:
-			updates["upstream_failure_count"] = gorm.Expr("upstream_failure_count + 1")
-		case QualityOutcomeCancel:
-			updates["cancelled_count"] = gorm.Expr("cancelled_count + 1")
-		case QualityOutcomeRejected:
-			updates["platform_reject_count"] = gorm.Expr("platform_reject_count + 1")
-		default:
-			return fmt.Errorf("%w: unknown outcome %d", ErrInvalidArgument, sample.Outcome)
+		// 主动探测只记 ProbeCount；它不能改变自然流量的可靠性、延迟或吞吐评分。
+		if !sample.IsProbe {
+			applyOutcomeUpdates(updates, sample.Outcome)
 		}
 
-		totalAfter := existing.NaturalRequestCount + existing.ProbeCount + 1
-		if sample.LatencyMs > 0 {
+		qualified := !sample.IsProbe && qualityOutcomeQualified(sample.Outcome)
+		totalAfter := bucketQualifiedCount(existing) + 1
+		if qualified {
+			updates["sample_ok_count"] = gorm.Expr("sample_ok_count + 1")
+		}
+		if qualified && sample.LatencyMs > 0 {
 			updates["latency_ms_sum"] = gorm.Expr("latency_ms_sum + ?", sample.LatencyMs)
 			updates["latency_ms_p50"] = updateMedianEstimate(existing.LatencyMsP50, sample.LatencyMs, totalAfter)
 		}
-		if sample.TtftMs > 0 {
+		if qualified && sample.TtftMs > 0 {
 			updates["ttft_ms_sum"] = gorm.Expr("ttft_ms_sum + ?", sample.TtftMs)
 			updates["ttft_ms_p50"] = updateMedianEstimate(existing.TtftMsP50, sample.TtftMs, totalAfter)
 		}
-		if sample.OutputTokens > 0 {
+		// token 与生成时长必须成对累计；只记录其中一项会让窗口汇总把不同请求的
+		// 分子、分母拼在一起，得到无法对应任何真实样本的吞吐率。
+		throughputKnown := !sample.IsProbe && sample.Outcome == QualityOutcomeSuccess &&
+			sample.OutputTokens > 0 && sample.GenerationMs > 0
+		if throughputKnown {
 			updates["output_tokens_sum"] = gorm.Expr("output_tokens_sum + ?", sample.OutputTokens)
-		}
-		if sample.GenerationMs > 0 {
 			updates["generation_ms_sum"] = gorm.Expr("generation_ms_sum + ?", sample.GenerationMs)
 		}
 		return tx.Model(&QualityBucket{}).Where("bucket_key_hash = ?", keyHash).Updates(updates).Error
@@ -172,8 +171,52 @@ func applySampleToBucket(bucket *QualityBucket, sample QualitySample) {
 		bucket.ProbeCount = 1
 	} else {
 		bucket.NaturalRequestCount = 1
+		applyOutcomeToBucket(bucket, sample.Outcome)
 	}
-	switch sample.Outcome {
+	qualified := !sample.IsProbe && qualityOutcomeQualified(sample.Outcome)
+	if qualified {
+		bucket.SampleOkCount = 1
+	}
+	if qualified && sample.LatencyMs > 0 {
+		bucket.LatencyMsSum = sample.LatencyMs
+		bucket.LatencyMsP50 = sample.LatencyMs // 首个样本即当前中位数的起点
+	}
+	if qualified && sample.TtftMs > 0 {
+		bucket.TtftMsSum = sample.TtftMs
+		bucket.TtftMsP50 = sample.TtftMs
+	}
+	if !sample.IsProbe && sample.Outcome == QualityOutcomeSuccess &&
+		sample.OutputTokens > 0 && sample.GenerationMs > 0 {
+		bucket.OutputTokensSum = sample.OutputTokens
+		bucket.GenerationMsSum = sample.GenerationMs
+	}
+}
+
+func validQualityOutcome(outcome int) bool {
+	return outcome >= QualityOutcomeSuccess && outcome <= QualityOutcomeRejected
+}
+
+func qualityOutcomeQualified(outcome int) bool {
+	return outcome == QualityOutcomeSuccess || outcome == QualityOutcomeTimeout || outcome == QualityOutcomeUpstream
+}
+
+func applyOutcomeUpdates(updates map[string]any, outcome int) {
+	switch outcome {
+	case QualityOutcomeSuccess:
+		updates["complete_success_count"] = gorm.Expr("complete_success_count + 1")
+	case QualityOutcomeTimeout:
+		updates["timeout_count"] = gorm.Expr("timeout_count + 1")
+	case QualityOutcomeUpstream:
+		updates["upstream_failure_count"] = gorm.Expr("upstream_failure_count + 1")
+	case QualityOutcomeCancel:
+		updates["cancelled_count"] = gorm.Expr("cancelled_count + 1")
+	case QualityOutcomeRejected:
+		updates["platform_reject_count"] = gorm.Expr("platform_reject_count + 1")
+	}
+}
+
+func applyOutcomeToBucket(bucket *QualityBucket, outcome int) {
+	switch outcome {
 	case QualityOutcomeSuccess:
 		bucket.CompleteSuccessCount = 1
 	case QualityOutcomeTimeout:
@@ -185,16 +228,14 @@ func applySampleToBucket(bucket *QualityBucket, sample QualitySample) {
 	case QualityOutcomeRejected:
 		bucket.PlatformRejectCount = 1
 	}
-	if sample.LatencyMs > 0 {
-		bucket.LatencyMsSum = sample.LatencyMs
-		bucket.LatencyMsP50 = sample.LatencyMs // 首个样本即当前中位数的起点
+}
+
+func bucketQualifiedCount(bucket QualityBucket) int64 {
+	if bucket.SampleOkCount > 0 {
+		return bucket.SampleOkCount
 	}
-	if sample.TtftMs > 0 {
-		bucket.TtftMsSum = sample.TtftMs
-		bucket.TtftMsP50 = sample.TtftMs
-	}
-	bucket.OutputTokensSum = sample.OutputTokens
-	bucket.GenerationMsSum = sample.GenerationMs
+	// 兼容 B4 前已写入但尚未维护 SampleOkCount 的桶。
+	return bucket.CompleteSuccessCount + bucket.TimeoutCount + bucket.UpstreamFailureCount
 }
 
 // updateMedianEstimate 用**流式中位数估计**更新 P50。
@@ -243,6 +284,10 @@ type QualityView struct {
 	ReliabilityLowerBoundPpm int64
 	// LatencyMsP50 是**近似**中位数（见 updateMedianEstimate）。
 	LatencyMsP50 int64
+	// OutputTokensSum / GenerationMsSum 只累计带可靠 usage 的文本成功样本。
+	// 两者任一为 0 都表示吞吐未知，调用方不得把它当作 0 token/s。
+	OutputTokensSum int64
+	GenerationMsSum int64
 	// LatestBucketTs 是窗口内最新的桶时间（0 表示窗口内没有任何样本）。
 	LatestBucketTs int64
 	// LatestUpstreamFailureTs 是窗口内**最后一次上游失败/超时**所在桶的时间（0 表示没有）。
@@ -293,26 +338,29 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
 	var latencyWeightedSum, latencyWeight int64
 	for i := range buckets {
 		bucket := &buckets[i]
-		view.SampleCount += bucket.NaturalRequestCount
+		qualifiedCount := bucketQualifiedCount(*bucket)
+		view.SampleCount += qualifiedCount
 		view.SuccessCount += bucket.CompleteSuccessCount
 		view.TimeoutCount += bucket.TimeoutCount
 		view.UpstreamFailures += bucket.UpstreamFailureCount
 		view.CancelledCount += bucket.CancelledCount
 		view.PlatformRejects += bucket.PlatformRejectCount
-		if bucket.BucketTs > view.LatestBucketTs {
+		if qualifiedCount > 0 && bucket.BucketTs > view.LatestBucketTs {
 			view.LatestBucketTs = bucket.BucketTs
 		}
 		if bucket.UpstreamFailureCount+bucket.TimeoutCount > 0 && bucket.BucketTs > view.LatestUpstreamFailureTs {
 			view.LatestUpstreamFailureTs = bucket.BucketTs
 		}
 		if bucket.LatencyMsP50 > 0 {
-			weight := bucket.NaturalRequestCount
+			weight := qualifiedCount
 			if weight <= 0 {
 				weight = 1
 			}
 			latencyWeightedSum += bucket.LatencyMsP50 * weight
 			latencyWeight += weight
 		}
+		view.OutputTokensSum += bucket.OutputTokensSum
+		view.GenerationMsSum += bucket.GenerationMsSum
 	}
 	if latencyWeight > 0 {
 		view.LatencyMsP50 = latencyWeightedSum / latencyWeight
@@ -321,8 +369,9 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
 	view.Insufficient = view.SampleCount < MinSamplesForQuality
 	view.Stale = view.LatestBucketTs > 0 && at-view.LatestBucketTs > int64(QualityStaleAfter.Seconds())
 	if view.SampleCount > 0 {
-		view.SuccessRatePpm = view.SuccessCount * 1_000_000 / view.SampleCount
-		view.ReliabilityLowerBoundPpm = wilsonLowerBoundPpm(view.SuccessCount, view.SampleCount)
+		reliabilitySuccesses := min(view.SuccessCount, view.SampleCount)
+		view.SuccessRatePpm = reliabilitySuccesses * 1_000_000 / view.SampleCount
+		view.ReliabilityLowerBoundPpm = wilsonLowerBoundPpm(reliabilitySuccesses, view.SampleCount)
 	}
 	return view, nil
 }
