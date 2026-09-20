@@ -6961,6 +6961,7 @@
     "Direct user access": "指定使用者授权",
     "Grant a registered user access by exact username.": "透過准确使用者名向已注册使用者授权。",
     "Shared resource": "分享資源",
+    "Shared resource usage": "共享資源用量",
     "Select a shared resource": "選擇分享資源",
     "Select a shared resource to review access": "選擇分享資源后查看授权",
     "No active access grants": "暂无有效授权",
