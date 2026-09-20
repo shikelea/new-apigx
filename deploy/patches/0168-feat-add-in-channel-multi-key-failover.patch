@@ -1,0 +1,1451 @@
+From 913aebe6d81cdde90e3405d1af35748f9a9e28c0 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sun, 20 Sep 2026 18:52:14 +0800
+Subject: [PATCH] feat: add in-channel multi-key failover
+
+---
+ apigx/api/share_test.go                       |  19 +-
+ apigx/model/models_identity.go                |   2 +-
+ apigx/model/repo_share.go                     |   3 +
+ apigx/relayhook/capacity_hook.go              |  35 ++-
+ apigx/relayhook/capacity_hook_test.go         |  56 +++++
+ constant/context_key.go                       |   1 +
+ controller/relay.go                           | 138 +++++++++--
+ controller/relay_multi_key_failover_test.go   | 214 ++++++++++++++++++
+ controller/relay_task_plugin_test.go          |  53 +++++
+ middleware/distributor.go                     |   7 +-
+ model/channel.go                              |  40 +++-
+ model/channel_status_test.go                  |  64 ++++++
+ service/multi_key_failover.go                 | 109 +++++++++
+ service/multi_key_failover_test.go            |  90 ++++++++
+ service/relay_error.go                        |  37 +++
+ service/relay_error_test.go                   |  22 ++
+ .../share/__tests__/channel-recipes.test.tsx  |  16 +-
+ .../components/channel-create-dialog.tsx      |  31 +++
+ .../share/components/key-pool-card.tsx        |   3 +
+ web/src/i18n/locales/en.json                  |   2 +
+ web/src/i18n/locales/fr.json                  |   2 +
+ web/src/i18n/locales/ja.json                  |   2 +
+ web/src/i18n/locales/ru.json                  |   2 +
+ web/src/i18n/locales/vi.json                  |   2 +
+ web/src/i18n/locales/zh-TW.json               |   2 +
+ web/src/i18n/locales/zh.json                  |   2 +
+ 26 files changed, 923 insertions(+), 31 deletions(-)
+ create mode 100644 controller/relay_multi_key_failover_test.go
+ create mode 100644 service/multi_key_failover.go
+ create mode 100644 service/multi_key_failover_test.go
+
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 1ccfd07..e1da69b 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -508,6 +508,22 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 		}
+ 	})
+ 
++	t.Run("invalid key pool mode writes nothing", func(t *testing.T) {
++		env := newTestEnv(t, true)
++		const owner int64 = 5108
++		groupID := env.createGroup(t, owner, "错误池策略组")
++		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"错误池策略","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-invalid-mode","key_pool_mode":9}`,
++			common.RoleCommonUser)
++		assert.Equal(t, http.StatusBadRequest, rec.Code)
++		assert.Contains(t, rec.Body.String(), "unsupported key_pool_mode")
++		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
++			var count int64
++			require.NoError(t, env.db.Model(target).Count(&count).Error)
++			assert.Zero(t, count)
++		}
++	})
++
+ 	t.Run("task recipe pins the plugin and fetches declared models", func(t *testing.T) {
+ 		env := newTestEnv(t, true)
+ 		const owner int64 = 5106
+@@ -761,12 +777,13 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
+ 				const owner int64 = 9_830_001
+ 				groupID := env.createGroup(t, owner, "三库生命周期组")
+ 				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+-					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
++					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success","key_pool_mode":1}`
+ 				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
+ 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 				channelID := int64(body["data"].(map[string]any)["id"].(float64))
+ 				shareChannel, getErr := apigxmodel.GetChannel(tx, owner, channelID)
+ 				require.NoError(t, getErr)
++				assert.Equal(t, apigxmodel.KeyPoolModeRandom, shareChannel.KeyPoolMode)
+ 				baseID := shareChannel.BaseChannelID
+ 				assertOfferingPublishProjectionAtomic(t, env, owner, owner+99, channelID, "b3-matrix-publish-"+tc.name)
+ 
+diff --git a/apigx/model/models_identity.go b/apigx/model/models_identity.go
+index 5f96def..2c2e01f 100644
+--- a/apigx/model/models_identity.go
++++ b/apigx/model/models_identity.go
+@@ -166,7 +166,7 @@ type Channel struct {
+ 	BaseURL string `gorm:"size:512;not null;default:''"`
+ 	// AuthTarget 认证目标（域名/路径），与 base_url 一同参与「资源修订」判定。
+ 	AuthTarget string `gorm:"size:256;not null;default:''"`
+-	// KeyPoolMode 渠道内选 Key 策略：0=轮询 / 1=随机 / 2=加权 / 3=最低占用；使用者不可见（§9.2）。
++	// KeyPoolMode 渠道内选 Key 策略：0=加权轮询 / 1=加权随机；使用者不可见（§9.2）。
+ 	KeyPoolMode int `gorm:"type:int;not null"`
+ 	// CapacityPolicyID 渠道级容量策略，apigx_capacity_policies.id（scope_type=2）。
+ 	CapacityPolicyID int64 `gorm:"bigint;not null;default:0"`
+diff --git a/apigx/model/repo_share.go b/apigx/model/repo_share.go
+index 1da387b..a12d009 100644
+--- a/apigx/model/repo_share.go
++++ b/apigx/model/repo_share.go
+@@ -183,6 +183,9 @@ func CreateChannel(db *gorm.DB, channel *Channel) error {
+ 	if channel.BaseChannelID <= 0 {
+ 		return fmt.Errorf("%w: base_channel_id is required（每个分享渠道必须绑定一条底座渠道；该列有唯一索引，0 会互相冲突）", ErrInvalidArgument)
+ 	}
++	if channel.KeyPoolMode != KeyPoolModePolling && channel.KeyPoolMode != KeyPoolModeRandom {
++		return fmt.Errorf("%w: unsupported key_pool_mode %d", ErrInvalidArgument, channel.KeyPoolMode)
++	}
+ 	// **必须校验分组归属**：ShareGroupID 来自请求体，若不校验，
+ 	// 只要知道别人的分组 ID 就能把自己的渠道挂进去（接口层测试发现的越权）。
+ 	// 先验归属再看其它字段，避免通过错误信息差异探测他人分组是否存在。
+diff --git a/apigx/relayhook/capacity_hook.go b/apigx/relayhook/capacity_hook.go
+index 605e174..16ba5e3 100644
+--- a/apigx/relayhook/capacity_hook.go
++++ b/apigx/relayhook/capacity_hook.go
+@@ -409,7 +409,34 @@ func AcquireForAttempt(c *gin.Context, channelID int) bool {
+ }
+ 
+ // ReleaseFromContext 释放上下文里持有的租约（幂等；无租约时为空操作）。
++//
++// 这是请求最终收尾入口。此时客户端响应已经确定，可以从 Writer 推断本次尝试的结果。
++// 上游错误后的重试不能使用这个推断：错误尚未写给客户端时 Writer 仍可能是默认 200，
++// 必须改用 ReleaseFailedAttemptFromContext 传入真实上游状态。
+ func ReleaseFromContext(c *gin.Context) {
++	if c == nil {
++		return
++	}
++	state := apigxmodel.AttemptStateFailed
++	status := 0
++	if c.Writer != nil {
++		status = c.Writer.Status()
++		if status < http.StatusBadRequest {
++			state = apigxmodel.AttemptStateSucceeded
++		}
++	}
++	releaseAttemptFromContext(c, state, status)
++}
++
++// ReleaseFailedAttemptFromContext 以明确的失败状态结束当前出站尝试并释放容量租约。
++//
++// 同渠道换 Key 和跨渠道重试发生在最终错误响应写给客户端之前，因此不能依赖
++// c.Writer.Status()。调用方应传入本次上游/提交错误的真实 HTTP 状态；未知时传 0。
++func ReleaseFailedAttemptFromContext(c *gin.Context, status int) {
++	releaseAttemptFromContext(c, apigxmodel.AttemptStateFailed, status)
++}
++
++func releaseAttemptFromContext(c *gin.Context, state int, status int) {
+ 	if c == nil {
+ 		return
+ 	}
+@@ -421,14 +448,6 @@ func ReleaseFromContext(c *gin.Context) {
+ 		// 先落状态再释放：顺序反过来的话，一旦释放后进程退出，尝试会永远停在「已开始」
+ 		// 而被对账误判为遗弃（实际上它是正常完成的）。
+ 		if db := channelpool.CurrentDB(); db != nil && lease.ID() != "" {
+-			state := apigxmodel.AttemptStateFailed
+-			status := 0
+-			if c.Writer != nil {
+-				status = c.Writer.Status()
+-				if status < http.StatusBadRequest {
+-					state = apigxmodel.AttemptStateSucceeded
+-				}
+-			}
+ 			if err := apigxmodel.CompleteAttempt(db, lease.ID(), state, status); err != nil {
+ 				common.SysError("apigx capacity: complete attempt failed: " + err.Error())
+ 			}
+diff --git a/apigx/relayhook/capacity_hook_test.go b/apigx/relayhook/capacity_hook_test.go
+index 25f857c..05bcd9d 100644
+--- a/apigx/relayhook/capacity_hook_test.go
++++ b/apigx/relayhook/capacity_hook_test.go
+@@ -8,12 +8,16 @@ import (
+ 	"time"
+ 
+ 	"github.com/QuantumNous/new-api/apigx/capacity"
++	"github.com/QuantumNous/new-api/apigx/channelpool"
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/gin-gonic/gin"
++	"github.com/glebarez/sqlite"
+ 	"github.com/go-redis/redis/v8"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
+ )
+ 
+ // 容量接线测试。
+@@ -134,6 +138,58 @@ func TestReleaseIsIdempotent(t *testing.T) {
+ 	cleanupChannel(t, channelID)
+ }
+ 
++// 上游错误发生时客户端响应尚未写出，Writer 仍是默认 200。重试前必须用真实
++// 上游状态结束旧尝试并释放租约，下一把 Key 才能取得新的独立租约。
++func TestReleaseFailedAttemptUsesExplicitUpstreamStatusBeforeRetry(t *testing.T) {
++	setupRedis(t)
++	const channelID = 90012
++	t.Cleanup(func() { Configure(Config{}) })
++	Configure(Config{Enabled: true, ChannelLimit: 1})
++
++	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++	require.NoError(t, err)
++	require.NoError(t, db.AutoMigrate(&apigxmodel.Channel{}, &apigxmodel.Attempt{}))
++	previousDB := channelpool.CurrentDB()
++	channelpool.SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { channelpool.SetDBProvider(func() *gorm.DB { return previousDB }) })
++
++	c := newCtx()
++	require.True(t, AcquireForAttempt(c, channelID))
++	firstUID := leaseIDFromContext(c)
++	require.NotEmpty(t, firstUID)
++	assert.Equal(t, http.StatusOK, c.Writer.Status(), "重试前 Writer 仍是默认成功状态")
++
++	usage, err := capacity.New(common.RDB).Usage(t.Context(), capacity.ChannelConcurrency(channelID))
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, usage)
++
++	ReleaseFailedAttemptFromContext(c, http.StatusTooManyRequests)
++	assert.Empty(t, leaseIDFromContext(c))
++	usage, err = capacity.New(common.RDB).Usage(t.Context(), capacity.ChannelConcurrency(channelID))
++	require.NoError(t, err)
++	assert.EqualValues(t, 0, usage, "失败尝试必须在换 Key 前释放容量")
++
++	firstAttempt, err := apigxmodel.GetAttemptByUID(db, firstUID)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AttemptStateFailed, firstAttempt.State)
++	assert.Equal(t, http.StatusTooManyRequests, firstAttempt.HttpStatus)
++
++	require.True(t, AcquireForAttempt(c, channelID))
++	secondUID := leaseIDFromContext(c)
++	require.NotEmpty(t, secondUID)
++	assert.NotEqual(t, firstUID, secondUID, "新 Key 尝试必须取得新租约")
++	secondAttempt, err := apigxmodel.GetAttemptByUID(db, secondUID)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AttemptStateStarted, secondAttempt.State)
++
++	ReleaseFromContext(c)
++	secondAttempt, err = apigxmodel.GetAttemptByUID(db, secondUID)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.AttemptStateSucceeded, secondAttempt.State)
++	assert.Equal(t, http.StatusOK, secondAttempt.HttpStatus)
++	cleanupChannel(t, channelID)
++}
++
+ // Redis 不可用时必须拒绝准入（503），而不是放行。
+ func TestAcquireFailsClosedWhenLedgerUnavailable(t *testing.T) {
+ 	setupRedis(t)
+diff --git a/constant/context_key.go b/constant/context_key.go
+index 994e657..0b75d63 100644
+--- a/constant/context_key.go
++++ b/constant/context_key.go
+@@ -38,6 +38,7 @@ const (
+ 	ContextKeyChannelStatusCodeMapping ContextKey = "status_code_mapping"
+ 	ContextKeyChannelIsMultiKey        ContextKey = "channel_is_multi_key"
+ 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
++	ContextKeyChannelMultiKeyStableID  ContextKey = "channel_multi_key_stable_id"
+ 	ContextKeyChannelKey               ContextKey = "channel_key"
+ 
+ 	ContextKeyAutoGroup           ContextKey = "auto_group"
+diff --git a/controller/relay.go b/controller/relay.go
+index abc20f3..7457d7d 100644
+--- a/controller/relay.go
++++ b/controller/relay.go
+@@ -142,14 +142,28 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
+ 	}
+ 	relayInfo.RetryIndex = 0
+ 	relayInfo.LastError = nil
++	attemptIndex := 0
++	var retryChannel *model.Channel
+ 
+ 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+-		relayInfo.RetryIndex = retryParam.GetRetry()
+-		channel, channelErr := getChannel(c, relayInfo, retryParam)
+-		if channelErr != nil {
+-			logger.LogError(c, channelErr.Error())
+-			newAPIError = channelErr
+-			break
++		relayInfo.RetryIndex = attemptIndex
++		attemptIndex++
++		var channel *model.Channel
++		if retryChannel != nil {
++			channel = retryChannel
++			retryChannel = nil
++			if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
++				newAPIError = setupErr
++				break
++			}
++		} else {
++			var channelErr *types.NewAPIError
++			channel, channelErr = getChannel(c, relayInfo, retryParam)
++			if channelErr != nil {
++				logger.LogError(c, channelErr.Error())
++				newAPIError = channelErr
++				break
++			}
+ 		}
+ 		addUsedChannel(c, channel.Id)
+ 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
+@@ -187,9 +201,23 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
+ 
+ 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
+ 		relayInfo.LastError = newAPIError
++		channel = hydrateMultiKeyChannel(channel, relayInfo)
++		// 上游错误尚未写回客户端，Writer 仍可能保持默认 200。先用真实状态结束
++		// 本次容量尝试，避免同渠道换 Key 时把失败错误记成成功。
++		relayhook.ReleaseFailedAttemptFromContext(c, newAPIError.StatusCode)
+ 
+ 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
+ 
++		if service.ShouldFailoverMultiKeyRelayError(c, newAPIError) {
++			switch service.RegisterMultiKeyFailure(c, channel) {
++			case service.MultiKeyFailoverRetrySameChannel:
++				retryChannel = channel
++				retryParam.ResetRetryNextTry()
++				continue
++			case service.MultiKeyFailoverChannelExhausted:
++				excludeChannelFromRetry(c, channel.Id)
++			}
++		}
+ 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+ 			break
+ 		}
+@@ -287,6 +315,43 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
+ 	return service.ShouldRetryRelayError(c, openaiErr, retryTimes)
+ }
+ 
++func excludeChannelFromRetry(c *gin.Context, channelID int) {
++	if c == nil || channelID <= 0 {
++		return
++	}
++	constraints := service.GetChannelConstraints(c)
++	for _, filter := range constraints.Filters {
++		if filter.Kind != taskdto.FilterDeniedChannelIds {
++			continue
++		}
++		for _, deniedID := range filter.DeniedChannelIds {
++			if deniedID == channelID {
++				return
++			}
++		}
++	}
++	constraints.AddFilter(taskdto.ChannelFilter{
++		Kind:             taskdto.FilterDeniedChannelIds,
++		DeniedChannelIds: []int{channelID},
++	})
++}
++
++// The first synchronous attempt historically carried only a lightweight
++// channel identity because Distributor had already populated the request
++// context. Hydrate the full object only after a failed multi-key attempt, when
++// key identities and pool policy are required for same-channel failover.
++func hydrateMultiKeyChannel(channel *model.Channel, relayInfo *relaycommon.RelayInfo) *model.Channel {
++	if channel == nil || channel.ChannelInfo.IsMultiKey || relayInfo == nil ||
++		relayInfo.ChannelMeta == nil || !relayInfo.ChannelMeta.ChannelIsMultiKey {
++		return channel
++	}
++	fullChannel, err := model.CacheGetChannel(channel.Id)
++	if err != nil || fullChannel == nil {
++		return channel
++	}
++	return fullChannel
++}
++
+ func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+ 	service.ProcessChannelError(c, channelError, err, relayInfo)
+ }
+@@ -483,19 +548,29 @@ func executeTaskSubmissionWith(
+ 		RequestPath: c.Request.URL.Path,
+ 		Retry:       common.GetPointer(0),
+ 	}
++	attemptNumber := 0
++	var retryChannel *model.Channel
+ 
+ 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
++		attemptNumber++
+ 		stage = "select_channel"
+ 		if requestErr := c.Request.Context().Err(); requestErr != nil {
+-			diagnostics.cancelled("before_attempt", retryParam.GetRetry()+1)
++			diagnostics.cancelled("before_attempt", attemptNumber)
+ 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
+ 			break
+ 		}
+ 		var channel *model.Channel
+ 
+-		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
++		if retryChannel != nil {
++			channel = retryChannel
++			retryChannel = nil
++			if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
++				taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_retry_channel_failed", http.StatusInternalServerError)
++				break
++			}
++		} else if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
+ 			channel = lockedCh
+-			if retryParam.GetRetry() > 0 {
++			if attemptNumber > 1 {
+ 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
+ 					taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_locked_channel_failed", http.StatusInternalServerError)
+ 					break
+@@ -510,7 +585,7 @@ func executeTaskSubmissionWith(
+ 				break
+ 			}
+ 		}
+-		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
++		diagnostics.attempt(attemptNumber, channel, relayInfo.LockedChannel != nil)
+ 
+ 		addUsedChannel(c, channel.Id)
+ 		bodyStorage, bodyErr := common.GetBodyStorage(c)
+@@ -528,14 +603,17 @@ func executeTaskSubmissionWith(
+ 		stage = "submit"
+ 		result, taskErr = submit(c, relayInfo)
+ 		if requestErr := c.Request.Context().Err(); requestErr != nil {
+-			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
++			diagnostics.cancelled("after_submit", attemptNumber)
+ 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
++			relayhook.ReleaseFailedAttemptFromContext(c, taskErr.StatusCode)
+ 			break
+ 		}
+ 		if taskErr == nil {
+-			diagnostics.attemptSucceeded(retryParam.GetRetry()+1, result)
++			diagnostics.attemptSucceeded(attemptNumber, result)
+ 			break
+ 		}
++		relayhook.ReleaseFailedAttemptFromContext(c, taskErr.StatusCode)
++		channel = hydrateMultiKeyChannel(channel, relayInfo)
+ 
+ 		if !taskErr.LocalError {
+ 			processChannelError(c,
+@@ -545,8 +623,25 @@ func executeTaskSubmissionWith(
+ 				relayInfo)
+ 		}
+ 
+-		willRetry := shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
+-		diagnostics.attemptFailed(retryParam.GetRetry()+1, channel, taskErr, willRetry)
++		willRetry := false
++		if shouldFailoverTaskMultiKey(c, taskErr) {
++			switch service.RegisterMultiKeyFailure(c, channel) {
++			case service.MultiKeyFailoverRetrySameChannel:
++				retryChannel = channel
++				retryParam.ResetRetryNextTry()
++				willRetry = true
++			case service.MultiKeyFailoverChannelExhausted:
++				if relayInfo.LockedChannel == nil {
++					excludeChannelFromRetry(c, channel.Id)
++					willRetry = shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
++				}
++			default:
++				willRetry = shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
++			}
++		} else {
++			willRetry = shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
++		}
++		diagnostics.attemptFailed(attemptNumber, channel, taskErr, willRetry)
+ 		if !willRetry {
+ 			break
+ 		}
+@@ -568,7 +663,7 @@ func executeTaskSubmissionWith(
+ 		return nil, taskErr
+ 	}
+ 	if requestErr := c.Request.Context().Err(); requestErr != nil {
+-		diagnostics.cancelled("before_reserve", retryParam.GetRetry()+1)
++		diagnostics.cancelled("before_reserve", attemptNumber)
+ 		return nil, service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
+ 	}
+ 
+@@ -738,13 +833,20 @@ func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
+ }
+ 
+ func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *taskdto.TaskError, retryTimes int) bool {
+-	if taskErr == nil || taskErr.NoRetry {
++	if retryTimes <= 0 {
+ 		return false
+ 	}
+-	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
++	return shouldFailoverTaskMultiKey(c, taskErr)
++}
++
++func shouldFailoverTaskMultiKey(c *gin.Context, taskErr *taskdto.TaskError) bool {
++	if taskErr == nil || taskErr.NoRetry || taskErr.LocalError {
+ 		return false
+ 	}
+-	if retryTimes <= 0 {
++	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
++		return false
++	}
++	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+ 		return false
+ 	}
+ 	if service.GetChannelConstraints(c).SuppressesRetry() {
+diff --git a/controller/relay_multi_key_failover_test.go b/controller/relay_multi_key_failover_test.go
+new file mode 100644
+index 0000000..e463f27
+--- /dev/null
++++ b/controller/relay_multi_key_failover_test.go
+@@ -0,0 +1,214 @@
++package controller
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	taskdto "github.com/QuantumNous/new-api/dto"
++	"github.com/QuantumNous/new-api/middleware"
++	"github.com/QuantumNous/new-api/model"
++	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
++	"github.com/QuantumNous/new-api/relaykit/types"
++	"github.com/QuantumNous/new-api/service"
++	"github.com/QuantumNous/new-api/setting/ratio_setting"
++	"github.com/gin-gonic/gin"
++	"github.com/glebarez/sqlite"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
++)
++
++func TestRelayExhaustsCurrentKeyPoolBeforeChangingAuthorizedChannel(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	usedKeys := make([]string, 0, 3)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
++		usedKeys = append(usedKeys, key)
++		w.Header().Set("Content-Type", "application/json")
++		if key == "key-a" || key == "key-b" {
++			w.WriteHeader(http.StatusTooManyRequests)
++			_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limited"}}`))
++			return
++		}
++		_, _ = w.Write([]byte(`{"id":"chatcmpl-g2","object":"chat.completion","created":1,"model":"g2-failover-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
++	}))
++	t.Cleanup(upstream.Close)
++
++	database := setupRelayMultiKeyDatabase(t)
++	first := relayMultiKeyChannel(7101, "primary", upstream.URL, "key-a\nkey-b", []string{"stable-a", "stable-b"})
++	second := relayMultiKeyChannel(7102, "fallback", upstream.URL, "key-c", []string{"stable-c"})
++	unauthorized := relayMultiKeyChannel(7103, "unauthorized", upstream.URL, "key-z", []string{"stable-z"})
++	for _, channel := range []*model.Channel{first, second, unauthorized} {
++		require.NoError(t, database.Create(channel).Error)
++		priority := int64(0)
++		require.NoError(t, database.Create(&model.Ability{
++			Group: "default", Model: "g2-failover-model", ChannelId: channel.Id,
++			Enabled: true, Priority: &priority, Weight: 10,
++		}).Error)
++	}
++	model.InitChannelCache()
++
++	recorder := httptest.NewRecorder()
++	c := newRelayMultiKeyContext(t, recorder, first, []int{first.Id, second.Id})
++
++	Relay(c, types.RelayFormatOpenAI)
++
++	assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
++	assert.Equal(t, []string{"key-a", "key-b", "key-c"}, usedKeys)
++	assert.NotContains(t, usedKeys, "key-z")
++}
++
++func TestRelayRetriesAnotherKeyAfterUnauthorizedWithNoGlobalRetries(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	usedKeys := make([]string, 0, 2)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
++		usedKeys = append(usedKeys, key)
++		w.Header().Set("Content-Type", "application/json")
++		if key == "key-a" {
++			w.WriteHeader(http.StatusUnauthorized)
++			_, _ = w.Write([]byte(`{"error":{"message":"invalid key","type":"authentication_error","code":"invalid_api_key"}}`))
++			return
++		}
++		_, _ = w.Write([]byte(`{"id":"chatcmpl-g2","object":"chat.completion","created":1,"model":"g2-failover-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
++	}))
++	t.Cleanup(upstream.Close)
++
++	database := setupRelayMultiKeyDatabase(t)
++	common.RetryTimes = 0
++	channel := relayMultiKeyChannel(7201, "same-channel", upstream.URL, "key-a\nkey-b", []string{"stable-a", "stable-b"})
++	require.NoError(t, database.Create(channel).Error)
++	require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
++	model.InitChannelCache()
++
++	recorder := httptest.NewRecorder()
++	c := newRelayMultiKeyContext(t, recorder, channel, nil)
++	Relay(c, types.RelayFormatOpenAI)
++
++	assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
++	assert.Equal(t, []string{"key-a", "key-b"}, usedKeys)
++}
++
++func TestRelayDoesNotRotateKeyAfterBadRequest(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	usedKeys := make([]string, 0, 1)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		usedKeys = append(usedKeys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusBadRequest)
++		_, _ = w.Write([]byte(`{"error":{"message":"invalid request","type":"invalid_request_error","code":"invalid_request"}}`))
++	}))
++	t.Cleanup(upstream.Close)
++
++	database := setupRelayMultiKeyDatabase(t)
++	channel := relayMultiKeyChannel(7301, "bad-request", upstream.URL, "key-a\nkey-b", []string{"stable-a", "stable-b"})
++	require.NoError(t, database.Create(channel).Error)
++	require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
++	model.InitChannelCache()
++
++	recorder := httptest.NewRecorder()
++	c := newRelayMultiKeyContext(t, recorder, channel, nil)
++	Relay(c, types.RelayFormatOpenAI)
++
++	assert.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
++	assert.Equal(t, []string{"key-a"}, usedKeys)
++}
++
++func newRelayMultiKeyContext(t *testing.T, recorder *httptest.ResponseRecorder, channel *model.Channel, allowedChannelIDs []int) *gin.Context {
++	t.Helper()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
++		strings.NewReader(`{"model":"g2-failover-model","messages":[{"role":"user","content":"hello"}]}`))
++	c.Request.Header.Set("Content-Type", "application/json")
++	common.SetContextKey(c, constant.ContextKeyUserId, 1)
++	common.SetContextKey(c, constant.ContextKeyUserQuota, 1_000_000)
++	common.SetContextKey(c, constant.ContextKeyOriginalModel, "g2-failover-model")
++	common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
++	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
++	common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
++	common.SetContextKey(c, constant.ContextKeyTokenUnlimited, true)
++	common.SetContextKey(c, constant.ContextKeyUserSetting, kitdto.UserSetting{AcceptUnsetRatioModel: true})
++	if len(allowedChannelIDs) > 0 {
++		service.GetChannelConstraints(c).AddFilter(taskdto.ChannelFilter{
++			Kind: taskdto.FilterAllowedChannelIds, AllowedChannelIds: allowedChannelIDs,
++		})
++	}
++	require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, "g2-failover-model"))
++	return c
++}
++
++func setupRelayMultiKeyDatabase(t *testing.T) *gorm.DB {
++	t.Helper()
++	previousDB, previousLogDB := model.DB, model.LOG_DB
++	previousMemoryCache := common.MemoryCacheEnabled
++	previousRedis := common.RedisEnabled
++	previousRetries := common.RetryTimes
++	previousErrorLog := constant.ErrorLogEnabled
++	previousConsumeLog := common.LogConsumeEnabled
++	previousCountToken := constant.CountToken
++	previousMainDatabaseType := common.MainDatabaseType()
++	previousLogDatabaseType := common.LogDatabaseType()
++	previousGroupRatios := ratio_setting.GroupRatio2JSONString()
++
++	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++	require.NoError(t, err)
++	sqlDB, err := database.DB()
++	require.NoError(t, err)
++	sqlDB.SetMaxOpenConns(1)
++	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.User{}, &model.UserSubscription{}))
++	require.NoError(t, database.Create(&model.User{
++		Id: 1, Username: "g2-relay-user", Group: "default", Quota: 1_000_000,
++		Status: common.UserStatusEnabled,
++	}).Error)
++	model.DB, model.LOG_DB = database, database
++	common.MemoryCacheEnabled = true
++	common.RedisEnabled = false
++	common.RetryTimes = 1
++	constant.ErrorLogEnabled = false
++	common.LogConsumeEnabled = false
++	constant.CountToken = false
++	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
++	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":0}`))
++	t.Setenv("APIGX_SHARED_MODE", "false")
++	t.Setenv("APIGX_KEY_STATS_ENABLED", "false")
++	t.Setenv("APIGX_QUALITY_ENABLED", "false")
++
++	t.Cleanup(func() {
++		model.DB, model.LOG_DB = previousDB, previousLogDB
++		common.MemoryCacheEnabled = previousMemoryCache
++		common.RedisEnabled = previousRedis
++		common.RetryTimes = previousRetries
++		constant.ErrorLogEnabled = previousErrorLog
++		common.LogConsumeEnabled = previousConsumeLog
++		constant.CountToken = previousCountToken
++		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
++		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroupRatios))
++		require.NoError(t, sqlDB.Close())
++	})
++	return database
++}
++
++func relayMultiKeyChannel(id int, name, baseURL, keys string, stableIDs []string) *model.Channel {
++	autoBan := 0
++	return &model.Channel{
++		Id: id, Name: name, Type: constant.ChannelTypeOpenAI, Key: keys,
++		Status: common.ChannelStatusEnabled, BaseURL: &baseURL, Models: "g2-failover-model",
++		Group: "default", AutoBan: &autoBan,
++		ChannelInfo: model.ChannelInfo{
++			IsMultiKey: true, MultiKeySize: len(stableIDs),
++			MultiKeyMode: constant.MultiKeyModePolling, MultiKeyStableIDs: stableIDs,
++		},
++	}
++}
++
++func relayMultiKeyAbility(channelID int) *model.Ability {
++	priority := int64(0)
++	return &model.Ability{
++		Group: "default", Model: "g2-failover-model", ChannelId: channelID,
++		Enabled: true, Priority: &priority, Weight: 10,
++	}
++}
+diff --git a/controller/relay_task_plugin_test.go b/controller/relay_task_plugin_test.go
+index abef10b..2c06dde 100644
+--- a/controller/relay_task_plugin_test.go
++++ b/controller/relay_task_plugin_test.go
+@@ -540,6 +540,59 @@ export function buildQueryRequest(){throw new Error("completed submissions must
+ func TestAcceptedSubmitStreamNeverRetries(t *testing.T) {
+ 	c := taskSubmissionTestContext()
+ 	assert.False(t, shouldRetryTaskRelay(c, 1, &dto.TaskError{StatusCode: 502, LocalError: true, NoRetry: true}, 3))
++	assert.False(t, shouldFailoverTaskMultiKey(c, &dto.TaskError{StatusCode: 502, LocalError: true}),
++		"local gateway failures must not rotate upstream credentials")
++}
++
++func TestTaskSubmissionFailsOverToNextKeyWithZeroGlobalRetries(t *testing.T) {
++	events := make([]string, 0, 3)
++	setupTaskSubmissionDatabase(t, true, &events)
++	previousRetries, previousErrorLog := common.RetryTimes, constant.ErrorLogEnabled
++	previousConsumeLog := common.LogConsumeEnabled
++	common.RetryTimes, constant.ErrorLogEnabled, common.LogConsumeEnabled = 0, false, false
++	t.Cleanup(func() {
++		common.RetryTimes, constant.ErrorLogEnabled = previousRetries, previousErrorLog
++		common.LogConsumeEnabled = previousConsumeLog
++	})
++
++	c := taskSubmissionTestContext()
++	common.SetContextKey(c, constant.ContextKeyChannelKey, "key-a")
++	common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
++	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 0)
++	billing := &taskSubmissionTestBilling{events: &events}
++	info := taskSubmissionRelayInfo(billing)
++	channel := &model.Channel{
++		Id: 1, Type: constant.ChannelTypeTaskPlugin, Name: "plugin", Key: "key-a\nkey-b",
++		ChannelInfo: model.ChannelInfo{
++			IsMultiKey:        true,
++			MultiKeyMode:      constant.MultiKeyModeRandom,
++			MultiKeyStableIDs: []string{"stable-a", "stable-b"},
++		},
++	}
++	info.LockedChannel = channel
++	info.ChannelMeta = &relaycommon.ChannelMeta{
++		ChannelId: 1, ChannelType: constant.ChannelTypeTaskPlugin, ChannelIsMultiKey: true,
++	}
++
++	usedKeys := make([]string, 0, 2)
++	outcome, taskErr := executeTaskSubmissionWith(c, info, func(c *gin.Context, _ *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
++		usedKeys = append(usedKeys, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
++		if len(usedKeys) == 1 {
++			return nil, &dto.TaskError{
++				Code: "rate_limited", Message: "rate limited", StatusCode: http.StatusTooManyRequests,
++				Error: errors.New("rate limited"),
++			}
++		}
++		return &relay.TaskSubmitResult{
++			UpstreamTaskID: "upstream_private",
++			Platform:       constant.TaskPlatform("plugin"),
++		}, nil
++	})
++
++	require.Nil(t, taskErr)
++	require.NotNil(t, outcome)
++	assert.Equal(t, []string{"key-a", "key-b"}, usedKeys)
++	assert.Equal(t, []string{"reserve", "insert", "settle"}, events)
+ }
+ 
+ func TestExecuteTaskSubmissionRefundsWhenFinalReserveFails(t *testing.T) {
+diff --git a/middleware/distributor.go b/middleware/distributor.go
+index 2fda976..42d2159 100644
+--- a/middleware/distributor.go
++++ b/middleware/distributor.go
+@@ -763,16 +763,21 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
+ 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
+ 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
+ 
+-	key, index, newAPIError := channel.GetNextEnabledKey()
++	key, index, newAPIError := channel.GetNextEnabledKeyExcluding(
++		service.MultiKeyExclusionsForChannel(c, channel.Id),
++	)
+ 	if newAPIError != nil {
+ 		return newAPIError
+ 	}
+ 	if channel.ChannelInfo.IsMultiKey {
+ 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
+ 		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
++		stableID, _ := channel.ChannelInfo.MultiKeyStableIDAt(index)
++		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyStableID, stableID)
+ 	} else {
+ 		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
+ 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
++		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyStableID, "")
+ 	}
+ 
+ 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
+diff --git a/model/channel.go b/model/channel.go
+index e18e493..bf67e21 100644
+--- a/model/channel.go
++++ b/model/channel.go
+@@ -486,7 +486,31 @@ func (channel *Channel) GetKeys() []string {
+ 	return keys
+ }
+ 
++// MultiKeyExclusions identifies keys that must not be selected for the current
++// request. Stable IDs take precedence so a concurrent key reorder cannot make
++// a failed credential eligible again; indexes preserve compatibility with
++// native New API channels that do not carry APIGX stable key identities.
++type MultiKeyExclusions struct {
++	StableIDs map[string]struct{}
++	Indexes   map[int]struct{}
++}
++
++func (excluded MultiKeyExclusions) contains(info *ChannelInfo, index int) bool {
++	if stableID, ok := info.MultiKeyStableIDAt(index); ok {
++		_, found := excluded.StableIDs[stableID]
++		return found
++	}
++	_, found := excluded.Indexes[index]
++	return found
++}
++
+ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
++	return channel.GetNextEnabledKeyExcluding(MultiKeyExclusions{})
++}
++
++// GetNextEnabledKeyExcluding applies the channel's normal random or weighted
++// polling policy to enabled keys that have not already failed in this request.
++func (channel *Channel) GetNextEnabledKeyExcluding(excluded MultiKeyExclusions) (string, int, *types.NewAPIError) {
+ 	// If not in multi-key mode, return the original key string directly.
+ 	if !channel.ChannelInfo.IsMultiKey {
+ 		return channel.Key, 0, nil
+@@ -506,7 +530,8 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+ 	// Collect indexes of enabled keys
+ 	enabledIdx := make([]int, 0, len(keys))
+ 	for i := range keys {
+-		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled {
++		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled &&
++			!excluded.contains(&channel.ChannelInfo, i) {
+ 			enabledIdx = append(enabledIdx, i)
+ 		}
+ 	}
+@@ -577,6 +602,19 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+ 	}
+ }
+ 
++func (channel *Channel) HasEnabledKeyExcluding(excluded MultiKeyExclusions) bool {
++	if channel == nil || !channel.ChannelInfo.IsMultiKey {
++		return false
++	}
++	for index := range channel.GetKeys() {
++		if channel.ChannelInfo.MultiKeyStatusAt(index) == common.ChannelStatusEnabled &&
++			!excluded.contains(&channel.ChannelInfo, index) {
++			return true
++		}
++	}
++	return false
++}
++
+ func (channel *Channel) SaveChannelInfo() error {
+ 	return DB.Model(channel).Update("channel_info", channel.ChannelInfo).Error
+ }
+diff --git a/model/channel_status_test.go b/model/channel_status_test.go
+index f958e70..e152691 100644
+--- a/model/channel_status_test.go
++++ b/model/channel_status_test.go
+@@ -98,6 +98,70 @@ func TestWeightedPollingAndStableStatusSurviveReorder(t *testing.T) {
+ 	}
+ }
+ 
++func TestGetNextEnabledKeyExcludingNeverRepeatsFailedKey(t *testing.T) {
++	setupChannelStatusTest(t)
++
++	for _, mode := range []constant.MultiKeyMode{constant.MultiKeyModePolling, constant.MultiKeyModeRandom} {
++		t.Run(string(mode), func(t *testing.T) {
++			channel := Channel{
++				Name:   "request-exclusion",
++				Key:    "key-a\nkey-b\nkey-c",
++				Status: common.ChannelStatusEnabled,
++				ChannelInfo: ChannelInfo{
++					IsMultiKey:        true,
++					MultiKeySize:      3,
++					MultiKeyMode:      mode,
++					MultiKeyStableIDs: []string{"stable-a", "stable-b", "stable-c"},
++					MultiKeyWeights:   []int64{16, 1, 1},
++				},
++			}
++			require.NoError(t, DB.Create(&channel).Error)
++
++			excluded := MultiKeyExclusions{StableIDs: map[string]struct{}{
++				"stable-a": {},
++				"stable-b": {},
++			}}
++			for range 8 {
++				key, index, apiErr := channel.GetNextEnabledKeyExcluding(excluded)
++				require.Nil(t, apiErr)
++				assert.Equal(t, "key-c", key)
++				assert.Equal(t, 2, index)
++			}
++			assert.True(t, channel.HasEnabledKeyExcluding(excluded))
++
++			excluded.StableIDs["stable-c"] = struct{}{}
++			_, _, apiErr := channel.GetNextEnabledKeyExcluding(excluded)
++			require.NotNil(t, apiErr)
++			assert.False(t, channel.HasEnabledKeyExcluding(excluded))
++		})
++	}
++}
++
++func TestMultiKeyExclusionFollowsStableIdentityAfterReorder(t *testing.T) {
++	setupChannelStatusTest(t)
++
++	channel := Channel{
++		Name:   "request-exclusion-reorder",
++		Key:    "key-b\nkey-a",
++		Status: common.ChannelStatusEnabled,
++		ChannelInfo: ChannelInfo{
++			IsMultiKey:        true,
++			MultiKeySize:      2,
++			MultiKeyMode:      constant.MultiKeyModePolling,
++			MultiKeyStableIDs: []string{"stable-b", "stable-a"},
++		},
++	}
++	require.NoError(t, DB.Create(&channel).Error)
++
++	key, index, apiErr := channel.GetNextEnabledKeyExcluding(MultiKeyExclusions{
++		StableIDs: map[string]struct{}{"stable-a": {}},
++		Indexes:   map[int]struct{}{0: {}},
++	})
++	require.Nil(t, apiErr)
++	assert.Equal(t, "key-b", key)
++	assert.Equal(t, 0, index, "stable identity takes precedence over a stale positional exclusion")
++}
++
+ func TestMultiKeyStatusSourcesRestoreIndependently(t *testing.T) {
+ 	info := ChannelInfo{
+ 		IsMultiKey:        true,
+diff --git a/service/multi_key_failover.go b/service/multi_key_failover.go
+new file mode 100644
+index 0000000..84c8acc
+--- /dev/null
++++ b/service/multi_key_failover.go
+@@ -0,0 +1,109 @@
++package service
++
++import (
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/gin-gonic/gin"
++)
++
++const MaxMultiKeyAttemptsPerRequest = 10
++
++const multiKeyAttemptsContextKey = "apigx_multi_key_attempts"
++
++type MultiKeyFailoverDecision int
++
++const (
++	MultiKeyFailoverNotApplicable MultiKeyFailoverDecision = iota
++	MultiKeyFailoverRetrySameChannel
++	MultiKeyFailoverChannelExhausted
++)
++
++type attemptedChannelKeys struct {
++	stableIDs map[string]struct{}
++	indexes   map[int]struct{}
++}
++
++type requestMultiKeyAttempts struct {
++	channels map[int]*attemptedChannelKeys
++}
++
++func multiKeyAttempts(c *gin.Context) *requestMultiKeyAttempts {
++	if c == nil {
++		return &requestMultiKeyAttempts{channels: make(map[int]*attemptedChannelKeys)}
++	}
++	if existing, ok := c.Get(multiKeyAttemptsContextKey); ok {
++		if attempts, valid := existing.(*requestMultiKeyAttempts); valid && attempts != nil {
++			return attempts
++		}
++	}
++	attempts := &requestMultiKeyAttempts{channels: make(map[int]*attemptedChannelKeys)}
++	c.Set(multiKeyAttemptsContextKey, attempts)
++	return attempts
++}
++
++func attemptedKeysForChannel(c *gin.Context, channelID int) *attemptedChannelKeys {
++	attempts := multiKeyAttempts(c)
++	keys := attempts.channels[channelID]
++	if keys == nil {
++		keys = &attemptedChannelKeys{
++			stableIDs: make(map[string]struct{}),
++			indexes:   make(map[int]struct{}),
++		}
++		attempts.channels[channelID] = keys
++	}
++	return keys
++}
++
++// MultiKeyExclusionsForChannel returns a defensive copy because selection may
++// outlive the caller's immediate lookup while the request records more failures.
++func MultiKeyExclusionsForChannel(c *gin.Context, channelID int) model.MultiKeyExclusions {
++	if c == nil || channelID <= 0 {
++		return model.MultiKeyExclusions{}
++	}
++	attempts := multiKeyAttempts(c).channels[channelID]
++	if attempts == nil {
++		return model.MultiKeyExclusions{}
++	}
++	excluded := model.MultiKeyExclusions{
++		StableIDs: make(map[string]struct{}, len(attempts.stableIDs)),
++		Indexes:   make(map[int]struct{}, len(attempts.indexes)),
++	}
++	for stableID := range attempts.stableIDs {
++		excluded.StableIDs[stableID] = struct{}{}
++	}
++	for index := range attempts.indexes {
++		excluded.Indexes[index] = struct{}{}
++	}
++	return excluded
++}
++
++// RegisterMultiKeyFailure records the credential used by the failed upstream
++// attempt and decides whether this request may try another key in the same
++// channel. It never changes persistent key health; the base channel error path
++// remains responsible for auto-disable and APIGX statistics.
++func RegisterMultiKeyFailure(c *gin.Context, channel *model.Channel) MultiKeyFailoverDecision {
++	if c == nil || channel == nil || channel.Id <= 0 || !channel.ChannelInfo.IsMultiKey {
++		return MultiKeyFailoverNotApplicable
++	}
++	index := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
++	if index < 0 || index >= len(channel.GetKeys()) {
++		return MultiKeyFailoverNotApplicable
++	}
++	attempted := attemptedKeysForChannel(c, channel.Id)
++	stableID := common.GetContextKeyString(c, constant.ContextKeyChannelMultiKeyStableID)
++	if stableID != "" {
++		attempted.stableIDs[stableID] = struct{}{}
++	} else if stableID, ok := channel.ChannelInfo.MultiKeyStableIDAt(index); ok {
++		attempted.stableIDs[stableID] = struct{}{}
++	} else {
++		attempted.indexes[index] = struct{}{}
++	}
++	if len(attempted.stableIDs)+len(attempted.indexes) >= MaxMultiKeyAttemptsPerRequest {
++		return MultiKeyFailoverChannelExhausted
++	}
++	if channel.HasEnabledKeyExcluding(MultiKeyExclusionsForChannel(c, channel.Id)) {
++		return MultiKeyFailoverRetrySameChannel
++	}
++	return MultiKeyFailoverChannelExhausted
++}
+diff --git a/service/multi_key_failover_test.go b/service/multi_key_failover_test.go
+new file mode 100644
+index 0000000..83a472a
+--- /dev/null
++++ b/service/multi_key_failover_test.go
+@@ -0,0 +1,90 @@
++package service
++
++import (
++	"net/http/httptest"
++	"testing"
++
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/assert"
++)
++
++func failoverTestContext() *gin.Context {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
++	return c
++}
++
++func TestRegisterMultiKeyFailureExcludesEveryFailedCredential(t *testing.T) {
++	c := failoverTestContext()
++	channel := &model.Channel{
++		Id:  41,
++		Key: "key-a\nkey-b\nkey-c",
++		ChannelInfo: model.ChannelInfo{
++			IsMultiKey:        true,
++			MultiKeyMode:      constant.MultiKeyModeRandom,
++			MultiKeyStableIDs: []string{"stable-a", "stable-b", "stable-c"},
++		},
++	}
++
++	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 0)
++	assert.Equal(t, MultiKeyFailoverRetrySameChannel, RegisterMultiKeyFailure(c, channel))
++	assert.Contains(t, MultiKeyExclusionsForChannel(c, channel.Id).StableIDs, "stable-a")
++
++	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 1)
++	assert.Equal(t, MultiKeyFailoverRetrySameChannel, RegisterMultiKeyFailure(c, channel))
++	assert.Contains(t, MultiKeyExclusionsForChannel(c, channel.Id).StableIDs, "stable-b")
++
++	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 2)
++	assert.Equal(t, MultiKeyFailoverChannelExhausted, RegisterMultiKeyFailure(c, channel))
++	assert.Len(t, MultiKeyExclusionsForChannel(c, channel.Id).StableIDs, 3)
++}
++
++func TestRegisterMultiKeyFailureStopsAtHardAttemptLimit(t *testing.T) {
++	c := failoverTestContext()
++	keys := make([]string, 11)
++	stableIDs := make([]string, 11)
++	for index := range keys {
++		keys[index] = string(rune('a' + index))
++		stableIDs[index] = "stable-" + keys[index]
++	}
++	channel := &model.Channel{
++		Id:  42,
++		Key: keys[0] + "\n" + keys[1] + "\n" + keys[2] + "\n" + keys[3] + "\n" + keys[4] + "\n" + keys[5] + "\n" + keys[6] + "\n" + keys[7] + "\n" + keys[8] + "\n" + keys[9] + "\n" + keys[10],
++		ChannelInfo: model.ChannelInfo{
++			IsMultiKey:        true,
++			MultiKeyMode:      constant.MultiKeyModePolling,
++			MultiKeyStableIDs: stableIDs,
++		},
++	}
++
++	for index := 0; index < MaxMultiKeyAttemptsPerRequest-1; index++ {
++		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
++		assert.Equal(t, MultiKeyFailoverRetrySameChannel, RegisterMultiKeyFailure(c, channel))
++	}
++	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, MaxMultiKeyAttemptsPerRequest-1)
++	assert.Equal(t, MultiKeyFailoverChannelExhausted, RegisterMultiKeyFailure(c, channel))
++	assert.Len(t, MultiKeyExclusionsForChannel(c, channel.Id).StableIDs, MaxMultiKeyAttemptsPerRequest)
++}
++
++func TestRegisterMultiKeyFailureUsesSelectedStableIdentityAfterReorder(t *testing.T) {
++	c := failoverTestContext()
++	channel := &model.Channel{
++		Id:  43,
++		Key: "key-b\nkey-a",
++		ChannelInfo: model.ChannelInfo{
++			IsMultiKey:        true,
++			MultiKeyMode:      constant.MultiKeyModePolling,
++			MultiKeyStableIDs: []string{"stable-b", "stable-a"},
++		},
++	}
++
++	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 0)
++	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyStableID, "stable-a")
++	assert.Equal(t, MultiKeyFailoverRetrySameChannel, RegisterMultiKeyFailure(c, channel))
++	excluded := MultiKeyExclusionsForChannel(c, channel.Id)
++	assert.Contains(t, excluded.StableIDs, "stable-a")
++	assert.NotContains(t, excluded.StableIDs, "stable-b")
++}
+diff --git a/service/relay_error.go b/service/relay_error.go
+index e4ecbaa..44c2c5d 100644
+--- a/service/relay_error.go
++++ b/service/relay_error.go
+@@ -50,6 +50,43 @@ func ShouldRetryRelayError(c *gin.Context, openaiErr *types.NewAPIError, retryTi
+ 	return operation_setting.ShouldRetryByStatusCode(code)
+ }
+ 
++// ShouldFailoverMultiKeyRelayError applies the normal retry policy without the
++// global cross-channel retry budget. A request can therefore exhaust the
++// current channel's key pool even when RetryTimes is zero. Explicit no-retry
++// errors, request cancellation, affinity rules, and single-attempt pins still
++// stop immediately.
++func ShouldFailoverMultiKeyRelayError(c *gin.Context, openaiErr *types.NewAPIError) bool {
++	if openaiErr == nil {
++		return false
++	}
++	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
++		return false
++	}
++	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
++		return false
++	}
++	if GetChannelConstraints(c).SuppressesRetry() {
++		return false
++	}
++	if types.IsChannelError(openaiErr) {
++		return true
++	}
++	if types.IsSkipRetryError(openaiErr) {
++		return false
++	}
++	code := openaiErr.StatusCode
++	if code >= 200 && code < 300 {
++		return false
++	}
++	if code < 100 || code > 599 {
++		return true
++	}
++	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
++		return false
++	}
++	return operation_setting.ShouldRetryByStatusCode(code)
++}
++
+ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+ 	if err == nil {
+ 		return
+diff --git a/service/relay_error_test.go b/service/relay_error_test.go
+index 8b71844..3fe79fc 100644
+--- a/service/relay_error_test.go
++++ b/service/relay_error_test.go
+@@ -1,6 +1,7 @@
+ package service
+ 
+ import (
++	"context"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+@@ -57,6 +58,27 @@ func TestShouldRetryRelayErrorHonorsChannelPinOnChannelError(t *testing.T) {
+ 	}
+ }
+ 
++func TestShouldFailoverMultiKeyRelayErrorIgnoresOnlyRetryBudget(t *testing.T) {
++	c, _ := gin.CreateTestContext(httptest.NewRecorder())
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++
++	rateLimited := types.NewErrorWithStatusCode(errors.New("rate limited"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
++	assert.True(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
++	assert.False(t, ShouldRetryRelayError(c, rateLimited, 0), "cross-channel retries still respect the global budget")
++
++	badRequest := types.NewErrorWithStatusCode(errors.New("invalid request"), types.ErrorCodeInvalidRequest, http.StatusBadRequest)
++	assert.False(t, ShouldFailoverMultiKeyRelayError(c, badRequest))
++
++	capacityRejected := types.NewErrorWithStatusCode(errors.New("capacity exceeded"), types.ErrorCodeGetChannelFailed,
++		http.StatusTooManyRequests, types.ErrOptionWithSkipRetry())
++	assert.False(t, ShouldFailoverMultiKeyRelayError(c, capacityRejected))
++
++	cancelledContext, cancel := context.WithCancel(c.Request.Context())
++	cancel()
++	c.Request = c.Request.WithContext(cancelledContext)
++	assert.False(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
++}
++
+ func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {
+ 	previousDB, previousType := model.DB, common.MainDatabaseType()
+ 	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+diff --git a/web/src/features/share/__tests__/channel-recipes.test.tsx b/web/src/features/share/__tests__/channel-recipes.test.tsx
+index ab67772..faf6a49 100644
+--- a/web/src/features/share/__tests__/channel-recipes.test.tsx
++++ b/web/src/features/share/__tests__/channel-recipes.test.tsx
+@@ -19,7 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
+ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+ import { render, screen, waitFor } from '@testing-library/react'
+ import userEvent from '@testing-library/user-event'
+-import { afterEach, expect, it, vi } from 'vitest'
++import i18next from 'i18next'
++import { afterEach, beforeAll, expect, it, vi } from 'vitest'
+ 
+ import { api } from '@/lib/api'
+ 
+@@ -74,6 +75,16 @@ const recipes: ChannelRecipe[] = [
+   },
+ ]
+ 
++beforeAll(() => {
++  i18next.addResources('en', 'translation', {
++    'share.channel.keyPoolMode': 'Key pool mode',
++    'share.keyPool.polling': 'Polling',
++    'share.keyPool.random': 'Random',
++    'share.keyPool.modeDescription':
++      'Polling follows key weights in sequence; random selects by weight for each request.',
++  })
++})
++
+ afterEach(() => {
+   vi.restoreAllMocks()
+ })
+@@ -126,6 +137,8 @@ it('loads recipes from the server and submits only the selected stable recipe id
+   await user.click(screen.getByRole('combobox', { name: 'Share group' }))
+   await user.click(await screen.findByRole('option', { name: 'Shared lab' }))
+   await user.type(screen.getByLabelText('Name'), 'Community New API')
++  await user.click(screen.getByRole('combobox', { name: 'Key pool mode' }))
++  await user.click(await screen.findByRole('option', { name: 'Random' }))
+   await user.type(
+     screen.getByLabelText('Upstream address'),
+     'https://gateway.example/v1'
+@@ -140,6 +153,7 @@ it('loads recipes from the server and submits only the selected stable recipe id
+       recipe_id: 'new-api',
+       base_url: 'https://gateway.example/v1',
+       upstream_key: 'sk-community',
++      key_pool_mode: 1,
+     })
+   )
+   expect(post.mock.calls[0]?.[1]).not.toHaveProperty('protocol')
+diff --git a/web/src/features/share/components/channel-create-dialog.tsx b/web/src/features/share/components/channel-create-dialog.tsx
+index 10881b6..7c5d078 100644
+--- a/web/src/features/share/components/channel-create-dialog.tsx
++++ b/web/src/features/share/components/channel-create-dialog.tsx
+@@ -84,6 +84,7 @@ export function ChannelCreateDialog(props: {
+   const [recipeId, setRecipeId] = useState('')
+   const [baseUrl, setBaseUrl] = useState('')
+   const [upstreamKey, setUpstreamKey] = useState('')
++  const [keyPoolMode, setKeyPoolMode] = useState('0')
+ 
+   const recipesQuery = useQuery({
+     queryKey: ['apigx-channel-recipes'],
+@@ -123,12 +124,14 @@ export function ChannelCreateDialog(props: {
+         recipe_id: recipeId,
+         base_url: baseUrl.trim(),
+         upstream_key: upstreamKey.trim(),
++        key_pool_mode: Number(keyPoolMode),
+       }),
+     onSuccess: (res) => {
+       setName('')
+       setRecipeId('')
+       setBaseUrl('')
+       setUpstreamKey('')
++      setKeyPoolMode('0')
+       props.onOpenChange(false)
+       props.onSaved(res.data?.id)
+     },
+@@ -199,6 +202,34 @@ export function ChannelCreateDialog(props: {
+             maxLength={64}
+           />
+         </Field>
++        <Field>
++          <FieldLabel htmlFor='share-channel-key-pool-mode'>
++            {t('share.channel.keyPoolMode')}
++          </FieldLabel>
++          <Select
++            value={keyPoolMode}
++            onValueChange={(next) => setKeyPoolMode(next ?? '0')}
++          >
++            <SelectTrigger id='share-channel-key-pool-mode' className='w-full'>
++              <SelectValue>
++                {t(
++                  keyPoolMode === '1'
++                    ? 'share.keyPool.random'
++                    : 'share.keyPool.polling'
++                )}
++              </SelectValue>
++            </SelectTrigger>
++            <SelectContent>
++              <SelectGroup>
++                <SelectItem value='0'>{t('share.keyPool.polling')}</SelectItem>
++                <SelectItem value='1'>{t('share.keyPool.random')}</SelectItem>
++              </SelectGroup>
++            </SelectContent>
++          </Select>
++          <FieldDescription>
++            {t('share.keyPool.modeDescription')}
++          </FieldDescription>
++        </Field>
+         <Field>
+           <FieldLabel htmlFor='share-channel-recipe'>
+             {t('Upstream type')}
+diff --git a/web/src/features/share/components/key-pool-card.tsx b/web/src/features/share/components/key-pool-card.tsx
+index a3f65e2..540e572 100644
+--- a/web/src/features/share/components/key-pool-card.tsx
++++ b/web/src/features/share/components/key-pool-card.tsx
+@@ -241,6 +241,9 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+           <p className='text-muted-foreground mt-1 text-sm'>
+             {t('share.keyPool.description')}
+           </p>
++          <p className='text-muted-foreground mt-1 text-xs'>
++            {t('share.keyPool.failoverDescription')}
++          </p>
+         </div>
+         <div className='flex flex-wrap gap-2'>
+           <Button variant='outline' size='sm' onClick={() => setAddOpen(true)}>
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 895fd18..b0c3c18 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6823,6 +6823,8 @@
+     "Includes estimates": "Includes estimates",
+     "{{count}} unavailable measurements": "{{count}} unavailable measurements",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
++    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index f29763b..a6f5f9f 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6823,6 +6823,8 @@
+     "Includes estimates": "Inclut des estimations",
+     "{{count}} unavailable measurements": "{{count}} mesures indisponibles",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
++    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 096da95..f5c1400 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6823,6 +6823,8 @@
+     "Includes estimates": "推定値を含む",
+     "{{count}} unavailable measurements": "取得不可 {{count}} 件",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
++    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 0bc6f02..0196094 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6823,6 +6823,8 @@
+     "Includes estimates": "Включает оценки",
+     "{{count}} unavailable measurements": "Недоступных измерений: {{count}}",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
++    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index c6f57d8..a73198f 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6823,6 +6823,8 @@
+     "Includes estimates": "Bao gồm giá trị ước tính",
+     "{{count}} unavailable measurements": "{{count}} phép đo không khả dụng",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
++    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index c0febd7..b6ca972 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6823,6 +6823,8 @@
+     "Includes estimates": "包含估算值",
+     "{{count}} unavailable measurements": "{{count}} 項計量不可取得",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
++    "share.keyPool.failoverDescription": "正常請求依照目前的池策略分配；遇到可重試的上游錯誤時，會先嘗試本渠道下一把可用 Key，再切換渠道。",
++    "share.keyPool.modeDescription": "輪詢會依照 Key 權重順序分配；隨機會在每次請求時按權重抽取。",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index ebbd89f..0ac4c33 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6823,6 +6823,8 @@
+     "Includes estimates": "包含估算值",
+     "{{count}} unavailable measurements": "{{count}} 项计量不可得",
+     "share.keyPool.description": "管理此渠道的凭据、权重和可用状态。",
++    "share.keyPool.failoverDescription": "正常请求按当前池策略分配；遇到可重试的上游错误时，会先尝试本渠道下一把可用 Key，再切换渠道。",
++    "share.keyPool.modeDescription": "轮询会按 Key 权重依次分配；随机会在每次请求时按权重抽取。",
+     "share.keyPool.apply": "应用 Key 池",
+     "share.keyPool.applied": "Key 池已应用",
+     "share.keyPool.pendingTitle": "更改尚未生效",
+-- 
+2.53.0.windows.1
+
