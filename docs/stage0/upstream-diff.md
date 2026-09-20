@@ -13,12 +13,12 @@
 ## 当前统计
 
 - 基线提交：`69a50029819a26c53e6babd276d49cfe2f8880ad`
-- 当前 fork 提交：`d6d5b7faab8e803bb11f0c6ddd1fa81514fb7875`
-- 相对基线提交数：**164** 个
-- 变化文件：**249** 个（新增 **152**，修改上游已有文件 **97**）
-- 行数变化：新增 **39,127** 行，删除 **223** 行
+- 当前 fork 提交：`448809088784efe84bd52b4029c36b07318607ed`
+- 相对基线提交数：**165** 个
+- 变化文件：**251** 个（新增 **154**，修改上游已有文件 **97**）
+- 行数变化：新增 **39,849** 行，删除 **223** 行
 - 未跟踪文件：**0** 个
-- 核对时间：2026-09-20（`git diff --name-status/--shortstat`；阶段 E 收口）
+- 核对时间：2026-09-20（`git diff --name-status/--shortstat`；阶段 F1 收口）
 
 > 2026-09-18 接手审查纠正：本节此前仍写“修改上游文件 0 个”，那只是阶段 0 早期快照，已经与当前 fork 不符。完整风险与整改顺序见 `docs/TAKEOVER_AUDIT.md`。
 
@@ -41,6 +41,7 @@
 | D-037 | `new-api/model/channel.go`、`apigx/{channelpool,model,relayhook}/**`、`controller/{relay,system_task_handlers,task_cancel}.go`、`service/task_polling.go`、任务/视频路由 | 稳定多 Key 与异步任务生命周期 | 每把真实 Key 只保留一个槽位，稳定 Key ID、原生权重和健康/容量/熔断独立来源进入底座选择器；新增加密凭据版本历史、不可变任务快照、历史凭据查询、状态 CAS、持久修复事件、任务租约移交/续租/幂等释放、取消能力契约和 501 明确限制 | 接手审查 P1-1/P1-2：旧权重靠复制明文槽位，索引状态会串 Key；异步任务只写快照，不按历史凭据查询，也没有终态、取消与重启对账闭环 | **中高**：触及底座多 Key 选择、任务提交/轮询和容量租约；已完成三库矩阵、全仓、真实 PostgreSQL+Redis HTTP、Key 轮换/删除、真实进程中断恢复与 162 补丁重建；真实第三方取消仍未实现 | 2026-09-19 | 已实施 |
 | D-038 | `new-api/apigx/{price,model,relayhook,api}/**`、`service/{quota,text_quota,task_polling,token_counter}.go`、`relay/{common,channel/openai}/**`、Kling 插件与分享者用量卡 | New API 本地价格匹配与六类统一计量 | 一键匹配只读 New API 当前本地按次价、倍率价和计价表达式，以服务端候选令牌确认并写不可变价格版本；同步与异步事件统一记录真实能力、维度、单位、可信度和冻结成本；分享者按渠道、Key、模型查看净用量、重试和四类成本状态 | 接手审查 P1-3/P1-4：原一键匹配要求客户端上传读数，图片假 token、语音秒数和异步任务最终 facts 不能形成可追溯成本，分享者汇总也会重复或漏算 | **中高**：触及结算后计量、异步终态、视频状态查询和分享者聚合；三库、阶段 D HTTP 20/20、全仓、前端构建/typecheck/定向用例、最终二进制与 163 补丁重建均通过 | 2026-09-19 | 已实施 |
 | D-039 | `new-api/web/src/features/{share,pricing,keys,apigx-platform}/**`、`new-api/apigx/{api/share.go,model/repo_offering.go,model/repo_plaza.go,model/repo_upstream.go}` | 三角色前端任务流 | “我的分享”按分组和渠道就绪链组织，补多 Key 权重/轮换、模型导入、本地价格匹配、容量与审核；模型详情用公开 Offering ID 写入指定来源或自动策略；管理员从待审核队列与资源选择器处理价格、别名和发布；窄屏改用完整操作卡片 | 接手审查 P1-7：原页面按表结构平铺，分享者缺 Key/价格流程，使用者与管理员需手填内部 ID，移动端关键操作不可见 | **中**：主要改前端信息架构与 APIGX 查询/更新端点；已完成 typecheck、变更文件 lint/format、11 文件 42 项 Vitest、生产构建、Go 全仓、三库及 390×844 浏览器回归 | 2026-09-20 | 已实施；P1-7 关闭，P1-6 的邀请组件与协议覆盖留待阶段 F |
+| D-040 | `new-api/apigx/api/{share.go,share_test.go}`、`new-api/web/src/features/{share,access}/**`、七种语言文件 | 安全自助渠道配方 + 邀请控件 | 服务端拥有普通用户配方白名单并按稳定 `recipe_id` 重新解析底座渠道类型；目录不泄露底座类型，未知配方零写入，三对象仍同事务创建；前端加载目录并处理完整异步状态，邀请改用项目 Select 和移动卡片，终态邀请不再重复撤销 | 接手审查 P1-6：客户端原先直接提交协议字符串，邀请残留原生选择器且移动表格横向滚动；“New API”还被误称为协议 | **中**：改变普通用户自助创建请求契约；管理员绑定既有底座渠道入口保持兼容。已通过三库生命周期、Go 全仓、8 文件 25 项前端测试、构建和 390×844/1440×1000 浏览器回归 | 2026-09-20 | 已实施；P1-6 的组件与任意类型注入缺口关闭，专用任务型协议继续留在 F2 |
 | D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
 | D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
 | D-009 | `new-api/middleware/distributor.go` | 必须修改 | 在 `SetupContextForSelectedChannel` 之后、`c.Next()` 之前插入容量钩子：`relayhook.Acquire` 取租约、`defer lease.Release()` 在下游全部结束后释放；满载 429、账本不可用 503。另加 1 行 import | T1.7 第二部分；计划书 §9.2（共享容量控制必须贯穿请求生命周期） | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。改动本身是「新增一个可开关的调用」，默认关闭时行为不变 | 2026-09-16 | 已实施（默认关闭，`APIGX_CAPACITY_ENABLED`） |
@@ -64,7 +65,7 @@
 | D-010 | `new-api/apigx/relayhook/{capacity_hook,capacity_hook_test}.go` | 新增 | 容量接线：`Acquire`/`Lease.Release`/长流续租协程/错误码映射（429+Retry-After、503）；为渠道+平台 Key+用户三维度做同一次原子预留 | T1.7 | 低（新包；不反向依赖 middleware，避免循环） | 2026-09-16 | 已实施 |
 | D-008 | `new-api/apigx/capacity/{capacity,capacity_test}.go` | 新增 | 共享容量账本：Lua 原子预留/幂等归还/租约续租与过期回收；维度 key 覆盖用户·平台 Key·渠道·供给·上游 Key·上游账户池 | T1.7；计划书 §9.2（底座没有渠道/Key 级并发上限，阶段 0 已实测确认） | 无（上游不存在同名路径） | 2026-09-16 | 已实施（核心账本） |
 | D-007 | `new-api/service/apigx_usage_only.go`、`apigx_usage_only_test.go` | 新增（同包） | 模式开关（`APIGX_USAGE_ONLY`）、`UsageOnlyFunding`、`newUsageOnlySession` 及其单测 | T1.6 | 低（新文件；与底座 `funding_source.go` 同包，便于实现 FundingSource 接口而不产生循环依赖） | 2026-09-16 | 已实施 |
-| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0164-feat-rebuild-APIGX-role-based-workflows.patch`；fork 分支 `apigx`，HEAD `d6d5b7f` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-20 | 164 个补丁从基线重放成功，tree `a6e0f700ecd4b4d2be1ce859997fe6e9b5fdf778` 一致 |
+| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0165-feat-secure-self-service-channel-recipes.patch`；fork 分支 `apigx`，HEAD `4488090` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-20 | 165 个补丁从基线重放成功，tree `c615b2cc9202676457a5ee4b9c1052a63087666a` 一致 |
 
 ## 二、新增文件（不修改上游）
 

@@ -1,5 +1,31 @@
 # 任务清单
 
+## [已完成] 接手整改阶段 F1：安全渠道配方与邀请控件收口（2026-09-20）
+
+**本轮目标**：由服务端提供并校验普通用户可创建的渠道配方，使分享者按稳定配方 ID 创建渠道；清理邀请卡残留的原生选择器，并补齐加载、空态、错误态、响应式和可访问性契约。
+**验收标准**：① 客户端不能指定任意底座渠道类型，只能提交服务端目录中的稳定配方 ID；② 目录仅暴露已核实可安全自助创建的协议，返回能力提示、Base URL 要求与模型抓取支持；③ 底座渠道、APIGX 渠道和初始加密 Key 仍同事务创建；④ 分享对话框以服务端目录为准并处理加载、失败、空目录和失效配方；⑤ 邀请卡复用项目 Select；⑥ 后端契约测试、前端行为测试、typecheck、lint、构建和真实浏览器桌面/移动回归通过。
+
+**布局草图**：
+```text
+分享渠道：分组 → 新建渠道弹窗 → 加载服务端配方 → 上游类型/名称/Base URL/初始 Key → 创建
+邀请访问：权限说明 → 邀请范围 Select → 目标/过期/次数 → 创建邀请
+```
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 配方目录与校验 | `new-api/apigx/api/share.go`、相关测试 | 修改 | 服务端拥有配方定义、目录端点和创建时重新解析 |
+| 分享前端 | `new-api/web/src/features/share/{api.ts,types.ts,components/channel-create-dialog.tsx}` | 修改 | 加载目录并处理完整异步状态 |
+| 邀请控件 | `new-api/web/src/features/access/components/invite-card.tsx` | 修改 | 复用 `@/components/ui/select` |
+| 契约与交付 | 前后端测试、i18n、补丁链与台账 | 修改 | 行为回归、构建、浏览器、可重建交付 |
+
+**任务清单**：
+- [x] F1.1 核对 New API 各候选渠道的真实路由、必填设置和模型抓取能力，冻结安全自助配方白名单 → 普通用户目录仅开放 OpenAI-compatible、Anthropic-compatible、Gemini 与 New API；New API 仅声明已核实的对话/图片/向量，视频继续走任务插件或专用配置
+- [x] F1.2 实现后端配方目录、创建请求稳定配方 ID 和服务端重新校验，保留原子创建边界 → `new-api/apigx/api/{share.go,share_test.go}`；目录不泄露底座类型，伪造 `protocol` 无效，未知配方零写入，原子创建回归通过
+- [x] F1.3 改造分享渠道弹窗的目录加载、错误/空态/失效配方与可访问状态 → `new-api/web/src/features/share/**`、七种语言；定向 5 项及 share/access 24 项 Vitest、typecheck、lint、format 与生产构建通过
+- [x] F1.4 将邀请卡原生选择器替换为项目 Select，并补交互与响应式回归 → `new-api/web/src/features/access/{components/invite-card.tsx,__tests__/invite-selection.test.tsx}`；移动端使用纵向邀请卡、桌面保留表格，已撤销/已用尽记录不再显示重复撤销操作；390×844 与 1440×1000 浏览器回归无横向溢出、console error 0
+- [x] F1.5 完成后端/前端/浏览器验证、inner 提交、第 165 个补丁、锁文件与台账重建交付 → 8 文件 25 项 Vitest、typecheck、变更文件 lint/format、Rsbuild、Go 全仓与 `relaykit` 独立测试通过；inner `448809088784efe84bd52b4029c36b07318607ed`；165 个补丁重建 tree `c615b2cc9202676457a5ee4b9c1052a63087666a` 与 fork HEAD 一致
+
 ## [已完成] 接手整改阶段 E：三角色前端任务流重做（2026-09-19 ～ 2026-09-20）
 
 **本轮目标**：在阶段 A-D 后端契约冻结后，按分享者、使用者和管理员的真实操作顺序重做必要前端，使用户无需理解内部数字 ID 或数据库表即可完成分享、选路和审核。

@@ -1,0 +1,1522 @@
+From 448809088784efe84bd52b4029c36b07318607ed Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sun, 20 Sep 2026 11:44:41 +0800
+Subject: [PATCH 165/165] feat: secure self-service channel recipes
+
+---
+ apigx/api/share.go                            | 131 +++++++---
+ apigx/api/share_test.go                       |  63 ++++-
+ .../__tests__/invite-selection.test.tsx       | 133 +++++++++++
+ .../access/components/invite-card.tsx         | 224 ++++++++++++++----
+ .../share/__tests__/channel-recipes.test.tsx  | 162 +++++++++++++
+ web/src/features/share/api.ts                 |  10 +-
+ .../components/channel-create-dialog.tsx      | 216 +++++++++++++----
+ web/src/features/share/types.ts               |  18 ++
+ web/src/i18n/locales/en.json                  |   5 +
+ web/src/i18n/locales/fr.json                  |   5 +
+ web/src/i18n/locales/ja.json                  |   5 +
+ web/src/i18n/locales/ru.json                  |   5 +
+ web/src/i18n/locales/vi.json                  |   5 +
+ web/src/i18n/locales/zh-TW.json               |   5 +
+ web/src/i18n/locales/zh.json                  |   5 +
+ 15 files changed, 857 insertions(+), 135 deletions(-)
+ create mode 100644 web/src/features/access/__tests__/invite-selection.test.tsx
+ create mode 100644 web/src/features/share/__tests__/channel-recipes.test.tsx
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 5b92d75..215d54f 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -59,6 +59,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	{
+ 		// 列出登录用户的**全部**渠道（"我的分享"页需要它；此前只有按分组的 /share-groups/:id/channels）。
+ 		channels.GET("", h.listAllChannels)
++		channels.GET("/recipes", h.listChannelRecipes)
+ 		channels.POST("", h.createChannel)
+ 		channels.GET("/:id", h.getChannel)
+ 		channels.DELETE("/:id", h.deleteChannel)
+@@ -382,9 +383,57 @@ type createChannelRequest struct {
+ 	ShareGroupID  int64  `json:"share_group_id"`
+ 	BaseChannelID int64  `json:"base_channel_id"`
+ 	Name          string `json:"name"`
+-	Protocol      string `json:"protocol"`
+-	BaseURL       string `json:"base_url"`
+-	KeyPoolMode   *int   `json:"key_pool_mode"`
++	RecipeID      string `json:"recipe_id"`
++	// Protocol 仅保留给管理员绑定既有底座渠道的兼容入口。普通用户自建渠道时，
++	// 服务端只接受 RecipeID，并从配方目录重新解析底座类型与协议标识。
++	Protocol    string `json:"protocol"`
++	BaseURL     string `json:"base_url"`
++	KeyPoolMode *int   `json:"key_pool_mode"`
++}
++
++type selfServeChannelRecipe struct {
++	ID                 string   `json:"id"`
++	Label              string   `json:"label"`
++	Protocol           string   `json:"protocol"`
++	DefaultBaseURL     string   `json:"default_base_url"`
++	CapabilityHints    []string `json:"capability_hints"`
++	RequiresBaseURL    bool     `json:"requires_base_url"`
++	SupportsModelFetch bool     `json:"supports_model_fetch"`
++	BaseChannelType    int      `json:"-"`
++}
++
++// selfServeChannelRecipes 是普通分享者唯一可用的底座渠道白名单。
++//
++// capability_hints 只描述当前底座适配器已经实现的能力，并不推断某个上游账户或模型
++// 一定开放这些能力。视频等需要任务插件或专用设置的渠道暂不放进自助目录。
++var selfServeChannelRecipes = []selfServeChannelRecipe{
++	{
++		ID: "openai-compatible", Label: "OpenAI compatible", Protocol: "openai",
++		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeOpenAI),
++		CapabilityHints: []string{"chat", "image", "audio", "embedding", "rerank"},
++		RequiresBaseURL: true, SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeOpenAI,
++	},
++	{
++		ID: "anthropic-compatible", Label: "Anthropic compatible", Protocol: "anthropic",
++		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeAnthropic),
++		CapabilityHints: []string{"chat"}, RequiresBaseURL: true,
++		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeAnthropic,
++	},
++	{
++		ID: "gemini", Label: "Gemini", Protocol: "gemini",
++		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeGemini),
++		CapabilityHints: []string{"chat", "image", "embedding"}, RequiresBaseURL: true,
++		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeGemini,
++	},
++	{
++		ID: "new-api", Label: "New API instance", Protocol: "new-api",
++		CapabilityHints: []string{"chat", "image", "embedding"}, RequiresBaseURL: true,
++		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeNewAPI,
++	},
++}
++
++func (h *handler) listChannelRecipes(c *gin.Context) {
++	ok(c, gin.H{"items": selfServeChannelRecipes})
+ }
+ 
+ func (h *handler) createChannel(c *gin.Context) {
+@@ -401,12 +450,10 @@ func (h *handler) createChannel(c *gin.Context) {
+ 	var selfServeKey string
+ 
+ 	channel := &apigxmodel.Channel{
+-		OwnerUserID:  owner,
+-		ShareGroupID: req.ShareGroupID,
+-		Name:         strings.TrimSpace(req.Name),
+-		Protocol:     req.Protocol,
+-		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
+-		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
++		OwnerUserID:   owner,
++		ShareGroupID:  req.ShareGroupID,
++		Name:          strings.TrimSpace(req.Name),
++		Protocol:      strings.TrimSpace(req.Protocol),
+ 		BaseURL:       channelpool.NormalizeUpstreamBaseURL(req.BaseURL),
+ 		BaseChannelID: req.BaseChannelID,
+ 		KeyPoolMode:   0, // 默认轮询（计划书 §3.5）
+@@ -437,8 +484,21 @@ func (h *handler) createChannel(c *gin.Context) {
+ 			return
+ 		}
+ 	} else {
++		recipe, recipeErr := selfServeChannelRecipeByID(req.RecipeID)
++		if recipeErr != nil {
++			failFromRepo(c, recipeErr)
++			return
++		}
++		channel.Protocol = recipe.Protocol
++		baseURL := strings.TrimSpace(req.BaseURL)
++		if baseURL == "" {
++			baseURL = recipe.DefaultBaseURL
++		}
++		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
++		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
++		channel.BaseURL = channelpool.NormalizeUpstreamBaseURL(baseURL)
+ 		selfServeKey = strings.TrimSpace(req.UpstreamKey)
+-		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey); recipeErr != nil {
++		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey, recipe); recipeErr != nil {
+ 			failFromRepo(c, recipeErr)
+ 			return
+ 		}
+@@ -452,7 +512,7 @@ func (h *handler) createChannel(c *gin.Context) {
+ 		// 底座渠道、APIGX 渠道和初始加密 Key 共用同一个主库事务。任何一步失败都会
+ 		// 回滚底座行，避免留下仍为 enabled 的孤儿渠道。
+ 		if err := h.db.Transaction(func(tx *gorm.DB) error {
+-			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey); err != nil {
++			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey, recipe); err != nil {
+ 				return err
+ 			}
+ 			if err := apigxmodel.CreateChannel(tx, channel); err != nil {
+@@ -2462,18 +2522,22 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
+ //   - 分享者只填 名称/协议/上游地址/自己的 Key ⇒ **不需要知道管理员侧的渠道 ID**；
+ //   - 上游 Key 用**分享者自己的**，平台不代垫 ⇒ 消耗归分享者；
+ //   - 底座渠道的模型列表留空，由「同步模型」按上游实际能力填充（不做猜测）。
+-func provisionBaseChannelForShareChannel(db *gorm.DB, channel *apigxmodel.Channel, upstreamKey string) error {
++func provisionBaseChannelForShareChannel(
++	db *gorm.DB,
++	channel *apigxmodel.Channel,
++	upstreamKey string,
++	recipe selfServeChannelRecipe,
++) error {
+ 	if db == nil {
+ 		return errors.New("apigx api: nil db")
+ 	}
+-	if err := validateSelfServeChannelRecipe(channel, upstreamKey); err != nil {
++	if err := validateSelfServeChannelRecipe(channel, upstreamKey, recipe); err != nil {
+ 		return err
+ 	}
+-	channelType, _ := baseChannelTypeForProtocol(channel.Protocol)
+ 
+ 	base := basemodel.Channel{
+ 		Name:        "APIGX-" + channel.Name,
+-		Type:        channelType,
++		Type:        recipe.BaseChannelType,
+ 		Key:         upstreamKey,
+ 		BaseURL:     &channel.BaseURL,
+ 		Group:       "default",
+@@ -2489,26 +2553,39 @@ func provisionBaseChannelForShareChannel(db *gorm.DB, channel *apigxmodel.Channe
+ 	return nil
+ }
+ 
+-func validateSelfServeChannelRecipe(channel *apigxmodel.Channel, upstreamKey string) error {
++func validateSelfServeChannelRecipe(
++	channel *apigxmodel.Channel,
++	upstreamKey string,
++	recipe selfServeChannelRecipe,
++) error {
+ 	if channel == nil {
+ 		return fmt.Errorf("%w: channel is required", apigxmodel.ErrInvalidArgument)
+ 	}
+ 	if channel.Name == "" {
+ 		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
+ 	}
+-	if channel.BaseURL == "" {
++	if recipe.RequiresBaseURL && channel.BaseURL == "" {
+ 		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
+ 	}
+ 	if upstreamKey == "" {
+ 		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
+ 	}
+-	_, ok := baseChannelTypeForProtocol(channel.Protocol)
+-	if !ok {
+-		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
++	if recipe.ID == "" || channel.Protocol != recipe.Protocol {
++		return fmt.Errorf("%w: channel recipe does not match the resolved protocol", apigxmodel.ErrInvalidArgument)
+ 	}
+ 	return nil
+ }
+ 
++func selfServeChannelRecipeByID(recipeID string) (selfServeChannelRecipe, error) {
++	recipeID = strings.TrimSpace(recipeID)
++	for _, recipe := range selfServeChannelRecipes {
++		if recipe.ID == recipeID {
++			return recipe, nil
++		}
++	}
++	return selfServeChannelRecipe{}, fmt.Errorf("%w: unsupported channel recipe", apigxmodel.ErrInvalidArgument)
++}
++
+ // prepareSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 变成待落库记录。
+ //
+ // 加密和指纹在任何数据库写入之前完成；ChannelID 在事务内创建 APIGX 渠道后补上。
+@@ -2531,20 +2608,6 @@ func prepareSelfServeUpstreamKey(upstreamKey string) (*apigxmodel.UpstreamKey, e
+ 	}, nil
+ }
+ 
+-// baseChannelTypeForProtocol 把我们的协议标识映射到底座渠道类型（用底座常量，不写死数字）。
+-func baseChannelTypeForProtocol(protocol string) (int, bool) {
+-	switch protocol {
+-	case "openai":
+-		return constant.ChannelTypeOpenAI, true
+-	case "anthropic":
+-		return constant.ChannelTypeAnthropic, true
+-	case "gemini":
+-		return constant.ChannelTypeGemini, true
+-	default:
+-		return 0, false
+-	}
+-}
+-
+ // upstreamKeyStableID 生成稳定的 Key 标识（同一把 Key 重复登记时保持幂等）。
+ func upstreamKeyStableID(key string) string {
+ 	sum := sha256.Sum256([]byte(key))
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index f27e3f8..2b158a3 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -18,6 +18,7 @@ import (
+ 	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
+ 	"github.com/QuantumNous/new-api/apigx/secretbox"
+ 	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/constant"
+ 	basemodel "github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+ 	"github.com/gin-gonic/gin"
+@@ -409,17 +410,17 @@ func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
+ 	const ownerA, ownerB int64 = 5001, 5002
+ 	groupA := env.createGroup(t, ownerA, "A 的分组")
+ 
+-	// 既没给 base_channel_id、也没给"自建配方"（名称/协议/上游地址/Key）→ 400。
++	// 既没给 base_channel_id、也没给服务端目录中的 recipe_id → 400。
+ 	// 注意：契约在支持「分享者自建渠道」后**有意变化** —— 校验从"必须有 base_channel_id"
+ 	// 变成"要么绑定既有底座渠道，要么给全自建配方"；这里断言的是后者缺字段时的拒绝。
+ 	rec, _ := env.do(t, http.MethodPost, "/api/channels", ownerA,
+ 		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"未绑定"}`)
+ 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+-	assert.Contains(t, rec.Body.String(), "base_url")
++	assert.Contains(t, rec.Body.String(), "channel recipe")
+ 
+ 	// 配方不完整（给了上游地址但没给 Key）→ 仍然 400，不允许半成品渠道落地
+ 	rec, _ = env.do(t, http.MethodPost, "/api/channels", ownerA,
+-		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"半成品","protocol":"openai","base_url":"https://example.com"}`)
++		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"半成品","recipe_id":"openai-compatible","base_url":"https://example.com"}`)
+ 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+ 	assert.Contains(t, rec.Body.String(), "upstream_key")
+ 
+@@ -429,6 +430,32 @@ func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
+ 	assert.Equal(t, http.StatusNotFound, rec.Code)
+ }
+ 
++func TestSelfServeChannelRecipeCatalog(t *testing.T) {
++	env := newTestEnv(t, true)
++	rec, body := env.do(t, http.MethodGet, "/api/channels/recipes", 5099, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data, ok := body["data"].(map[string]any)
++	require.True(t, ok)
++	items, ok := data["items"].([]any)
++	require.True(t, ok)
++	require.Len(t, items, 4)
++
++	seen := make(map[string]map[string]any, len(items))
++	for _, raw := range items {
++		item, itemOK := raw.(map[string]any)
++		require.True(t, itemOK)
++		_, leaksBaseType := item["base_channel_type"]
++		assert.False(t, leaksBaseType, "目录不能向普通用户暴露底座渠道类型")
++		seen[item["id"].(string)] = item
++	}
++	newAPIRecipe := seen["new-api"]
++	require.NotNil(t, newAPIRecipe)
++	assert.Equal(t, "new-api", newAPIRecipe["protocol"])
++	assert.Equal(t, true, newAPIRecipe["requires_base_url"])
++	assert.Equal(t, true, newAPIRecipe["supports_model_fetch"])
++	assert.ElementsMatch(t, []any{"chat", "image", "embedding"}, newAPIRecipe["capability_hints"])
++}
++
+ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 	t.Run("ordinary user provisions a complete channel", func(t *testing.T) {
+ 		env := newTestEnv(t, true)
+@@ -436,7 +463,7 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 		groupID := env.createGroup(t, owner, "自建渠道组")
+ 		secret := "sk-self-serve-complete"
+ 		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+-			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"`+secret+`"}`,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"自建线路","recipe_id":"new-api","protocol":"anthropic","base_url":"https://example.com/v1","upstream_key":"`+secret+`"}`,
+ 			common.RoleCommonUser)
+ 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 		assert.NotContains(t, rec.Body.String(), secret)
+@@ -444,9 +471,11 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 
+ 		shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+ 		require.NoError(t, err)
++		assert.Equal(t, "new-api", shareChannel.Protocol, "协议必须由服务端配方解析，不能信任客户端 protocol")
+ 		var baseChannel basemodel.Channel
+ 		require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error)
+ 		assert.Equal(t, common.ChannelStatusEnabled, baseChannel.Status)
++		assert.Equal(t, constant.ChannelTypeNewAPI, baseChannel.Type)
+ 		assert.Equal(t, secret, baseChannel.Key, "底座现有转发路径仍需要明文投影")
+ 		assert.Equal(t, "https://example.com", baseChannel.GetBaseURL())
+ 
+@@ -456,6 +485,22 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 		assert.NotContains(t, storedKey.SecretRef, secret)
+ 	})
+ 
++	t.Run("unknown recipe writes nothing", func(t *testing.T) {
++		env := newTestEnv(t, true)
++		const owner int64 = 5105
++		groupID := env.createGroup(t, owner, "未知配方组")
++		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"未知线路","recipe_id":"channel-type-999","base_url":"https://example.com","upstream_key":"sk-unknown"}`,
++			common.RoleCommonUser)
++		assert.Equal(t, http.StatusBadRequest, rec.Code)
++		assert.Contains(t, rec.Body.String(), "unsupported channel recipe")
++		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
++			var count int64
++			require.NoError(t, env.db.Model(target).Count(&count).Error)
++			assert.Zero(t, count)
++		}
++	})
++
+ 	t.Run("ordinary user cannot bind a global base channel", func(t *testing.T) {
+ 		env := newTestEnv(t, true)
+ 		const owner int64 = 5102
+@@ -478,7 +523,7 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 		const owner int64 = 5103
+ 		groupID := env.createGroup(t, owner, "缺主密钥组")
+ 		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+-			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"失败线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-no-store"}`,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"失败线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-no-store"}`,
+ 			common.RoleCommonUser)
+ 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+ 		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
+@@ -502,7 +547,7 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 		t.Cleanup(func() { _ = env.db.Callback().Create().Remove(callbackName) })
+ 
+ 		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+-			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-rollback"}`,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"回滚线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-rollback"}`,
+ 			common.RoleCommonUser)
+ 		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+ 		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
+@@ -518,7 +563,7 @@ func TestDeleteChannelFailsClosedAndIsIdempotent(t *testing.T) {
+ 	const owner, stranger int64 = 5201, 5202
+ 	groupID := env.createGroup(t, owner, "删除生命周期组")
+ 	rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+-		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"待删除线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-delete"}`,
++		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"待删除线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-delete"}`,
+ 		common.RoleCommonUser)
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	channelID := int64(body["data"].(map[string]any)["id"].(float64))
+@@ -664,7 +709,7 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
+ 				const owner int64 = 9_830_001
+ 				groupID := env.createGroup(t, owner, "三库生命周期组")
+ 				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+-					`,"name":"三库自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
++					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
+ 				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
+ 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 				channelID := int64(body["data"].(map[string]any)["id"].(float64))
+@@ -685,7 +730,7 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
+ 					}
+ 				}))
+ 				failedBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+-					`,"name":"三库回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-matrix-rollback"}`
++					`,"name":"三库回滚线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-matrix-rollback"}`
+ 				rec, _ = env.doWithRole(t, http.MethodPost, "/api/channels", owner, failedBody, common.RoleCommonUser)
+ 				assert.Equal(t, http.StatusInternalServerError, rec.Code)
+ 				require.NoError(t, tx.Callback().Create().Remove(callbackName))
+diff --git a/web/src/features/access/__tests__/invite-selection.test.tsx b/web/src/features/access/__tests__/invite-selection.test.tsx
+new file mode 100644
+index 0000000..405bf20
+--- /dev/null
++++ b/web/src/features/access/__tests__/invite-selection.test.tsx
+@@ -0,0 +1,133 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { render, screen, waitFor } from '@testing-library/react'
++import userEvent from '@testing-library/user-event'
++import { afterEach, expect, it, vi } from 'vitest'
++
++import { api } from '@/lib/api'
++
++import { AccessInviteCard } from '../components/invite-card'
++
++afterEach(() => {
++  vi.restoreAllMocks()
++})
++
++it('uses the shared accessible Select and issues an invite for the chosen group', async () => {
++  vi.spyOn(api, 'get').mockResolvedValue({
++    data: { success: true, data: { items: [] } },
++  })
++  const post = vi.spyOn(api, 'post').mockResolvedValue({
++    data: {
++      success: true,
++      data: { id: 5, token: 'invite-once', token_prefix: 'invite' },
++    },
++  })
++  const client = new QueryClient({
++    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
++  })
++  const user = userEvent.setup()
++  const view = render(
++    <QueryClientProvider client={client}>
++      <AccessInviteCard
++        groups={[
++          {
++            id: 23,
++            public_id: 'group-public-23',
++            name: 'Friends only',
++            description: '',
++            default_visibility: 1,
++            publish_status: 2,
++            updated_at: 0,
++          },
++        ]}
++      />
++    </QueryClientProvider>
++  )
++
++  expect(view.container.querySelector('select')).not.toBeInTheDocument()
++  await user.click(screen.getByRole('combobox', { name: 'Share group' }))
++  await user.click(await screen.findByRole('option', { name: 'Friends only' }))
++  await user.click(screen.getByRole('button', { name: 'Issue invite' }))
++
++  await waitFor(() =>
++    expect(post).toHaveBeenCalledWith(
++      '/api/apigx/access/invites',
++      expect.objectContaining({
++        target_scope_type: 1,
++        target_scope_id: 23,
++        max_uses: 1,
++        revoke_grants: true,
++      })
++    )
++  )
++  expect(await screen.findByText('invite-once')).toBeVisible()
++})
++
++it('does not offer revoke again after an invite has already been revoked', async () => {
++  vi.spyOn(api, 'get').mockResolvedValue({
++    data: {
++      success: true,
++      data: {
++        items: [
++          {
++            id: 9,
++            creator_user_id: 1,
++            target_scope_type: 1,
++            target_scope_id: 23,
++            token_prefix: 'revoked',
++            max_uses: 1,
++            used_count: 0,
++            expires_at: 0,
++            status: 1,
++            revoke_grants: true,
++            created_at: 0,
++            updated_at: 0,
++          },
++        ],
++      },
++    },
++  })
++  const client = new QueryClient({
++    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
++  })
++
++  render(
++    <QueryClientProvider client={client}>
++      <AccessInviteCard
++        groups={[
++          {
++            id: 23,
++            public_id: 'group-public-23',
++            name: 'Friends only',
++            description: '',
++            default_visibility: 1,
++            publish_status: 2,
++            updated_at: 0,
++          },
++        ]}
++      />
++    </QueryClientProvider>
++  )
++
++  expect(await screen.findAllByText('Revoked')).not.toHaveLength(0)
++  expect(
++    screen.queryByRole('button', { name: 'Revoke' })
++  ).not.toBeInTheDocument()
++})
+diff --git a/web/src/features/access/components/invite-card.tsx b/web/src/features/access/components/invite-card.tsx
+index 259bddc..b238338 100644
+--- a/web/src/features/access/components/invite-card.tsx
++++ b/web/src/features/access/components/invite-card.tsx
+@@ -24,17 +24,33 @@ import { useTranslation } from 'react-i18next'
+ 
+ import { ConfirmDialog } from '@/components/confirm-dialog'
+ import { CopyButton } from '@/components/copy-button'
+-import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
++import {
++  StaticDataTable,
++  type StaticDataTableColumn,
++} from '@/components/data-table'
+ import { EmptyState } from '@/components/empty-state'
+ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+ import { Input } from '@/components/ui/input'
+ import { Label } from '@/components/ui/label'
+-
++import {
++  Select,
++  SelectContent,
++  SelectGroup,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from '@/components/ui/select'
++import { redeemAccessInvite } from '@/features/access-invite/api'
+ import type { ShareGroup } from '@/features/share/types'
+ 
+-import { redeemAccessInvite } from '@/features/access-invite/api'
+-import { createAccessInvite, listAccessInvites, revokeAccessInvite, type AccessInvite } from '../api'
++import {
++  createAccessInvite,
++  listAccessInvites,
++  revokeAccessInvite,
++  type AccessInvite,
++} from '../api'
+ 
+ /**
+  * 访问授权：资源访问邀请（§4「访问授权」/「邀请兑换」）。
+@@ -52,6 +68,10 @@ function inviteStatusLabelKey(status: number): string {
+   return 'Expired'
+ }
+ 
++function canRevokeInvite(invite: AccessInvite): boolean {
++  return invite.status === 0
++}
++
+ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+   const { t } = useTranslation()
+   const queryClient = useQueryClient()
+@@ -73,7 +93,10 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+     },
+   })
+ 
+-  const query = useQuery({ queryKey: ['apigx-access-invites'], queryFn: () => listAccessInvites() })
++  const query = useQuery({
++    queryKey: ['apigx-access-invites'],
++    queryFn: () => listAccessInvites(),
++  })
+ 
+   const refresh = () => {
+     void queryClient.invalidateQueries({ queryKey: ['apigx-access-invites'] })
+@@ -88,7 +111,10 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+         target_scope_id: Number(groupId),
+         max_uses: Number.isFinite(parsedMaxUses) ? parsedMaxUses : 1,
+         // 有效期按天换算成 UTC epoch 秒；0 表示不过期
+-        expires_at: parsedDays > 0 ? Math.floor(Date.now() / 1000) + parsedDays * 86400 : 0,
++        expires_at:
++          parsedDays > 0
++            ? Math.floor(Date.now() / 1000) + parsedDays * 86400
++            : 0,
+         revoke_grants: true,
+       })
+     },
+@@ -112,22 +138,34 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+     String(invite.target_scope_id)
+ 
+   const columns: StaticDataTableColumn<AccessInvite>[] = [
+-    { id: 'prefix', header: t('Invite code'), cell: (row) => row.token_prefix + '…' },
++    {
++      id: 'prefix',
++      header: t('Invite code'),
++      cell: (row) => `${row.token_prefix}…`,
++    },
+     { id: 'target', header: t('Share group'), cell: (row) => groupName(row) },
+     {
+       id: 'uses',
+       header: t('Uses'),
+-      cell: (row) => (row.max_uses > 0 ? row.used_count + ' / ' + row.max_uses : t('Unlimited')),
++      cell: (row) =>
++        row.max_uses > 0
++          ? `${row.used_count} / ${row.max_uses}`
++          : t('Unlimited'),
++    },
++    {
++      id: 'status',
++      header: t('Status'),
++      cell: (row) => t(inviteStatusLabelKey(row.status)),
+     },
+-    { id: 'status', header: t('Status'), cell: (row) => t(inviteStatusLabelKey(row.status)) },
+     {
+       id: 'actions',
+       header: '',
+-      cell: (row) => (
+-        <Button variant='outline' size='sm' onClick={() => setRevoking(row)}>
+-          {t('Revoke')}
+-        </Button>
+-      ),
++      cell: (row) =>
++        canRevokeInvite(row) ? (
++          <Button variant='outline' size='sm' onClick={() => setRevoking(row)}>
++            {t('Revoke')}
++          </Button>
++        ) : null,
+     },
+   ]
+ 
+@@ -140,44 +178,76 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+       </CardHeader>
+       <CardContent className='space-y-4'>
+         <p className='text-muted-foreground text-sm'>
+-          {t('Issue an invite so others can see the resources of a share group.')}
++          {t(
++            'Issue an invite so others can see the resources of a share group.'
++          )}
+         </p>
+ 
+-        <div className='grid gap-3 sm:grid-cols-3'>
+-          <div className='space-y-2'>
+-            <Label>{t('Share group')}</Label>
+-            <select
+-              className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
++        <FieldGroup className='grid gap-3 sm:grid-cols-3'>
++          <Field>
++            <FieldLabel htmlFor='access-invite-group'>
++              {t('Share group')}
++            </FieldLabel>
++            <Select
+               value={groupId}
+-              onChange={(event) => setGroupId(event.target.value)}
++              disabled={props.groups.length === 0}
++              onValueChange={(next) => setGroupId(next ?? '')}
+             >
+-              <option value=''>{t('Select a share group')}</option>
+-              {props.groups.map((group) => (
+-                <option key={group.id} value={String(group.id)}>
+-                  {group.name}
+-                </option>
+-              ))}
+-            </select>
+-          </div>
+-          <div className='space-y-2'>
+-            <Label>{t('Max uses')}</Label>
+-            <Input value={maxUses} onChange={(event) => setMaxUses(event.target.value)} />
+-          </div>
+-          <div className='space-y-2'>
+-            <Label>{t('Valid days')}</Label>
+-            <Input value={days} onChange={(event) => setDays(event.target.value)} />
+-          </div>
+-        </div>
++              <SelectTrigger id='access-invite-group' className='w-full'>
++                <SelectValue placeholder={t('Select a share group')}>
++                  {props.groups.find((group) => String(group.id) === groupId)
++                    ?.name ?? ''}
++                </SelectValue>
++              </SelectTrigger>
++              <SelectContent>
++                <SelectGroup>
++                  {props.groups.map((group) => (
++                    <SelectItem key={group.id} value={String(group.id)}>
++                      {group.name}
++                    </SelectItem>
++                  ))}
++                </SelectGroup>
++              </SelectContent>
++            </Select>
++          </Field>
++          <Field>
++            <FieldLabel htmlFor='access-invite-max-uses'>
++              {t('Max uses')}
++            </FieldLabel>
++            <Input
++              id='access-invite-max-uses'
++              value={maxUses}
++              onChange={(event) => setMaxUses(event.target.value)}
++            />
++          </Field>
++          <Field>
++            <FieldLabel htmlFor='access-invite-days'>
++              {t('Valid days')}
++            </FieldLabel>
++            <Input
++              id='access-invite-days'
++              value={days}
++              onChange={(event) => setDays(event.target.value)}
++            />
++          </Field>
++        </FieldGroup>
+ 
+-        <Button disabled={missing || create.isPending} onClick={() => create.mutate()}>
++        <Button
++          disabled={missing || create.isPending}
++          onClick={() => create.mutate()}
++        >
+           {t('Issue invite')}
+         </Button>
+ 
+         {issuedToken === '' ? null : (
+           <div className='bg-muted/40 space-y-2 rounded-md p-3'>
+-            <p className='text-sm font-medium'>{t('Copy the invite code now — it is shown only once.')}</p>
++            <p className='text-sm font-medium'>
++              {t('Copy the invite code now — it is shown only once.')}
++            </p>
+             <div className='flex items-center gap-2'>
+-              <code className='bg-background rounded px-2 py-1 font-mono text-xs'>{issuedToken}</code>
++              <code className='bg-background rounded px-2 py-1 font-mono text-xs'>
++                {issuedToken}
++              </code>
+               <CopyButton value={issuedToken} />
+             </div>
+           </div>
+@@ -186,14 +256,74 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+         {items.length === 0 ? (
+           <EmptyState title={t('No invite yet')} />
+         ) : (
+-          <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.id} />
++          <>
++            <div className='space-y-2 sm:hidden'>
++              {items.map((invite) => (
++                <div
++                  key={invite.id}
++                  className='space-y-3 rounded-md border p-3'
++                >
++                  <div className='flex items-start justify-between gap-3'>
++                    <div className='min-w-0'>
++                      <p className='text-muted-foreground text-xs'>
++                        {t('Invite code')}
++                      </p>
++                      <p className='truncate font-mono text-sm'>
++                        {invite.token_prefix}…
++                      </p>
++                    </div>
++                    <span className='bg-muted rounded-full px-2 py-1 text-xs'>
++                      {t(inviteStatusLabelKey(invite.status))}
++                    </span>
++                  </div>
++                  <dl className='grid grid-cols-2 gap-3 text-sm'>
++                    <div className='min-w-0'>
++                      <dt className='text-muted-foreground text-xs'>
++                        {t('Share group')}
++                      </dt>
++                      <dd className='truncate'>{groupName(invite)}</dd>
++                    </div>
++                    <div>
++                      <dt className='text-muted-foreground text-xs'>
++                        {t('Uses')}
++                      </dt>
++                      <dd>
++                        {invite.max_uses > 0
++                          ? `${invite.used_count} / ${invite.max_uses}`
++                          : t('Unlimited')}
++                      </dd>
++                    </div>
++                  </dl>
++                  {canRevokeInvite(invite) ? (
++                    <Button
++                      variant='outline'
++                      size='sm'
++                      className='w-full'
++                      onClick={() => setRevoking(invite)}
++                    >
++                      {t('Revoke')}
++                    </Button>
++                  ) : null}
++                </div>
++              ))}
++            </div>
++            <div className='hidden sm:block'>
++              <StaticDataTable
++                columns={columns}
++                data={items}
++                getRowKey={(row) => row.id}
++              />
++            </div>
++          </>
+         )}
+ 
+         {/* U-2：兑换与发放合并为同一界面（原来是一个独立页面） */}
+         <div className='space-y-2 border-t pt-4'>
+           <p className='text-sm font-medium'>{t('Redeem an invite')}</p>
+           <p className='text-muted-foreground text-sm'>
+-            {t('Paste the invite code you received to unlock the shared resources.')}
++            {t(
++              'Paste the invite code you received to unlock the shared resources.'
++            )}
+           </p>
+           <div className='flex items-end gap-2'>
+             <div className='flex-1 space-y-2'>
+@@ -224,7 +354,9 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+             </p>
+           ) : null}
+           {redeem.isError || redeem.data?.success === false ? (
+-            <p className='text-destructive text-sm'>{t('Invalid or already used invite code')}</p>
++            <p className='text-destructive text-sm'>
++              {t('Invalid or already used invite code')}
++            </p>
+           ) : null}
+         </div>
+         <ConfirmDialog
+@@ -233,7 +365,9 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
+             if (!next) setRevoking(null)
+           }}
+           title={t('Revoke invite')}
+-          desc={t('The code stops working and grants created by it are revoked.')}
++          desc={t(
++            'The code stops working and grants created by it are revoked.'
++          )}
+           destructive
+           confirmText={t('Revoke')}
+           isLoading={revoke.isPending}
+diff --git a/web/src/features/share/__tests__/channel-recipes.test.tsx b/web/src/features/share/__tests__/channel-recipes.test.tsx
+new file mode 100644
+index 0000000..30706f3
+--- /dev/null
++++ b/web/src/features/share/__tests__/channel-recipes.test.tsx
+@@ -0,0 +1,162 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { render, screen, waitFor } from '@testing-library/react'
++import userEvent from '@testing-library/user-event'
++import { afterEach, expect, it, vi } from 'vitest'
++
++import { api } from '@/lib/api'
++
++import { ChannelCreateDialog } from '../components/channel-create-dialog'
++import type { ChannelRecipe, ShareGroup } from '../types'
++
++const groups: ShareGroup[] = [
++  {
++    id: 7,
++    public_id: 'group-public-7',
++    name: 'Shared lab',
++    description: '',
++    default_visibility: 0,
++    publish_status: 0,
++    updated_at: 0,
++  },
++]
++
++const recipes: ChannelRecipe[] = [
++  {
++    id: 'openai-compatible',
++    label: 'OpenAI compatible',
++    protocol: 'openai',
++    default_base_url: 'https://api.openai.com',
++    capability_hints: ['chat', 'image', 'audio', 'embedding', 'rerank'],
++    requires_base_url: true,
++    supports_model_fetch: true,
++  },
++  {
++    id: 'new-api',
++    label: 'New API instance',
++    protocol: 'new-api',
++    default_base_url: '',
++    capability_hints: ['chat', 'image', 'embedding'],
++    requires_base_url: true,
++    supports_model_fetch: true,
++  },
++]
++
++afterEach(() => {
++  vi.restoreAllMocks()
++})
++
++function renderDialog() {
++  const client = new QueryClient({
++    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
++  })
++  return render(
++    <QueryClientProvider client={client}>
++      <ChannelCreateDialog
++        groups={groups}
++        open
++        onOpenChange={vi.fn()}
++        onSaved={vi.fn()}
++      />
++    </QueryClientProvider>
++  )
++}
++
++it('loads recipes from the server and submits only the selected stable recipe id', async () => {
++  vi.spyOn(api, 'get').mockResolvedValue({
++    data: { success: true, data: { items: recipes } },
++  })
++  const post = vi.spyOn(api, 'post').mockResolvedValue({
++    data: { success: true, data: { id: 19, public_id: 'channel-public-19' } },
++  })
++  const user = userEvent.setup()
++  renderDialog()
++
++  const recipeSelect = await screen.findByRole('combobox', {
++    name: 'Upstream type',
++  })
++  await waitFor(() =>
++    expect(recipeSelect).toHaveTextContent('OpenAI compatible')
++  )
++  await user.click(recipeSelect)
++  await user.click(
++    await screen.findByRole('option', { name: 'New API instance' })
++  )
++  expect(
++    screen.getByText('Capabilities: Chat, Image, Embeddings')
++  ).toBeVisible()
++  expect(
++    screen.getByText(
++      'Use this only when the upstream address is another New API deployment.'
++    )
++  ).toBeVisible()
++
++  await user.click(screen.getByRole('combobox', { name: 'Share group' }))
++  await user.click(await screen.findByRole('option', { name: 'Shared lab' }))
++  await user.type(screen.getByLabelText('Name'), 'Community New API')
++  await user.type(
++    screen.getByLabelText('Upstream address'),
++    'https://gateway.example/v1'
++  )
++  await user.type(screen.getByLabelText('Your upstream key'), 'sk-community')
++  await user.click(screen.getByRole('button', { name: 'Create' }))
++
++  await waitFor(() =>
++    expect(post).toHaveBeenCalledWith('/api/apigx/channels', {
++      share_group_id: 7,
++      name: 'Community New API',
++      recipe_id: 'new-api',
++      base_url: 'https://gateway.example/v1',
++      upstream_key: 'sk-community',
++    })
++  )
++  expect(post.mock.calls[0]?.[1]).not.toHaveProperty('protocol')
++})
++
++it('disables creation while the recipe catalog is loading', () => {
++  vi.spyOn(api, 'get').mockReturnValue(new Promise(() => undefined))
++  renderDialog()
++
++  expect(screen.getByText('Loading...')).toBeVisible()
++  expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled()
++})
++
++it('shows a retryable error when the recipe catalog cannot be loaded', async () => {
++  vi.spyOn(api, 'get').mockRejectedValue(new Error('catalog offline'))
++  renderDialog()
++
++  expect(await screen.findByRole('alert')).toHaveTextContent(
++    'Could not load channel recipes'
++  )
++  expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled()
++  expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled()
++})
++
++it('keeps creation disabled when the server returns an empty recipe catalog', async () => {
++  vi.spyOn(api, 'get').mockResolvedValue({
++    data: { success: true, data: { items: [] } },
++  })
++  renderDialog()
++
++  expect(await screen.findByRole('alert')).toHaveTextContent(
++    'No channel recipes are available'
++  )
++  expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled()
++})
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 344a8fe..025ff0b 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -21,6 +21,7 @@ import { api } from '@/lib/api'
+ import type {
+   CapacityPolicyPayload,
+   ChannelDetailResponse,
++  ChannelRecipeListResponse,
+   OfferingListResponse,
+   PriceMatchConfirmResponse,
+   PriceMatchPreviewResponse,
+@@ -36,15 +37,20 @@ export async function getShareGroups(): Promise<ShareGroupListResponse> {
+   return res.data
+ }
+ 
++export async function getChannelRecipes(): Promise<ChannelRecipeListResponse> {
++  const res = await api.get('/api/apigx/channels/recipes')
++  return res.data
++}
++
+ /**
+  * 新建分享渠道（§4「渠道 CRUD」）。
+- * 只传配方（名称/协议/上游地址/自己的上游 Key）—— 平台会**代建底座渠道**并绑定，
++ * 只传服务端目录中的稳定配方 ID（以及名称/上游地址/自己的上游 Key）—— 平台会**代建底座渠道**并绑定，
+  * 分享者不需要知道管理员侧的渠道 ID。
+  */
+ export async function createShareChannel(input: {
+   share_group_id: number
+   name: string
+-  protocol: string
++  recipe_id: string
+   base_url: string
+   upstream_key: string
+   key_pool_mode?: number
+diff --git a/web/src/features/share/components/channel-create-dialog.tsx b/web/src/features/share/components/channel-create-dialog.tsx
+index 21fb9c9..b66c6a6 100644
+--- a/web/src/features/share/components/channel-create-dialog.tsx
++++ b/web/src/features/share/components/channel-create-dialog.tsx
+@@ -16,36 +16,60 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import { useMutation } from '@tanstack/react-query'
+-import { useState } from 'react'
++import { useMutation, useQuery } from '@tanstack/react-query'
++import { useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { Dialog } from '@/components/dialog'
++import { LoadingState } from '@/components/loading-state'
++import {
++  Alert,
++  AlertAction,
++  AlertDescription,
++  AlertTitle,
++} from '@/components/ui/alert'
+ import { Button } from '@/components/ui/button'
++import {
++  Field,
++  FieldDescription,
++  FieldGroup,
++  FieldLabel,
++} from '@/components/ui/field'
+ import { Input } from '@/components/ui/input'
+-import { Label } from '@/components/ui/label'
+ import {
+   Select,
+   SelectContent,
++  SelectGroup,
+   SelectItem,
+   SelectTrigger,
+   SelectValue,
+ } from '@/components/ui/select'
+ import { handleServerError } from '@/lib/handle-server-error'
+ 
+-import { createShareChannel } from '../api'
+-import type { ShareGroup } from '../types'
++import { createShareChannel, getChannelRecipes } from '../api'
++import type { ChannelRecipe, ShareGroup } from '../types'
++
++const emptyRecipes: ChannelRecipe[] = []
++
++function capabilityLabelKey(
++  capability: ChannelRecipe['capability_hints'][number]
++): string {
++  if (capability === 'chat') return 'Chat'
++  if (capability === 'image') return 'Image'
++  if (capability === 'audio') return 'Audio'
++  if (capability === 'embedding') return 'Embeddings'
++  if (capability === 'rerank') return 'Rerank'
++  return 'Video'
++}
+ 
+-function protocolLabel(protocol: string): string {
+-  if (protocol === 'openai') return 'OpenAI'
+-  if (protocol === 'anthropic') return 'Anthropic'
+-  return 'Gemini'
++function recipeLabel(recipe: ChannelRecipe, t: (key: string) => string) {
++  return recipe.id === 'new-api' ? t('New API instance') : recipe.label
+ }
+ 
+ /**
+  * 新建分享渠道（§4「渠道 CRUD」）。
+  *
+- * 只需填配方：名称 / 协议 / 上游地址 / **自己的上游 Key** —— 平台代建底座渠道并绑定，
++ * 只需填配方：名称 / 服务端配方 / 上游地址 / **自己的上游 Key** —— 平台代建底座渠道并绑定，
+  * 分享者不必（也不应该）知道管理员侧的渠道 ID。
+  */
+ export function ChannelCreateDialog(props: {
+@@ -57,21 +81,52 @@ export function ChannelCreateDialog(props: {
+   const { t } = useTranslation()
+   const [groupId, setGroupId] = useState('')
+   const [name, setName] = useState('')
+-  const [protocol, setProtocol] = useState('openai')
++  const [recipeId, setRecipeId] = useState('')
+   const [baseUrl, setBaseUrl] = useState('')
+   const [upstreamKey, setUpstreamKey] = useState('')
+ 
++  const recipesQuery = useQuery({
++    queryKey: ['apigx-channel-recipes'],
++    queryFn: getChannelRecipes,
++    enabled: props.open,
++  })
++  const recipes = recipesQuery.data?.data?.items ?? emptyRecipes
++  const selectedRecipe = recipes.find((recipe) => recipe.id === recipeId)
++
++  useEffect(() => {
++    if (!props.open || recipes.length === 0 || selectedRecipe != null) return
++    const firstRecipe = recipes[0]
++    setRecipeId(firstRecipe.id)
++    setBaseUrl((current) =>
++      current.trim() === '' ? firstRecipe.default_base_url : current
++    )
++  }, [props.open, recipes, selectedRecipe])
++
++  const selectRecipe = (nextRecipeId: string) => {
++    const nextRecipe = recipes.find((recipe) => recipe.id === nextRecipeId)
++    if (nextRecipe == null) return
++    setRecipeId(nextRecipe.id)
++    setBaseUrl((current) => {
++      const currentWasDefault =
++        selectedRecipe != null && current === selectedRecipe.default_base_url
++      return current.trim() === '' || currentWasDefault
++        ? nextRecipe.default_base_url
++        : current
++    })
++  }
++
+   const create = useMutation({
+     mutationFn: () =>
+       createShareChannel({
+         share_group_id: Number(groupId),
+         name: name.trim(),
+-        protocol,
++        recipe_id: recipeId,
+         base_url: baseUrl.trim(),
+         upstream_key: upstreamKey.trim(),
+       }),
+     onSuccess: (res) => {
+       setName('')
++      setRecipeId('')
+       setBaseUrl('')
+       setUpstreamKey('')
+       props.onOpenChange(false)
+@@ -81,9 +136,12 @@ export function ChannelCreateDialog(props: {
+   })
+ 
+   const missing =
++    recipesQuery.isPending ||
++    recipesQuery.isError ||
++    selectedRecipe == null ||
+     groupId === '' ||
+     name.trim() === '' ||
+-    baseUrl.trim() === '' ||
++    (selectedRecipe?.requires_base_url === true && baseUrl.trim() === '') ||
+     upstreamKey.trim() === ''
+ 
+   return (
+@@ -106,73 +164,141 @@ export function ChannelCreateDialog(props: {
+         </>
+       }
+     >
+-      <div className='space-y-4'>
+-        <div className='space-y-2'>
+-          <Label>{t('Share group')}</Label>
++      <FieldGroup>
++        <Field>
++          <FieldLabel htmlFor='share-channel-group'>
++            {t('Share group')}
++          </FieldLabel>
+           <Select
+             value={groupId}
+             onValueChange={(next) => setGroupId(next ?? '')}
+           >
+-            <SelectTrigger aria-label={t('Share group')}>
++            <SelectTrigger id='share-channel-group' className='w-full'>
+               <SelectValue placeholder={t('Select a share group')}>
+                 {props.groups.find((group) => String(group.id) === groupId)
+                   ?.name ?? ''}
+               </SelectValue>
+             </SelectTrigger>
+             <SelectContent>
+-              {props.groups.map((group) => (
+-                <SelectItem key={group.id} value={String(group.id)}>
+-                  {group.name}
+-                </SelectItem>
+-              ))}
++              <SelectGroup>
++                {props.groups.map((group) => (
++                  <SelectItem key={group.id} value={String(group.id)}>
++                    {group.name}
++                  </SelectItem>
++                ))}
++              </SelectGroup>
+             </SelectContent>
+           </Select>
+-        </div>
+-        <div className='space-y-2'>
+-          <Label>{t('Name')}</Label>
++        </Field>
++        <Field>
++          <FieldLabel htmlFor='share-channel-name'>{t('Name')}</FieldLabel>
+           <Input
++            id='share-channel-name'
+             value={name}
+             onChange={(event) => setName(event.target.value)}
+             maxLength={64}
+           />
+-        </div>
+-        <div className='space-y-2'>
+-          <Label>{t('Protocol')}</Label>
++        </Field>
++        <Field>
++          <FieldLabel htmlFor='share-channel-recipe'>
++            {t('Upstream type')}
++          </FieldLabel>
+           <Select
+-            value={protocol}
+-            onValueChange={(next) => setProtocol(next ?? 'openai')}
++            value={recipeId}
++            disabled={
++              recipesQuery.isPending ||
++              recipesQuery.isError ||
++              recipes.length === 0
++            }
++            onValueChange={(next) => selectRecipe(next ?? '')}
+           >
+-            <SelectTrigger aria-label={t('Protocol')}>
+-              <SelectValue>{protocolLabel(protocol)}</SelectValue>
++            <SelectTrigger id='share-channel-recipe' className='w-full'>
++              <SelectValue placeholder={t('Upstream type')}>
++                {selectedRecipe == null ? '' : recipeLabel(selectedRecipe, t)}
++              </SelectValue>
+             </SelectTrigger>
+             <SelectContent>
+-              <SelectItem value='openai'>OpenAI</SelectItem>
+-              <SelectItem value='anthropic'>Anthropic</SelectItem>
+-              <SelectItem value='gemini'>Gemini</SelectItem>
++              <SelectGroup>
++                {recipes.map((recipe) => (
++                  <SelectItem key={recipe.id} value={recipe.id}>
++                    {recipeLabel(recipe, t)}
++                  </SelectItem>
++                ))}
++              </SelectGroup>
+             </SelectContent>
+           </Select>
+-        </div>
+-        <div className='space-y-2'>
+-          <Label>{t('Upstream address')}</Label>
++          {recipesQuery.isPending ? (
++            <LoadingState inline size='sm' message={t('Loading...')} />
++          ) : null}
++          {recipesQuery.isError ? (
++            <Alert variant='destructive'>
++              <AlertTitle>{t('Loading failed')}</AlertTitle>
++              <AlertDescription>
++                {t('Could not load channel recipes')}
++              </AlertDescription>
++              <AlertAction>
++                <Button
++                  variant='outline'
++                  size='sm'
++                  onClick={() => void recipesQuery.refetch()}
++                >
++                  {t('Retry')}
++                </Button>
++              </AlertAction>
++            </Alert>
++          ) : null}
++          {!recipesQuery.isPending &&
++          !recipesQuery.isError &&
++          recipes.length === 0 ? (
++            <Alert>
++              <AlertTitle>{t('No channel recipes are available')}</AlertTitle>
++            </Alert>
++          ) : null}
++          {selectedRecipe == null ? null : (
++            <>
++              <FieldDescription>
++                {t('Capabilities')}:{' '}
++                {selectedRecipe.capability_hints
++                  .map((capability) => t(capabilityLabelKey(capability)))
++                  .join(', ')}
++              </FieldDescription>
++              {selectedRecipe.id === 'new-api' ? (
++                <FieldDescription>
++                  {t(
++                    'Use this only when the upstream address is another New API deployment.'
++                  )}
++                </FieldDescription>
++              ) : null}
++            </>
++          )}
++        </Field>
++        <Field>
++          <FieldLabel htmlFor='share-channel-base-url'>
++            {t('Upstream address')}
++          </FieldLabel>
+           <Input
++            id='share-channel-base-url'
+             placeholder='https://api.example.com'
+             value={baseUrl}
+             onChange={(event) => setBaseUrl(event.target.value)}
+           />
+-        </div>
+-        <div className='space-y-2'>
+-          <Label>{t('Your upstream key')}</Label>
++        </Field>
++        <Field>
++          <FieldLabel htmlFor='share-channel-upstream-key'>
++            {t('Your upstream key')}
++          </FieldLabel>
+           <Input
++            id='share-channel-upstream-key'
+             type='password'
+             autoComplete='off'
+             value={upstreamKey}
+             onChange={(event) => setUpstreamKey(event.target.value)}
+           />
+-          <p className='text-muted-foreground text-xs'>
++          <FieldDescription>
+             {t('It is stored encrypted and never shown again.')}
+-          </p>
+-        </div>
+-      </div>
++          </FieldDescription>
++        </Field>
++      </FieldGroup>
+     </Dialog>
+   )
+ }
+diff --git a/web/src/features/share/types.ts b/web/src/features/share/types.ts
+index cd5c027..b305192 100644
+--- a/web/src/features/share/types.ts
++++ b/web/src/features/share/types.ts
+@@ -57,6 +57,24 @@ export interface ShareChannelListResponse {
+   success: boolean
+   data?: { items: ShareChannel[] }
+ }
++
++/** 服务端拥有的普通用户自助渠道配方。客户端不能提交底座 channel type。 */
++export interface ChannelRecipe {
++  id: string
++  label: string
++  protocol: string
++  default_base_url: string
++  capability_hints: Array<
++    'chat' | 'image' | 'audio' | 'embedding' | 'rerank' | 'video'
++  >
++  requires_base_url: boolean
++  supports_model_fetch: boolean
++}
++
++export interface ChannelRecipeListResponse {
++  success: boolean
++  data?: { items: ChannelRecipe[] }
++}
+ // 渠道详情相关类型（字段与后端 `getChannel` / `listUpstreamKeys` / `listOfferings` 一致）。
+ 
+ export interface ChannelDetail {
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 0eb18d8..2d6192d 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6739,6 +6739,11 @@
+     "APIGX Platform": "APIGX Platform",
+     "New share channel": "New share channel",
+     "Protocol": "Protocol",
++    "Upstream type": "Upstream type",
++    "New API instance": "New API instance",
++    "Use this only when the upstream address is another New API deployment.": "Use this only when the upstream address is another New API deployment.",
++    "Could not load channel recipes": "Could not load channel recipes",
++    "No channel recipes are available": "No channel recipes are available",
+     "Upstream address": "Upstream address",
+     "Your upstream key": "Your upstream key",
+     "It is stored encrypted and never shown again.": "It is stored encrypted and never shown again.",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index d02cf08..5911b54 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6739,6 +6739,11 @@
+     "APIGX Platform": "Plateforme APIGX",
+     "New share channel": "Nouveau canal de partage",
+     "Protocol": "Protocole",
++    "Upstream type": "Type de service amont",
++    "New API instance": "Instance New API",
++    "Use this only when the upstream address is another New API deployment.": "À utiliser uniquement lorsque l’adresse amont pointe vers un autre déploiement New API.",
++    "Could not load channel recipes": "Impossible de charger les configurations de canal",
++    "No channel recipes are available": "Aucune configuration de canal n’est disponible",
+     "Upstream address": "Adresse de l'amont",
+     "Your upstream key": "Votre clé amont",
+     "It is stored encrypted and never shown again.": "Elle est stockée chiffrée et ne sera plus affichée.",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index da316bb..8fec660 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6739,6 +6739,11 @@
+     "APIGX Platform": "APIGX プラットフォーム",
+     "New share channel": "共有チャネルを作成",
+     "Protocol": "プロトコル",
++    "Upstream type": "上流タイプ",
++    "New API instance": "New API インスタンス",
++    "Use this only when the upstream address is another New API deployment.": "上流アドレスが別の New API デプロイを指す場合にのみ選択してください。",
++    "Could not load channel recipes": "チャンネル設定を読み込めませんでした",
++    "No channel recipes are available": "利用可能なチャンネル設定がありません",
+     "Upstream address": "上流アドレス",
+     "Your upstream key": "上流キー",
+     "It is stored encrypted and never shown again.": "暗号化して保存され、再表示されません。",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 864e2e5..0a28e2e 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6739,6 +6739,11 @@
+     "APIGX Platform": "Платформа APIGX",
+     "New share channel": "Новый общий канал",
+     "Protocol": "Протокол",
++    "Upstream type": "Тип вышестоящего сервиса",
++    "New API instance": "Экземпляр New API",
++    "Use this only when the upstream address is another New API deployment.": "Выбирайте только если адрес вышестоящего сервиса указывает на другое развертывание New API.",
++    "Could not load channel recipes": "Не удалось загрузить конфигурации каналов",
++    "No channel recipes are available": "Нет доступных конфигураций каналов",
+     "Upstream address": "Адрес вышестоящего сервиса",
+     "Your upstream key": "Ваш ключ вышестоящего сервиса",
+     "It is stored encrypted and never shown again.": "Хранится в зашифрованном виде и больше не отображается.",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 849b75a..12ca8ed 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6739,6 +6739,11 @@
+     "APIGX Platform": "Nền tảng APIGX",
+     "New share channel": "Kênh chia sẻ mới",
+     "Protocol": "Giao thức",
++    "Upstream type": "Loại thượng nguồn",
++    "New API instance": "Phiên bản New API",
++    "Use this only when the upstream address is another New API deployment.": "Chỉ chọn khi địa chỉ thượng nguồn trỏ đến một bản triển khai New API khác.",
++    "Could not load channel recipes": "Không thể tải cấu hình kênh",
++    "No channel recipes are available": "Không có cấu hình kênh nào khả dụng",
+     "Upstream address": "Địa chỉ thượng nguồn",
+     "Your upstream key": "Khóa thượng nguồn của bạn",
+     "It is stored encrypted and never shown again.": "Được lưu mã hóa và không hiển thị lại.",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 72867dd..042b7d4 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6739,6 +6739,11 @@
+     "APIGX Platform": "平台管理",
+     "New share channel": "新增分享管道",
+     "Protocol": "協定",
++    "Upstream type": "上游類型",
++    "New API instance": "New API 實例",
++    "Use this only when the upstream address is another New API deployment.": "僅當上游位址指向另一套 New API 部署時選擇。",
++    "Could not load channel recipes": "無法載入渠道配方",
++    "No channel recipes are available": "目前沒有可用的渠道配方",
+     "Upstream address": "上游位址",
+     "Your upstream key": "你的上游金鑰",
+     "It is stored encrypted and never shown again.": "將以密文儲存，之後不再顯示。",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 60f960c..ae9e6e8 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6739,6 +6739,11 @@
+     "APIGX Platform": "平台管理",
+     "New share channel": "新建分享渠道",
+     "Protocol": "协议",
++    "Upstream type": "上游类型",
++    "New API instance": "New API 实例",
++    "Use this only when the upstream address is another New API deployment.": "仅当上游地址指向另一套 New API 部署时选择。",
++    "Could not load channel recipes": "无法加载渠道配方",
++    "No channel recipes are available": "当前没有可用的渠道配方",
+     "Upstream address": "上游地址",
+     "Your upstream key": "你的上游 Key",
+     "It is stored encrypted and never shown again.": "将以密文存储，之后不再显示。",
+-- 
+2.53.0.windows.1
+
