@@ -15,9 +15,17 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { describe, expect, it } from 'vitest'
+*/ import { describe, expect, it } from 'vitest'
 
-import { healthLabelKey, keyPoolModeLabelKey, keyStatusLabelKey, offeringStatusLabelKey, visibilityLabelKey } from '../lib/labels'
+import {
+  healthLabelKey,
+  isUpstreamKeyEnabled,
+  keyPoolModeLabelKey,
+  keyStatusLabelKey,
+  offeringStatusLabelKey,
+  toggledUpstreamKeyStatus,
+  visibilityLabelKey,
+} from '../lib/labels'
 
 describe('分享枚举文案映射', () => {
   it('轮询与随机分别映射到各自文案键', () => {
@@ -29,11 +37,11 @@ describe('分享枚举文案映射', () => {
     expect(keyPoolModeLabelKey(9)).toBe('share.keyPool.unknown:9')
   })
 
-  it('四种可见性分别映射', () => {
-    expect(visibilityLabelKey(0)).toBe('share.visibility.public')
-    expect(visibilityLabelKey(1)).toBe('share.visibility.invite')
-    expect(visibilityLabelKey(2)).toBe('share.visibility.selected')
-    expect(visibilityLabelKey(3)).toBe('share.visibility.private')
+  it('三种后端可见性分别映射', () => {
+    expect(visibilityLabelKey(0)).toBe('share.visibility.private')
+    expect(visibilityLabelKey(1)).toBe('Limited (invite or assigned users)')
+    expect(visibilityLabelKey(2)).toBe('share.visibility.public')
+    expect(visibilityLabelKey(3)).toBe('share.visibility.unknown:3')
   })
 
   it('未知可见性回退为带原值的键', () => {
@@ -49,10 +57,19 @@ describe('分享枚举文案映射', () => {
 })
 describe('Key 与供给状态文案映射', () => {
   it('Key 三态映射，未知回退保留原值', () => {
-    expect(keyStatusLabelKey(0)).toBe('share.keyStatus.enabled')
-    expect(keyStatusLabelKey(1)).toBe('share.keyStatus.disabled')
+    expect(keyStatusLabelKey(0)).toBe('share.keyStatus.disabled')
+    expect(keyStatusLabelKey(1)).toBe('share.keyStatus.enabled')
     expect(keyStatusLabelKey(2)).toBe('share.keyStatus.autoDisabled')
     expect(keyStatusLabelKey(9)).toBe('share.keyStatus.unknown:9')
+  })
+
+  it('只把后端状态 1 视为启用，并在启停之间切换', () => {
+    expect(isUpstreamKeyEnabled(1)).toBe(true)
+    expect(isUpstreamKeyEnabled(0)).toBe(false)
+    expect(isUpstreamKeyEnabled(2)).toBe(false)
+    expect(toggledUpstreamKeyStatus(1)).toBe(0)
+    expect(toggledUpstreamKeyStatus(0)).toBe(1)
+    expect(toggledUpstreamKeyStatus(2)).toBe(1)
   })
 
   it('供给四态映射，未知回退保留原值', () => {

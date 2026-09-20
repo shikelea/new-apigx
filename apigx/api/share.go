@@ -160,6 +160,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	{
 		keys.POST("/:id/rotate", h.rotateUpstreamKey)
 		keys.PATCH("/:id/status", h.updateKeyStatus)
+		keys.PATCH("/:id/weight", h.updateKeyWeight)
 		keys.PATCH("/:id/cooldown", h.updateKeyCooldown)
 		keys.DELETE("/:id", h.deleteUpstreamKey)
 	}
@@ -488,7 +489,8 @@ func (h *handler) listChannels(c *gin.Context) {
 	for _, ch := range channels {
 		items = append(items, gin.H{
 			"id": ch.ID, "public_id": ch.PublicID, "name": ch.Name, "protocol": ch.Protocol,
-			"key_pool_mode": ch.KeyPoolMode, "health_state": ch.HealthState, "base_url": ch.BaseURL,
+			"share_group_id": ch.ShareGroupID, "key_pool_mode": ch.KeyPoolMode,
+			"health_state": ch.HealthState, "base_url": ch.BaseURL,
 		})
 	}
 	ok(c, gin.H{"items": items})
@@ -511,7 +513,7 @@ func (h *handler) getChannel(c *gin.Context) {
 	// 注意：不返回 BaseURL 之外的任何上游细节，也不返回凭据
 	ok(c, gin.H{
 		"id": ch.ID, "public_id": ch.PublicID, "name": ch.Name, "protocol": ch.Protocol,
-		"base_url": ch.BaseURL, "key_pool_mode": ch.KeyPoolMode,
+		"share_group_id": ch.ShareGroupID, "base_url": ch.BaseURL, "key_pool_mode": ch.KeyPoolMode,
 		"health_state": ch.HealthState, "health_reason": ch.HealthReason,
 	})
 }
@@ -591,6 +593,10 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "missing_key", "upstream key is required")
 		return
 	}
+	if req.Weight != nil && (*req.Weight < 1 || *req.Weight > 1000) {
+		fail(c, http.StatusBadRequest, "invalid_weight", "weight must be between 1 and 1000")
+		return
+	}
 
 	// 立即加密：明文不落库、不进日志、不回显。
 	plain := strings.TrimSpace(req.Key)
@@ -617,6 +623,9 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
 		SecretRef:         envelope,
 		SecretFingerprint: fingerprint,
 		Status:            apigxmodel.UpstreamKeyStatusEnabled,
+	}
+	if strings.TrimSpace(key.StableKeyID) == "" {
+		key.StableKeyID = "key-" + common.GetRandomString(12)
 	}
 	if req.Weight != nil {
 		key.Weight = *req.Weight
@@ -747,6 +756,31 @@ func (h *handler) updateKeyStatus(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"id": id, "status": *req.Status})
+}
+
+type updateWeightRequest struct {
+	Weight *int64 `json:"weight"`
+}
+
+func (h *handler) updateKeyWeight(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req updateWeightRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Weight == nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "weight is required")
+		return
+	}
+	if err := apigxmodel.UpdateUpstreamKeyWeight(h.db, owner, id, *req.Weight); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "weight": *req.Weight})
 }
 
 type updateCooldownRequest struct {
@@ -992,11 +1026,12 @@ func (h *handler) setChannelCapacityPolicy(c *gin.Context) {
 // ---------------------------------------------------------------------------
 
 type platformKeyPreferencesRequest struct {
-	ScopeMode           *int     `json:"scope_mode"`
-	PinnedOfferingID    *int64   `json:"pinned_offering_id"`
-	AllowedModelIDs     []string `json:"allowed_model_ids"`
-	AllowedOwnerUserIDs []int64  `json:"allowed_owner_user_ids"`
-	AllowFallback       *bool    `json:"allow_fallback"`
+	ScopeMode              *int     `json:"scope_mode"`
+	PinnedOfferingID       *int64   `json:"pinned_offering_id"`
+	PinnedOfferingPublicID *string  `json:"pinned_offering_public_id"`
+	AllowedModelIDs        []string `json:"allowed_model_ids"`
+	AllowedOwnerUserIDs    []int64  `json:"allowed_owner_user_ids"`
+	AllowFallback          *bool    `json:"allow_fallback"`
 	// DefaultRouteMode 是「默认路由策略」（计划书 §9.1：保存到平台 Key 的偏好）。
 	// 空串与 "auto" 都表示综合自动；latency / throughput / reliability 会把它
 	// 变成**请求级候选限定**（见 relayhook.EligibleBaseChannelsForStrategy）。
@@ -1015,22 +1050,29 @@ func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
 	key, err := apigxmodel.GetAPIKeyByToken(h.db, owner, tokenID)
 	if errors.Is(err, apigxmodel.ErrNotFound) {
 		// 未配置偏好 = 按默认自动路由（不是错误）
-		ok(c, gin.H{"token_id": tokenID, "scope_mode": apigxmodel.ScopeModeDefault, "configured": false})
+		ok(c, gin.H{
+			"token_id": tokenID, "scope_mode": apigxmodel.ScopeModeDefault, "configured": false,
+			"pinned_offering_id": int64(0), "pinned_offering_public_id": "",
+			"allowed_model_ids": []string{}, "allowed_owner_user_ids": []int64{},
+			"allow_fallback": true, "default_route_mode": "auto",
+		})
 		return
 	}
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
+	pinnedPublicID := h.visibleOfferingPublicID(owner, key.PinnedOfferingID)
 	ok(c, gin.H{
-		"token_id":               key.TokenID,
-		"configured":             true,
-		"scope_mode":             key.ScopeMode,
-		"pinned_offering_id":     key.PinnedOfferingID,
-		"allowed_model_ids":      key.AllowedModels(),
-		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
-		"allow_fallback":         key.AllowFallback,
-		"default_route_mode":     key.DefaultRouteMode,
+		"token_id":                  key.TokenID,
+		"configured":                true,
+		"scope_mode":                key.ScopeMode,
+		"pinned_offering_id":        key.PinnedOfferingID,
+		"pinned_offering_public_id": pinnedPublicID,
+		"allowed_model_ids":         key.AllowedModels(),
+		"allowed_owner_user_ids":    key.AllowedOwnerIDs(),
+		"allow_fallback":            key.AllowFallback,
+		"default_route_mode":        key.DefaultRouteMode,
 	})
 }
 
@@ -1051,6 +1093,20 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
+	}
+	if req.PinnedOfferingPublicID != nil {
+		publicID := strings.TrimSpace(*req.PinnedOfferingPublicID)
+		if publicID == "" {
+			zero := int64(0)
+			req.PinnedOfferingID = &zero
+		} else {
+			item, resolveErr := apigxmodel.GetPlazaItem(h.db, owner, publicID)
+			if resolveErr != nil {
+				failFromRepo(c, resolveErr)
+				return
+			}
+			req.PinnedOfferingID = &item.OfferingID
+		}
 	}
 
 	key, err := apigxmodel.UpsertAPIKeyPreferences(h.db, owner, tokenID, func(k *apigxmodel.APIKey) error {
@@ -1094,15 +1150,31 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
 	// 偏好已变更：让准入侧立刻看到新限制（否则最长一个缓存 TTL 才生效，
 	// 「刚收紧来源却仍被放行」是不能接受的）
 	relayhook.InvalidatePreferenceCache(tokenID)
+	pinnedPublicID := h.visibleOfferingPublicID(owner, key.PinnedOfferingID)
 	ok(c, gin.H{
-		"token_id":               key.TokenID,
-		"scope_mode":             key.ScopeMode,
-		"pinned_offering_id":     key.PinnedOfferingID,
-		"allowed_model_ids":      key.AllowedModels(),
-		"allowed_owner_user_ids": key.AllowedOwnerIDs(),
-		"allow_fallback":         key.AllowFallback,
-		"default_route_mode":     key.DefaultRouteMode,
+		"token_id":                  key.TokenID,
+		"scope_mode":                key.ScopeMode,
+		"pinned_offering_id":        key.PinnedOfferingID,
+		"pinned_offering_public_id": pinnedPublicID,
+		"allowed_model_ids":         key.AllowedModels(),
+		"allowed_owner_user_ids":    key.AllowedOwnerIDs(),
+		"allow_fallback":            key.AllowFallback,
+		"default_route_mode":        key.DefaultRouteMode,
 	})
+}
+
+func (h *handler) visibleOfferingPublicID(owner, offeringID int64) string {
+	if offeringID <= 0 {
+		return ""
+	}
+	var offering apigxmodel.ModelOffering
+	if err := h.db.Select("public_id").Where("id = ?", offeringID).First(&offering).Error; err != nil {
+		return ""
+	}
+	if _, err := apigxmodel.GetPlazaItem(h.db, owner, offering.PublicID); err != nil {
+		return ""
+	}
+	return offering.PublicID
 }
 
 // ---------------------------------------------------------------------------
@@ -1390,18 +1462,27 @@ func (h *handler) listOfferingsForReview(c *gin.Context) {
 	if parsed, err := strconv.Atoi(c.Query("page_size")); err == nil && parsed > 0 && parsed <= 100 {
 		pageSize = parsed
 	}
-	items, total, err := apigxmodel.ListOfferingsForReview(h.db, apigxmodel.OfferingStatusPending, (page-1)*pageSize, pageSize)
+	status := apigxmodel.OfferingStatusPending
+	if c.Query("status") == "all" {
+		status = -1
+	}
+	items, total, err := apigxmodel.ListOfferingsForReview(h.db, status, (page-1)*pageSize, pageSize)
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
+	ownerIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		ownerIDs = append(ownerIDs, item.OwnerUserID)
+	}
+	ownerNames := h.ownerDisplayNames(ownerIDs)
 	result := make([]gin.H, 0, len(items))
 	for _, item := range items {
 		var caps apigxmodel.Capability
 		_ = common.UnmarshalJsonStr(item.Capabilities, &caps)
 		result = append(result, gin.H{
 			"id": item.OfferingID, "public_id": item.OfferingPublicID,
-			"owner_user_id":  item.OwnerUserID,
+			"owner_user_id": item.OwnerUserID, "owner_display_name": ownerNames[item.OwnerUserID],
 			"share_group_id": item.ShareGroupID, "share_group_public_id": item.ShareGroupPublicID,
 			"share_group_name": item.ShareGroupName, "group_visibility": item.GroupVisibility,
 			"channel_id": item.ChannelID, "channel_public_id": item.ChannelPublicID, "channel_name": item.ChannelName,
@@ -1630,7 +1711,13 @@ func (h *handler) listPlaza(c *gin.Context) {
 		return
 	}
 	out := make([]gin.H, 0, len(items))
+	ownerIDs := make([]int64, 0, len(items))
 	for _, item := range items {
+		ownerIDs = append(ownerIDs, item.OwnerUserID)
+	}
+	ownerNames := h.ownerDisplayNames(ownerIDs)
+	for _, item := range items {
+		item.OwnerDisplayName = ownerNames[item.OwnerUserID]
 		out = append(out, plazaItemToJSON(item))
 	}
 	ok(c, gin.H{"items": out, "total": total, "page": page, "page_size": pageSize})
@@ -1647,7 +1734,41 @@ func (h *handler) getPlazaItem(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
+	item.OwnerDisplayName = h.ownerDisplayNames([]int64{item.OwnerUserID})[item.OwnerUserID]
 	ok(c, plazaItemToJSON(*item))
+}
+
+func (h *handler) ownerDisplayNames(ownerIDs []int64) map[int64]string {
+	if !h.db.Migrator().HasTable(&basemodel.User{}) {
+		return map[int64]string{}
+	}
+	ids := make([]int64, 0, len(ownerIDs))
+	seen := make(map[int64]struct{}, len(ownerIDs))
+	for _, ownerID := range ownerIDs {
+		if _, exists := seen[ownerID]; exists {
+			continue
+		}
+		seen[ownerID] = struct{}{}
+		ids = append(ids, ownerID)
+	}
+	type ownerRow struct {
+		ID          int64
+		Username    string
+		DisplayName string
+	}
+	rows := make([]ownerRow, 0, len(ids))
+	if len(ids) > 0 {
+		_ = h.db.Model(&basemodel.User{}).Select("id", "username", "display_name").Where("id IN ?", ids).Scan(&rows).Error
+	}
+	out := make(map[int64]string, len(rows))
+	for _, row := range rows {
+		name := strings.TrimSpace(row.DisplayName)
+		if name == "" {
+			name = row.Username
+		}
+		out[row.ID] = name
+	}
+	return out
 }
 
 // plazaItemToJSON 把广场条目转成对外 JSON。
@@ -1670,6 +1791,7 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 		"model":                       item.UpstreamModelID,
 		"channel_public_id":           item.ChannelPublicID,
 		"owner_user_id":               item.OwnerUserID,
+		"owner_display_name":          item.OwnerDisplayName,
 		"capabilities":                item.Capabilities,
 		"updated_at":                  item.UpdatedAt,
 	}
@@ -2138,7 +2260,8 @@ func (h *handler) listAllChannels(c *gin.Context) {
 	for _, ch := range channels {
 		items = append(items, gin.H{
 			"id": ch.ID, "public_id": ch.PublicID, "name": ch.Name, "protocol": ch.Protocol,
-			"key_pool_mode": ch.KeyPoolMode, "health_state": ch.HealthState, "base_url": ch.BaseURL,
+			"share_group_id": ch.ShareGroupID, "key_pool_mode": ch.KeyPoolMode,
+			"health_state": ch.HealthState, "base_url": ch.BaseURL,
 		})
 	}
 	ok(c, gin.H{"items": items})

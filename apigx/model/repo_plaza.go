@@ -30,6 +30,9 @@ const (
 // 刻意只包含**与使用者决策相关且不敏感**的信息：模型名、来源的对外标识、
 // 已具备的能力、以及不敏感的统计。不含上游地址、渠道内部 ID、凭据、价格明细的内部结构。
 type PlazaItem struct {
+	// OfferingID is used only for server-side preference resolution. API
+	// responses continue to expose OfferingPublicID instead of this value.
+	OfferingID int64
 	// 对外**标准模型 ID** 与介绍：只有在"上游名 -> 标准模型"的映射**已确认**时才有值
 	// （§8.2：客户端从可用目录/调用示例获取标准 ID）。未命中时留空，界面显示上游名。
 	CanonicalAPIModelID string
@@ -49,6 +52,7 @@ type PlazaItem struct {
 	UpstreamModelID  string
 	ChannelPublicID  string
 	OwnerUserID      int64
+	OwnerDisplayName string
 	// Capabilities 是**平台当前真正具备**的能力（见 PlatformSupportedCapabilities）。
 	Capabilities Capability
 	// UnverifiedCapabilities 是分享者声明、但平台当前尚不具备的能力：如实列出而不是隐藏，
@@ -210,6 +214,7 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
 			quality = QualityView{Insufficient: true}
 		}
 		items = append(items, PlazaItem{
+			OfferingID:               r.ID,
 			OfferingPublicID:         r.PublicID,
 			SampleCount:              quality.SampleCount,
 			ReliabilityLowerBoundPpm: quality.ReliabilityLowerBoundPpm,
@@ -256,6 +261,9 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
 	if err := db.Where("id = ?", channel.ShareGroupID).First(&group).Error; err != nil {
 		return nil, ErrNotFound
 	}
+	if group.PublishStatus != ShareGroupPublishPublished {
+		return nil, ErrNotFound
+	}
 	// 可见性与**列表同源**：公开，或该分组/该供给上有未过期授权（**不含本人所有**，理由见列表判据注释）。
 	if group.DefaultVisibility != ShareGroupVisibilityPublic {
 		allowedGroup, err := GrantExistsForResource(db, GrantSubjectUser, viewerUserID, GrantResourceGroup, group.ID, 0)
@@ -273,10 +281,14 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
 
 	effective, unverified := projectCapabilities(offering.CapabilityOf())
 	return &PlazaItem{
+		OfferingID:             offering.ID,
 		OfferingPublicID:       offering.PublicID,
 		UpstreamModelID:        offering.UpstreamModelID,
 		ChannelPublicID:        channel.PublicID,
 		OwnerUserID:            channel.OwnerUserID,
+		GroupPublicID:          group.PublicID,
+		GroupName:              group.Name,
+		GroupDescription:       group.Description,
 		Capabilities:           effective,
 		UnverifiedCapabilities: unverified,
 		UpdatedAt:              offering.UpdatedAt,

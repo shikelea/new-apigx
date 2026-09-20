@@ -15,9 +15,20 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { api } from '@/lib/api'
+*/
+import { api } from '@/lib/api'
 
-import type { CapacityPolicyPayload, ChannelDetailResponse, OfferingListResponse, ShareChannelListResponse, ShareGroup, ShareGroupListResponse, UpstreamKeyListResponse } from './types'
+import type {
+  CapacityPolicyPayload,
+  ChannelDetailResponse,
+  OfferingListResponse,
+  PriceMatchConfirmResponse,
+  PriceMatchPreviewResponse,
+  ShareChannelListResponse,
+  ShareGroup,
+  ShareGroupListResponse,
+  UpstreamKeyListResponse,
+} from './types'
 
 // 「我的分享」数据访问层：只做请求与类型，错误交给 Query 失败回调（规范 3.9）。
 export async function getShareGroups(): Promise<ShareGroupListResponse> {
@@ -48,18 +59,83 @@ export async function getShareChannels(): Promise<ShareChannelListResponse> {
 }
 // 渠道详情的数据访问：渠道本身、它的 Key 池、它的供给。
 // 说明：Key 池接口**只返回掩码**（凭据永不出后端），因此界面无法也不应展示明文。
-export async function getChannel(channelId: number): Promise<ChannelDetailResponse> {
+export async function getChannel(
+  channelId: number
+): Promise<ChannelDetailResponse> {
   const res = await api.get(`/api/apigx/channels/${channelId}`)
   return res.data
 }
 
-export async function getChannelKeys(channelId: number): Promise<UpstreamKeyListResponse> {
+export async function getChannelKeys(
+  channelId: number
+): Promise<UpstreamKeyListResponse> {
   const res = await api.get(`/api/apigx/channels/${channelId}/keys`)
   return res.data
 }
 
-export async function getChannelOfferings(channelId: number): Promise<OfferingListResponse> {
+export async function createUpstreamKey(
+  channelId: number,
+  payload: { name: string; key: string; weight: number; expires_at?: number }
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/channels/${channelId}/keys`, payload)
+  return res.data
+}
+
+export async function rotateUpstreamKey(
+  keyId: number,
+  key: string
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/keys/${keyId}/rotate`, { key })
+  return res.data
+}
+
+export async function updateUpstreamKeyStatus(
+  keyId: number,
+  status: number
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.patch(`/api/apigx/keys/${keyId}/status`, { status })
+  return res.data
+}
+
+export async function updateUpstreamKeyWeight(
+  keyId: number,
+  weight: number
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.patch(`/api/apigx/keys/${keyId}/weight`, { weight })
+  return res.data
+}
+
+export async function applyChannelKeyPool(
+  channelId: number
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/channels/${channelId}/apply`)
+  return res.data
+}
+
+export async function getChannelOfferings(
+  channelId: number
+): Promise<OfferingListResponse> {
   const res = await api.get(`/api/apigx/channels/${channelId}/offerings`)
+  return res.data
+}
+
+export async function previewChannelPriceMatch(
+  channelId: number
+): Promise<PriceMatchPreviewResponse> {
+  const res = await api.post(
+    `/api/apigx/channels/${channelId}/price-match/preview`
+  )
+  return res.data
+}
+
+export async function confirmChannelPriceMatch(
+  channelId: number,
+  selections: { offering_id: number; candidate_token: string }[]
+): Promise<PriceMatchConfirmResponse> {
+  const res = await api.post(
+    `/api/apigx/channels/${channelId}/price-match/confirm`,
+    { selections }
+  )
   return res.data
 }
 /**
@@ -68,13 +144,23 @@ export async function getChannelOfferings(channelId: number): Promise<OfferingLi
  * 复用底座的取模型能力（40+ 家适配器），这里只是触发与落库。
  */
 /** 为**指定上游模型**建一条供给（草稿）—— 用于"勾选导入"，而不是一次性全量导入。 */
-export async function createOffering(channelId: number, upstreamModelID: string): Promise<{ success: boolean; data?: unknown }> {
-  const res = await api.post('/api/apigx/channels/' + channelId + '/offerings', { upstream_model_id: upstreamModelID })
+export async function createOffering(
+  channelId: number,
+  upstreamModelID: string
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/channels/${channelId}/offerings`, {
+    upstream_model_id: upstreamModelID,
+  })
   return res.data
 }
 
-export async function fetchUpstreamModels(channelId: number, importAsDraft: boolean): Promise<{ success: boolean; data?: unknown }> {
-  const res = await api.post(`/api/apigx/channels/${channelId}/fetch-models`, { import: importAsDraft })
+export async function fetchUpstreamModels(
+  channelId: number,
+  importAsDraft: boolean
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(`/api/apigx/channels/${channelId}/fetch-models`, {
+    import: importAsDraft,
+  })
   return res.data
 }
 
@@ -83,12 +169,17 @@ export async function setChannelCapacityPolicy(
   channelId: number,
   payload: CapacityPolicyPayload
 ): Promise<{ success: boolean; data?: unknown }> {
-  const res = await api.put(`/api/apigx/channels/${channelId}/capacity-policy`, payload)
+  const res = await api.put(
+    `/api/apigx/channels/${channelId}/capacity-policy`,
+    payload
+  )
   return res.data
 }
 
 /** 提交供给审核（发布/驳回是平台侧动作，分享者只能提交）。 */
-export async function submitOffering(offeringId: number): Promise<{ success: boolean; data?: unknown }> {
+export async function submitOffering(
+  offeringId: number
+): Promise<{ success: boolean; data?: unknown }> {
   const res = await api.post(`/api/apigx/offerings/${offeringId}/submit`)
   return res.data
 }
@@ -114,23 +205,31 @@ export async function updateShareGroup(
 
 // ── 删除（§4/§5 的 CRUD 含 Delete；后端接口早已提供，此前界面没有入口）────────────────
 
-export async function deleteShareGroup(groupId: number): Promise<{ success: boolean }> {
-  const res = await api.delete('/api/apigx/share-groups/' + groupId)
+export async function deleteShareGroup(
+  groupId: number
+): Promise<{ success: boolean }> {
+  const res = await api.delete(`/api/apigx/share-groups/${groupId}`)
   return res.data
 }
 
-export async function deleteShareChannel(channelId: number): Promise<{ success: boolean }> {
-  const res = await api.delete('/api/apigx/channels/' + channelId)
+export async function deleteShareChannel(
+  channelId: number
+): Promise<{ success: boolean }> {
+  const res = await api.delete(`/api/apigx/channels/${channelId}`)
   return res.data
 }
 
-export async function deleteOffering(offeringId: number): Promise<{ success: boolean }> {
-  const res = await api.delete('/api/apigx/offerings/' + offeringId)
+export async function deleteOffering(
+  offeringId: number
+): Promise<{ success: boolean }> {
+  const res = await api.delete(`/api/apigx/offerings/${offeringId}`)
   return res.data
 }
 
-export async function deleteUpstreamKey(keyId: number): Promise<{ success: boolean }> {
-  const res = await api.delete('/api/apigx/upstream-keys/' + keyId)
+export async function deleteUpstreamKey(
+  keyId: number
+): Promise<{ success: boolean }> {
+  const res = await api.delete(`/api/apigx/keys/${keyId}`)
   return res.data
 }
 
@@ -139,7 +238,14 @@ export async function deleteUpstreamKey(keyId: number): Promise<{ success: boole
 export interface UsageSummaryQuantity {
   capability: number
   dimension: number
-  unit: 'token' | 'image' | 'second' | 'request' | 'character' | 'document' | 'unknown'
+  unit:
+    | 'token'
+    | 'image'
+    | 'second'
+    | 'request'
+    | 'character'
+    | 'document'
+    | 'unknown'
   quantity_milli: number
   upstream_reported_milli: number
   local_estimated_milli: number

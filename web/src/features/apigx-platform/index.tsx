@@ -15,97 +15,283 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { useMutation, useQuery } from '@tanstack/react-query'
+*/
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { useState } from 'react'
+import { BadgeCheck, CircleDollarSign, Route } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
-import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
+import {
+  StaticDataTable,
+  type StaticDataTableColumn,
+} from '@/components/data-table'
 import { EmptyState } from '@/components/empty-state'
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Combobox } from '@/components/ui/combobox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { formatMicroUSD } from '@/features/plaza/lib/format'
-import { getChannelOfferings } from '@/features/share/api'
-import type { Offering } from '@/features/share/types'
+import { handleServerError } from '@/lib/handle-server-error'
 
-import { applyRouteRanking, getPriceRules, publishOffering, rejectOffering, setManualPrice } from './api'
+import {
+  applyRouteRanking,
+  getPriceRules,
+  getReviewOfferings,
+  publishOffering,
+  rejectOffering,
+  setManualPrice,
+} from './api'
 import { AliasCandidatesCard } from './components/alias-candidates-card'
-import { canSubmitManualPrice, isOfferingReviewable, parseUsdPerMillion, PRICE_SCOPE_OPTIONS } from './lib/price'
-import type { PriceDimension } from './types'
+import { canSubmitManualPrice, parseUsdPerMillion } from './lib/price'
+import type { PriceDimension, ReviewOffering } from './types'
 
-/** 平台管理：价格规则（查询与人工覆盖）与路由排名应用。均为平台侧动作。 */
-export function ApigxPlatform() {
+export function ReviewOfferingMobileCards(props: {
+  items: ReviewOffering[]
+  reviewPending: boolean
+  onConfigurePrice: (id: number) => void
+  onPublish: (id: number) => void
+  onReject: (id: number) => void
+}) {
   const { t } = useTranslation()
 
-  const [scopeType, setScopeType] = useState(String(PRICE_SCOPE_OPTIONS[0].value))
-  const [scopeId, setScopeId] = useState('')
+  return (
+    <section
+      aria-label={t('apigxPlatform.review.queue')}
+      className='space-y-3 md:hidden'
+    >
+      {props.items.map((row) => (
+        <div className='space-y-4 rounded-lg border p-4' key={row.id}>
+          <div className='flex items-start justify-between gap-3'>
+            <div className='min-w-0'>
+              <code className='block text-xs font-semibold break-all'>
+                {row.upstream_model_id}
+              </code>
+              <p className='text-muted-foreground mt-1 text-xs break-words'>
+                {row.share_group_name} · {row.channel_name}
+              </p>
+            </div>
+            <Badge
+              className='shrink-0'
+              variant={row.price_configured ? 'default' : 'warning'}
+            >
+              {row.price_configured ? t('Configured') : t('Price unknown')}
+            </Badge>
+          </div>
+          <div className='space-y-1'>
+            <p className='text-muted-foreground text-xs'>
+              {t('apigxPlatform.review.owner')}
+            </p>
+            <p className='text-sm font-medium'>
+              {row.owner_display_name ||
+                t('Provider {{id}}', { id: row.owner_user_id })}
+            </p>
+          </div>
+          <div className='grid grid-cols-2 gap-2'>
+            <Button
+              className='col-span-2'
+              variant='outline'
+              onClick={() => props.onConfigurePrice(row.id)}
+            >
+              {t('apigxPlatform.configurePrice')}
+            </Button>
+            <Button
+              disabled={!row.price_configured || props.reviewPending}
+              onClick={() => props.onPublish(row.id)}
+            >
+              {t('apigxPlatform.publish')}
+            </Button>
+            <Button
+              variant='outline'
+              disabled={props.reviewPending}
+              onClick={() => props.onReject(row.id)}
+            >
+              {t('apigxPlatform.reject')}
+            </Button>
+          </div>
+        </div>
+      ))}
+    </section>
+  )
+}
+
+export function ApigxPlatform() {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [selectedResourceID, setSelectedResourceID] = useState('')
+  const [priceScope, setPriceScope] = useState<'offering' | 'channel'>(
+    'offering'
+  )
   const [inputPrice, setInputPrice] = useState('')
   const [outputPrice, setOutputPrice] = useState('')
-
   const [model, setModel] = useState('')
   const [strategy, setStrategy] = useState('auto')
   const [dryRun, setDryRun] = useState(true)
 
-  const [reviewChannelId, setReviewChannelId] = useState('')
-  const reviewChannel = Number.parseInt(reviewChannelId.trim(), 10)
-  const canReview = Number.isFinite(reviewChannel) && reviewChannel > 0
-
-  const offeringsQuery = useQuery({
-    queryKey: ['apigx-review-offerings', reviewChannel],
-    queryFn: () => getChannelOfferings(reviewChannel),
-    enabled: canReview,
+  const reviewQuery = useQuery({
+    queryKey: ['apigx-review-offerings', 'all'],
+    queryFn: () => getReviewOfferings({ all: true, pageSize: 100 }),
   })
+  const resources = useMemo(
+    () => reviewQuery.data?.data?.items ?? [],
+    [reviewQuery.data]
+  )
+  const pending = resources.filter((resource) => resource.status === 1)
+  const selectedResource = resources.find(
+    (resource) => String(resource.id) === selectedResourceID
+  )
+  const scopeType = priceScope === 'offering' ? 0 : 2
+  let scopeID = 0
+  if (selectedResource) {
+    scopeID =
+      priceScope === 'offering'
+        ? selectedResource.id
+        : selectedResource.channel_id
+  }
+
+  const priceQuery = useQuery({
+    queryKey: ['apigx-price-rules', scopeType, scopeID],
+    queryFn: () => getPriceRules(scopeType, scopeID),
+    enabled: scopeID > 0,
+  })
+
+  useEffect(() => {
+    setInputPrice('')
+    setOutputPrice('')
+  }, [priceScope, selectedResourceID])
 
   const reviewMutation = useMutation({
     mutationFn: (input: { id: number; publish: boolean }) =>
       input.publish ? publishOffering(input.id) : rejectOffering(input.id),
-    onSuccess: () => {
-      void offeringsQuery.refetch()
+    onSuccess: (_, input) => {
+      toast.success(
+        input.publish
+          ? t('apigxPlatform.review.published')
+          : t('apigxPlatform.review.rejected')
+      )
+      void queryClient.invalidateQueries({
+        queryKey: ['apigx-review-offerings'],
+      })
     },
-  })
-
-  const parsedScopeId = Number.parseInt(scopeId.trim(), 10)
-  const canQuery = Number.isFinite(parsedScopeId) && parsedScopeId > 0
-
-  const priceQuery = useQuery({
-    queryKey: ['apigx-price-rules', scopeType, parsedScopeId],
-    queryFn: () => getPriceRules(Number(scopeType), parsedScopeId),
-    enabled: canQuery,
+    onError: (error) => handleServerError(error),
   })
 
   const savePriceMutation = useMutation({
     mutationFn: () =>
       setManualPrice({
-        scope_type: Number(scopeType),
-        scope_id: parsedScopeId,
+        scope_type: scopeType,
+        scope_id: scopeID,
         input_usd_per_million: parseUsdPerMillion(inputPrice) ?? 0,
         output_usd_per_million: parseUsdPerMillion(outputPrice) ?? 0,
       }),
     onSuccess: () => {
+      toast.success(t('apigxPlatform.price.saved'))
       void priceQuery.refetch()
+      void queryClient.invalidateQueries({
+        queryKey: ['apigx-review-offerings'],
+      })
     },
+    onError: (error) => handleServerError(error),
   })
 
   const applyRankingMutation = useMutation({
     mutationFn: () => applyRouteRanking({ model, strategy, dry_run: dryRun }),
+    onSuccess: () =>
+      toast.success(
+        dryRun
+          ? t('apigxPlatform.route.previewed')
+          : t('apigxPlatform.route.applied')
+      ),
+    onError: (error) => handleServerError(error),
   })
 
-  const offerings = offeringsQuery.data?.data?.items ?? []
-  const reviewColumns: StaticDataTableColumn<Offering>[] = [
-    { id: 'model', header: t('apigxPlatform.model'), cell: (row) => row.upstream_model_id },
+  const resourceOptions = resources.map((resource) => ({
+    value: String(resource.id),
+    label: resource.upstream_model_id,
+    description: `${resource.share_group_name} · ${resource.channel_name}`,
+  }))
+  const modelOptions = useMemo(
+    () =>
+      [
+        ...new Set(
+          resources
+            .filter((resource) => resource.status === 2)
+            .map((resource) => resource.upstream_model_id)
+        ),
+      ]
+        .sort()
+        .map((name) => ({ value: name, label: name })),
+    [resources]
+  )
+
+  if (reviewQuery.isPending) {
+    return <LoadingState />
+  }
+  if (reviewQuery.isError) {
+    return <ErrorState onRetry={() => void reviewQuery.refetch()} />
+  }
+
+  const reviewColumns: StaticDataTableColumn<ReviewOffering>[] = [
+    {
+      id: 'resource',
+      header: t('apigxPlatform.review.resource'),
+      className: 'min-w-56',
+      cell: (row) => (
+        <div>
+          <code className='text-xs font-semibold'>{row.upstream_model_id}</code>
+          <div className='text-muted-foreground mt-1 text-xs'>
+            {row.share_group_name} · {row.channel_name}
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: 'owner',
+      header: t('apigxPlatform.review.owner'),
+      cell: (row) =>
+        row.owner_display_name ||
+        t('Provider {{id}}', { id: row.owner_user_id }),
+    },
+    {
+      id: 'price',
+      header: t('apigxPlatform.review.price'),
+      cell: (row) => (
+        <Badge variant={row.price_configured ? 'default' : 'warning'}>
+          {row.price_configured ? t('Configured') : t('Price unknown')}
+        </Badge>
+      ),
+    },
     {
       id: 'actions',
       header: '',
       cell: (row) => (
-        <div className='flex gap-2'>
+        <div className='flex flex-wrap justify-end gap-2'>
+          <Button
+            variant='ghost'
+            size='sm'
+            onClick={() => {
+              setSelectedResourceID(String(row.id))
+              setPriceScope('offering')
+            }}
+          >
+            {t('apigxPlatform.configurePrice')}
+          </Button>
           <Button
             size='sm'
-            variant='outline'
-            disabled={!isOfferingReviewable(row.status) || reviewMutation.isPending}
+            disabled={!row.price_configured || reviewMutation.isPending}
             onClick={() => reviewMutation.mutate({ id: row.id, publish: true })}
           >
             {t('apigxPlatform.publish')}
@@ -113,8 +299,10 @@ export function ApigxPlatform() {
           <Button
             size='sm'
             variant='outline'
-            disabled={!isOfferingReviewable(row.status) || reviewMutation.isPending}
-            onClick={() => reviewMutation.mutate({ id: row.id, publish: false })}
+            disabled={reviewMutation.isPending}
+            onClick={() =>
+              reviewMutation.mutate({ id: row.id, publish: false })
+            }
           >
             {t('apigxPlatform.reject')}
           </Button>
@@ -125,150 +313,234 @@ export function ApigxPlatform() {
 
   const dimensions = priceQuery.data?.data?.dimensions ?? []
   const priceColumns: StaticDataTableColumn<PriceDimension>[] = [
-    { id: 'dimension', header: t('apigxPlatform.dimension'), cell: (row) => row.dimension },
+    {
+      id: 'dimension',
+      header: t('apigxPlatform.dimension'),
+      cell: (row) => t(row.dimension),
+    },
     {
       id: 'unit_price',
       header: t('apigxPlatform.unitPrice'),
-      cell: (row) => (row.price_known ? formatMicroUSD(row.usd_unit_price_micro) : t('apigxPlatform.priceUnknown')),
+      cell: (row) =>
+        row.price_known
+          ? `$${formatMicroUSD(row.usd_unit_price_micro)}`
+          : t('Price unknown'),
     },
   ]
 
   return (
     <div className='space-y-6'>
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('apigxPlatform.priceRules')}</CardTitle>
-            <CardContent className='pt-0'>
-              <PriceEditingHint />
-            </CardContent>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <div className='grid gap-3 sm:grid-cols-3'>
-                <div className='space-y-1'>
-                  <Label>{t('apigxPlatform.scope')}</Label>
-                  <Select value={scopeType} onValueChange={(next) => setScopeType(next ?? '0')}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {PRICE_SCOPE_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={String(option.value)}>
-                          {t(option.labelKey)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className='space-y-1'>
-                  <Label>{t('apigxPlatform.scopeId')}</Label>
-                  <Input value={scopeId} onChange={(event) => setScopeId(event.target.value)} inputMode='numeric' />
-                </div>
-              </div>
-
-              {canQuery && dimensions.length > 0 ? (
-                <StaticDataTable columns={priceColumns} data={dimensions} getRowKey={(row) => row.dimension} />
-              ) : null}
-              {canQuery && !priceQuery.isFetching && dimensions.length === 0 ? (
-                <EmptyState title={t('apigxPlatform.noPrice')} />
-              ) : null}
-
-              <div className='grid gap-3 sm:grid-cols-2'>
-                <div className='space-y-1'>
-                  <Label>{t('apigxPlatform.inputPrice')}</Label>
-                  <Input value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} inputMode='decimal' />
-                </div>
-                <div className='space-y-1'>
-                  <Label>{t('apigxPlatform.outputPrice')}</Label>
-                  <Input
-                    value={outputPrice}
-                    onChange={(event) => setOutputPrice(event.target.value)}
-                    inputMode='decimal'
-                  />
-                </div>
-              </div>
-              <Button
-                disabled={!canSubmitManualPrice({ scopeType: Number(scopeType), scopeId, inputPrice, outputPrice }) || savePriceMutation.isPending}
-                onClick={() => savePriceMutation.mutate()}
-              >
-                {t('apigxPlatform.savePrice')}
-              </Button>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('apigxPlatform.applyRanking')}</CardTitle>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <div className='grid gap-3 sm:grid-cols-2'>
-                <div className='space-y-1'>
-                  <Label>{t('apigxPlatform.model')}</Label>
-                  <Input value={model} onChange={(event) => setModel(event.target.value)} />
-                </div>
-                <div className='space-y-1'>
-                  <Label>{t('apigxPlatform.strategy')}</Label>
-                  <Select value={strategy} onValueChange={(next) => setStrategy(next ?? 'auto')}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value='auto'>{t('apigxPlatform.strategy.auto')}</SelectItem>
-                      <SelectItem value='latency'>{t('apigxPlatform.strategy.latency')}</SelectItem>
-                      <SelectItem value='throughput'>{t('apigxPlatform.strategy.throughput')}</SelectItem>
-                      <SelectItem value='reliability'>{t('apigxPlatform.strategy.reliability')}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div className='flex items-center gap-3'>
-                <Switch checked={dryRun} onCheckedChange={setDryRun} id='apigx-route-dry-run' />
-                <Label htmlFor='apigx-route-dry-run'>{t('apigxPlatform.dryRun')}</Label>
-              </div>
-              <Button
-                disabled={model.trim() === '' || applyRankingMutation.isPending}
-                onClick={() => applyRankingMutation.mutate()}
-              >
-                {t('apigxPlatform.apply')}
-              </Button>
-            </CardContent>
-          </Card>
-          <AliasCandidatesCard />
-
-          <Card>
-            <CardHeader>
-              <CardTitle>{t('apigxPlatform.review')}</CardTitle>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <div className='space-y-1 sm:max-w-xs'>
-                <Label>{t('apigxPlatform.channelId')}</Label>
-                <Input
-                  value={reviewChannelId}
-                  onChange={(event) => setReviewChannelId(event.target.value)}
-                  inputMode='numeric'
+      <Card>
+        <CardHeader>
+          <CardTitle className='flex items-center gap-2'>
+            <BadgeCheck className='size-4' />
+            {t('apigxPlatform.review.queue')}
+          </CardTitle>
+          <p className='text-muted-foreground text-sm'>
+            {t('apigxPlatform.review.description')}
+          </p>
+        </CardHeader>
+        <CardContent>
+          {pending.length === 0 ? (
+            <EmptyState title={t('apigxPlatform.review.empty')} />
+          ) : (
+            <>
+              <ReviewOfferingMobileCards
+                items={pending}
+                reviewPending={reviewMutation.isPending}
+                onConfigurePrice={(id) => {
+                  setSelectedResourceID(String(id))
+                  setPriceScope('offering')
+                }}
+                onPublish={(id) => reviewMutation.mutate({ id, publish: true })}
+                onReject={(id) => reviewMutation.mutate({ id, publish: false })}
+              />
+              <div className='hidden md:block'>
+                <StaticDataTable
+                  columns={reviewColumns}
+                  data={pending}
+                  getRowKey={(row) => row.id}
                 />
               </div>
-              {canReview && offerings.length === 0 && !offeringsQuery.isFetching ? (
-                <EmptyState title={t('apigxPlatform.noOffering')} />
-              ) : null}
-              {offerings.length > 0 ? (
-                <StaticDataTable columns={reviewColumns} data={offerings} getRowKey={(row) => row.id} />
-              ) : null}
-            </CardContent>
-          </Card>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card id='apigx-price-editor'>
+        <CardHeader>
+          <CardTitle className='flex items-center gap-2'>
+            <CircleDollarSign className='size-4' />
+            {t('apigxPlatform.priceRules')}
+          </CardTitle>
+          <PriceEditingHint />
+        </CardHeader>
+        <CardContent className='space-y-4'>
+          <div className='grid gap-3 sm:grid-cols-2'>
+            <div className='space-y-2'>
+              <Label>{t('apigxPlatform.resource')}</Label>
+              <Combobox
+                options={resourceOptions}
+                value={selectedResourceID}
+                onValueChange={(value) => setSelectedResourceID(value ?? '')}
+                placeholder={t('apigxPlatform.selectResource')}
+                searchPlaceholder={t('Search models')}
+                emptyText={t('apigxPlatform.noOffering')}
+              />
+            </div>
+            <div className='space-y-2'>
+              <Label>{t('apigxPlatform.scope')}</Label>
+              <Select
+                value={priceScope}
+                onValueChange={(value) =>
+                  setPriceScope((value ?? 'offering') as 'offering' | 'channel')
+                }
+              >
+                <SelectTrigger>
+                  <SelectValue>
+                    {t(`apigxPlatform.priceScope.${priceScope}`)}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='offering'>
+                    {t('apigxPlatform.priceScope.offering')}
+                  </SelectItem>
+                  <SelectItem value='channel'>
+                    {t('apigxPlatform.priceScope.channel')}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {scopeID > 0 && dimensions.length > 0 ? (
+            <StaticDataTable
+              columns={priceColumns}
+              data={dimensions}
+              getRowKey={(row) => row.dimension}
+            />
+          ) : null}
+          {scopeID > 0 && !priceQuery.isFetching && dimensions.length === 0 ? (
+            <EmptyState title={t('apigxPlatform.noPrice')} />
+          ) : null}
+
+          <div className='grid gap-3 sm:grid-cols-2'>
+            <div className='space-y-2'>
+              <Label>{t('apigxPlatform.inputPrice')}</Label>
+              <Input
+                value={inputPrice}
+                onChange={(event) => setInputPrice(event.target.value)}
+                inputMode='decimal'
+              />
+            </div>
+            <div className='space-y-2'>
+              <Label>{t('apigxPlatform.outputPrice')}</Label>
+              <Input
+                value={outputPrice}
+                onChange={(event) => setOutputPrice(event.target.value)}
+                inputMode='decimal'
+              />
+            </div>
+          </div>
+          <Button
+            disabled={
+              !selectedResource ||
+              !canSubmitManualPrice({
+                scopeType,
+                scopeId: String(scopeID),
+                inputPrice,
+                outputPrice,
+              }) ||
+              savePriceMutation.isPending
+            }
+            onClick={() => savePriceMutation.mutate()}
+          >
+            {t('apigxPlatform.savePrice')}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className='flex items-center gap-2'>
+            <Route className='size-4' />
+            {t('apigxPlatform.applyRanking')}
+          </CardTitle>
+          <p className='text-muted-foreground text-sm'>
+            {t('apigxPlatform.route.description')}
+          </p>
+        </CardHeader>
+        <CardContent className='space-y-4'>
+          <div className='grid gap-3 sm:grid-cols-2'>
+            <div className='space-y-2'>
+              <Label>{t('apigxPlatform.model')}</Label>
+              <Combobox
+                options={modelOptions}
+                value={model}
+                onValueChange={(value) => setModel(value ?? '')}
+                placeholder={t('apigxPlatform.selectModel')}
+                searchPlaceholder={t('Search models')}
+              />
+            </div>
+            <div className='space-y-2'>
+              <Label>{t('apigxPlatform.strategy')}</Label>
+              <Select
+                value={strategy}
+                onValueChange={(value) => setStrategy(value ?? 'auto')}
+              >
+                <SelectTrigger>
+                  <SelectValue>
+                    {t(`apigxPlatform.strategy.${strategy}`)}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value='auto'>
+                    {t('apigxPlatform.strategy.auto')}
+                  </SelectItem>
+                  <SelectItem value='latency'>
+                    {t('apigxPlatform.strategy.latency')}
+                  </SelectItem>
+                  <SelectItem value='throughput'>
+                    {t('apigxPlatform.strategy.throughput')}
+                  </SelectItem>
+                  <SelectItem value='reliability'>
+                    {t('apigxPlatform.strategy.reliability')}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className='flex flex-wrap items-center justify-between gap-3'>
+            <div className='flex items-center gap-3'>
+              <Switch
+                checked={dryRun}
+                onCheckedChange={setDryRun}
+                id='apigx-route-dry-run'
+              />
+              <Label htmlFor='apigx-route-dry-run'>
+                {t('apigxPlatform.dryRun')}
+              </Label>
+            </div>
+            <Button
+              disabled={model === '' || applyRankingMutation.isPending}
+              onClick={() => applyRankingMutation.mutate()}
+            >
+              {dryRun ? t('apigxPlatform.preview') : t('apigxPlatform.apply')}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <AliasCandidatesCard />
     </div>
   )
 }
-/**
- * 价格配置指引。
- *
- * **复用 New API 自带的定价能力**：模型价格的配置与同步在底座的「系统设置 → 模型与定价」里，
- * 这里只给出直达入口，不另造一套价格源（渠道价格读数走平台的 price-sync，人工覆盖走本页的输入框）。
- */
+
 function PriceEditingHint() {
   const { t } = useTranslation()
   return (
     <p className='text-muted-foreground text-xs'>
-      {t('Prices are configured and synced in New API model pricing.')} 
+      {t('Prices are configured and synced in New API model pricing.')}{' '}
       <Link to='/system-settings/models' className='underline'>
         {t('Open model pricing')}
       </Link>

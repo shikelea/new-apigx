@@ -16,13 +16,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-
 import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 
 import { getPlaza } from '@/features/plaza/api'
 
-import { shareGroupOptions, summarizeModelSources, type ModelSourcesSummary } from '../lib/apigx-sources'
+import {
+  shareGroupOptions,
+  summarizeModelSources,
+  type ModelSourcesSummary,
+} from '../lib/apigx-sources'
 
 /**
  * 拉取"分享来源"数据（我们的广场），供底座模型广场展示与筛选。
@@ -42,15 +45,20 @@ export function useApigxModelSources() {
     retry: false,
   })
 
-  const items = query.data ?? []
+  const items = useMemo(() => query.data ?? [], [query.data])
 
   return {
     isLoading: query.isLoading,
     /** 模型名 -> 分享来源汇总 */
-    byModel: useMemo<Map<string, ModelSourcesSummary>>(() => summarizeModelSources(items), [items]),
+    byModel: useMemo<Map<string, ModelSourcesSummary>>(
+      () => summarizeModelSources(items),
+      [items]
+    ),
     /** 分享分组可选项 */
     groupOptions: useMemo<string[]>(() => shareGroupOptions(items), [items]),
     /** 是否拿到了数据（用于决定"显示不显示"这一块） */
     hasData: items.length > 0,
+    /** 当前用户可见的原始来源，供模型详情比较具体渠道。 */
+    items,
   }
 }

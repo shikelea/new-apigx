@@ -39,6 +39,8 @@ export interface PlazaOfferingItem {
   channel_public_id: string
   /** 分享者用户 ID */
   owner_user_id: number
+  /** 分享者公开显示名 */
+  owner_display_name?: string
   /** 该供给声明的能力（如 chat / embedding / image） */
   capabilities?: string[]
   /** 尚未验证的能力（后端仅在存在时返回） */

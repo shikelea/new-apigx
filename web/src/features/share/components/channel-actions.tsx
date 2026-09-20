@@ -15,21 +15,33 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { useMutation, useQueryClient } from '@tanstack/react-query'
+*/
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { handleServerError } from '@/lib/handle-server-error'
 
 import { fetchUpstreamModels, setChannelCapacityPolicy } from '../api'
-import { ModelImportDialog } from './model-import-dialog'
-import { buildCapacityPolicyPayload, type LimitDimensionInput } from '../lib/capacity'
+import {
+  buildCapacityPolicyPayload,
+  type LimitDimensionInput,
+} from '../lib/capacity'
 import type { LimitMode } from '../types'
+import { ModelImportDialog } from './model-import-dialog'
 
 const MODE_OPTIONS: { mode: LimitMode; labelKey: string }[] = [
   { mode: 0, labelKey: 'share.limitMode.unset' },
@@ -46,13 +58,20 @@ export function ChannelActions(props: { channelId: number }) {
 
   const [syncOpen, setSyncOpen] = useState(false)
   const [chooseOpen, setChooseOpen] = useState(false)
-  const [concurrency, setConcurrency] = useState<LimitDimensionInput>({ mode: 0, value: '' })
+  const [concurrency, setConcurrency] = useState<LimitDimensionInput>({
+    mode: 0,
+    value: '',
+  })
   const [rpm, setRpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
   const [tpm, setTpm] = useState<LimitDimensionInput>({ mode: 0, value: '' })
 
   const invalidateChannelData = () => {
-    void queryClient.invalidateQueries({ queryKey: ['apigx-channel-offerings', props.channelId] })
-    void queryClient.invalidateQueries({ queryKey: ['apigx-channel', props.channelId] })
+    void queryClient.invalidateQueries({
+      queryKey: ['apigx-channel-offerings', props.channelId],
+    })
+    void queryClient.invalidateQueries({
+      queryKey: ['apigx-channel', props.channelId],
+    })
   }
 
   const syncMutation = useMutation({
@@ -60,12 +79,22 @@ export function ChannelActions(props: { channelId: number }) {
     onSuccess: () => {
       setSyncOpen(false)
       invalidateChannelData()
+      toast.success(t('share.models.importedAll'))
     },
+    onError: (error) => handleServerError(error),
   })
 
   const policyMutation = useMutation({
-    mutationFn: () => setChannelCapacityPolicy(props.channelId, buildCapacityPolicyPayload({ concurrency, rpm, tpm })),
-    onSuccess: invalidateChannelData,
+    mutationFn: () =>
+      setChannelCapacityPolicy(
+        props.channelId,
+        buildCapacityPolicyPayload({ concurrency, rpm, tpm })
+      ),
+    onSuccess: () => {
+      invalidateChannelData()
+      toast.success(t('share.capacity.saved'))
+    },
+    onError: (error) => handleServerError(error),
   })
 
   return (
@@ -75,40 +104,61 @@ export function ChannelActions(props: { channelId: number }) {
       </CardHeader>
       <CardContent className='space-y-6'>
         <div>
-          <Button variant='outline' onClick={() => setSyncOpen(true)}>
-            {t('share.actions.syncModels')}
-          </Button>
-          {/* 「同步模型」是一次性全导；这里让分享者先看清单再挑（避免导出一堆没用的草稿供给） */}
-          <Button variant='outline' onClick={() => setChooseOpen(true)}>
-            {t('Choose models')}
-          </Button>
-          <p className='text-muted-foreground mt-2 text-xs'>{t('share.actions.syncModelsHint')}</p>
+          <div className='flex flex-wrap gap-2'>
+            <Button variant='outline' onClick={() => setSyncOpen(true)}>
+              {t('share.actions.syncModels')}
+            </Button>
+            {/* 「同步模型」是一次性全导；这里让分享者先看清单再挑（避免导出一堆没用的草稿供给） */}
+            <Button variant='outline' onClick={() => setChooseOpen(true)}>
+              {t('Choose models')}
+            </Button>
+          </div>
+          <p className='text-muted-foreground mt-2 text-xs'>
+            {t('share.actions.syncModelsHint')}
+          </p>
         </div>
 
         <div className='space-y-4'>
-          <div className='text-sm font-medium'>{t('share.actions.capacity')}</div>
+          <div className='text-sm font-medium'>
+            {t('share.actions.capacity')}
+          </div>
           <LimitRow
             label={t('share.actions.concurrency')}
             input={concurrency}
             onChange={setConcurrency}
             valueLabel={t('share.actions.concurrencyValue')}
           />
-          <LimitRow label={t('share.actions.rpm')} input={rpm} onChange={setRpm} valueLabel={t('share.actions.rpmValue')} />
-          <LimitRow label={t('share.actions.tpm')} input={tpm} onChange={setTpm} valueLabel={t('share.actions.tpmValue')} />
-          <Button disabled={policyMutation.isPending} onClick={() => policyMutation.mutate()}>
+          <LimitRow
+            label={t('share.actions.rpm')}
+            input={rpm}
+            onChange={setRpm}
+            valueLabel={t('share.actions.rpmValue')}
+          />
+          <LimitRow
+            label={t('share.actions.tpm')}
+            input={tpm}
+            onChange={setTpm}
+            valueLabel={t('share.actions.tpmValue')}
+          />
+          <Button
+            disabled={policyMutation.isPending}
+            onClick={() => policyMutation.mutate()}
+          >
             {t('share.actions.saveCapacity')}
           </Button>
         </div>
 
         <ModelImportDialog
-        channelId={props.channelId}
-        open={chooseOpen}
-        onOpenChange={setChooseOpen}
-        onSaved={() => {
-          void queryClient.invalidateQueries({ queryKey: ['apigx-channel-offerings', props.channelId] })
-        }}
-      />
-      <ConfirmDialog
+          channelId={props.channelId}
+          open={chooseOpen}
+          onOpenChange={setChooseOpen}
+          onSaved={() => {
+            void queryClient.invalidateQueries({
+              queryKey: ['apigx-channel-offerings', props.channelId],
+            })
+          }}
+        />
+        <ConfirmDialog
           open={syncOpen}
           onOpenChange={setSyncOpen}
           title={t('share.actions.syncModels')}
@@ -130,6 +180,9 @@ function LimitRow(props: {
   onChange: (next: LimitDimensionInput) => void
 }) {
   const { t } = useTranslation()
+  const selectedMode = MODE_OPTIONS.find(
+    (option) => option.mode === props.input.mode
+  )
   const modeOptions = MODE_OPTIONS.map((option) => (
     <SelectItem key={option.mode} value={String(option.mode)}>
       {t(option.labelKey)}
@@ -142,10 +195,16 @@ function LimitRow(props: {
         <Label>{props.label}</Label>
         <Select
           value={String(props.input.mode)}
-          onValueChange={(next) => props.onChange({ ...props.input, mode: Number(next) as LimitMode })}
+          onValueChange={(next) =>
+            props.onChange({ ...props.input, mode: Number(next) as LimitMode })
+          }
         >
           <SelectTrigger>
-            <SelectValue />
+            <SelectValue>
+              {selectedMode
+                ? t(selectedMode.labelKey)
+                : String(props.input.mode)}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>{modeOptions}</SelectContent>
         </Select>
@@ -155,7 +214,9 @@ function LimitRow(props: {
           <Label>{props.valueLabel}</Label>
           <Input
             value={props.input.value}
-            onChange={(event) => props.onChange({ ...props.input, value: event.target.value })}
+            onChange={(event) =>
+              props.onChange({ ...props.input, value: event.target.value })
+            }
             inputMode='numeric'
           />
         </div>

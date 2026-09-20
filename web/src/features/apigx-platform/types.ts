@@ -40,6 +40,37 @@ export interface PriceRuleResponse {
   }
 }
 
+export interface ReviewOffering {
+  id: number
+  public_id: string
+  owner_user_id: number
+  owner_display_name?: string
+  share_group_id: number
+  share_group_public_id: string
+  share_group_name: string
+  group_visibility: number
+  channel_id: number
+  channel_public_id: string
+  channel_name: string
+  upstream_model_id: string
+  capabilities?: Record<string, boolean>
+  status: number
+  revision: number
+  price_configured: boolean
+  created_at: number
+  updated_at: number
+}
+
+export interface ReviewOfferingListResponse {
+  success: boolean
+  data?: {
+    items: ReviewOffering[]
+    total: number
+    page: number
+    page_size: number
+  }
+}
+
 /** 人工覆盖价格（平台侧动作）。 */
 export interface ManualPricePayload {
   scope_type: number

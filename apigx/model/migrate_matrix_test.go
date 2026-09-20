@@ -3,6 +3,7 @@ package apigxmodel
 import (
 	"errors"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -130,6 +131,12 @@ func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
 		})
 		require.NoError(t, reviewErr)
 		assert.Equal(t, owner, result.OwnerUserID)
+		allItems, allTotal, listErr := ListOfferingsForReview(tx, -1, 0, 100)
+		require.NoError(t, listErr)
+		assert.GreaterOrEqual(t, allTotal, int64(1))
+		assert.True(t, slices.ContainsFunc(allItems, func(item OfferingReviewItem) bool {
+			return item.OfferingID == offering.ID && item.Status == OfferingStatusPublished
+		}), "status=-1 must include the published offering")
 		var event AuditEvent
 		require.NoError(t, tx.Where("target_type = ? AND target_id = ?", "model_offering", offering.ID).First(&event).Error)
 		assert.Equal(t, reviewer, event.ActorUserID)

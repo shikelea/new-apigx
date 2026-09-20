@@ -133,6 +133,9 @@ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
 	if key.SecretFingerprint == "" {
 		return fmt.Errorf("%w: secret_fingerprint is required（密文不可比对，重复导入只能靠指纹发现）", ErrInvalidArgument)
 	}
+	if key.Weight < 0 || key.Weight > 1000 {
+		return fmt.Errorf("%w: weight must be between 1 and 1000", ErrInvalidArgument)
+	}
 	if key.CredentialVersion <= 0 {
 		key.CredentialVersion = 1
 	}
@@ -194,6 +197,29 @@ func UpdateUpstreamKeyStatus(db *gorm.DB, ownerUserID, keyID int64, status int) 
 	now := common.GetTimestamp()
 	return db.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
 		Updates(map[string]any{"status": status, "updated_at": now}).Error
+}
+
+// UpdateUpstreamKeyWeight changes only the routing weight of one owned Key.
+// The caller explicitly reapplies the pool after batching Key edits, matching
+// the existing channel projection lifecycle.
+func UpdateUpstreamKeyWeight(db *gorm.DB, ownerUserID, keyID, weight int64) error {
+	if weight < 1 || weight > 1000 {
+		return fmt.Errorf("%w: weight must be between 1 and 1000", ErrInvalidArgument)
+	}
+	key, err := getUpstreamKeyWithOwnership(db, ownerUserID, keyID)
+	if err != nil {
+		return err
+	}
+	now := common.GetTimestamp()
+	res := db.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
+		Updates(map[string]any{"weight": weight, "updated_at": now})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SetUpstreamKeyCooldown 设置冷却截止时间。

@@ -124,6 +124,7 @@ export interface PlatformKeyPreferences {
   configured: boolean
   scope_mode: number
   pinned_offering_id: number
+  pinned_offering_public_id?: string
   allowed_model_ids: string[]
   allowed_owner_user_ids: number[]
   allow_fallback: boolean
@@ -140,6 +141,7 @@ export interface PlatformKeyPreferencesResponse {
 export interface PlatformKeyPreferencesPayload {
   scope_mode?: number
   pinned_offering_id?: number
+  pinned_offering_public_id?: string
   allowed_model_ids?: string[]
   allowed_owner_user_ids?: number[]
   allow_fallback?: boolean

@@ -733,6 +733,9 @@ func TestUpstreamKeyStatusAndValidation(t *testing.T) {
 	rec, _ := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
 		`{"stable_key_id":"s1"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
+		`{"key":"sk-invalid-weight","weight":0}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	// 正常创建
 	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
@@ -740,6 +743,15 @@ func TestUpstreamKeyStatusAndValidation(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	data, _ := body["data"].(map[string]any)
 	keyID := int64(data["id"].(float64))
+	assert.NotEmpty(t, data["stable_key_id"])
+
+	// 权重只接受 1-1000，且 owner 隔离仍由服务端校验。
+	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/weight", owner, `{"weight":7}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/weight", owner, `{"weight":0}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/weight", owner+1, `{"weight":9}`)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 
 	// 非法状态 → 400；缺字段 → 400
 	rec, _ = env.do(t, http.MethodPatch, "/api/keys/"+strconv.FormatInt(keyID, 10)+"/status", owner, `{"status":99}`)
@@ -969,6 +981,37 @@ func TestPlatformKeyPreferencesAPI(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":2}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
+	// 模型广场使用 public_id 固定来源，浏览器无需接触或手填内部供给 ID。
+	group := &apigxmodel.ShareGroup{
+		OwnerUserID: other, Name: "可选来源", DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic,
+		PublishStatus: apigxmodel.ShareGroupPublishPublished,
+	}
+	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "公开来源底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	channel := &apigxmodel.Channel{
+		OwnerUserID: other, ShareGroupID: group.ID, BaseChannelID: baseChannelID,
+		Name: "来源渠道", Protocol: "openai", BaseURL: "https://source.example",
+	}
+	require.NoError(t, apigxmodel.CreateChannel(env.db, channel))
+	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "public-pin-model"}
+	require.NoError(t, apigxmodel.CreateModelOffering(env.db, other, offering))
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, other, offering.ID))
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, other, offering.ID))
+	rec, body = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner,
+		`{"scope_mode":2,"pinned_offering_public_id":"`+offering.PublicID+`","allow_fallback":true}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, offering.PublicID, data["pinned_offering_public_id"])
+	assert.Equal(t, float64(offering.ID), data["pinned_offering_id"])
+
+	rec, body = env.do(t, http.MethodGet, "/api/platform-keys/4321/preferences", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, offering.PublicID, data["pinned_offering_public_id"])
+
 	// 未知模式被拒
 	rec, _ = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner, `{"scope_mode":99}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -1073,6 +1116,10 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
 func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
 	env := newTestEnv(t, true)
 	const owner, reviewer int64 = 8451, 8499
+	require.NoError(t, env.db.AutoMigrate(&basemodel.User{}))
+	require.NoError(t, env.db.Create(&basemodel.User{
+		Id: int(owner), Username: "review-owner", DisplayName: "共享者甲", Password: "not-used-in-test",
+	}).Error)
 	baseChannelID := nextBaseChannelID()
 	require.NoError(t, env.db.Create(&basemodel.Channel{
 		Id: int(baseChannelID), Name: "跨 owner 审核底座", Key: "x", Status: common.ChannelStatusEnabled,
@@ -1106,6 +1153,7 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
 	require.Len(t, items, 1)
 	first := items[0].(map[string]any)
 	assert.Equal(t, float64(owner), first["owner_user_id"])
+	assert.Equal(t, "共享者甲", first["owner_display_name"])
 	assert.Equal(t, "review-publish", first["upstream_model_id"])
 	assert.Equal(t, true, first["price_configured"])
 	assert.NotContains(t, rec.Body.String(), plainSecret)
@@ -1123,6 +1171,13 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
 	assert.Equal(t, float64(owner), data["owner_user_id"])
 	assert.Equal(t, float64(apigxmodel.OfferingStatusPending), data["from_status"])
 	assert.Equal(t, float64(apigxmodel.OfferingStatusPublished), data["status"])
+
+	// 管理资源选择器请求全部状态，已发布供给也必须返回。
+	rec, body = env.do(t, http.MethodGet, "/api/reviews/offerings?status=all&page=1&page_size=10", reviewer, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	allItems := body["data"].(map[string]any)["items"].([]any)
+	require.Len(t, allItems, 1)
+	assert.Equal(t, float64(apigxmodel.OfferingStatusPublished), allItems[0].(map[string]any)["status"])
 
 	// 重复审核不能成功，也不能产生第二条审计事件。
 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(publishID, 10)+"/publish", reviewer, "")

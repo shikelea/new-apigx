@@ -200,7 +200,7 @@ func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingR
 	if db == nil {
 		return nil, 0, errors.New("apigxmodel: nil db")
 	}
-	if status < OfferingStatusDraft || status > OfferingStatusRejected {
+	if status != -1 && (status < OfferingStatusDraft || status > OfferingStatusRejected) {
 		return nil, 0, fmt.Errorf("%w: invalid offering review status", ErrInvalidArgument)
 	}
 	if offset < 0 {
@@ -216,7 +216,10 @@ func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingR
 	base := db.Table(offeringTable+" AS o").
 		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
 		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
-		Where("o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ?", status, AliveFlagAlive)
+		Where("o.deleted_at IS NULL AND o.alive_flag = ?", AliveFlagAlive)
+	if status != -1 {
+		base = base.Where("o.status = ?", status)
+	}
 
 	var total int64
 	if err := base.Count(&total).Error; err != nil {

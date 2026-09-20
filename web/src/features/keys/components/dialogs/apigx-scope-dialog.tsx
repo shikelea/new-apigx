@@ -15,7 +15,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { useMutation, useQuery } from '@tanstack/react-query'
+*/ import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -23,11 +23,21 @@ import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 
 import { getPlatformKeyPreferences, setPlatformKeyPreferences } from '../../api'
-import { buildScopePayload, ROUTE_MODE_OPTIONS, type ScopeFormState } from '../../lib/apigx-scope'
+import {
+  buildScopePayload,
+  ROUTE_MODE_OPTIONS,
+  type ScopeFormState,
+} from '../../lib/apigx-scope'
 
 const EMPTY_FORM: ScopeFormState = {
   scopeMode: '0',
@@ -43,7 +53,11 @@ const EMPTY_FORM: ScopeFormState = {
  *
  * 表单用 `GET` 的当前值**预填**后再整体提交 ⇒ 幂等往返，不会误清空用户没动过的限制。
  */
-export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: boolean) => void; tokenId: number }) {
+export function ApigxScopeDialog(props: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  tokenId: number
+}) {
   const { t } = useTranslation()
   const [form, setForm] = useState<ScopeFormState>(EMPTY_FORM)
 
@@ -60,16 +74,19 @@ export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: bo
     }
     setForm({
       scopeMode: String(prefs.scope_mode),
-      pinnedOfferingId: prefs.pinned_offering_id > 0 ? String(prefs.pinned_offering_id) : '',
+      pinnedOfferingId:
+        prefs.pinned_offering_id > 0 ? String(prefs.pinned_offering_id) : '',
       allowedModelIds: prefs.allowed_model_ids.join(', '),
       allowedOwnerUserIds: prefs.allowed_owner_user_ids.join(', '),
       allowFallback: prefs.allow_fallback,
-      defaultRouteMode: prefs.default_route_mode === '' ? 'auto' : prefs.default_route_mode,
+      defaultRouteMode:
+        prefs.default_route_mode === '' ? 'auto' : prefs.default_route_mode,
     })
   }, [prefsQuery.data])
 
   const saveMutation = useMutation({
-    mutationFn: () => setPlatformKeyPreferences(props.tokenId, buildScopePayload(form)),
+    mutationFn: () =>
+      setPlatformKeyPreferences(props.tokenId, buildScopePayload(form)),
     onSuccess: () => {
       props.onOpenChange(false)
     },
@@ -86,20 +103,36 @@ export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: bo
           <Button variant='outline' onClick={() => props.onOpenChange(false)}>
             {t('Cancel')}
           </Button>
-          <Button disabled={saveMutation.isPending} onClick={() => saveMutation.mutate()}>
+          <Button
+            disabled={saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+          >
             {t('Save')}
           </Button>
         </>
       }
     >
       <div className='space-y-4'>
-        <p className='text-muted-foreground text-xs'>{t('apigxKey.scope.hint')}</p>
+        <p className='text-muted-foreground text-xs'>
+          {t('apigxKey.scope.hint')}
+        </p>
 
         <div className='space-y-2'>
           <Label>{t('apigxKey.scope.routeMode')}</Label>
-          <Select value={form.defaultRouteMode} onValueChange={(next) => setForm({ ...form, defaultRouteMode: next ?? 'auto' })}>
+          <Select
+            value={form.defaultRouteMode}
+            onValueChange={(next) =>
+              setForm({ ...form, defaultRouteMode: next ?? 'auto' })
+            }
+          >
             <SelectTrigger>
-              <SelectValue />
+              <SelectValue>
+                {t(
+                  ROUTE_MODE_OPTIONS.find(
+                    (option) => option.value === form.defaultRouteMode
+                  )?.labelKey ?? 'apigxKey.routeMode.auto'
+                )}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {ROUTE_MODE_OPTIONS.map((option) => (
@@ -115,7 +148,9 @@ export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: bo
           <Label>{t('apigxKey.scope.pinnedOffering')}</Label>
           <Input
             value={form.pinnedOfferingId}
-            onChange={(event) => setForm({ ...form, pinnedOfferingId: event.target.value })}
+            onChange={(event) =>
+              setForm({ ...form, pinnedOfferingId: event.target.value })
+            }
             placeholder={t('apigxKey.scope.pinnedOfferingPlaceholder')}
           />
         </div>
@@ -124,7 +159,9 @@ export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: bo
           <Label>{t('apigxKey.scope.allowedModels')}</Label>
           <Input
             value={form.allowedModelIds}
-            onChange={(event) => setForm({ ...form, allowedModelIds: event.target.value })}
+            onChange={(event) =>
+              setForm({ ...form, allowedModelIds: event.target.value })
+            }
             placeholder={t('apigxKey.scope.listPlaceholder')}
           />
         </div>
@@ -133,7 +170,9 @@ export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: bo
           <Label>{t('apigxKey.scope.allowedOwners')}</Label>
           <Input
             value={form.allowedOwnerUserIds}
-            onChange={(event) => setForm({ ...form, allowedOwnerUserIds: event.target.value })}
+            onChange={(event) =>
+              setForm({ ...form, allowedOwnerUserIds: event.target.value })
+            }
             placeholder={t('apigxKey.scope.listPlaceholder')}
           />
         </div>
@@ -141,10 +180,14 @@ export function ApigxScopeDialog(props: { open: boolean; onOpenChange: (open: bo
         <div className='flex items-center gap-3'>
           <Switch
             checked={form.allowFallback}
-            onCheckedChange={(next) => setForm({ ...form, allowFallback: next })}
+            onCheckedChange={(next) =>
+              setForm({ ...form, allowFallback: next })
+            }
             id='apigx-scope-fallback'
           />
-          <Label htmlFor='apigx-scope-fallback'>{t('apigxKey.scope.allowFallback')}</Label>
+          <Label htmlFor='apigx-scope-fallback'>
+            {t('apigxKey.scope.allowFallback')}
+          </Label>
         </div>
       </div>
     </Dialog>

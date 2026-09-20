@@ -24,9 +24,23 @@ import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { handleServerError } from '@/lib/handle-server-error'
 
 import { createShareChannel } from '../api'
 import type { ShareGroup } from '../types'
+
+function protocolLabel(protocol: string): string {
+  if (protocol === 'openai') return 'OpenAI'
+  if (protocol === 'anthropic') return 'Anthropic'
+  return 'Gemini'
+}
 
 /**
  * 新建分享渠道（§4「渠道 CRUD」）。
@@ -63,10 +77,14 @@ export function ChannelCreateDialog(props: {
       props.onOpenChange(false)
       props.onSaved(res.data?.id)
     },
+    onError: (error) => handleServerError(error),
   })
 
   const missing =
-    groupId === '' || name.trim() === '' || baseUrl.trim() === '' || upstreamKey.trim() === ''
+    groupId === '' ||
+    name.trim() === '' ||
+    baseUrl.trim() === '' ||
+    upstreamKey.trim() === ''
 
   return (
     <Dialog
@@ -79,7 +97,10 @@ export function ChannelCreateDialog(props: {
           <Button variant='outline' onClick={() => props.onOpenChange(false)}>
             {t('Cancel')}
           </Button>
-          <Button disabled={missing || create.isPending} onClick={() => create.mutate()}>
+          <Button
+            disabled={missing || create.isPending}
+            onClick={() => create.mutate()}
+          >
             {t('Create')}
           </Button>
         </>
@@ -88,34 +109,48 @@ export function ChannelCreateDialog(props: {
       <div className='space-y-4'>
         <div className='space-y-2'>
           <Label>{t('Share group')}</Label>
-          <select
-            className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
+          <Select
             value={groupId}
-            onChange={(event) => setGroupId(event.target.value)}
+            onValueChange={(next) => setGroupId(next ?? '')}
           >
-            <option value=''>{t('Select a share group')}</option>
-            {props.groups.map((group) => (
-              <option key={group.id} value={String(group.id)}>
-                {group.name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label={t('Share group')}>
+              <SelectValue placeholder={t('Select a share group')}>
+                {props.groups.find((group) => String(group.id) === groupId)
+                  ?.name ?? ''}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {props.groups.map((group) => (
+                <SelectItem key={group.id} value={String(group.id)}>
+                  {group.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className='space-y-2'>
           <Label>{t('Name')}</Label>
-          <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} />
+          <Input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            maxLength={64}
+          />
         </div>
         <div className='space-y-2'>
           <Label>{t('Protocol')}</Label>
-          <select
-            className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
+          <Select
             value={protocol}
-            onChange={(event) => setProtocol(event.target.value)}
+            onValueChange={(next) => setProtocol(next ?? 'openai')}
           >
-            <option value='openai'>OpenAI</option>
-            <option value='anthropic'>Anthropic</option>
-            <option value='gemini'>Gemini</option>
-          </select>
+            <SelectTrigger aria-label={t('Protocol')}>
+              <SelectValue>{protocolLabel(protocol)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='openai'>OpenAI</SelectItem>
+              <SelectItem value='anthropic'>Anthropic</SelectItem>
+              <SelectItem value='gemini'>Gemini</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <div className='space-y-2'>
           <Label>{t('Upstream address')}</Label>
@@ -133,7 +168,9 @@ export function ChannelCreateDialog(props: {
             value={upstreamKey}
             onChange={(event) => setUpstreamKey(event.target.value)}
           />
-          <p className='text-muted-foreground text-xs'>{t('It is stored encrypted and never shown again.')}</p>
+          <p className='text-muted-foreground text-xs'>
+            {t('It is stored encrypted and never shown again.')}
+          </p>
         </div>
       </div>
     </Dialog>

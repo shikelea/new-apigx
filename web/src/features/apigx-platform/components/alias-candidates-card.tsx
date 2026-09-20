@@ -21,14 +21,78 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
+import {
+  StaticDataTable,
+  type StaticDataTableColumn,
+} from '@/components/data-table'
 import { EmptyState } from '@/components/empty-state'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
-import { bulkConfirmAliases, getAliasCandidates, rejectAliasCandidate } from '../api'
+import {
+  bulkConfirmAliases,
+  getAliasCandidates,
+  rejectAliasCandidate,
+} from '../api'
 import type { AliasCandidate } from '../types'
 import { AliasConfirmDialog } from './alias-confirm-dialog'
+
+export function AliasCandidateMobileCards(props: {
+  items: AliasCandidate[]
+  bulkPending: boolean
+  rejectPending: boolean
+  onConfirm: (candidate: AliasCandidate) => void
+  onBulk: (normalizedModelID: string) => void
+  onReject: (id: number) => void
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <section aria-label={t('Model catalog')} className='space-y-3 md:hidden'>
+      {props.items.map((row) => (
+        <div className='space-y-4 rounded-lg border p-4' key={row.id}>
+          <div className='space-y-3'>
+            <div>
+              <p className='text-muted-foreground text-xs'>
+                {t('Upstream model')}
+              </p>
+              <code className='mt-1 block text-xs font-semibold break-all'>
+                {row.external_model_id}
+              </code>
+            </div>
+            <div>
+              <p className='text-muted-foreground text-xs'>
+                {t('Normalized name')}
+              </p>
+              <code className='mt-1 block text-xs break-all'>
+                {row.normalized_model_id}
+              </code>
+            </div>
+          </div>
+          <div className='grid gap-2'>
+            <Button variant='outline' onClick={() => props.onConfirm(row)}>
+              {t('Confirm')}
+            </Button>
+            <Button
+              variant='outline'
+              disabled={props.bulkPending}
+              onClick={() => props.onBulk(row.normalized_model_id)}
+            >
+              {t('Match all with the same name')}
+            </Button>
+            <Button
+              variant='outline'
+              disabled={props.rejectPending}
+              onClick={() => props.onReject(row.id)}
+            >
+              {t('Reject')}
+            </Button>
+          </div>
+        </div>
+      ))}
+    </section>
+  )
+}
 
 /**
  * 模型目录 · 待确认候选（§4「批量匹配、人工覆盖」）。
@@ -41,7 +105,10 @@ export function AliasCandidatesCard() {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState<AliasCandidate | null>(null)
 
-  const query = useQuery({ queryKey: ['apigx-alias-candidates'], queryFn: () => getAliasCandidates(0) })
+  const query = useQuery({
+    queryKey: ['apigx-alias-candidates'],
+    queryFn: () => getAliasCandidates(0),
+  })
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ['apigx-alias-candidates'] })
@@ -53,15 +120,27 @@ export function AliasCandidatesCard() {
   })
 
   const bulk = useMutation({
-    mutationFn: (normalized: string) => bulkConfirmAliases(normalized, { api_model_id: normalized, modality_type: 1 }),
+    mutationFn: (normalized: string) =>
+      bulkConfirmAliases(normalized, {
+        api_model_id: normalized,
+        modality_type: 1,
+      }),
     onSuccess: refresh,
   })
 
   const items = query.data?.data?.items ?? []
 
   const columns: StaticDataTableColumn<AliasCandidate>[] = [
-    { id: 'external', header: t('Upstream model'), cell: (row) => row.external_model_id },
-    { id: 'normalized', header: t('Normalized name'), cell: (row) => row.normalized_model_id },
+    {
+      id: 'external',
+      header: t('Upstream model'),
+      cell: (row) => row.external_model_id,
+    },
+    {
+      id: 'normalized',
+      header: t('Normalized name'),
+      cell: (row) => row.normalized_model_id,
+    },
     {
       id: 'actions',
       header: '',
@@ -70,10 +149,20 @@ export function AliasCandidatesCard() {
           <Button size='sm' variant='outline' onClick={() => setEditing(row)}>
             {t('Confirm')}
           </Button>
-          <Button size='sm' variant='outline' disabled={bulk.isPending} onClick={() => bulk.mutate(row.normalized_model_id)}>
+          <Button
+            size='sm'
+            variant='outline'
+            disabled={bulk.isPending}
+            onClick={() => bulk.mutate(row.normalized_model_id)}
+          >
             {t('Match all with the same name')}
           </Button>
-          <Button size='sm' variant='outline' disabled={reject.isPending} onClick={() => reject.mutate(row.id)}>
+          <Button
+            size='sm'
+            variant='outline'
+            disabled={reject.isPending}
+            onClick={() => reject.mutate(row.id)}
+          >
             {t('Reject')}
           </Button>
         </div>
@@ -87,11 +176,31 @@ export function AliasCandidatesCard() {
         <CardTitle>{t('Model catalog')}</CardTitle>
       </CardHeader>
       <CardContent className='space-y-4'>
-        <p className='text-muted-foreground text-xs'>{t('Candidates are collected automatically. The plaza only shows a standard model after confirmation.')}</p>
+        <p className='text-muted-foreground text-xs'>
+          {t(
+            'Candidates are collected automatically. The plaza only shows a standard model after confirmation.'
+          )}
+        </p>
         {items.length === 0 ? (
           <EmptyState title={t('No pending candidate')} />
         ) : (
-          <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.id} />
+          <>
+            <AliasCandidateMobileCards
+              items={items}
+              bulkPending={bulk.isPending}
+              rejectPending={reject.isPending}
+              onConfirm={setEditing}
+              onBulk={(normalizedModelID) => bulk.mutate(normalizedModelID)}
+              onReject={(id) => reject.mutate(id)}
+            />
+            <div className='hidden md:block'>
+              <StaticDataTable
+                columns={columns}
+                data={items}
+                getRowKey={(row) => row.id}
+              />
+            </div>
+          </>
         )}
         <AliasConfirmDialog
           candidate={editing}

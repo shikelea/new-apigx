@@ -15,7 +15,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/// 枚举 → i18n 键的映射。
+*/ // 枚举 → i18n 键的映射。
 //
 // 放在纯函数里而不是散在组件中：这样"未知取值必须显示原值"这条约定可以被测试固定住 ——
 // 否则后端新增枚举时界面会静默显示空白或错误文案（规范：枚举与文案统一约定）。
@@ -31,13 +31,12 @@ export function keyPoolModeLabelKey(mode: number): string {
   return `share.keyPool.unknown:${mode}`
 }
 
-/** 默认可见性：0=公开 / 1=邀请 / 2=指定用户 / 3=仅自己。 */
+/** 默认可见性：0=仅自己 / 1=邀请码或指定用户 / 2=公开。 */
 export function visibilityLabelKey(visibility: number): string {
   const map: Record<number, string> = {
-    0: 'share.visibility.public',
-    1: 'share.visibility.invite',
-    2: 'share.visibility.selected',
-    3: 'share.visibility.private',
+    0: 'share.visibility.private',
+    1: 'Limited (invite or assigned users)',
+    2: 'share.visibility.public',
   }
   return map[visibility] ?? `share.visibility.unknown:${visibility}`
 }
@@ -51,14 +50,22 @@ export function healthLabelKey(state: number): string {
   }
   return map[state] ?? `share.health.unknown:${state}`
 }
-/** 上游 Key 状态：0=启用 / 1=停用 / 2=自动禁用（未知回退保留原值）。 */
+/** 上游 Key 状态：0=停用 / 1=启用 / 2=鉴权失效（未知回退保留原值）。 */
 export function keyStatusLabelKey(status: number): string {
   const map: Record<number, string> = {
-    0: 'share.keyStatus.enabled',
-    1: 'share.keyStatus.disabled',
+    0: 'share.keyStatus.disabled',
+    1: 'share.keyStatus.enabled',
     2: 'share.keyStatus.autoDisabled',
   }
   return map[status] ?? `share.keyStatus.unknown:${status}`
+}
+
+export function isUpstreamKeyEnabled(status: number): boolean {
+  return status === 1
+}
+
+export function toggledUpstreamKeyStatus(status: number): number {
+  return isUpstreamKeyEnabled(status) ? 0 : 1
 }
 
 /** 供给状态（未知回退保留原值）。 */

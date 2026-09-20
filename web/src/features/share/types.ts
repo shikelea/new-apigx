@@ -25,7 +25,7 @@ export interface ShareGroup {
   name: string
   /** 简介（不可信文本，按纯文本渲染） */
   description: string
-  /** 默认可见性（0=公开 / 1=邀请 / 2=指定用户 / 3=仅自己） */
+  /** 默认可见性（0=仅自己 / 1=邀请码或指定用户 / 2=公开）。 */
   default_visibility: number
   /** 发布状态 */
   publish_status: number
@@ -36,6 +36,7 @@ export interface ShareGroup {
 export interface ShareChannel {
   id: number
   public_id: string
+  share_group_id: number
   name: string
   /** 客户端协议族（如 openai） */
   protocol: string
@@ -61,6 +62,7 @@ export interface ShareChannelListResponse {
 export interface ChannelDetail {
   id: number
   public_id: string
+  share_group_id: number
   name: string
   protocol: string
   base_url: string
@@ -74,7 +76,7 @@ export interface UpstreamKey {
   id: number
   stable_key_id: string
   name: string
-  /** 0=启用 / 1=停用 / 2=自动禁用（冷却中） */
+  /** 0=停用 / 1=启用 / 2=上游鉴权失效。 */
   status: number
   /** 权重（= 流量占比；同池内归一） */
   weight: number
@@ -93,8 +95,15 @@ export interface Offering {
   upstream_model_id: string
   status: number
   revision: number
-  capabilities?: string[]
+  capabilities?: OfferingCapabilities
   price_rule_id: number
+}
+
+export interface OfferingCapabilities {
+  streaming?: boolean
+  vision?: boolean
+  tools?: boolean
+  reasoning?: boolean
 }
 
 export interface ChannelDetailResponse {
@@ -110,6 +119,60 @@ export interface UpstreamKeyListResponse {
 export interface OfferingListResponse {
   success: boolean
   data?: { items: Offering[] }
+}
+
+export interface PriceMatchDimension {
+  dimension: number
+  unit_scale: number
+  unit_price_micro: number
+  currency: string
+  usd_unit_price_micro: number
+}
+
+export type PriceMatchStatus =
+  | 'matched'
+  | 'unchanged'
+  | 'not_found'
+  | 'manual_override'
+  | 'expression_requires_manual'
+
+export interface PriceMatchCandidate {
+  offering_id: number
+  upstream_model_id: string
+  normalized_model_id: string
+  matched_model_id?: string
+  match_kind?: 'exact' | 'canonical_alias'
+  status: PriceMatchStatus
+  reason?: string
+  confirmable: boolean
+  candidate_token?: string
+  source?: number
+  source_ref?: string
+  pricing_mode?: number
+  dimensions?: PriceMatchDimension[]
+  expression?: string
+  current_version?: number
+  current_locked?: boolean
+}
+
+export interface PriceMatchPreviewResponse {
+  success: boolean
+  data?: {
+    channel_id: number
+    candidates: PriceMatchCandidate[]
+    matched: number
+    requires_manual: number
+  }
+}
+
+export interface PriceMatchConfirmResponse {
+  success: boolean
+  data?: {
+    applied: number
+    pending: number
+    skipped: string[]
+    notes: Record<string, string>
+  }
 }
 /**
  * 容量策略请求体。

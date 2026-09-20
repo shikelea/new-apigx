@@ -128,7 +128,13 @@ func TestUpstreamKeyOwnershipTravelsThroughChannel(t *testing.T) {
 
 	// 改状态同样被拒
 	assert.ErrorIs(t, UpdateUpstreamKeyStatus(db, ownerB, keyA.ID, UpstreamKeyStatusDisabled), ErrNotFound)
+	assert.ErrorIs(t, UpdateUpstreamKeyWeight(db, ownerB, keyA.ID, 3), ErrNotFound)
 	assert.ErrorIs(t, SetUpstreamKeyCooldown(db, ownerB, keyA.ID, common.GetTimestamp()+60), ErrNotFound)
+	require.NoError(t, UpdateUpstreamKeyWeight(db, ownerA, keyA.ID, 3))
+	var weighted UpstreamKey
+	require.NoError(t, db.First(&weighted, keyA.ID).Error)
+	assert.EqualValues(t, 3, weighted.Weight)
+	assert.ErrorIs(t, UpdateUpstreamKeyWeight(db, ownerA, keyA.ID, 0), ErrInvalidArgument)
 }
 
 func TestUpstreamKeyCredentialHistorySurvivesRotationAndDelete(t *testing.T) {
