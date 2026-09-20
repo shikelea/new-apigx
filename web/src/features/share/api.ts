@@ -21,6 +21,7 @@ import { api } from '@/lib/api'
 import type {
   CapacityPolicyPayload,
   ChannelDetailResponse,
+  ChannelRecipeListResponse,
   OfferingListResponse,
   PriceMatchConfirmResponse,
   PriceMatchPreviewResponse,
@@ -36,15 +37,20 @@ export async function getShareGroups(): Promise<ShareGroupListResponse> {
   return res.data
 }
 
+export async function getChannelRecipes(): Promise<ChannelRecipeListResponse> {
+  const res = await api.get('/api/apigx/channels/recipes')
+  return res.data
+}
+
 /**
  * 新建分享渠道（§4「渠道 CRUD」）。
- * 只传配方（名称/协议/上游地址/自己的上游 Key）—— 平台会**代建底座渠道**并绑定，
+ * 只传服务端目录中的稳定配方 ID（以及名称/上游地址/自己的上游 Key）—— 平台会**代建底座渠道**并绑定，
  * 分享者不需要知道管理员侧的渠道 ID。
  */
 export async function createShareChannel(input: {
   share_group_id: number
   name: string
-  protocol: string
+  recipe_id: string
   base_url: string
   upstream_key: string
   key_pool_mode?: number

@@ -57,6 +57,24 @@ export interface ShareChannelListResponse {
   success: boolean
   data?: { items: ShareChannel[] }
 }
+
+/** 服务端拥有的普通用户自助渠道配方。客户端不能提交底座 channel type。 */
+export interface ChannelRecipe {
+  id: string
+  label: string
+  protocol: string
+  default_base_url: string
+  capability_hints: Array<
+    'chat' | 'image' | 'audio' | 'embedding' | 'rerank' | 'video'
+  >
+  requires_base_url: boolean
+  supports_model_fetch: boolean
+}
+
+export interface ChannelRecipeListResponse {
+  success: boolean
+  data?: { items: ChannelRecipe[] }
+}
 // 渠道详情相关类型（字段与后端 `getChannel` / `listUpstreamKeys` / `listOfferings` 一致）。
 
 export interface ChannelDetail {

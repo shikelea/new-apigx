@@ -18,6 +18,7 @@ import (
 	apigxrouting "github.com/QuantumNous/new-api/apigx/routing"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
@@ -409,17 +410,17 @@ func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
 	const ownerA, ownerB int64 = 5001, 5002
 	groupA := env.createGroup(t, ownerA, "A 的分组")
 
-	// 既没给 base_channel_id、也没给"自建配方"（名称/协议/上游地址/Key）→ 400。
+	// 既没给 base_channel_id、也没给服务端目录中的 recipe_id → 400。
 	// 注意：契约在支持「分享者自建渠道」后**有意变化** —— 校验从"必须有 base_channel_id"
 	// 变成"要么绑定既有底座渠道，要么给全自建配方"；这里断言的是后者缺字段时的拒绝。
 	rec, _ := env.do(t, http.MethodPost, "/api/channels", ownerA,
 		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"未绑定"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "base_url")
+	assert.Contains(t, rec.Body.String(), "channel recipe")
 
 	// 配方不完整（给了上游地址但没给 Key）→ 仍然 400，不允许半成品渠道落地
 	rec, _ = env.do(t, http.MethodPost, "/api/channels", ownerA,
-		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"半成品","protocol":"openai","base_url":"https://example.com"}`)
+		`{"share_group_id":`+strconv.FormatInt(groupA, 10)+`,"name":"半成品","recipe_id":"openai-compatible","base_url":"https://example.com"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "upstream_key")
 
@@ -429,6 +430,32 @@ func TestChannelRequiresBaseChannelAndOwnedGroup(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestSelfServeChannelRecipeCatalog(t *testing.T) {
+	env := newTestEnv(t, true)
+	rec, body := env.do(t, http.MethodGet, "/api/channels/recipes", 5099, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, ok := body["data"].(map[string]any)
+	require.True(t, ok)
+	items, ok := data["items"].([]any)
+	require.True(t, ok)
+	require.Len(t, items, 4)
+
+	seen := make(map[string]map[string]any, len(items))
+	for _, raw := range items {
+		item, itemOK := raw.(map[string]any)
+		require.True(t, itemOK)
+		_, leaksBaseType := item["base_channel_type"]
+		assert.False(t, leaksBaseType, "目录不能向普通用户暴露底座渠道类型")
+		seen[item["id"].(string)] = item
+	}
+	newAPIRecipe := seen["new-api"]
+	require.NotNil(t, newAPIRecipe)
+	assert.Equal(t, "new-api", newAPIRecipe["protocol"])
+	assert.Equal(t, true, newAPIRecipe["requires_base_url"])
+	assert.Equal(t, true, newAPIRecipe["supports_model_fetch"])
+	assert.ElementsMatch(t, []any{"chat", "image", "embedding"}, newAPIRecipe["capability_hints"])
+}
+
 func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 	t.Run("ordinary user provisions a complete channel", func(t *testing.T) {
 		env := newTestEnv(t, true)
@@ -436,7 +463,7 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 		groupID := env.createGroup(t, owner, "自建渠道组")
 		secret := "sk-self-serve-complete"
 		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
-			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"`+secret+`"}`,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"自建线路","recipe_id":"new-api","protocol":"anthropic","base_url":"https://example.com/v1","upstream_key":"`+secret+`"}`,
 			common.RoleCommonUser)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), secret)
@@ -444,9 +471,11 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 
 		shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
 		require.NoError(t, err)
+		assert.Equal(t, "new-api", shareChannel.Protocol, "协议必须由服务端配方解析，不能信任客户端 protocol")
 		var baseChannel basemodel.Channel
 		require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error)
 		assert.Equal(t, common.ChannelStatusEnabled, baseChannel.Status)
+		assert.Equal(t, constant.ChannelTypeNewAPI, baseChannel.Type)
 		assert.Equal(t, secret, baseChannel.Key, "底座现有转发路径仍需要明文投影")
 		assert.Equal(t, "https://example.com", baseChannel.GetBaseURL())
 
@@ -454,6 +483,22 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 		require.NoError(t, env.db.Where("channel_id = ?", channelID).First(&storedKey).Error)
 		assert.True(t, secretbox.IsEnvelope(storedKey.SecretRef))
 		assert.NotContains(t, storedKey.SecretRef, secret)
+	})
+
+	t.Run("unknown recipe writes nothing", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5105
+		groupID := env.createGroup(t, owner, "未知配方组")
+		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"未知线路","recipe_id":"channel-type-999","base_url":"https://example.com","upstream_key":"sk-unknown"}`,
+			common.RoleCommonUser)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "unsupported channel recipe")
+		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
+			var count int64
+			require.NoError(t, env.db.Model(target).Count(&count).Error)
+			assert.Zero(t, count)
+		}
 	})
 
 	t.Run("ordinary user cannot bind a global base channel", func(t *testing.T) {
@@ -478,7 +523,7 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 		const owner int64 = 5103
 		groupID := env.createGroup(t, owner, "缺主密钥组")
 		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
-			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"失败线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-no-store"}`,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"失败线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-no-store"}`,
 			common.RoleCommonUser)
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
@@ -502,7 +547,7 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 		t.Cleanup(func() { _ = env.db.Callback().Create().Remove(callbackName) })
 
 		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
-			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-rollback"}`,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"回滚线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-rollback"}`,
 			common.RoleCommonUser)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code)
 		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
@@ -518,7 +563,7 @@ func TestDeleteChannelFailsClosedAndIsIdempotent(t *testing.T) {
 	const owner, stranger int64 = 5201, 5202
 	groupID := env.createGroup(t, owner, "删除生命周期组")
 	rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
-		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"待删除线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-delete"}`,
+		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"待删除线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-delete"}`,
 		common.RoleCommonUser)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	channelID := int64(body["data"].(map[string]any)["id"].(float64))
@@ -664,7 +709,7 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 				const owner int64 = 9_830_001
 				groupID := env.createGroup(t, owner, "三库生命周期组")
 				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
-					`,"name":"三库自建线路","protocol":"openai","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
+					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
 				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				channelID := int64(body["data"].(map[string]any)["id"].(float64))
@@ -685,7 +730,7 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 					}
 				}))
 				failedBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
-					`,"name":"三库回滚线路","protocol":"openai","base_url":"https://example.com","upstream_key":"sk-matrix-rollback"}`
+					`,"name":"三库回滚线路","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-matrix-rollback"}`
 				rec, _ = env.doWithRole(t, http.MethodPost, "/api/channels", owner, failedBody, common.RoleCommonUser)
 				assert.Equal(t, http.StatusInternalServerError, rec.Code)
 				require.NoError(t, tx.Callback().Create().Remove(callbackName))

@@ -16,36 +16,60 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMutation } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
+import { LoadingState } from '@/components/loading-state'
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
 import { handleServerError } from '@/lib/handle-server-error'
 
-import { createShareChannel } from '../api'
-import type { ShareGroup } from '../types'
+import { createShareChannel, getChannelRecipes } from '../api'
+import type { ChannelRecipe, ShareGroup } from '../types'
 
-function protocolLabel(protocol: string): string {
-  if (protocol === 'openai') return 'OpenAI'
-  if (protocol === 'anthropic') return 'Anthropic'
-  return 'Gemini'
+const emptyRecipes: ChannelRecipe[] = []
+
+function capabilityLabelKey(
+  capability: ChannelRecipe['capability_hints'][number]
+): string {
+  if (capability === 'chat') return 'Chat'
+  if (capability === 'image') return 'Image'
+  if (capability === 'audio') return 'Audio'
+  if (capability === 'embedding') return 'Embeddings'
+  if (capability === 'rerank') return 'Rerank'
+  return 'Video'
+}
+
+function recipeLabel(recipe: ChannelRecipe, t: (key: string) => string) {
+  return recipe.id === 'new-api' ? t('New API instance') : recipe.label
 }
 
 /**
  * 新建分享渠道（§4「渠道 CRUD」）。
  *
- * 只需填配方：名称 / 协议 / 上游地址 / **自己的上游 Key** —— 平台代建底座渠道并绑定，
+ * 只需填配方：名称 / 服务端配方 / 上游地址 / **自己的上游 Key** —— 平台代建底座渠道并绑定，
  * 分享者不必（也不应该）知道管理员侧的渠道 ID。
  */
 export function ChannelCreateDialog(props: {
@@ -57,21 +81,52 @@ export function ChannelCreateDialog(props: {
   const { t } = useTranslation()
   const [groupId, setGroupId] = useState('')
   const [name, setName] = useState('')
-  const [protocol, setProtocol] = useState('openai')
+  const [recipeId, setRecipeId] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [upstreamKey, setUpstreamKey] = useState('')
+
+  const recipesQuery = useQuery({
+    queryKey: ['apigx-channel-recipes'],
+    queryFn: getChannelRecipes,
+    enabled: props.open,
+  })
+  const recipes = recipesQuery.data?.data?.items ?? emptyRecipes
+  const selectedRecipe = recipes.find((recipe) => recipe.id === recipeId)
+
+  useEffect(() => {
+    if (!props.open || recipes.length === 0 || selectedRecipe != null) return
+    const firstRecipe = recipes[0]
+    setRecipeId(firstRecipe.id)
+    setBaseUrl((current) =>
+      current.trim() === '' ? firstRecipe.default_base_url : current
+    )
+  }, [props.open, recipes, selectedRecipe])
+
+  const selectRecipe = (nextRecipeId: string) => {
+    const nextRecipe = recipes.find((recipe) => recipe.id === nextRecipeId)
+    if (nextRecipe == null) return
+    setRecipeId(nextRecipe.id)
+    setBaseUrl((current) => {
+      const currentWasDefault =
+        selectedRecipe != null && current === selectedRecipe.default_base_url
+      return current.trim() === '' || currentWasDefault
+        ? nextRecipe.default_base_url
+        : current
+    })
+  }
 
   const create = useMutation({
     mutationFn: () =>
       createShareChannel({
         share_group_id: Number(groupId),
         name: name.trim(),
-        protocol,
+        recipe_id: recipeId,
         base_url: baseUrl.trim(),
         upstream_key: upstreamKey.trim(),
       }),
     onSuccess: (res) => {
       setName('')
+      setRecipeId('')
       setBaseUrl('')
       setUpstreamKey('')
       props.onOpenChange(false)
@@ -81,9 +136,12 @@ export function ChannelCreateDialog(props: {
   })
 
   const missing =
+    recipesQuery.isPending ||
+    recipesQuery.isError ||
+    selectedRecipe == null ||
     groupId === '' ||
     name.trim() === '' ||
-    baseUrl.trim() === '' ||
+    (selectedRecipe?.requires_base_url === true && baseUrl.trim() === '') ||
     upstreamKey.trim() === ''
 
   return (
@@ -106,73 +164,141 @@ export function ChannelCreateDialog(props: {
         </>
       }
     >
-      <div className='space-y-4'>
-        <div className='space-y-2'>
-          <Label>{t('Share group')}</Label>
+      <FieldGroup>
+        <Field>
+          <FieldLabel htmlFor='share-channel-group'>
+            {t('Share group')}
+          </FieldLabel>
           <Select
             value={groupId}
             onValueChange={(next) => setGroupId(next ?? '')}
           >
-            <SelectTrigger aria-label={t('Share group')}>
+            <SelectTrigger id='share-channel-group' className='w-full'>
               <SelectValue placeholder={t('Select a share group')}>
                 {props.groups.find((group) => String(group.id) === groupId)
                   ?.name ?? ''}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              {props.groups.map((group) => (
-                <SelectItem key={group.id} value={String(group.id)}>
-                  {group.name}
-                </SelectItem>
-              ))}
+              <SelectGroup>
+                {props.groups.map((group) => (
+                  <SelectItem key={group.id} value={String(group.id)}>
+                    {group.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
-        </div>
-        <div className='space-y-2'>
-          <Label>{t('Name')}</Label>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor='share-channel-name'>{t('Name')}</FieldLabel>
           <Input
+            id='share-channel-name'
             value={name}
             onChange={(event) => setName(event.target.value)}
             maxLength={64}
           />
-        </div>
-        <div className='space-y-2'>
-          <Label>{t('Protocol')}</Label>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor='share-channel-recipe'>
+            {t('Upstream type')}
+          </FieldLabel>
           <Select
-            value={protocol}
-            onValueChange={(next) => setProtocol(next ?? 'openai')}
+            value={recipeId}
+            disabled={
+              recipesQuery.isPending ||
+              recipesQuery.isError ||
+              recipes.length === 0
+            }
+            onValueChange={(next) => selectRecipe(next ?? '')}
           >
-            <SelectTrigger aria-label={t('Protocol')}>
-              <SelectValue>{protocolLabel(protocol)}</SelectValue>
+            <SelectTrigger id='share-channel-recipe' className='w-full'>
+              <SelectValue placeholder={t('Upstream type')}>
+                {selectedRecipe == null ? '' : recipeLabel(selectedRecipe, t)}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value='openai'>OpenAI</SelectItem>
-              <SelectItem value='anthropic'>Anthropic</SelectItem>
-              <SelectItem value='gemini'>Gemini</SelectItem>
+              <SelectGroup>
+                {recipes.map((recipe) => (
+                  <SelectItem key={recipe.id} value={recipe.id}>
+                    {recipeLabel(recipe, t)}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
-        </div>
-        <div className='space-y-2'>
-          <Label>{t('Upstream address')}</Label>
+          {recipesQuery.isPending ? (
+            <LoadingState inline size='sm' message={t('Loading...')} />
+          ) : null}
+          {recipesQuery.isError ? (
+            <Alert variant='destructive'>
+              <AlertTitle>{t('Loading failed')}</AlertTitle>
+              <AlertDescription>
+                {t('Could not load channel recipes')}
+              </AlertDescription>
+              <AlertAction>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() => void recipesQuery.refetch()}
+                >
+                  {t('Retry')}
+                </Button>
+              </AlertAction>
+            </Alert>
+          ) : null}
+          {!recipesQuery.isPending &&
+          !recipesQuery.isError &&
+          recipes.length === 0 ? (
+            <Alert>
+              <AlertTitle>{t('No channel recipes are available')}</AlertTitle>
+            </Alert>
+          ) : null}
+          {selectedRecipe == null ? null : (
+            <>
+              <FieldDescription>
+                {t('Capabilities')}:{' '}
+                {selectedRecipe.capability_hints
+                  .map((capability) => t(capabilityLabelKey(capability)))
+                  .join(', ')}
+              </FieldDescription>
+              {selectedRecipe.id === 'new-api' ? (
+                <FieldDescription>
+                  {t(
+                    'Use this only when the upstream address is another New API deployment.'
+                  )}
+                </FieldDescription>
+              ) : null}
+            </>
+          )}
+        </Field>
+        <Field>
+          <FieldLabel htmlFor='share-channel-base-url'>
+            {t('Upstream address')}
+          </FieldLabel>
           <Input
+            id='share-channel-base-url'
             placeholder='https://api.example.com'
             value={baseUrl}
             onChange={(event) => setBaseUrl(event.target.value)}
           />
-        </div>
-        <div className='space-y-2'>
-          <Label>{t('Your upstream key')}</Label>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor='share-channel-upstream-key'>
+            {t('Your upstream key')}
+          </FieldLabel>
           <Input
+            id='share-channel-upstream-key'
             type='password'
             autoComplete='off'
             value={upstreamKey}
             onChange={(event) => setUpstreamKey(event.target.value)}
           />
-          <p className='text-muted-foreground text-xs'>
+          <FieldDescription>
             {t('It is stored encrypted and never shown again.')}
-          </p>
-        </div>
-      </div>
+          </FieldDescription>
+        </Field>
+      </FieldGroup>
     </Dialog>
   )
 }

@@ -59,6 +59,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	{
 		// 列出登录用户的**全部**渠道（"我的分享"页需要它；此前只有按分组的 /share-groups/:id/channels）。
 		channels.GET("", h.listAllChannels)
+		channels.GET("/recipes", h.listChannelRecipes)
 		channels.POST("", h.createChannel)
 		channels.GET("/:id", h.getChannel)
 		channels.DELETE("/:id", h.deleteChannel)
@@ -382,9 +383,57 @@ type createChannelRequest struct {
 	ShareGroupID  int64  `json:"share_group_id"`
 	BaseChannelID int64  `json:"base_channel_id"`
 	Name          string `json:"name"`
-	Protocol      string `json:"protocol"`
-	BaseURL       string `json:"base_url"`
-	KeyPoolMode   *int   `json:"key_pool_mode"`
+	RecipeID      string `json:"recipe_id"`
+	// Protocol 仅保留给管理员绑定既有底座渠道的兼容入口。普通用户自建渠道时，
+	// 服务端只接受 RecipeID，并从配方目录重新解析底座类型与协议标识。
+	Protocol    string `json:"protocol"`
+	BaseURL     string `json:"base_url"`
+	KeyPoolMode *int   `json:"key_pool_mode"`
+}
+
+type selfServeChannelRecipe struct {
+	ID                 string   `json:"id"`
+	Label              string   `json:"label"`
+	Protocol           string   `json:"protocol"`
+	DefaultBaseURL     string   `json:"default_base_url"`
+	CapabilityHints    []string `json:"capability_hints"`
+	RequiresBaseURL    bool     `json:"requires_base_url"`
+	SupportsModelFetch bool     `json:"supports_model_fetch"`
+	BaseChannelType    int      `json:"-"`
+}
+
+// selfServeChannelRecipes 是普通分享者唯一可用的底座渠道白名单。
+//
+// capability_hints 只描述当前底座适配器已经实现的能力，并不推断某个上游账户或模型
+// 一定开放这些能力。视频等需要任务插件或专用设置的渠道暂不放进自助目录。
+var selfServeChannelRecipes = []selfServeChannelRecipe{
+	{
+		ID: "openai-compatible", Label: "OpenAI compatible", Protocol: "openai",
+		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeOpenAI),
+		CapabilityHints: []string{"chat", "image", "audio", "embedding", "rerank"},
+		RequiresBaseURL: true, SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeOpenAI,
+	},
+	{
+		ID: "anthropic-compatible", Label: "Anthropic compatible", Protocol: "anthropic",
+		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeAnthropic),
+		CapabilityHints: []string{"chat"}, RequiresBaseURL: true,
+		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeAnthropic,
+	},
+	{
+		ID: "gemini", Label: "Gemini", Protocol: "gemini",
+		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeGemini),
+		CapabilityHints: []string{"chat", "image", "embedding"}, RequiresBaseURL: true,
+		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeGemini,
+	},
+	{
+		ID: "new-api", Label: "New API instance", Protocol: "new-api",
+		CapabilityHints: []string{"chat", "image", "embedding"}, RequiresBaseURL: true,
+		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeNewAPI,
+	},
+}
+
+func (h *handler) listChannelRecipes(c *gin.Context) {
+	ok(c, gin.H{"items": selfServeChannelRecipes})
 }
 
 func (h *handler) createChannel(c *gin.Context) {
@@ -401,12 +450,10 @@ func (h *handler) createChannel(c *gin.Context) {
 	var selfServeKey string
 
 	channel := &apigxmodel.Channel{
-		OwnerUserID:  owner,
-		ShareGroupID: req.ShareGroupID,
-		Name:         strings.TrimSpace(req.Name),
-		Protocol:     req.Protocol,
-		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
-		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
+		OwnerUserID:   owner,
+		ShareGroupID:  req.ShareGroupID,
+		Name:          strings.TrimSpace(req.Name),
+		Protocol:      strings.TrimSpace(req.Protocol),
 		BaseURL:       channelpool.NormalizeUpstreamBaseURL(req.BaseURL),
 		BaseChannelID: req.BaseChannelID,
 		KeyPoolMode:   0, // 默认轮询（计划书 §3.5）
@@ -437,8 +484,21 @@ func (h *handler) createChannel(c *gin.Context) {
 			return
 		}
 	} else {
+		recipe, recipeErr := selfServeChannelRecipeByID(req.RecipeID)
+		if recipeErr != nil {
+			failFromRepo(c, recipeErr)
+			return
+		}
+		channel.Protocol = recipe.Protocol
+		baseURL := strings.TrimSpace(req.BaseURL)
+		if baseURL == "" {
+			baseURL = recipe.DefaultBaseURL
+		}
+		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
+		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
+		channel.BaseURL = channelpool.NormalizeUpstreamBaseURL(baseURL)
 		selfServeKey = strings.TrimSpace(req.UpstreamKey)
-		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey); recipeErr != nil {
+		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey, recipe); recipeErr != nil {
 			failFromRepo(c, recipeErr)
 			return
 		}
@@ -452,7 +512,7 @@ func (h *handler) createChannel(c *gin.Context) {
 		// 底座渠道、APIGX 渠道和初始加密 Key 共用同一个主库事务。任何一步失败都会
 		// 回滚底座行，避免留下仍为 enabled 的孤儿渠道。
 		if err := h.db.Transaction(func(tx *gorm.DB) error {
-			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey); err != nil {
+			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey, recipe); err != nil {
 				return err
 			}
 			if err := apigxmodel.CreateChannel(tx, channel); err != nil {
@@ -2462,18 +2522,22 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
 //   - 分享者只填 名称/协议/上游地址/自己的 Key ⇒ **不需要知道管理员侧的渠道 ID**；
 //   - 上游 Key 用**分享者自己的**，平台不代垫 ⇒ 消耗归分享者；
 //   - 底座渠道的模型列表留空，由「同步模型」按上游实际能力填充（不做猜测）。
-func provisionBaseChannelForShareChannel(db *gorm.DB, channel *apigxmodel.Channel, upstreamKey string) error {
+func provisionBaseChannelForShareChannel(
+	db *gorm.DB,
+	channel *apigxmodel.Channel,
+	upstreamKey string,
+	recipe selfServeChannelRecipe,
+) error {
 	if db == nil {
 		return errors.New("apigx api: nil db")
 	}
-	if err := validateSelfServeChannelRecipe(channel, upstreamKey); err != nil {
+	if err := validateSelfServeChannelRecipe(channel, upstreamKey, recipe); err != nil {
 		return err
 	}
-	channelType, _ := baseChannelTypeForProtocol(channel.Protocol)
 
 	base := basemodel.Channel{
 		Name:        "APIGX-" + channel.Name,
-		Type:        channelType,
+		Type:        recipe.BaseChannelType,
 		Key:         upstreamKey,
 		BaseURL:     &channel.BaseURL,
 		Group:       "default",
@@ -2489,24 +2553,37 @@ func provisionBaseChannelForShareChannel(db *gorm.DB, channel *apigxmodel.Channe
 	return nil
 }
 
-func validateSelfServeChannelRecipe(channel *apigxmodel.Channel, upstreamKey string) error {
+func validateSelfServeChannelRecipe(
+	channel *apigxmodel.Channel,
+	upstreamKey string,
+	recipe selfServeChannelRecipe,
+) error {
 	if channel == nil {
 		return fmt.Errorf("%w: channel is required", apigxmodel.ErrInvalidArgument)
 	}
 	if channel.Name == "" {
 		return fmt.Errorf("%w: name is required", apigxmodel.ErrInvalidArgument)
 	}
-	if channel.BaseURL == "" {
+	if recipe.RequiresBaseURL && channel.BaseURL == "" {
 		return fmt.Errorf("%w: base_url is required", apigxmodel.ErrInvalidArgument)
 	}
 	if upstreamKey == "" {
 		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
 	}
-	_, ok := baseChannelTypeForProtocol(channel.Protocol)
-	if !ok {
-		return fmt.Errorf("%w: unsupported protocol for self-serve channel", apigxmodel.ErrInvalidArgument)
+	if recipe.ID == "" || channel.Protocol != recipe.Protocol {
+		return fmt.Errorf("%w: channel recipe does not match the resolved protocol", apigxmodel.ErrInvalidArgument)
 	}
 	return nil
+}
+
+func selfServeChannelRecipeByID(recipeID string) (selfServeChannelRecipe, error) {
+	recipeID = strings.TrimSpace(recipeID)
+	for _, recipe := range selfServeChannelRecipes {
+		if recipe.ID == recipeID {
+			return recipe, nil
+		}
+	}
+	return selfServeChannelRecipe{}, fmt.Errorf("%w: unsupported channel recipe", apigxmodel.ErrInvalidArgument)
 }
 
 // prepareSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 变成待落库记录。
@@ -2529,20 +2606,6 @@ func prepareSelfServeUpstreamKey(upstreamKey string) (*apigxmodel.UpstreamKey, e
 		Weight:            1,
 		Status:            apigxmodel.UpstreamKeyStatusEnabled,
 	}, nil
-}
-
-// baseChannelTypeForProtocol 把我们的协议标识映射到底座渠道类型（用底座常量，不写死数字）。
-func baseChannelTypeForProtocol(protocol string) (int, bool) {
-	switch protocol {
-	case "openai":
-		return constant.ChannelTypeOpenAI, true
-	case "anthropic":
-		return constant.ChannelTypeAnthropic, true
-	case "gemini":
-		return constant.ChannelTypeGemini, true
-	default:
-		return 0, false
-	}
 }
 
 // upstreamKeyStableID 生成稳定的 Key 标识（同一把 Key 重复登记时保持幂等）。

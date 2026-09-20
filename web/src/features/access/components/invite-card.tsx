@@ -24,17 +24,33 @@ import { useTranslation } from 'react-i18next'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CopyButton } from '@/components/copy-button'
-import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
+import {
+  StaticDataTable,
+  type StaticDataTableColumn,
+} from '@/components/data-table'
 import { EmptyState } from '@/components/empty-state'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { redeemAccessInvite } from '@/features/access-invite/api'
 import type { ShareGroup } from '@/features/share/types'
 
-import { redeemAccessInvite } from '@/features/access-invite/api'
-import { createAccessInvite, listAccessInvites, revokeAccessInvite, type AccessInvite } from '../api'
+import {
+  createAccessInvite,
+  listAccessInvites,
+  revokeAccessInvite,
+  type AccessInvite,
+} from '../api'
 
 /**
  * 访问授权：资源访问邀请（§4「访问授权」/「邀请兑换」）。
@@ -50,6 +66,10 @@ function inviteStatusLabelKey(status: number): string {
   if (status === 1) return 'Revoked'
   if (status === 2) return 'Used up'
   return 'Expired'
+}
+
+function canRevokeInvite(invite: AccessInvite): boolean {
+  return invite.status === 0
 }
 
 export function AccessInviteCard(props: { groups: ShareGroup[] }) {
@@ -73,7 +93,10 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
     },
   })
 
-  const query = useQuery({ queryKey: ['apigx-access-invites'], queryFn: () => listAccessInvites() })
+  const query = useQuery({
+    queryKey: ['apigx-access-invites'],
+    queryFn: () => listAccessInvites(),
+  })
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ['apigx-access-invites'] })
@@ -88,7 +111,10 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
         target_scope_id: Number(groupId),
         max_uses: Number.isFinite(parsedMaxUses) ? parsedMaxUses : 1,
         // 有效期按天换算成 UTC epoch 秒；0 表示不过期
-        expires_at: parsedDays > 0 ? Math.floor(Date.now() / 1000) + parsedDays * 86400 : 0,
+        expires_at:
+          parsedDays > 0
+            ? Math.floor(Date.now() / 1000) + parsedDays * 86400
+            : 0,
         revoke_grants: true,
       })
     },
@@ -112,22 +138,34 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
     String(invite.target_scope_id)
 
   const columns: StaticDataTableColumn<AccessInvite>[] = [
-    { id: 'prefix', header: t('Invite code'), cell: (row) => row.token_prefix + '…' },
+    {
+      id: 'prefix',
+      header: t('Invite code'),
+      cell: (row) => `${row.token_prefix}…`,
+    },
     { id: 'target', header: t('Share group'), cell: (row) => groupName(row) },
     {
       id: 'uses',
       header: t('Uses'),
-      cell: (row) => (row.max_uses > 0 ? row.used_count + ' / ' + row.max_uses : t('Unlimited')),
+      cell: (row) =>
+        row.max_uses > 0
+          ? `${row.used_count} / ${row.max_uses}`
+          : t('Unlimited'),
     },
-    { id: 'status', header: t('Status'), cell: (row) => t(inviteStatusLabelKey(row.status)) },
+    {
+      id: 'status',
+      header: t('Status'),
+      cell: (row) => t(inviteStatusLabelKey(row.status)),
+    },
     {
       id: 'actions',
       header: '',
-      cell: (row) => (
-        <Button variant='outline' size='sm' onClick={() => setRevoking(row)}>
-          {t('Revoke')}
-        </Button>
-      ),
+      cell: (row) =>
+        canRevokeInvite(row) ? (
+          <Button variant='outline' size='sm' onClick={() => setRevoking(row)}>
+            {t('Revoke')}
+          </Button>
+        ) : null,
     },
   ]
 
@@ -140,44 +178,76 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
       </CardHeader>
       <CardContent className='space-y-4'>
         <p className='text-muted-foreground text-sm'>
-          {t('Issue an invite so others can see the resources of a share group.')}
+          {t(
+            'Issue an invite so others can see the resources of a share group.'
+          )}
         </p>
 
-        <div className='grid gap-3 sm:grid-cols-3'>
-          <div className='space-y-2'>
-            <Label>{t('Share group')}</Label>
-            <select
-              className='border-input bg-background h-9 w-full rounded-md border px-3 text-sm'
+        <FieldGroup className='grid gap-3 sm:grid-cols-3'>
+          <Field>
+            <FieldLabel htmlFor='access-invite-group'>
+              {t('Share group')}
+            </FieldLabel>
+            <Select
               value={groupId}
-              onChange={(event) => setGroupId(event.target.value)}
+              disabled={props.groups.length === 0}
+              onValueChange={(next) => setGroupId(next ?? '')}
             >
-              <option value=''>{t('Select a share group')}</option>
-              {props.groups.map((group) => (
-                <option key={group.id} value={String(group.id)}>
-                  {group.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className='space-y-2'>
-            <Label>{t('Max uses')}</Label>
-            <Input value={maxUses} onChange={(event) => setMaxUses(event.target.value)} />
-          </div>
-          <div className='space-y-2'>
-            <Label>{t('Valid days')}</Label>
-            <Input value={days} onChange={(event) => setDays(event.target.value)} />
-          </div>
-        </div>
+              <SelectTrigger id='access-invite-group' className='w-full'>
+                <SelectValue placeholder={t('Select a share group')}>
+                  {props.groups.find((group) => String(group.id) === groupId)
+                    ?.name ?? ''}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {props.groups.map((group) => (
+                    <SelectItem key={group.id} value={String(group.id)}>
+                      {group.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor='access-invite-max-uses'>
+              {t('Max uses')}
+            </FieldLabel>
+            <Input
+              id='access-invite-max-uses'
+              value={maxUses}
+              onChange={(event) => setMaxUses(event.target.value)}
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor='access-invite-days'>
+              {t('Valid days')}
+            </FieldLabel>
+            <Input
+              id='access-invite-days'
+              value={days}
+              onChange={(event) => setDays(event.target.value)}
+            />
+          </Field>
+        </FieldGroup>
 
-        <Button disabled={missing || create.isPending} onClick={() => create.mutate()}>
+        <Button
+          disabled={missing || create.isPending}
+          onClick={() => create.mutate()}
+        >
           {t('Issue invite')}
         </Button>
 
         {issuedToken === '' ? null : (
           <div className='bg-muted/40 space-y-2 rounded-md p-3'>
-            <p className='text-sm font-medium'>{t('Copy the invite code now — it is shown only once.')}</p>
+            <p className='text-sm font-medium'>
+              {t('Copy the invite code now — it is shown only once.')}
+            </p>
             <div className='flex items-center gap-2'>
-              <code className='bg-background rounded px-2 py-1 font-mono text-xs'>{issuedToken}</code>
+              <code className='bg-background rounded px-2 py-1 font-mono text-xs'>
+                {issuedToken}
+              </code>
               <CopyButton value={issuedToken} />
             </div>
           </div>
@@ -186,14 +256,74 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
         {items.length === 0 ? (
           <EmptyState title={t('No invite yet')} />
         ) : (
-          <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.id} />
+          <>
+            <div className='space-y-2 sm:hidden'>
+              {items.map((invite) => (
+                <div
+                  key={invite.id}
+                  className='space-y-3 rounded-md border p-3'
+                >
+                  <div className='flex items-start justify-between gap-3'>
+                    <div className='min-w-0'>
+                      <p className='text-muted-foreground text-xs'>
+                        {t('Invite code')}
+                      </p>
+                      <p className='truncate font-mono text-sm'>
+                        {invite.token_prefix}…
+                      </p>
+                    </div>
+                    <span className='bg-muted rounded-full px-2 py-1 text-xs'>
+                      {t(inviteStatusLabelKey(invite.status))}
+                    </span>
+                  </div>
+                  <dl className='grid grid-cols-2 gap-3 text-sm'>
+                    <div className='min-w-0'>
+                      <dt className='text-muted-foreground text-xs'>
+                        {t('Share group')}
+                      </dt>
+                      <dd className='truncate'>{groupName(invite)}</dd>
+                    </div>
+                    <div>
+                      <dt className='text-muted-foreground text-xs'>
+                        {t('Uses')}
+                      </dt>
+                      <dd>
+                        {invite.max_uses > 0
+                          ? `${invite.used_count} / ${invite.max_uses}`
+                          : t('Unlimited')}
+                      </dd>
+                    </div>
+                  </dl>
+                  {canRevokeInvite(invite) ? (
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      className='w-full'
+                      onClick={() => setRevoking(invite)}
+                    >
+                      {t('Revoke')}
+                    </Button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <div className='hidden sm:block'>
+              <StaticDataTable
+                columns={columns}
+                data={items}
+                getRowKey={(row) => row.id}
+              />
+            </div>
+          </>
         )}
 
         {/* U-2：兑换与发放合并为同一界面（原来是一个独立页面） */}
         <div className='space-y-2 border-t pt-4'>
           <p className='text-sm font-medium'>{t('Redeem an invite')}</p>
           <p className='text-muted-foreground text-sm'>
-            {t('Paste the invite code you received to unlock the shared resources.')}
+            {t(
+              'Paste the invite code you received to unlock the shared resources.'
+            )}
           </p>
           <div className='flex items-end gap-2'>
             <div className='flex-1 space-y-2'>
@@ -224,7 +354,9 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
             </p>
           ) : null}
           {redeem.isError || redeem.data?.success === false ? (
-            <p className='text-destructive text-sm'>{t('Invalid or already used invite code')}</p>
+            <p className='text-destructive text-sm'>
+              {t('Invalid or already used invite code')}
+            </p>
           ) : null}
         </div>
         <ConfirmDialog
@@ -233,7 +365,9 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
             if (!next) setRevoking(null)
           }}
           title={t('Revoke invite')}
-          desc={t('The code stops working and grants created by it are revoked.')}
+          desc={t(
+            'The code stops working and grants created by it are revoked.'
+          )}
           destructive
           confirmText={t('Revoke')}
           isLoading={revoke.isPending}
