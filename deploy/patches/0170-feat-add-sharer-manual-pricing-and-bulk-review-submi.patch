@@ -1,0 +1,1852 @@
+From 89b80286ebe2e34c2a70fe892f08566a77463239 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sun, 20 Sep 2026 20:53:02 +0800
+Subject: [PATCH] feat: add sharer manual pricing and bulk review submission
+
+---
+ apigx/api/share.go                            | 162 +++++++++
+ apigx/api/share_test.go                       |  93 ++++++
+ apigx/model/migrate_matrix_test.go            |  44 +++
+ apigx/model/repo_price.go                     |  63 ++++
+ apigx/model/repo_price_test.go                |  63 ++++
+ apigx/price/mapping_test.go                   |  21 ++
+ apigx/price/match.go                          |  10 +
+ .../share/__tests__/manual-price.test.ts      |  98 ++++++
+ web/src/features/share/api.ts                 |  22 ++
+ .../share/components/channel-detail.tsx       |  79 ++++-
+ .../share/components/manual-price-dialog.tsx  | 314 ++++++++++++++++++
+ .../share/components/price-match-card.tsx     | 199 ++++++-----
+ web/src/features/share/lib/manual-price.ts    |  95 ++++++
+ web/src/features/share/types.ts               |  30 ++
+ web/src/i18n/locales/en.json                  |  19 ++
+ web/src/i18n/locales/fr.json                  |  19 ++
+ web/src/i18n/locales/ja.json                  |  19 ++
+ web/src/i18n/locales/ru.json                  |  19 ++
+ web/src/i18n/locales/vi.json                  |  19 ++
+ web/src/i18n/locales/zh-TW.json               |  19 ++
+ web/src/i18n/locales/zh.json                  |  19 ++
+ 21 files changed, 1343 insertions(+), 83 deletions(-)
+ create mode 100644 web/src/features/share/__tests__/manual-price.test.ts
+ create mode 100644 web/src/features/share/components/manual-price-dialog.tsx
+ create mode 100644 web/src/features/share/lib/manual-price.ts
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 61a1740..ad2e0f5 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -71,6 +71,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
+ 		channels.POST("/:id/offerings", h.createOffering)
+ 		channels.GET("/:id/offerings", h.listOfferings)
++		channels.POST("/:id/offerings/submit", h.submitChannelOfferings)
+ 		channels.POST("/:id/price-match/preview", h.previewChannelPriceMatch)
+ 		channels.POST("/:id/price-match/confirm", h.confirmChannelPriceMatch)
+ 		channels.POST("/:id/fetch-models", h.fetchUpstreamModels)
+@@ -79,6 +80,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	offerings := r.Group("/offerings")
+ 	{
+ 		offerings.PATCH("/:id/capabilities", h.updateOfferingCapabilities)
++		offerings.PUT("/:id/manual-price", h.setOfferingManualPrice)
+ 		offerings.POST("/:id/submit", h.submitOffering)
+ 		offerings.POST("/:id/publish", h.publishOffering)
+ 		offerings.POST("/:id/reject", h.rejectOffering)
+@@ -1475,6 +1477,7 @@ func (h *handler) listOfferings(c *gin.Context) {
+ 			"upstream_model_id": item.UpstreamModelID,
+ 			"status":            item.Status, "revision": item.Revision,
+ 			"capabilities": item.CapabilityOf(), "price_rule_id": item.PriceRuleID,
++			"price_configured": h.offeringHasAcceptedPrice(item.ID),
+ 		})
+ 	}
+ 	ok(c, gin.H{"items": items})
+@@ -1505,6 +1508,119 @@ func (h *handler) updateOfferingCapabilities(c *gin.Context) {
+ 	ok(c, gin.H{"id": id})
+ }
+ 
++const maxManualPriceMicroUSD int64 = 1_000_000_000
++
++type manualOfferingPriceItemRequest struct {
++	Dimension    int    `json:"dimension"`
++	UnitScale    int    `json:"unit_scale"`
++	USDUnitPrice string `json:"usd_unit_price"`
++}
++
++// setOfferingManualPrice appends a locked USD price snapshot for one offering
++// owned by the current sharer. Scope and owner are never accepted from the
++// client, so knowing another offering's numeric ID cannot grant write access.
++func (h *handler) setOfferingManualPrice(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req struct {
++		Items []manualOfferingPriceItemRequest `json:"items"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil || len(req.Items) == 0 {
++		fail(c, http.StatusBadRequest, "invalid_body", "at least one price item is required")
++		return
++	}
++	items := make([]apigxmodel.PriceRuleItem, 0, len(req.Items))
++	for _, input := range req.Items {
++		priceMicro, err := parseManualUSDPriceMicro(input.USDUnitPrice)
++		if err != nil {
++			fail(c, http.StatusBadRequest, "invalid_price", err.Error())
++			return
++		}
++		items = append(items, apigxmodel.PriceRuleItem{
++			Dimension: input.Dimension, UnitScale: input.UnitScale,
++			UnitPriceMicro: priceMicro, Currency: "USD",
++			UsdUnitPriceMicro: priceMicro, UsdState: apigxmodel.UsdStateNotNeeded,
++		})
++	}
++	rule, err := apigxmodel.CreateManualOfferingPriceSnapshot(h.db, owner, id, items)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{
++		"offering_id": id, "price_rule_id": rule.ID, "version": rule.Version,
++		"currency": "USD", "locked": true, "source": "manual",
++	})
++}
++
++// parseManualUSDPriceMicro parses a plain decimal USD value without passing
++// through float64. At most six decimal places are accepted because the
++// immutable price schema stores micro USD.
++func parseManualUSDPriceMicro(raw string) (int64, error) {
++	value := strings.TrimSpace(raw)
++	if value == "" {
++		return 0, fmt.Errorf("price is required")
++	}
++	parts := strings.Split(value, ".")
++	if len(parts) > 2 || (parts[0] == "" && (len(parts) == 1 || parts[1] == "")) {
++		return 0, fmt.Errorf("price must be a plain USD decimal")
++	}
++	whole := parts[0]
++	if whole == "" {
++		whole = "0"
++	}
++	if !decimalDigitsOnly(whole) {
++		return 0, fmt.Errorf("price must be a plain USD decimal")
++	}
++	fraction := ""
++	if len(parts) == 2 {
++		fraction = parts[1]
++		if fraction == "" || !decimalDigitsOnly(fraction) {
++			return 0, fmt.Errorf("price must be a plain USD decimal")
++		}
++		if len(fraction) > 6 {
++			return 0, fmt.Errorf("price supports at most 6 decimal places")
++		}
++	}
++	wholeValue, err := strconv.ParseInt(whole, 10, 64)
++	if err != nil || wholeValue > maxManualPriceMicroUSD/1_000_000 {
++		return 0, fmt.Errorf("price exceeds the supported range")
++	}
++	for len(fraction) < 6 {
++		fraction += "0"
++	}
++	fractionValue := int64(0)
++	if fraction != "" {
++		fractionValue, err = strconv.ParseInt(fraction, 10, 64)
++		if err != nil {
++			return 0, fmt.Errorf("price must be a plain USD decimal")
++		}
++	}
++	micro := wholeValue*1_000_000 + fractionValue
++	if micro > maxManualPriceMicroUSD {
++		return 0, fmt.Errorf("price exceeds the supported range")
++	}
++	return micro, nil
++}
++
++func decimalDigitsOnly(value string) bool {
++	if value == "" {
++		return false
++	}
++	for i := 0; i < len(value); i++ {
++		if value[i] < '0' || value[i] > '9' {
++			return false
++		}
++	}
++	return true
++}
++
+ // submitOffering 分享者提交审核（草稿或已驳回 → 待审核）。
+ func (h *handler) submitOffering(c *gin.Context) {
+ 	owner, valid := h.ownerID(c)
+@@ -1522,6 +1638,52 @@ func (h *handler) submitOffering(c *gin.Context) {
+ 	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPending})
+ }
+ 
++// submitChannelOfferings submits every priced draft/rejected offering in one
++// owned channel. Items that are already pending/published or still unpriced
++// are reported as skipped instead of making the whole action fail.
++func (h *handler) submitChannelOfferings(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	channelID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	offerings, err := apigxmodel.ListModelOfferingsByChannel(h.db, owner, channelID)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	submitted := make([]int64, 0, len(offerings))
++	skipped := make([]gin.H, 0)
++	failed := make([]gin.H, 0)
++	for i := range offerings {
++		offering := &offerings[i]
++		if offering.Status != apigxmodel.OfferingStatusDraft && offering.Status != apigxmodel.OfferingStatusRejected {
++			skipped = append(skipped, gin.H{"offering_id": offering.ID, "reason": "status_not_submittable"})
++			continue
++		}
++		if !h.offeringHasAcceptedPrice(offering.ID) {
++			skipped = append(skipped, gin.H{"offering_id": offering.ID, "reason": "price_not_configured"})
++			continue
++		}
++		if err := apigxmodel.SubmitModelOffering(h.db, owner, offering.ID); err != nil {
++			if errors.Is(err, apigxmodel.ErrInvalidArgument) || errors.Is(err, apigxmodel.ErrNotFound) {
++				skipped = append(skipped, gin.H{"offering_id": offering.ID, "reason": "state_changed"})
++				continue
++			}
++			failed = append(failed, gin.H{"offering_id": offering.ID, "reason": "internal_error"})
++			continue
++		}
++		submitted = append(submitted, offering.ID)
++	}
++	ok(c, gin.H{
++		"channel_id": channelID, "submitted": len(submitted), "submitted_ids": submitted,
++		"skipped": skipped, "failed": failed,
++	})
++}
++
+ // requirePlatformReviewer 判定当前身份是否有权做审核动作（发布 / 驳回）。
+ //
+ // 审核**必须**由平台侧完成：如果分享者能自行发布，"待审核"就形同虚设
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index e1da69b..47da546 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1696,6 +1696,99 @@ func TestPriceRuleEndpointsEnforceAcceptanceInvariants(t *testing.T) {
+ 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+ }
+ 
++func TestSharerCanSetOwnedOfferingManualPriceAndBulkSubmitReadyModels(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner, other int64 = 8921, 8922
++	baseChannelID := nextBaseChannelID()
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseChannelID), Name: "分享者定价底座", Key: "x", Status: common.ChannelStatusEnabled,
++	}).Error)
++	groupID := env.createGroup(t, owner, "分享者定价组")
++	channelID := env.createChannel(t, owner, groupID, baseChannelID)
++
++	createOffering := func(modelID string) int64 {
++		t.Helper()
++		rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++			`{"upstream_model_id":"`+modelID+`"}`)
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++		return int64(body["data"].(map[string]any)["id"].(float64))
++	}
++	readyID := createOffering("owner-priced-ready")
++	unpricedID := createOffering("owner-unpriced")
++	alreadyPendingID := createOffering("owner-already-pending")
++
++	manualPriceBody := `{"items":[` +
++		`{"dimension":0,"unit_scale":0,"usd_unit_price":"2.75"},` +
++		`{"dimension":1,"unit_scale":0,"usd_unit_price":"0"}]}`
++	manualPath := "/api/offerings/" + strconv.FormatInt(readyID, 10) + "/manual-price"
++	rec, body := env.doWithRole(t, http.MethodPut, manualPath, owner, manualPriceBody, common.RoleCommonUser)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	assert.Equal(t, true, body["data"].(map[string]any)["locked"])
++
++	rule, items, err := apigxmodel.GetEffectivePriceRule(env.db, apigxmodel.PriceScopeOffering, readyID, 0)
++	require.NoError(t, err)
++	assert.Equal(t, apigxmodel.PriceRuleSourceManual, rule.Source)
++	assert.True(t, rule.ManualOverride)
++	assert.True(t, rule.Locked)
++	assert.Equal(t, owner, rule.CreatedByUserID)
++	require.Len(t, items, 2)
++	assert.EqualValues(t, 2_750_000, items[0].UnitPriceMicro)
++	assert.EqualValues(t, 0, items[1].UnitPriceMicro, "显式零价必须有价格分项，不能与未知混淆")
++	var storedOffering apigxmodel.ModelOffering
++	require.NoError(t, env.db.Where("id = ?", readyID).First(&storedOffering).Error)
++	assert.Equal(t, rule.ID, storedOffering.PriceRuleID)
++
++	// Knowing an ID is not enough to price another user's offering.
++	rec, _ = env.doWithRole(t, http.MethodPut, manualPath, other, manualPriceBody, common.RoleCommonUser)
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++	// Dimension/unit mismatches are rejected by the immutable price repository.
++	rec, _ = env.doWithRole(t, http.MethodPut,
++		"/api/offerings/"+strconv.FormatInt(unpricedID, 10)+"/manual-price", owner,
++		`{"items":[{"dimension":5,"unit_scale":0,"usd_unit_price":"1"}]}`, common.RoleCommonUser)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	// Keep the API's accepted decimal syntax aligned with the form validator.
++	rec, _ = env.doWithRole(t, http.MethodPut,
++		"/api/offerings/"+strconv.FormatInt(unpricedID, 10)+"/manual-price", owner,
++		`{"items":[{"dimension":0,"unit_scale":0,"usd_unit_price":"1."}]}`, common.RoleCommonUser)
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++
++	// Prepare one already-pending model so the bulk response proves it does not
++	// resubmit non-draft states.
++	pendingPath := "/api/offerings/" + strconv.FormatInt(alreadyPendingID, 10) + "/manual-price"
++	rec, _ = env.doWithRole(t, http.MethodPut, pendingPath, owner,
++		`{"items":[{"dimension":9,"unit_scale":5,"usd_unit_price":"0.01"}]}`, common.RoleCommonUser)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	rec, _ = env.doWithRole(t, http.MethodPost,
++		"/api/offerings/"+strconv.FormatInt(alreadyPendingID, 10)+"/submit", owner, "", common.RoleCommonUser)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	bulkPath := "/api/channels/" + strconv.FormatInt(channelID, 10) + "/offerings/submit"
++	rec, body = env.doWithRole(t, http.MethodPost, bulkPath, owner, "", common.RoleCommonUser)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data := body["data"].(map[string]any)
++	assert.EqualValues(t, 1, data["submitted"])
++	submittedIDs := data["submitted_ids"].([]any)
++	require.Len(t, submittedIDs, 1)
++	assert.EqualValues(t, readyID, submittedIDs[0])
++	skipped := data["skipped"].([]any)
++	require.Len(t, skipped, 2)
++	reasons := map[string]bool{}
++	for _, raw := range skipped {
++		reasons[raw.(map[string]any)["reason"].(string)] = true
++	}
++	assert.True(t, reasons["price_not_configured"])
++	assert.True(t, reasons["status_not_submittable"])
++
++	rec, _ = env.doWithRole(t, http.MethodPost, bulkPath, other, "", common.RoleCommonUser)
++	assert.Equal(t, http.StatusNotFound, rec.Code)
++
++	var ready, unpriced apigxmodel.ModelOffering
++	require.NoError(t, env.db.Where("id = ?", readyID).First(&ready).Error)
++	require.NoError(t, env.db.Where("id = ?", unpricedID).First(&unpriced).Error)
++	assert.Equal(t, apigxmodel.OfferingStatusPending, ready.Status)
++	assert.Equal(t, apigxmodel.OfferingStatusDraft, unpriced.Status)
++}
++
+ func TestChannelPriceMatchPreviewAndConfirmUseServerCandidates(t *testing.T) {
+ 	oldModels := ratio_setting.ModelRatio2JSONString()
+ 	oldCompletions := ratio_setting.CompletionRatio2JSONString()
+diff --git a/apigx/model/migrate_matrix_test.go b/apigx/model/migrate_matrix_test.go
+index 0482873..03df5ff 100644
+--- a/apigx/model/migrate_matrix_test.go
++++ b/apigx/model/migrate_matrix_test.go
+@@ -37,6 +37,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
+ 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
+ 		assertOfferingReviewDialect(t, db)
++		assertManualOfferingPriceDialect(t, db)
+ 		assertQualityRoutingDialect(t, db)
+ 		assertStageCAsyncTaskDialect(t, db)
+ 		assertStageDUsageSummaryDialect(t, db)
+@@ -64,6 +65,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
+ 		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
+ 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+ 		assertOfferingReviewDialect(t, db)
++		assertManualOfferingPriceDialect(t, db)
+ 		assertQualityRoutingDialect(t, db)
+ 		assertStageCAsyncTaskDialect(t, db)
+ 		assertStageDUsageSummaryDialect(t, db)
+@@ -90,6 +92,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
+ 	require.NoError(t, Migrate(db), "第二次迁移必须幂等")
+ 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
+ 	assertOfferingReviewDialect(t, db)
++	assertManualOfferingPriceDialect(t, db)
+ 	assertQualityRoutingDialect(t, db)
+ 	assertStageCAsyncTaskDialect(t, db)
+ 	assertStageDUsageSummaryDialect(t, db)
+@@ -150,6 +153,47 @@ func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
+ 	require.ErrorIs(t, err, errRollbackOfferingReviewMatrix)
+ }
+ 
++var errRollbackManualOfferingPriceMatrix = errors.New("rollback manual offering price matrix fixture")
++
++// assertManualOfferingPriceDialect verifies the owner-scoped manual price
++// snapshot and its optimistic offering attachment on every supported database.
++func assertManualOfferingPriceDialect(t *testing.T, db *gorm.DB) {
++	t.Helper()
++	err := db.Transaction(func(tx *gorm.DB) error {
++		const owner int64 = 9_815_001
++		group := &ShareGroup{OwnerUserID: owner, Name: "manual-price-matrix"}
++		require.NoError(t, CreateShareGroup(tx, group))
++		channel := &Channel{
++			OwnerUserID: owner, ShareGroupID: group.ID,
++			Name: "manual-price-matrix", BaseChannelID: 9_815_001,
++		}
++		require.NoError(t, CreateChannel(tx, channel))
++		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "manual-price-matrix-model"}
++		require.NoError(t, CreateModelOffering(tx, owner, offering))
++
++		rule, priceErr := CreateManualOfferingPriceSnapshot(tx, owner, offering.ID, []PriceRuleItem{{
++			Dimension: 0, UnitScale: 0, UnitPriceMicro: 1_250_000,
++		}})
++		require.NoError(t, priceErr)
++		require.NotNil(t, rule)
++		assert.True(t, rule.ManualOverride)
++		assert.True(t, rule.Locked)
++
++		stored, getErr := GetModelOffering(tx, owner, offering.ID)
++		require.NoError(t, getErr)
++		assert.Equal(t, rule.ID, stored.PriceRuleID)
++		assert.EqualValues(t, offering.Revision+1, stored.Revision)
++		require.NoError(t, SubmitModelOffering(tx, owner, offering.ID))
++
++		_, priceErr = CreateManualOfferingPriceSnapshot(tx, owner, offering.ID, []PriceRuleItem{{
++			Dimension: 0, UnitScale: 0, UnitPriceMicro: 2_000_000,
++		}})
++		assert.ErrorIs(t, priceErr, ErrInvalidArgument)
++		return errRollbackManualOfferingPriceMatrix
++	})
++	assert.ErrorIs(t, err, errRollbackManualOfferingPriceMatrix)
++}
++
+ var errRollbackQualityRoutingMatrix = errors.New("rollback quality routing matrix fixture")
+ 
+ // assertQualityRoutingDialect 覆盖 B4 新依赖的原子桶累加与 6 小时汇总：
+diff --git a/apigx/model/repo_price.go b/apigx/model/repo_price.go
+index 6e0a8fa..1db603d 100644
+--- a/apigx/model/repo_price.go
++++ b/apigx/model/repo_price.go
+@@ -151,6 +151,69 @@ func CreatePriceRuleSnapshot(db *gorm.DB, rule *PriceRule, items []PriceRuleItem
+ 	})
+ }
+ 
++// CreateManualOfferingPriceSnapshot lets one sharer append a locked manual
++// price for an offering they own. The caller supplies only price dimensions;
++// ownership and the immutable offering scope are derived on the server.
++//
++// Manual pricing is deliberately limited to drafts and rejected offerings.
++// Pending or published offerings need a revision workflow instead of silently
++// changing the price while review or routing is already in progress.
++func CreateManualOfferingPriceSnapshot(db *gorm.DB, ownerUserID, offeringID int64, items []PriceRuleItem) (*PriceRule, error) {
++	if db == nil || ownerUserID <= 0 || offeringID <= 0 {
++		return nil, fmt.Errorf("%w: owner and offering are required", ErrInvalidArgument)
++	}
++	if len(items) == 0 {
++		return nil, fmt.Errorf("%w: at least one price dimension is required", ErrInvalidArgument)
++	}
++
++	var created *PriceRule
++	err := db.Transaction(func(tx *gorm.DB) error {
++		offering, err := GetModelOffering(tx, ownerUserID, offeringID)
++		if err != nil {
++			return err
++		}
++		if offering.Status != OfferingStatusDraft && offering.Status != OfferingStatusRejected {
++			return fmt.Errorf("%w: offering %d cannot be priced in status %d", ErrInvalidArgument, offeringID, offering.Status)
++		}
++
++		normalized := make([]PriceRuleItem, len(items))
++		copy(normalized, items)
++		for i := range normalized {
++			normalized[i].Currency = "USD"
++			normalized[i].UsdUnitPriceMicro = normalized[i].UnitPriceMicro
++			normalized[i].UsdState = UsdStateNotNeeded
++		}
++		rule := &PriceRule{
++			ScopeType: PriceScopeOffering, ScopeID: offering.ID,
++			Source: PriceRuleSourceManual, SourceRef: "share-owner-manual",
++			Currency: "USD", PricingMode: PriceModePerDimension,
++			FxRateMicro: 1_000_000, ManualOverride: true, Locked: true,
++			ValidationState: PriceValidationAccepted, CreatedByUserID: ownerUserID,
++		}
++		if err := CreatePriceRuleSnapshot(tx, rule, normalized); err != nil {
++			return err
++		}
++		result := tx.Model(&ModelOffering{}).
++			Where("id = ? AND alive_flag = ? AND revision = ? AND status IN ?",
++				offering.ID, AliveFlagAlive, offering.Revision,
++				[]int{OfferingStatusDraft, OfferingStatusRejected}).
++			Updates(map[string]any{
++				"price_rule_id": rule.ID,
++				"revision":      offering.Revision + 1,
++				"updated_at":    common.GetTimestamp(),
++			})
++		if result.Error != nil {
++			return result.Error
++		}
++		if result.RowsAffected == 0 {
++			return fmt.Errorf("%w: offering %d changed while saving price", ErrInvalidArgument, offering.ID)
++		}
++		created = rule
++		return nil
++	})
++	return created, err
++}
++
+ // GetEffectivePriceRule 取出某作用域在给定时刻**生效**的价格快照。
+ //
+ // 生效判据：`EffectiveFrom <= at` 且（`EffectiveTo == 0` 或 `at < EffectiveTo`），
+diff --git a/apigx/model/repo_price_test.go b/apigx/model/repo_price_test.go
+index 80855ee..09b1575 100644
+--- a/apigx/model/repo_price_test.go
++++ b/apigx/model/repo_price_test.go
+@@ -5,6 +5,7 @@ import (
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
+ )
+ 
+ // T2.1 价格快照的三条不变量（计划书 §阶段 2 验收）。
+@@ -114,6 +115,68 @@ func TestPriceSyncCannotOverwriteManualOverride(t *testing.T) {
+ 	assert.ErrorIs(t, ApplyPriceSync(db, third, nil), ErrPriceLocked, "锁定后同步必须被挡")
+ }
+ 
++func TestManualOfferingPriceRejectsConcurrentOfferingChanges(t *testing.T) {
++	tests := []struct {
++		name   string
++		change func(tx *gorm.DB, offering *ModelOffering) error
++	}{
++		{
++			name: "status changed before price attachment",
++			change: func(tx *gorm.DB, offering *ModelOffering) error {
++				return tx.Model(&ModelOffering{}).Where("id = ?", offering.ID).
++					Update("status", OfferingStatusPending).Error
++			},
++		},
++		{
++			name: "revision changed before price attachment",
++			change: func(tx *gorm.DB, offering *ModelOffering) error {
++				return tx.Model(&ModelOffering{}).Where("id = ?", offering.ID).
++					Update("revision", offering.Revision+1).Error
++			},
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			db := newRepoDB(t)
++			const owner int64 = 9651
++			_, channel := seedGroupAndChannel(t, db, owner)
++			offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "manual-price-race"}
++			require.NoError(t, CreateModelOffering(db, owner, offering))
++
++			callbackName := "g4:change_offering_before_manual_price_attach:" + tt.name
++			require.NoError(t, db.Callback().Create().After("gorm:create").Register(callbackName, func(tx *gorm.DB) {
++				if tx.Statement.Schema == nil || tx.Statement.Schema.Table != (PriceRule{}).TableName() {
++					return
++				}
++				if err := tt.change(tx.Session(&gorm.Session{NewDB: true}), offering); err != nil {
++					tx.AddError(err)
++				}
++			}))
++			t.Cleanup(func() { _ = db.Callback().Create().Remove(callbackName) })
++
++			created, err := CreateManualOfferingPriceSnapshot(db, owner, offering.ID, []PriceRuleItem{{
++				Dimension: 0, UnitScale: 0, UnitPriceMicro: 1_000_000,
++			}})
++			assert.Nil(t, created)
++			assert.ErrorIs(t, err, ErrInvalidArgument)
++
++			var ruleCount int64
++			require.NoError(t, db.Model(&PriceRule{}).
++				Where("scope_type = ? AND scope_id = ?", PriceScopeOffering, offering.ID).
++				Count(&ruleCount).Error)
++			assert.Zero(t, ruleCount, "stale offering state must roll back the new price snapshot")
++
++			var stored ModelOffering
++			require.NoError(t, db.Where("id = ?", offering.ID).First(&stored).Error)
++			assert.Equal(t, OfferingStatusDraft, stored.Status)
++			assert.EqualValues(t, offering.Revision, stored.Revision,
++				"the injected change is part of the rejected transaction and must roll back")
++			assert.Zero(t, stored.PriceRuleID)
++		})
++	}
++}
++
+ // ③ 单渠道同步不污染全局或其他分享者：快照按作用域版本化，互不可见。
+ func TestPriceSnapshotScopesAreIsolated(t *testing.T) {
+ 	db := newRepoDB(t)
+diff --git a/apigx/price/mapping_test.go b/apigx/price/mapping_test.go
+index 7de59b9..f066a1c 100644
+--- a/apigx/price/mapping_test.go
++++ b/apigx/price/mapping_test.go
+@@ -400,6 +400,27 @@ func TestPreviewAndConfirmChannelMatchesUseServerLocalPricing(t *testing.T) {
+ 	}
+ }
+ 
++func TestPreviewChannelMatchesReturnsLockedManualDimensions(t *testing.T) {
++	db := newPriceTestDB(t)
++	const owner int64 = 7651
++	channel := seedShareChannel(t, db, owner, "人工价格回填渠道")
++	offering := seedOffering(t, db, owner, channel, "manual-price-preview")
++	_, err := apigxmodel.CreateManualOfferingPriceSnapshot(db, owner, offering, []apigxmodel.PriceRuleItem{
++		{Dimension: DimensionInputTokens, UnitScale: UnitScalePerMillionTokens, UnitPriceMicro: 2_750_000},
++		{Dimension: DimensionOutputTokens, UnitScale: UnitScalePerMillionTokens, UnitPriceMicro: 0},
++	})
++	require.NoError(t, err)
++
++	preview, err := PreviewChannelMatches(db, owner, channel)
++	require.NoError(t, err)
++	require.Len(t, preview, 1)
++	assert.Equal(t, MatchStatusManualOverride, preview[0].Status)
++	assert.True(t, preview[0].CurrentLocked)
++	require.Len(t, preview[0].Dimensions, 2)
++	assert.EqualValues(t, 2_750_000, preview[0].Dimensions[0].UsdUnitPriceMicro)
++	assert.EqualValues(t, 0, preview[0].Dimensions[1].UsdUnitPriceMicro)
++}
++
+ func TestConfirmChannelMatchesRejectsStaleAndUnauthorizedCandidates(t *testing.T) {
+ 	setPriceTestRatios(t, map[string]float64{"apigx-match-stale": 0.5}, map[string]float64{"apigx-match-stale": 2})
+ 	db := newPriceTestDB(t)
+diff --git a/apigx/price/match.go b/apigx/price/match.go
+index 2d5740b..5898927 100644
+--- a/apigx/price/match.go
++++ b/apigx/price/match.go
+@@ -142,6 +142,16 @@ func buildMatchCandidate(db *gorm.DB, offering *apigxmodel.ModelOffering) (Match
+ 		candidate.CurrentSource = current.Source
+ 		candidate.CurrentLocked = current.Locked || current.ManualOverride
+ 		if candidate.CurrentLocked {
++			for i := range currentItems {
++				usdPrice, ok := apigxmodel.EffectiveUSDUnitPriceMicro(current, &currentItems[i])
++				if !ok {
++					continue
++				}
++				candidate.Dimensions = append(candidate.Dimensions, MatchDimension{
++					Dimension: currentItems[i].Dimension, UnitScale: currentItems[i].UnitScale,
++					UnitPriceMicro: usdPrice, Currency: "USD", UsdUnitPriceMicro: usdPrice,
++				})
++			}
+ 			candidate.Status = MatchStatusManualOverride
+ 			candidate.Reason = "manual_price_active"
+ 			return candidate, nil
+diff --git a/web/src/features/share/__tests__/manual-price.test.ts b/web/src/features/share/__tests__/manual-price.test.ts
+new file mode 100644
+index 0000000..8aac84a
+--- /dev/null
++++ b/web/src/features/share/__tests__/manual-price.test.ts
+@@ -0,0 +1,98 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { describe, expect, it } from 'vitest'
++
++import {
++  manualPriceItemsAreValid,
++  manualPriceItemsForCandidate,
++  microUSDToDecimal,
++  offeringAllowsManualPrice,
++} from '../lib/manual-price'
++
++describe('manual offering price validation', () => {
++  it('only allows the owner workflow to edit draft or rejected offerings', () => {
++    expect(offeringAllowsManualPrice({ status: 0 })).toBe(true)
++    expect(offeringAllowsManualPrice({ status: 3 })).toBe(true)
++    expect(offeringAllowsManualPrice({ status: 1 })).toBe(false)
++    expect(offeringAllowsManualPrice({ status: 2 })).toBe(false)
++    expect(offeringAllowsManualPrice(undefined)).toBe(false)
++  })
++
++  it('converts locked price dimensions back to exact editable USD strings', () => {
++    expect(microUSDToDecimal(0)).toBe('0')
++    expect(microUSDToDecimal(12_500_000)).toBe('12.5')
++    expect(
++      manualPriceItemsForCandidate({
++        offering_id: 9,
++        upstream_model_id: 'priced-model',
++        normalized_model_id: 'priced-model',
++        status: 'manual_override',
++        confirmable: false,
++        dimensions: [
++          {
++            dimension: 0,
++            unit_scale: 0,
++            unit_price_micro: 10_000_000,
++            usd_unit_price_micro: 10_000_000,
++            currency: 'USD',
++          },
++          {
++            dimension: 1,
++            unit_scale: 0,
++            unit_price_micro: 50_000_001,
++            usd_unit_price_micro: 50_000_001,
++            currency: 'USD',
++          },
++        ],
++      })
++    ).toEqual([
++      { dimension: 0, unit_scale: 0, usd_unit_price: '10' },
++      { dimension: 1, unit_scale: 0, usd_unit_price: '50.000001' },
++    ])
++  })
++
++  it('accepts capability-specific units and explicit zero prices', () => {
++    expect(
++      manualPriceItemsAreValid([
++        { dimension: 0, unit_scale: 0, usd_unit_price: '1.25' },
++        { dimension: 5, unit_scale: 2, usd_unit_price: '0' },
++        { dimension: 8, unit_scale: 4, usd_unit_price: '4.400001' },
++      ])
++    ).toBe(true)
++  })
++
++  it('rejects duplicate dimensions, incompatible units, and unsafe decimals', () => {
++    expect(
++      manualPriceItemsAreValid([
++        { dimension: 0, unit_scale: 0, usd_unit_price: '1' },
++        { dimension: 0, unit_scale: 1, usd_unit_price: '2' },
++      ])
++    ).toBe(false)
++    expect(
++      manualPriceItemsAreValid([
++        { dimension: 5, unit_scale: 0, usd_unit_price: '1' },
++      ])
++    ).toBe(false)
++    expect(
++      manualPriceItemsAreValid([
++        { dimension: 9, unit_scale: 5, usd_unit_price: '1.0000001' },
++      ])
++    ).toBe(false)
++  })
++})
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 025ff0b..8b19755 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -19,9 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
+ import { api } from '@/lib/api'
+ 
+ import type {
++  BulkSubmitOfferingsResponse,
+   CapacityPolicyPayload,
+   ChannelDetailResponse,
+   ChannelRecipeListResponse,
++  ManualPriceItemInput,
++  ManualPriceResponse,
+   OfferingListResponse,
+   PriceMatchConfirmResponse,
+   PriceMatchPreviewResponse,
+@@ -144,6 +147,16 @@ export async function confirmChannelPriceMatch(
+   )
+   return res.data
+ }
++
++export async function setOfferingManualPrice(
++  offeringId: number,
++  items: ManualPriceItemInput[]
++): Promise<ManualPriceResponse> {
++  const res = await api.put(`/api/apigx/offerings/${offeringId}/manual-price`, {
++    items,
++  })
++  return res.data
++}
+ /**
+  * 一键获取该渠道的上游模型；`import` 为 true 时**批量导入为草稿供给**。
+  *
+@@ -190,6 +203,15 @@ export async function submitOffering(
+   return res.data
+ }
+ 
++export async function submitChannelOfferings(
++  channelId: number
++): Promise<BulkSubmitOfferingsResponse> {
++  const res = await api.post(
++    `/api/apigx/channels/${channelId}/offerings/submit`
++  )
++  return res.data
++}
++
+ // 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
+ /** 创建分享分组（§4：分组是分享的组织单位，可见性在此设定）。 */
+ export async function createShareGroup(input: {
+diff --git a/web/src/features/share/components/channel-detail.tsx b/web/src/features/share/components/channel-detail.tsx
+index 0bf9b5c..fb3f211 100644
+--- a/web/src/features/share/components/channel-detail.tsx
++++ b/web/src/features/share/components/channel-detail.tsx
+@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
+ */
+ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+ import { Link } from '@tanstack/react-router'
+-import { ArrowLeft, CircleCheck, CircleDashed } from 'lucide-react'
++import { ArrowLeft, CircleCheck, CircleDashed, Send } from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
+ import { toast } from 'sonner'
+ 
+@@ -40,6 +40,7 @@ import {
+   getChannel,
+   getChannelKeys,
+   getChannelOfferings,
++  submitChannelOfferings,
+   submitOffering,
+ } from '../api'
+ import {
+@@ -68,6 +69,28 @@ export function ChannelDetailView(props: { channelId: number }) {
+     onError: (error) => handleServerError(error),
+   })
+ 
++  const submitAllMutation = useMutation({
++    mutationFn: () => submitChannelOfferings(props.channelId),
++    onSuccess: (response) => {
++      const result = response.data
++      const submitted = result?.submitted ?? 0
++      const skipped = result?.skipped.length ?? 0
++      const failed = result?.failed.length ?? 0
++      const notify = failed > 0 ? toast.warning : toast.success
++      notify(
++        t('share.review.bulkResult', {
++          submitted,
++          skipped,
++          failed,
++        })
++      )
++      void queryClient.invalidateQueries({
++        queryKey: ['apigx-channel-offerings', props.channelId],
++      })
++    },
++    onError: (error) => handleServerError(error),
++  })
++
+   const channelQuery = useQuery({
+     queryKey: ['apigx-channel', props.channelId],
+     queryFn: () => getChannel(props.channelId),
+@@ -117,6 +140,11 @@ export function ChannelDetailView(props: { channelId: number }) {
+   const draftOfferings = offerings.filter(
+     (offering) => offering.status === 0 || offering.status === 3
+   ).length
++  const readyToSubmit = offerings.filter(
++    (offering) =>
++      (offering.status === 0 || offering.status === 3) &&
++      offering.price_configured
++  ).length
+   const ready = usableKeys > 0 && publishedOfferings > 0
+ 
+   const offeringColumns: StaticDataTableColumn<Offering>[] = [
+@@ -137,6 +165,19 @@ export function ChannelDetailView(props: { channelId: number }) {
+         </Badge>
+       ),
+     },
++    {
++      id: 'price',
++      header: t('share.offering.price'),
++      cell: (row) => (
++        <Badge variant={row.price_configured ? 'default' : 'outline'}>
++          {t(
++            row.price_configured
++              ? 'share.offering.priced'
++              : 'share.offering.unpriced'
++          )}
++        </Badge>
++      ),
++    },
+     {
+       id: 'capabilities',
+       header: t('share.offering.capabilities'),
+@@ -246,10 +287,26 @@ export function ChannelDetailView(props: { channelId: number }) {
+ 
+           <Card id='models'>
+             <CardHeader>
+-              <CardTitle>{t('share.offerings')}</CardTitle>
+-              <p className='text-muted-foreground text-sm'>
+-                {t('share.models.description')}
+-              </p>
++              <div className='flex flex-wrap items-start justify-between gap-3'>
++                <div>
++                  <CardTitle>{t('share.offerings')}</CardTitle>
++                  <p className='text-muted-foreground mt-1 text-sm'>
++                    {t('share.models.description')}
++                  </p>
++                </div>
++                {draftOfferings > 0 ? (
++                  <Button
++                    size='sm'
++                    disabled={
++                      readyToSubmit === 0 || submitAllMutation.isPending
++                    }
++                    onClick={() => submitAllMutation.mutate()}
++                  >
++                    <Send />
++                    {t('share.review.submitReady', { count: readyToSubmit })}
++                  </Button>
++                ) : null}
++              </div>
+             </CardHeader>
+             <CardContent>
+               {offerings.length === 0 ? (
+@@ -264,10 +321,7 @@ export function ChannelDetailView(props: { channelId: number }) {
+             </CardContent>
+           </Card>
+ 
+-          <PriceMatchCard
+-            channelId={props.channelId}
+-            offeringCount={offerings.length}
+-          />
++          <PriceMatchCard channelId={props.channelId} offerings={offerings} />
+         </div>
+       </SectionPageLayout.Content>
+     </SectionPageLayout>
+@@ -292,6 +346,13 @@ function SubmitOfferingButton(props: {
+   if (props.offering.status !== 0 && props.offering.status !== 3) {
+     return null
+   }
++  if (!props.offering.price_configured) {
++    return (
++      <Button variant='outline' size='sm' render={<a href='#price-match' />}>
++        {t('share.offering.setPriceFirst')}
++      </Button>
++    )
++  }
+   return (
+     <Button
+       variant='outline'
+diff --git a/web/src/features/share/components/manual-price-dialog.tsx b/web/src/features/share/components/manual-price-dialog.tsx
+new file mode 100644
+index 0000000..60c8331
+--- /dev/null
++++ b/web/src/features/share/components/manual-price-dialog.tsx
+@@ -0,0 +1,314 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { useMutation } from '@tanstack/react-query'
++import { Plus, Trash2 } from 'lucide-react'
++import { useEffect, useRef, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++import { toast } from 'sonner'
++
++import { Dialog } from '@/components/dialog'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Label } from '@/components/ui/label'
++import {
++  Select,
++  SelectContent,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from '@/components/ui/select'
++import { handleServerError } from '@/lib/handle-server-error'
++
++import { setOfferingManualPrice } from '../api'
++import {
++  defaultManualPriceUnit,
++  MANUAL_PRICE_UNIT_VALUES_BY_DIMENSION,
++  manualPriceItemsForCandidate,
++  manualPriceItemsAreValid,
++} from '../lib/manual-price'
++import type { ManualPriceItemInput, PriceMatchCandidate } from '../types'
++
++const DIMENSIONS = [
++  { value: 0, label: 'Input tokens' },
++  { value: 1, label: 'Output tokens' },
++  { value: 2, label: 'Cache read tokens' },
++  { value: 3, label: 'Cache write tokens' },
++  { value: 4, label: 'Reasoning tokens' },
++  { value: 5, label: 'Images' },
++  { value: 6, label: 'Input audio' },
++  { value: 7, label: 'Output audio' },
++  { value: 8, label: 'Output video' },
++  { value: 9, label: 'Requests' },
++  { value: 10, label: 'Input characters' },
++  { value: 11, label: 'Documents' },
++] as const
++
++const UNITS = [
++  { value: 0, label: '1M tokens' },
++  { value: 1, label: '1K tokens' },
++  { value: 2, label: 'image' },
++  { value: 3, label: 'second' },
++  { value: 4, label: 'minute' },
++  { value: 5, label: 'request' },
++  { value: 6, label: '1K characters' },
++  { value: 7, label: 'document' },
++] as const
++
++type EditablePriceItem = ManualPriceItemInput & { rowId: number }
++
++export function ManualPriceDialog(props: {
++  candidate: PriceMatchCandidate | null
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  onSaved: () => void
++}) {
++  const { t } = useTranslation()
++  const rowSequence = useRef(0)
++  const [items, setItems] = useState<EditablePriceItem[]>([])
++
++  useEffect(() => {
++    if (!props.open) return
++    setItems(
++      manualPriceItemsForCandidate(props.candidate).map((item) => ({
++        rowId: ++rowSequence.current,
++        ...item,
++      }))
++    )
++  }, [props.candidate, props.open])
++
++  const mutation = useMutation({
++    mutationFn: () =>
++      setOfferingManualPrice(
++        props.candidate?.offering_id ?? 0,
++        items.map(({ rowId: _rowId, ...item }) => item)
++      ),
++    onSuccess: () => {
++      toast.success(t('share.price.manualSaved'))
++      props.onOpenChange(false)
++      props.onSaved()
++    },
++    onError: (error) => handleServerError(error),
++  })
++
++  const valid = manualPriceItemsAreValid(items)
++  const unusedDimension = DIMENSIONS.find(
++    (option) => !items.some((item) => item.dimension === option.value)
++  )
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('share.price.manualTitle')}
++      description={t('share.price.manualDescription', {
++        model: props.candidate?.upstream_model_id ?? '',
++      })}
++      contentClassName='sm:max-w-3xl'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button
++            disabled={!valid || mutation.isPending}
++            onClick={() => mutation.mutate()}
++          >
++            {t('share.price.saveManual')}
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-4'>
++        <div className='bg-muted/30 rounded-lg border p-3 text-sm'>
++          <div className='font-medium'>{t('share.price.manualCurrency')}</div>
++          <p className='text-muted-foreground mt-1 text-xs'>
++            {t('share.price.manualLockNotice')}
++          </p>
++        </div>
++
++        <div className='space-y-3'>
++          {items.map((item) => {
++            const units =
++              MANUAL_PRICE_UNIT_VALUES_BY_DIMENSION[item.dimension] ?? []
++            return (
++              <div
++                key={item.rowId}
++                className='grid gap-3 rounded-lg border p-3 sm:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end'
++              >
++                <div className='space-y-1.5'>
++                  <Label htmlFor={`manual-price-dimension-${item.rowId}`}>
++                    {t('share.price.dimension')}
++                  </Label>
++                  <Select
++                    value={String(item.dimension)}
++                    onValueChange={(next) => {
++                      const dimension = Number(next)
++                      setItems((current) =>
++                        current.map((entry) =>
++                          entry.rowId === item.rowId
++                            ? {
++                                ...entry,
++                                dimension,
++                                unit_scale: defaultManualPriceUnit(dimension),
++                              }
++                            : entry
++                        )
++                      )
++                    }}
++                  >
++                    <SelectTrigger
++                      id={`manual-price-dimension-${item.rowId}`}
++                      className='w-full'
++                    >
++                      <SelectValue>
++                        {t(
++                          DIMENSIONS.find(
++                            (option) => option.value === item.dimension
++                          )?.label ?? 'Usage'
++                        )}
++                      </SelectValue>
++                    </SelectTrigger>
++                    <SelectContent>
++                      {DIMENSIONS.map((option) => (
++                        <SelectItem
++                          key={option.value}
++                          value={String(option.value)}
++                          disabled={items.some(
++                            (entry) =>
++                              entry.rowId !== item.rowId &&
++                              entry.dimension === option.value
++                          )}
++                        >
++                          {t(option.label)}
++                        </SelectItem>
++                      ))}
++                    </SelectContent>
++                  </Select>
++                </div>
++
++                <div className='space-y-1.5'>
++                  <Label htmlFor={`manual-price-unit-${item.rowId}`}>
++                    {t('share.price.unit')}
++                  </Label>
++                  <Select
++                    value={String(item.unit_scale)}
++                    onValueChange={(next) =>
++                      setItems((current) =>
++                        current.map((entry) =>
++                          entry.rowId === item.rowId
++                            ? { ...entry, unit_scale: Number(next) }
++                            : entry
++                        )
++                      )
++                    }
++                  >
++                    <SelectTrigger
++                      id={`manual-price-unit-${item.rowId}`}
++                      className='w-full'
++                    >
++                      <SelectValue>
++                        {t(
++                          UNITS.find(
++                            (option) => option.value === item.unit_scale
++                          )?.label ?? 'unit'
++                        )}
++                      </SelectValue>
++                    </SelectTrigger>
++                    <SelectContent>
++                      {UNITS.filter((option) =>
++                        units.includes(option.value)
++                      ).map((option) => (
++                        <SelectItem
++                          key={option.value}
++                          value={String(option.value)}
++                        >
++                          {t(option.label)}
++                        </SelectItem>
++                      ))}
++                    </SelectContent>
++                  </Select>
++                </div>
++
++                <div className='space-y-1.5'>
++                  <Label htmlFor={`manual-price-value-${item.rowId}`}>
++                    {t('share.price.usdUnitPrice')}
++                  </Label>
++                  <Input
++                    id={`manual-price-value-${item.rowId}`}
++                    inputMode='decimal'
++                    placeholder='0.000000'
++                    value={item.usd_unit_price}
++                    onChange={(event) =>
++                      setItems((current) =>
++                        current.map((entry) =>
++                          entry.rowId === item.rowId
++                            ? {
++                                ...entry,
++                                usd_unit_price: event.target.value,
++                              }
++                            : entry
++                        )
++                      )
++                    }
++                  />
++                </div>
++
++                <Button
++                  type='button'
++                  variant='ghost'
++                  size='icon'
++                  aria-label={t('share.price.removeDimension')}
++                  onClick={() =>
++                    setItems((current) =>
++                      current.filter((entry) => entry.rowId !== item.rowId)
++                    )
++                  }
++                >
++                  <Trash2 />
++                </Button>
++              </div>
++            )
++          })}
++        </div>
++
++        <Button
++          type='button'
++          variant='outline'
++          size='sm'
++          disabled={!unusedDimension}
++          onClick={() => {
++            if (!unusedDimension) return
++            setItems((current) => [
++              ...current,
++              {
++                rowId: ++rowSequence.current,
++                dimension: unusedDimension.value,
++                unit_scale: defaultManualPriceUnit(unusedDimension.value),
++                usd_unit_price: '',
++              },
++            ])
++          }}
++        >
++          <Plus />
++          {t('share.price.addDimension')}
++        </Button>
++      </div>
++    </Dialog>
++  )
++}
+diff --git a/web/src/features/share/components/price-match-card.tsx b/web/src/features/share/components/price-match-card.tsx
+index bd5289f..cbf80fd 100644
+--- a/web/src/features/share/components/price-match-card.tsx
++++ b/web/src/features/share/components/price-match-card.tsx
+@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+ import { useMutation, useQueryClient } from '@tanstack/react-query'
+-import { Calculator, Check, RefreshCw } from 'lucide-react'
++import { Calculator, Check, Pencil, RefreshCw } from 'lucide-react'
+ import { useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ import { toast } from 'sonner'
+@@ -31,7 +31,13 @@ import { Checkbox } from '@/components/ui/checkbox'
+ import { handleServerError } from '@/lib/handle-server-error'
+ 
+ import { confirmChannelPriceMatch, previewChannelPriceMatch } from '../api'
+-import type { PriceMatchCandidate, PriceMatchDimension } from '../types'
++import { offeringAllowsManualPrice } from '../lib/manual-price'
++import type {
++  Offering,
++  PriceMatchCandidate,
++  PriceMatchDimension,
++} from '../types'
++import { ManualPriceDialog } from './manual-price-dialog'
+ 
+ const DIMENSION_LABELS: Record<number, string> = {
+   0: 'Input tokens',
+@@ -61,7 +67,7 @@ const UNIT_LABELS: Record<number, string> = {
+ 
+ export function PriceMatchCard(props: {
+   channelId: number
+-  offeringCount: number
++  offerings: Offering[]
+ }) {
+   const { t } = useTranslation()
+   const queryClient = useQueryClient()
+@@ -69,6 +75,8 @@ export function PriceMatchCard(props: {
+     null
+   )
+   const [selected, setSelected] = useState<Set<number>>(new Set())
++  const [manualCandidate, setManualCandidate] =
++    useState<PriceMatchCandidate | null>(null)
+ 
+   const previewMutation = useMutation({
+     mutationFn: () => previewChannelPriceMatch(props.channelId),
+@@ -114,88 +122,114 @@ export function PriceMatchCard(props: {
+ 
+   const confirmableCount =
+     candidates?.filter((item) => item.confirmable).length ?? 0
++  const editableOfferingIds = new Set(
++    props.offerings
++      .filter(offeringAllowsManualPrice)
++      .map((offering) => offering.id)
++  )
+ 
+   return (
+-    <Card id='price-match'>
+-      <CardHeader className='gap-3 sm:flex-row sm:items-center sm:justify-between'>
+-        <div>
+-          <CardTitle className='flex items-center gap-2'>
+-            <Calculator className='size-4' />
+-            {t('share.price.title')}
+-          </CardTitle>
+-          <p className='text-muted-foreground mt-1 text-sm'>
+-            {t('share.price.description')}
+-          </p>
+-        </div>
+-        <Button
+-          variant='outline'
+-          size='sm'
+-          disabled={props.offeringCount === 0 || previewMutation.isPending}
+-          onClick={() => previewMutation.mutate()}
+-        >
+-          <RefreshCw
+-            className={previewMutation.isPending ? 'animate-spin' : undefined}
+-          />
+-          {t('share.price.preview')}
+-        </Button>
+-      </CardHeader>
+-      <CardContent className='space-y-4'>
+-        {props.offeringCount === 0 ? (
+-          <EmptyState title={t('share.price.noModels')} />
+-        ) : null}
++    <>
++      <Card id='price-match'>
++        <CardHeader className='gap-3 sm:flex-row sm:items-center sm:justify-between'>
++          <div>
++            <CardTitle className='flex items-center gap-2'>
++              <Calculator className='size-4' />
++              {t('share.price.title')}
++            </CardTitle>
++            <p className='text-muted-foreground mt-1 text-sm'>
++              {t('share.price.description')}
++            </p>
++          </div>
++          <Button
++            variant='outline'
++            size='sm'
++            disabled={props.offerings.length === 0 || previewMutation.isPending}
++            onClick={() => previewMutation.mutate()}
++          >
++            <RefreshCw
++              className={previewMutation.isPending ? 'animate-spin' : undefined}
++            />
++            {t('share.price.preview')}
++          </Button>
++        </CardHeader>
++        <CardContent className='space-y-4'>
++          {props.offerings.length === 0 ? (
++            <EmptyState title={t('share.price.noModels')} />
++          ) : null}
+ 
+-        {candidates !== null && candidates.length === 0 ? (
+-          <EmptyState title={t('share.price.noCandidates')} />
+-        ) : null}
++          {candidates !== null && candidates.length === 0 ? (
++            <EmptyState title={t('share.price.noCandidates')} />
++          ) : null}
+ 
+-        {candidates && candidates.length > 0 ? (
+-          <>
+-            <Alert>
+-              <AlertTitle>{t('share.price.previewReady')}</AlertTitle>
+-              <AlertDescription>
+-                {t('share.price.previewSummary', {
+-                  matched: confirmableCount,
+-                  manual: candidates.length - confirmableCount,
+-                })}
+-              </AlertDescription>
+-            </Alert>
+-            <div className='grid gap-3 lg:grid-cols-2'>
+-              {candidates.map((candidate) => (
+-                <PriceCandidate
+-                  key={candidate.offering_id}
+-                  candidate={candidate}
+-                  checked={selected.has(candidate.offering_id)}
+-                  onCheckedChange={(checked) => {
+-                    setSelected((current) => {
+-                      const next = new Set(current)
+-                      if (checked) next.add(candidate.offering_id)
+-                      else next.delete(candidate.offering_id)
+-                      return next
+-                    })
+-                  }}
+-                />
+-              ))}
+-            </div>
+-            <div className='flex justify-end'>
+-              <Button
+-                disabled={selected.size === 0 || confirmMutation.isPending}
+-                onClick={() => confirmMutation.mutate()}
+-              >
+-                <Check />
+-                {t('share.price.confirmSelected', { count: selected.size })}
+-              </Button>
+-            </div>
+-          </>
+-        ) : null}
+-      </CardContent>
+-    </Card>
++          {candidates && candidates.length > 0 ? (
++            <>
++              <Alert>
++                <AlertTitle>{t('share.price.previewReady')}</AlertTitle>
++                <AlertDescription>
++                  {t('share.price.previewSummary', {
++                    matched: confirmableCount,
++                    manual: candidates.length - confirmableCount,
++                  })}
++                </AlertDescription>
++              </Alert>
++              <div className='grid gap-3 lg:grid-cols-2'>
++                {candidates.map((candidate) => (
++                  <PriceCandidate
++                    key={candidate.offering_id}
++                    candidate={candidate}
++                    checked={selected.has(candidate.offering_id)}
++                    allowManualPrice={editableOfferingIds.has(
++                      candidate.offering_id
++                    )}
++                    onCheckedChange={(checked) => {
++                      setSelected((current) => {
++                        const next = new Set(current)
++                        if (checked) next.add(candidate.offering_id)
++                        else next.delete(candidate.offering_id)
++                        return next
++                      })
++                    }}
++                    onManualPrice={() => setManualCandidate(candidate)}
++                  />
++                ))}
++              </div>
++              <div className='flex justify-end'>
++                <Button
++                  disabled={selected.size === 0 || confirmMutation.isPending}
++                  onClick={() => confirmMutation.mutate()}
++                >
++                  <Check />
++                  {t('share.price.confirmSelected', { count: selected.size })}
++                </Button>
++              </div>
++            </>
++          ) : null}
++        </CardContent>
++      </Card>
++      <ManualPriceDialog
++        candidate={manualCandidate}
++        open={manualCandidate !== null}
++        onOpenChange={(open) => {
++          if (!open) setManualCandidate(null)
++        }}
++        onSaved={() => {
++          void queryClient.invalidateQueries({
++            queryKey: ['apigx-channel-offerings', props.channelId],
++          })
++          previewMutation.mutate()
++        }}
++      />
++    </>
+   )
+ }
+ 
+ function PriceCandidate(props: {
+   candidate: PriceMatchCandidate
+   checked: boolean
++  allowManualPrice: boolean
+   onCheckedChange: (checked: boolean) => void
++  onManualPrice: () => void
+ }) {
+   const { t } = useTranslation()
+   const statusKey = `share.price.status.${props.candidate.status}`
+@@ -252,6 +286,23 @@ function PriceCandidate(props: {
+               )}
+             </p>
+           ) : null}
++          {props.allowManualPrice &&
++          !props.candidate.confirmable &&
++          props.candidate.status !== 'unchanged' ? (
++            <Button
++              type='button'
++              variant='outline'
++              size='sm'
++              onClick={props.onManualPrice}
++            >
++              <Pencil />
++              {t(
++                props.candidate.status === 'manual_override'
++                  ? 'share.price.updateManual'
++                  : 'share.price.setManual'
++              )}
++            </Button>
++          ) : null}
+         </div>
+       </div>
+     </article>
+diff --git a/web/src/features/share/lib/manual-price.ts b/web/src/features/share/lib/manual-price.ts
+new file mode 100644
+index 0000000..45792d8
+--- /dev/null
++++ b/web/src/features/share/lib/manual-price.ts
+@@ -0,0 +1,95 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import type {
++  ManualPriceItemInput,
++  Offering,
++  PriceMatchCandidate,
++} from '../types'
++
++export const MANUAL_PRICE_UNIT_VALUES_BY_DIMENSION: Record<number, number[]> = {
++  0: [0, 1],
++  1: [0, 1],
++  2: [0, 1],
++  3: [0, 1],
++  4: [0, 1],
++  5: [2],
++  6: [3, 4],
++  7: [3, 4],
++  8: [3, 4],
++  9: [5],
++  10: [6],
++  11: [7],
++}
++
++export function defaultManualPriceUnit(dimension: number) {
++  return MANUAL_PRICE_UNIT_VALUES_BY_DIMENSION[dimension]?.[0] ?? 5
++}
++
++export function offeringAllowsManualPrice(
++  offering: Pick<Offering, 'status'> | undefined
++) {
++  return offering?.status === 0 || offering?.status === 3
++}
++
++export function microUSDToDecimal(value: number) {
++  const whole = Math.trunc(value / 1_000_000)
++  const fraction = String(value % 1_000_000)
++    .padStart(6, '0')
++    .replace(/0+$/, '')
++  return fraction ? `${whole}.${fraction}` : String(whole)
++}
++
++export function manualPriceItemsForCandidate(
++  candidate: PriceMatchCandidate | null
++): ManualPriceItemInput[] {
++  if (candidate?.dimensions?.length) {
++    return candidate.dimensions.map((item) => ({
++      dimension: item.dimension,
++      unit_scale: item.unit_scale,
++      usd_unit_price: microUSDToDecimal(item.usd_unit_price_micro),
++    }))
++  }
++  const dimensions = candidate?.expression ? [0, 1, 2, 3] : [0, 1]
++  return dimensions.map((dimension) => ({
++    dimension,
++    unit_scale: defaultManualPriceUnit(dimension),
++    usd_unit_price: '',
++  }))
++}
++
++export function manualPriceItemsAreValid(items: ManualPriceItemInput[]) {
++  if (items.length === 0) return false
++  const dimensions = new Set<number>()
++  for (const item of items) {
++    if (dimensions.has(item.dimension)) return false
++    dimensions.add(item.dimension)
++    if (
++      !MANUAL_PRICE_UNIT_VALUES_BY_DIMENSION[item.dimension]?.includes(
++        item.unit_scale
++      )
++    ) {
++      return false
++    }
++    const value = item.usd_unit_price.trim()
++    if (!/^(?:\d+|\d*\.\d{1,6})$/.test(value)) return false
++    const numeric = Number(value)
++    if (!Number.isFinite(numeric) || numeric < 0 || numeric > 1000) return false
++  }
++  return true
++}
+diff --git a/web/src/features/share/types.ts b/web/src/features/share/types.ts
+index c3ba542..5f339a0 100644
+--- a/web/src/features/share/types.ts
++++ b/web/src/features/share/types.ts
+@@ -117,6 +117,7 @@ export interface Offering {
+   revision: number
+   capabilities?: OfferingCapabilities
+   price_rule_id: number
++  price_configured: boolean
+ }
+ 
+ export interface OfferingCapabilities {
+@@ -194,6 +195,35 @@ export interface PriceMatchConfirmResponse {
+     notes: Record<string, string>
+   }
+ }
++
++export interface ManualPriceItemInput {
++  dimension: number
++  unit_scale: number
++  usd_unit_price: string
++}
++
++export interface ManualPriceResponse {
++  success: boolean
++  data?: {
++    offering_id: number
++    price_rule_id: number
++    version: number
++    currency: 'USD'
++    locked: boolean
++    source: 'manual'
++  }
++}
++
++export interface BulkSubmitOfferingsResponse {
++  success: boolean
++  data?: {
++    channel_id: number
++    submitted: number
++    submitted_ids: number[]
++    skipped: { offering_id: number; reason: string }[]
++    failed: { offering_id: number; reason: string }[]
++  }
++}
+ /**
+  * 容量策略请求体。
+  *
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index b0c3c18..b0fbddb 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6871,6 +6871,25 @@
+     "share.models.result.duplicate": "Already present",
+     "share.models.result.failed": "Failed",
+     "share.review.submitted": "Submitted for review.",
++    "share.review.submitReady": "Submit ready models ({{count}})",
++    "share.review.bulkResult": "Submitted {{submitted}}; skipped {{skipped}}; failed {{failed}}.",
++    "share.offering.price": "Price",
++    "share.offering.priced": "Priced",
++    "share.offering.unpriced": "Unpriced",
++    "share.offering.setPriceFirst": "Set price first",
++    "share.price.setManual": "Set manual price",
++    "share.price.updateManual": "Update manual price",
++    "share.price.manualTitle": "Manual model price",
++    "share.price.manualDescription": "Set the USD reference price for {{model}}.",
++    "share.price.manualCurrency": "Currency: USD",
++    "share.price.manualLockNotice": "Saving creates a locked price snapshot. Later system price syncs will not overwrite it.",
++    "share.price.dimension": "Usage dimension",
++    "share.price.unit": "Billing unit",
++    "share.price.usdUnitPrice": "USD per unit",
++    "share.price.addDimension": "Add price item",
++    "share.price.removeDimension": "Remove price item",
++    "share.price.saveManual": "Save manual price",
++    "share.price.manualSaved": "Manual price saved.",
+     "share.capacity.saved": "Capacity policy saved.",
+     "share.channel.overview": "Channel overview",
+     "share.channel.deleted": "Channel deleted.",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index a6f5f9f..2730c8d 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6871,6 +6871,25 @@
+     "share.models.result.duplicate": "Already present",
+     "share.models.result.failed": "Failed",
+     "share.review.submitted": "Submitted for review.",
++    "share.review.submitReady": "Submit ready models ({{count}})",
++    "share.review.bulkResult": "Submitted {{submitted}}; skipped {{skipped}}; failed {{failed}}.",
++    "share.offering.price": "Price",
++    "share.offering.priced": "Priced",
++    "share.offering.unpriced": "Unpriced",
++    "share.offering.setPriceFirst": "Set price first",
++    "share.price.setManual": "Set manual price",
++    "share.price.updateManual": "Update manual price",
++    "share.price.manualTitle": "Manual model price",
++    "share.price.manualDescription": "Set the USD reference price for {{model}}.",
++    "share.price.manualCurrency": "Currency: USD",
++    "share.price.manualLockNotice": "Saving creates a locked price snapshot. Later system price syncs will not overwrite it.",
++    "share.price.dimension": "Usage dimension",
++    "share.price.unit": "Billing unit",
++    "share.price.usdUnitPrice": "USD per unit",
++    "share.price.addDimension": "Add price item",
++    "share.price.removeDimension": "Remove price item",
++    "share.price.saveManual": "Save manual price",
++    "share.price.manualSaved": "Manual price saved.",
+     "share.capacity.saved": "Capacity policy saved.",
+     "share.channel.overview": "Channel overview",
+     "share.channel.deleted": "Channel deleted.",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index f5c1400..7ad8426 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6871,6 +6871,25 @@
+     "share.models.result.duplicate": "Already present",
+     "share.models.result.failed": "Failed",
+     "share.review.submitted": "Submitted for review.",
++    "share.review.submitReady": "Submit ready models ({{count}})",
++    "share.review.bulkResult": "Submitted {{submitted}}; skipped {{skipped}}; failed {{failed}}.",
++    "share.offering.price": "Price",
++    "share.offering.priced": "Priced",
++    "share.offering.unpriced": "Unpriced",
++    "share.offering.setPriceFirst": "Set price first",
++    "share.price.setManual": "Set manual price",
++    "share.price.updateManual": "Update manual price",
++    "share.price.manualTitle": "Manual model price",
++    "share.price.manualDescription": "Set the USD reference price for {{model}}.",
++    "share.price.manualCurrency": "Currency: USD",
++    "share.price.manualLockNotice": "Saving creates a locked price snapshot. Later system price syncs will not overwrite it.",
++    "share.price.dimension": "Usage dimension",
++    "share.price.unit": "Billing unit",
++    "share.price.usdUnitPrice": "USD per unit",
++    "share.price.addDimension": "Add price item",
++    "share.price.removeDimension": "Remove price item",
++    "share.price.saveManual": "Save manual price",
++    "share.price.manualSaved": "Manual price saved.",
+     "share.capacity.saved": "Capacity policy saved.",
+     "share.channel.overview": "Channel overview",
+     "share.channel.deleted": "Channel deleted.",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 0196094..1d536df 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6871,6 +6871,25 @@
+     "share.models.result.duplicate": "Already present",
+     "share.models.result.failed": "Failed",
+     "share.review.submitted": "Submitted for review.",
++    "share.review.submitReady": "Submit ready models ({{count}})",
++    "share.review.bulkResult": "Submitted {{submitted}}; skipped {{skipped}}; failed {{failed}}.",
++    "share.offering.price": "Price",
++    "share.offering.priced": "Priced",
++    "share.offering.unpriced": "Unpriced",
++    "share.offering.setPriceFirst": "Set price first",
++    "share.price.setManual": "Set manual price",
++    "share.price.updateManual": "Update manual price",
++    "share.price.manualTitle": "Manual model price",
++    "share.price.manualDescription": "Set the USD reference price for {{model}}.",
++    "share.price.manualCurrency": "Currency: USD",
++    "share.price.manualLockNotice": "Saving creates a locked price snapshot. Later system price syncs will not overwrite it.",
++    "share.price.dimension": "Usage dimension",
++    "share.price.unit": "Billing unit",
++    "share.price.usdUnitPrice": "USD per unit",
++    "share.price.addDimension": "Add price item",
++    "share.price.removeDimension": "Remove price item",
++    "share.price.saveManual": "Save manual price",
++    "share.price.manualSaved": "Manual price saved.",
+     "share.capacity.saved": "Capacity policy saved.",
+     "share.channel.overview": "Channel overview",
+     "share.channel.deleted": "Channel deleted.",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index a73198f..dcde82e 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6871,6 +6871,25 @@
+     "share.models.result.duplicate": "Already present",
+     "share.models.result.failed": "Failed",
+     "share.review.submitted": "Submitted for review.",
++    "share.review.submitReady": "Submit ready models ({{count}})",
++    "share.review.bulkResult": "Submitted {{submitted}}; skipped {{skipped}}; failed {{failed}}.",
++    "share.offering.price": "Price",
++    "share.offering.priced": "Priced",
++    "share.offering.unpriced": "Unpriced",
++    "share.offering.setPriceFirst": "Set price first",
++    "share.price.setManual": "Set manual price",
++    "share.price.updateManual": "Update manual price",
++    "share.price.manualTitle": "Manual model price",
++    "share.price.manualDescription": "Set the USD reference price for {{model}}.",
++    "share.price.manualCurrency": "Currency: USD",
++    "share.price.manualLockNotice": "Saving creates a locked price snapshot. Later system price syncs will not overwrite it.",
++    "share.price.dimension": "Usage dimension",
++    "share.price.unit": "Billing unit",
++    "share.price.usdUnitPrice": "USD per unit",
++    "share.price.addDimension": "Add price item",
++    "share.price.removeDimension": "Remove price item",
++    "share.price.saveManual": "Save manual price",
++    "share.price.manualSaved": "Manual price saved.",
+     "share.capacity.saved": "Capacity policy saved.",
+     "share.channel.overview": "Channel overview",
+     "share.channel.deleted": "Channel deleted.",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index b6ca972..484cd5a 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6871,6 +6871,25 @@
+     "share.models.result.duplicate": "Already present",
+     "share.models.result.failed": "Failed",
+     "share.review.submitted": "Submitted for review.",
++    "share.review.submitReady": "一鍵提交可審核模型（{{count}}）",
++    "share.review.bulkResult": "已提交 {{submitted}} 個，略過 {{skipped}} 個，失敗 {{failed}} 個。",
++    "share.offering.price": "價格",
++    "share.offering.priced": "已定價",
++    "share.offering.unpriced": "未定價",
++    "share.offering.setPriceFirst": "先設定價格",
++    "share.price.setManual": "手動定價",
++    "share.price.updateManual": "修改人工價格",
++    "share.price.manualTitle": "手動設定模型價格",
++    "share.price.manualDescription": "為 {{model}} 設定 USD 參考價格。",
++    "share.price.manualCurrency": "計價幣別：USD",
++    "share.price.manualLockNotice": "儲存後會建立鎖定的價格快照，後續系統價格同步不會覆蓋它。",
++    "share.price.dimension": "用量維度",
++    "share.price.unit": "計價單位",
++    "share.price.usdUnitPrice": "每單位 USD 價格",
++    "share.price.addDimension": "新增價格項目",
++    "share.price.removeDimension": "刪除價格項目",
++    "share.price.saveManual": "儲存人工價格",
++    "share.price.manualSaved": "人工價格已儲存。",
+     "share.capacity.saved": "Capacity policy saved.",
+     "share.channel.overview": "Channel overview",
+     "share.channel.deleted": "Channel deleted.",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 0ac4c33..3e30f5e 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6871,6 +6871,25 @@
+     "share.models.result.duplicate": "已存在",
+     "share.models.result.failed": "失败",
+     "share.review.submitted": "已提交审核。",
++    "share.review.submitReady": "一键提交可审核模型（{{count}}）",
++    "share.review.bulkResult": "已提交 {{submitted}} 个，跳过 {{skipped}} 个，失败 {{failed}} 个。",
++    "share.offering.price": "价格",
++    "share.offering.priced": "已定价",
++    "share.offering.unpriced": "未定价",
++    "share.offering.setPriceFirst": "先设置价格",
++    "share.price.setManual": "手动定价",
++    "share.price.updateManual": "修改人工价格",
++    "share.price.manualTitle": "手动设置模型价格",
++    "share.price.manualDescription": "为 {{model}} 设置 USD 参考价格。",
++    "share.price.manualCurrency": "计价币种：USD",
++    "share.price.manualLockNotice": "保存后会生成锁定的价格快照，后续系统价格同步不会覆盖它。",
++    "share.price.dimension": "用量维度",
++    "share.price.unit": "计价单位",
++    "share.price.usdUnitPrice": "每单位 USD 价格",
++    "share.price.addDimension": "添加价格项",
++    "share.price.removeDimension": "删除价格项",
++    "share.price.saveManual": "保存人工价格",
++    "share.price.manualSaved": "人工价格已保存。",
+     "share.capacity.saved": "容量策略已保存。",
+     "share.channel.overview": "渠道概览",
+     "share.channel.deleted": "渠道已删除。",
+-- 
+2.53.0.windows.1
+

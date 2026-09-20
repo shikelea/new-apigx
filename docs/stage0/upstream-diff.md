@@ -13,12 +13,12 @@
 ## 当前统计
 
 - 基线提交：`69a50029819a26c53e6babd276d49cfe2f8880ad`
-- 当前 fork 提交：`d83af55402e94c2af893a108bda36e23e22a30f6`
-- 相对基线提交数：**169** 个
-- 变化文件：**284** 个（新增 **170**，修改上游已有文件 **114**）
-- 行数变化：新增 **43,639** 行，删除 **1,258** 行
+- 当前 fork 提交：`89b80286ebe2e34c2a70fe892f08566a77463239`
+- 相对基线提交数：**170** 个
+- 变化文件：**287** 个（新增 **173**，修改上游已有文件 **114**）
+- 行数变化：新增 **44,899** 行，删除 **1,258** 行
 - 未跟踪文件：**0** 个
-- 核对时间：2026-09-20（`git diff --name-status/--shortstat`；阶段 G3 收口）
+- 核对时间：2026-09-20（`git diff --name-status/--shortstat`；阶段 G4 收口）
 
 > 2026-09-18 接手审查纠正：本节此前仍写“修改上游文件 0 个”，那只是阶段 0 早期快照，已经与当前 fork 不符。完整风险与整改顺序见 `docs/TAKEOVER_AUDIT.md`。
 
@@ -46,6 +46,7 @@
 | D-042 | `new-api/apigx/{api,model,relayhook,routing}/**`、`new-api/web/src/features/{access,dashboard,keys,plaza,pricing,share,system-settings}/**`、路由、侧边栏与七种语言文件 | 新用户资源工作流与信息架构 | 广场把资源归为公开、本人私有、别人分享给我，同模型 ID 聚合；卡片保留 6 小时可靠性、P50 延迟、文本吞吐，详情保留来源级指标与参考价格；访问授权拆为 `/access`，共享用量并入数据看板；平台 Key 使用同一资源范围并支持综合自动/指定来源；价格同步应用后刷新当前系统价格基线 | 接手整改 G1：原 ShareGroup、余额、重复用量和资源来源概念直接暴露在普通用户主流程，广场与 Key 的范围语义不一致，价格同步后前端仍可能沿用旧基线；模型卡片质量指标必须保留 | **中**：改变广场可见资源、平台 Key 范围与多个主要页面；已通过前端全量 1771 项、typecheck、构建、Go 全仓、三库矩阵及 390×844/1440×1000 浏览器回归。质量证据仍是本地样本，不代替生产流量和完整设备审计 | 2026-09-20 | 已实施；ShareGroup 继续作为后端授权/发布边界，普通用户一级导航统一为资源范围 |
 | D-043 | `new-api/{model/channel.go,middleware/distributor.go,controller/relay.go,service/relay_error.go}`、`new-api/apigx/relayhook/capacity_hook.go`、分享渠道前端与相关测试 | 渠道内多 Key 故障切换 | 继续复用 New API 的加权轮询/随机、逐 Key 健康、错误判定与跨渠道重试；为单次请求增加失败 Key 排除集合，429/401/可重试临时错误先换当前渠道内未尝试 Key，耗尽后才进入授权范围内的跨渠道路由；渠道内切换不消耗全局重试预算，单池最多尝试 10 把 Key；异步只在提交阶段切换，成功提交后的查询继续使用凭据快照；失败尝试按真实上游状态结束容量租约 | 用户要求轮 Key 与底座多渠道故障切换一致，无需为每把 Key 建渠道或让用户创建多个渠道分组；原逻辑只在选路前选择一次 Key，429 后跨渠道重试，且重试前容量账本会把 Writer 默认 200 误记为成功 | **中高**：触及同步/异步重试热路径与容量尝试账本；已通过真实 HTTP 替身 429→换 Key→换授权渠道、401 在零全局重试下换 Key、400 不换 Key，尝试账本保存真实 429 并在重试前释放旧租约，Go 全仓、三库、前端全量与 168 补丁重建。仍需生产多实例和真实第三方故障压测 | 2026-09-20 | 已实施；正常流量继续使用底座原生 Key 策略，APIGX 只增加请求级排除与同渠道优先接线 |
 | D-044 | `new-api/service/{relay_error.go,relay_error_test.go}`、`new-api/controller/{relay.go,relay_multi_key_failover_test.go}` | 流式响应后的重试边界 | 在底座跨渠道与 APIGX 渠道内重试判定前统一检查 Gin Writer；响应已写出后停止所有 HTTP 重试，顶层只记录错误，不再把 JSON 错误体追加到已开始的 SSE/普通响应；WebSocket 继续走原错误帧 | 锁定基线的重试策略没有响应提交检查；Claude/Gemini 等适配器可能在已输出部分流后返回错误，继续换 Key/渠道会把两个上游响应拼入同一客户端流 | **中**：修改公共错误判定与顶层呈现；已用真实控制器链路验证 Anthropic SSE 输出部分内容后坏帧只访问第一把 Key且无 JSON 拼接，原 429/401/400 行为、Go 全仓和三库矩阵通过；仍需真实第三方流中断压测 | 2026-09-20 | 已实施；未写出响应时继续完整复用原错误策略，写出后严格停止重试 |
+| D-045 | `new-api/apigx/{api/share.go,model/repo_price.go,price/match.go}`、`new-api/web/src/features/share/**`、七种语言文件 | 分享模型人工定价与批量送审 | 动态计价表达式或未知价格保留未知状态并给分享者人工录入入口；服务端按本人 Offering 反查作用域，保存 `manual + locked + accepted` USD 不可变快照，以状态和修订号条件更新防止送审竞态；渠道工作台显示定价状态，支持单项及批量提交已定价草稿/驳回模型，并返回成功、跳过和失败明细 | G4 分享者流程断点：动态表达式提示“手动输入”却没有入口，模型抓取后也不能从渠道工作台一键提交审核 | **低到中**：新增 APIGX owner-scoped API、价格快照和分享工作台交互；已通过权限/事务/并发回滚、SQLite/PostgreSQL/MySQL、前端 1775 项、Go 全仓、生产构建及桌面/移动真实浏览器流程 | 2026-09-20 | 已实施；明确零价与未知价继续分离，待审核/已发布状态禁止改价 |
 | D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
 | D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
 | D-009 | `new-api/middleware/distributor.go` | 必须修改 | 在 `SetupContextForSelectedChannel` 之后、`c.Next()` 之前插入容量钩子：`relayhook.Acquire` 取租约、`defer lease.Release()` 在下游全部结束后释放；满载 429、账本不可用 503。另加 1 行 import | T1.7 第二部分；计划书 §9.2（共享容量控制必须贯穿请求生命周期） | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。改动本身是「新增一个可开关的调用」，默认关闭时行为不变 | 2026-09-16 | 已实施（默认关闭，`APIGX_CAPACITY_ENABLED`） |
@@ -69,7 +70,7 @@
 | D-010 | `new-api/apigx/relayhook/{capacity_hook,capacity_hook_test}.go` | 新增 | 容量接线：`Acquire`/`Lease.Release`/长流续租协程/错误码映射（429+Retry-After、503）；为渠道+平台 Key+用户三维度做同一次原子预留 | T1.7 | 低（新包；不反向依赖 middleware，避免循环） | 2026-09-16 | 已实施 |
 | D-008 | `new-api/apigx/capacity/{capacity,capacity_test}.go` | 新增 | 共享容量账本：Lua 原子预留/幂等归还/租约续租与过期回收；维度 key 覆盖用户·平台 Key·渠道·供给·上游 Key·上游账户池 | T1.7；计划书 §9.2（底座没有渠道/Key 级并发上限，阶段 0 已实测确认） | 无（上游不存在同名路径） | 2026-09-16 | 已实施（核心账本） |
 | D-007 | `new-api/service/apigx_usage_only.go`、`apigx_usage_only_test.go` | 新增（同包） | 模式开关（`APIGX_USAGE_ONLY`）、`UsageOnlyFunding`、`newUsageOnlySession` 及其单测 | T1.6 | 低（新文件；与底座 `funding_source.go` 同包，便于实现 FundingSource 接口而不产生循环依赖） | 2026-09-16 | 已实施 |
-| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0169-fix-stop-relay-retries-after-response-starts.patch`；fork 分支 `apigx`，HEAD `d83af55` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-20 | 169 个补丁从基线重放成功，tree `119822f37a6425f7a838edbdfa9412ef472147f8` 一致 |
+| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0170-feat-add-sharer-manual-pricing-and-bulk-review-submi.patch`；fork 分支 `apigx`，HEAD `89b8028` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-20 | 170 个补丁从基线重放成功，tree `b51450e809e49e5664393a2f02a98b602e182c5a` 一致 |
 
 ## 二、新增文件（不修改上游）
 
