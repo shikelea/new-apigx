@@ -1,0 +1,172 @@
+From d83af55402e94c2af893a108bda36e23e22a30f6 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sun, 20 Sep 2026 19:19:16 +0800
+Subject: [PATCH] fix: stop relay retries after response starts
+
+---
+ controller/relay.go                         |  6 ++++
+ controller/relay_multi_key_failover_test.go | 37 +++++++++++++++++++++
+ service/relay_error.go                      | 14 ++++++++
+ service/relay_error_test.go                 | 16 +++++++++
+ 4 files changed, 73 insertions(+)
+
+diff --git a/controller/relay.go b/controller/relay.go
+index 7457d7d..e89b1e0 100644
+--- a/controller/relay.go
++++ b/controller/relay.go
+@@ -97,11 +97,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
+ 			case types.RelayFormatOpenAIRealtime:
+ 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
+ 			case types.RelayFormatClaude:
++				if c.Writer.Written() {
++					return
++				}
+ 				c.JSON(newAPIError.StatusCode, gin.H{
+ 					"type":  "error",
+ 					"error": newAPIError.ToClaudeError(),
+ 				})
+ 			default:
++				if c.Writer.Written() {
++					return
++				}
+ 				c.JSON(newAPIError.StatusCode, gin.H{
+ 					"error": newAPIError.ToOpenAIError(),
+ 				})
+diff --git a/controller/relay_multi_key_failover_test.go b/controller/relay_multi_key_failover_test.go
+index e463f27..8596f37 100644
+--- a/controller/relay_multi_key_failover_test.go
++++ b/controller/relay_multi_key_failover_test.go
+@@ -118,6 +118,40 @@ func TestRelayDoesNotRotateKeyAfterBadRequest(t *testing.T) {
+ 	assert.Equal(t, []string{"key-a"}, usedKeys)
+ }
+ 
++func TestRelayDoesNotRetryAfterStreamingResponseStarted(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	usedKeys := make([]string, 0, 2)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		key := r.Header.Get("x-api-key")
++		usedKeys = append(usedKeys, key)
++		w.Header().Set("Content-Type", "text/event-stream")
++		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-g3\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"g2-failover-model\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
++		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"))
++		_, _ = w.Write([]byte("data: {not-json}\n\n"))
++	}))
++	t.Cleanup(upstream.Close)
++
++	database := setupRelayMultiKeyDatabase(t)
++	channel := relayMultiKeyChannel(7401, "streaming", upstream.URL, "key-a\nkey-b", []string{"stable-a", "stable-b"})
++	channel.Type = constant.ChannelTypeAnthropic
++	require.NoError(t, database.Create(channel).Error)
++	require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
++	model.InitChannelCache()
++
++	recorder := httptest.NewRecorder()
++	c := newRelayMultiKeyContext(t, recorder, channel, nil)
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
++		strings.NewReader(`{"model":"g2-failover-model","messages":[{"role":"user","content":"hello"}],"stream":true}`))
++	c.Request.Header.Set("Content-Type", "application/json")
++
++	Relay(c, types.RelayFormatOpenAI)
++
++	assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
++	assert.Equal(t, []string{"key-a"}, usedKeys)
++	assert.Contains(t, recorder.Body.String(), "partial")
++	assert.NotContains(t, recorder.Body.String(), `"error":`)
++}
++
+ func newRelayMultiKeyContext(t *testing.T, recorder *httptest.ResponseRecorder, channel *model.Channel, allowedChannelIDs []int) *gin.Context {
+ 	t.Helper()
+ 	c, _ := gin.CreateTestContext(recorder)
+@@ -150,6 +184,7 @@ func setupRelayMultiKeyDatabase(t *testing.T) *gorm.DB {
+ 	previousErrorLog := constant.ErrorLogEnabled
+ 	previousConsumeLog := common.LogConsumeEnabled
+ 	previousCountToken := constant.CountToken
++	previousStreamingTimeout := constant.StreamingTimeout
+ 	previousMainDatabaseType := common.MainDatabaseType()
+ 	previousLogDatabaseType := common.LogDatabaseType()
+ 	previousGroupRatios := ratio_setting.GroupRatio2JSONString()
+@@ -171,6 +206,7 @@ func setupRelayMultiKeyDatabase(t *testing.T) *gorm.DB {
+ 	constant.ErrorLogEnabled = false
+ 	common.LogConsumeEnabled = false
+ 	constant.CountToken = false
++	constant.StreamingTimeout = 30
+ 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+ 	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":0}`))
+ 	t.Setenv("APIGX_SHARED_MODE", "false")
+@@ -185,6 +221,7 @@ func setupRelayMultiKeyDatabase(t *testing.T) *gorm.DB {
+ 		constant.ErrorLogEnabled = previousErrorLog
+ 		common.LogConsumeEnabled = previousConsumeLog
+ 		constant.CountToken = previousCountToken
++		constant.StreamingTimeout = previousStreamingTimeout
+ 		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
+ 		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroupRatios))
+ 		require.NoError(t, sqlDB.Close())
+diff --git a/service/relay_error.go b/service/relay_error.go
+index 44c2c5d..716253f 100644
+--- a/service/relay_error.go
++++ b/service/relay_error.go
+@@ -22,6 +22,13 @@ func ShouldRetryRelayError(c *gin.Context, openaiErr *types.NewAPIError, retryTi
+ 	if openaiErr == nil {
+ 		return false
+ 	}
++	// Once any part of an HTTP response has reached the client, retrying would
++	// append another upstream response to the same body. This is especially
++	// dangerous for SSE, where an adaptor can fail after earlier events were
++	// flushed successfully.
++	if relayResponseStarted(c) {
++		return false
++	}
+ 	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
+ 		return false
+ 	}
+@@ -59,6 +66,9 @@ func ShouldFailoverMultiKeyRelayError(c *gin.Context, openaiErr *types.NewAPIErr
+ 	if openaiErr == nil {
+ 		return false
+ 	}
++	if relayResponseStarted(c) {
++		return false
++	}
+ 	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+ 		return false
+ 	}
+@@ -87,6 +97,10 @@ func ShouldFailoverMultiKeyRelayError(c *gin.Context, openaiErr *types.NewAPIErr
+ 	return operation_setting.ShouldRetryByStatusCode(code)
+ }
+ 
++func relayResponseStarted(c *gin.Context) bool {
++	return c != nil && c.Writer != nil && c.Writer.Written()
++}
++
+ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
+ 	if err == nil {
+ 		return
+diff --git a/service/relay_error_test.go b/service/relay_error_test.go
+index 3fe79fc..ba8b615 100644
+--- a/service/relay_error_test.go
++++ b/service/relay_error_test.go
+@@ -79,6 +79,22 @@ func TestShouldFailoverMultiKeyRelayErrorIgnoresOnlyRetryBudget(t *testing.T) {
+ 	assert.False(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
+ }
+ 
++func TestRelayRetryStopsAfterResponseStarted(t *testing.T) {
++	recorder := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
++
++	rateLimited := types.NewErrorWithStatusCode(errors.New("rate limited"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
++	require.True(t, ShouldRetryRelayError(c, rateLimited, 1))
++	require.True(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
++
++	_, err := c.Writer.Write([]byte("data: partial\n\n"))
++	require.NoError(t, err)
++	require.True(t, c.Writer.Written())
++	assert.False(t, ShouldRetryRelayError(c, rateLimited, 1))
++	assert.False(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
++}
++
+ func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {
+ 	previousDB, previousType := model.DB, common.MainDatabaseType()
+ 	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+-- 
+2.53.0.windows.1
+
