@@ -79,6 +79,22 @@ func TestShouldFailoverMultiKeyRelayErrorIgnoresOnlyRetryBudget(t *testing.T) {
 	assert.False(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
 }
 
+func TestRelayRetryStopsAfterResponseStarted(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	rateLimited := types.NewErrorWithStatusCode(errors.New("rate limited"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
+	require.True(t, ShouldRetryRelayError(c, rateLimited, 1))
+	require.True(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
+
+	_, err := c.Writer.Write([]byte("data: partial\n\n"))
+	require.NoError(t, err)
+	require.True(t, c.Writer.Written())
+	assert.False(t, ShouldRetryRelayError(c, rateLimited, 1))
+	assert.False(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
+}
+
 func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {
 	previousDB, previousType := model.DB, common.MainDatabaseType()
 	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled

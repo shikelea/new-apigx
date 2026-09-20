@@ -22,6 +22,13 @@ func ShouldRetryRelayError(c *gin.Context, openaiErr *types.NewAPIError, retryTi
 	if openaiErr == nil {
 		return false
 	}
+	// Once any part of an HTTP response has reached the client, retrying would
+	// append another upstream response to the same body. This is especially
+	// dangerous for SSE, where an adaptor can fail after earlier events were
+	// flushed successfully.
+	if relayResponseStarted(c) {
+		return false
+	}
 	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		return false
 	}
@@ -59,6 +66,9 @@ func ShouldFailoverMultiKeyRelayError(c *gin.Context, openaiErr *types.NewAPIErr
 	if openaiErr == nil {
 		return false
 	}
+	if relayResponseStarted(c) {
+		return false
+	}
 	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
 		return false
 	}
@@ -85,6 +95,10 @@ func ShouldFailoverMultiKeyRelayError(c *gin.Context, openaiErr *types.NewAPIErr
 		return false
 	}
 	return operation_setting.ShouldRetryByStatusCode(code)
+}
+
+func relayResponseStarted(c *gin.Context) bool {
+	return c != nil && c.Writer != nil && c.Writer.Written()
 }
 
 func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {

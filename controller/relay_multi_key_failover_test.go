@@ -118,6 +118,40 @@ func TestRelayDoesNotRotateKeyAfterBadRequest(t *testing.T) {
 	assert.Equal(t, []string{"key-a"}, usedKeys)
 }
 
+func TestRelayDoesNotRetryAfterStreamingResponseStarted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	usedKeys := make([]string, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("x-api-key")
+		usedKeys = append(usedKeys, key)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-g3\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"g2-failover-model\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {not-json}\n\n"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	database := setupRelayMultiKeyDatabase(t)
+	channel := relayMultiKeyChannel(7401, "streaming", upstream.URL, "key-a\nkey-b", []string{"stable-a", "stable-b"})
+	channel.Type = constant.ChannelTypeAnthropic
+	require.NoError(t, database.Create(channel).Error)
+	require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
+	model.InitChannelCache()
+
+	recorder := httptest.NewRecorder()
+	c := newRelayMultiKeyContext(t, recorder, channel, nil)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"g2-failover-model","messages":[{"role":"user","content":"hello"}],"stream":true}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	Relay(c, types.RelayFormatOpenAI)
+
+	assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Equal(t, []string{"key-a"}, usedKeys)
+	assert.Contains(t, recorder.Body.String(), "partial")
+	assert.NotContains(t, recorder.Body.String(), `"error":`)
+}
+
 func newRelayMultiKeyContext(t *testing.T, recorder *httptest.ResponseRecorder, channel *model.Channel, allowedChannelIDs []int) *gin.Context {
 	t.Helper()
 	c, _ := gin.CreateTestContext(recorder)
@@ -150,6 +184,7 @@ func setupRelayMultiKeyDatabase(t *testing.T) *gorm.DB {
 	previousErrorLog := constant.ErrorLogEnabled
 	previousConsumeLog := common.LogConsumeEnabled
 	previousCountToken := constant.CountToken
+	previousStreamingTimeout := constant.StreamingTimeout
 	previousMainDatabaseType := common.MainDatabaseType()
 	previousLogDatabaseType := common.LogDatabaseType()
 	previousGroupRatios := ratio_setting.GroupRatio2JSONString()
@@ -171,6 +206,7 @@ func setupRelayMultiKeyDatabase(t *testing.T) *gorm.DB {
 	constant.ErrorLogEnabled = false
 	common.LogConsumeEnabled = false
 	constant.CountToken = false
+	constant.StreamingTimeout = 30
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":0}`))
 	t.Setenv("APIGX_SHARED_MODE", "false")
@@ -185,6 +221,7 @@ func setupRelayMultiKeyDatabase(t *testing.T) *gorm.DB {
 		constant.ErrorLogEnabled = previousErrorLog
 		common.LogConsumeEnabled = previousConsumeLog
 		constant.CountToken = previousCountToken
+		constant.StreamingTimeout = previousStreamingTimeout
 		common.SetDatabaseTypes(previousMainDatabaseType, previousLogDatabaseType)
 		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroupRatios))
 		require.NoError(t, sqlDB.Close())
