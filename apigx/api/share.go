@@ -71,6 +71,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
 		channels.POST("/:id/offerings", h.createOffering)
 		channels.GET("/:id/offerings", h.listOfferings)
+		channels.POST("/:id/offerings/submit", h.submitChannelOfferings)
 		channels.POST("/:id/price-match/preview", h.previewChannelPriceMatch)
 		channels.POST("/:id/price-match/confirm", h.confirmChannelPriceMatch)
 		channels.POST("/:id/fetch-models", h.fetchUpstreamModels)
@@ -79,6 +80,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	offerings := r.Group("/offerings")
 	{
 		offerings.PATCH("/:id/capabilities", h.updateOfferingCapabilities)
+		offerings.PUT("/:id/manual-price", h.setOfferingManualPrice)
 		offerings.POST("/:id/submit", h.submitOffering)
 		offerings.POST("/:id/publish", h.publishOffering)
 		offerings.POST("/:id/reject", h.rejectOffering)
@@ -1475,6 +1477,7 @@ func (h *handler) listOfferings(c *gin.Context) {
 			"upstream_model_id": item.UpstreamModelID,
 			"status":            item.Status, "revision": item.Revision,
 			"capabilities": item.CapabilityOf(), "price_rule_id": item.PriceRuleID,
+			"price_configured": h.offeringHasAcceptedPrice(item.ID),
 		})
 	}
 	ok(c, gin.H{"items": items})
@@ -1505,6 +1508,119 @@ func (h *handler) updateOfferingCapabilities(c *gin.Context) {
 	ok(c, gin.H{"id": id})
 }
 
+const maxManualPriceMicroUSD int64 = 1_000_000_000
+
+type manualOfferingPriceItemRequest struct {
+	Dimension    int    `json:"dimension"`
+	UnitScale    int    `json:"unit_scale"`
+	USDUnitPrice string `json:"usd_unit_price"`
+}
+
+// setOfferingManualPrice appends a locked USD price snapshot for one offering
+// owned by the current sharer. Scope and owner are never accepted from the
+// client, so knowing another offering's numeric ID cannot grant write access.
+func (h *handler) setOfferingManualPrice(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req struct {
+		Items []manualOfferingPriceItemRequest `json:"items"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Items) == 0 {
+		fail(c, http.StatusBadRequest, "invalid_body", "at least one price item is required")
+		return
+	}
+	items := make([]apigxmodel.PriceRuleItem, 0, len(req.Items))
+	for _, input := range req.Items {
+		priceMicro, err := parseManualUSDPriceMicro(input.USDUnitPrice)
+		if err != nil {
+			fail(c, http.StatusBadRequest, "invalid_price", err.Error())
+			return
+		}
+		items = append(items, apigxmodel.PriceRuleItem{
+			Dimension: input.Dimension, UnitScale: input.UnitScale,
+			UnitPriceMicro: priceMicro, Currency: "USD",
+			UsdUnitPriceMicro: priceMicro, UsdState: apigxmodel.UsdStateNotNeeded,
+		})
+	}
+	rule, err := apigxmodel.CreateManualOfferingPriceSnapshot(h.db, owner, id, items)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{
+		"offering_id": id, "price_rule_id": rule.ID, "version": rule.Version,
+		"currency": "USD", "locked": true, "source": "manual",
+	})
+}
+
+// parseManualUSDPriceMicro parses a plain decimal USD value without passing
+// through float64. At most six decimal places are accepted because the
+// immutable price schema stores micro USD.
+func parseManualUSDPriceMicro(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, fmt.Errorf("price is required")
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) > 2 || (parts[0] == "" && (len(parts) == 1 || parts[1] == "")) {
+		return 0, fmt.Errorf("price must be a plain USD decimal")
+	}
+	whole := parts[0]
+	if whole == "" {
+		whole = "0"
+	}
+	if !decimalDigitsOnly(whole) {
+		return 0, fmt.Errorf("price must be a plain USD decimal")
+	}
+	fraction := ""
+	if len(parts) == 2 {
+		fraction = parts[1]
+		if fraction == "" || !decimalDigitsOnly(fraction) {
+			return 0, fmt.Errorf("price must be a plain USD decimal")
+		}
+		if len(fraction) > 6 {
+			return 0, fmt.Errorf("price supports at most 6 decimal places")
+		}
+	}
+	wholeValue, err := strconv.ParseInt(whole, 10, 64)
+	if err != nil || wholeValue > maxManualPriceMicroUSD/1_000_000 {
+		return 0, fmt.Errorf("price exceeds the supported range")
+	}
+	for len(fraction) < 6 {
+		fraction += "0"
+	}
+	fractionValue := int64(0)
+	if fraction != "" {
+		fractionValue, err = strconv.ParseInt(fraction, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("price must be a plain USD decimal")
+		}
+	}
+	micro := wholeValue*1_000_000 + fractionValue
+	if micro > maxManualPriceMicroUSD {
+		return 0, fmt.Errorf("price exceeds the supported range")
+	}
+	return micro, nil
+}
+
+func decimalDigitsOnly(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // submitOffering 分享者提交审核（草稿或已驳回 → 待审核）。
 func (h *handler) submitOffering(c *gin.Context) {
 	owner, valid := h.ownerID(c)
@@ -1520,6 +1636,52 @@ func (h *handler) submitOffering(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{"id": id, "status": apigxmodel.OfferingStatusPending})
+}
+
+// submitChannelOfferings submits every priced draft/rejected offering in one
+// owned channel. Items that are already pending/published or still unpriced
+// are reported as skipped instead of making the whole action fail.
+func (h *handler) submitChannelOfferings(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	channelID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	offerings, err := apigxmodel.ListModelOfferingsByChannel(h.db, owner, channelID)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	submitted := make([]int64, 0, len(offerings))
+	skipped := make([]gin.H, 0)
+	failed := make([]gin.H, 0)
+	for i := range offerings {
+		offering := &offerings[i]
+		if offering.Status != apigxmodel.OfferingStatusDraft && offering.Status != apigxmodel.OfferingStatusRejected {
+			skipped = append(skipped, gin.H{"offering_id": offering.ID, "reason": "status_not_submittable"})
+			continue
+		}
+		if !h.offeringHasAcceptedPrice(offering.ID) {
+			skipped = append(skipped, gin.H{"offering_id": offering.ID, "reason": "price_not_configured"})
+			continue
+		}
+		if err := apigxmodel.SubmitModelOffering(h.db, owner, offering.ID); err != nil {
+			if errors.Is(err, apigxmodel.ErrInvalidArgument) || errors.Is(err, apigxmodel.ErrNotFound) {
+				skipped = append(skipped, gin.H{"offering_id": offering.ID, "reason": "state_changed"})
+				continue
+			}
+			failed = append(failed, gin.H{"offering_id": offering.ID, "reason": "internal_error"})
+			continue
+		}
+		submitted = append(submitted, offering.ID)
+	}
+	ok(c, gin.H{
+		"channel_id": channelID, "submitted": len(submitted), "submitted_ids": submitted,
+		"skipped": skipped, "failed": failed,
+	})
 }
 
 // requirePlatformReviewer 判定当前身份是否有权做审核动作（发布 / 驳回）。

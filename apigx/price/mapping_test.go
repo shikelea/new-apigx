@@ -400,6 +400,27 @@ func TestPreviewAndConfirmChannelMatchesUseServerLocalPricing(t *testing.T) {
 	}
 }
 
+func TestPreviewChannelMatchesReturnsLockedManualDimensions(t *testing.T) {
+	db := newPriceTestDB(t)
+	const owner int64 = 7651
+	channel := seedShareChannel(t, db, owner, "人工价格回填渠道")
+	offering := seedOffering(t, db, owner, channel, "manual-price-preview")
+	_, err := apigxmodel.CreateManualOfferingPriceSnapshot(db, owner, offering, []apigxmodel.PriceRuleItem{
+		{Dimension: DimensionInputTokens, UnitScale: UnitScalePerMillionTokens, UnitPriceMicro: 2_750_000},
+		{Dimension: DimensionOutputTokens, UnitScale: UnitScalePerMillionTokens, UnitPriceMicro: 0},
+	})
+	require.NoError(t, err)
+
+	preview, err := PreviewChannelMatches(db, owner, channel)
+	require.NoError(t, err)
+	require.Len(t, preview, 1)
+	assert.Equal(t, MatchStatusManualOverride, preview[0].Status)
+	assert.True(t, preview[0].CurrentLocked)
+	require.Len(t, preview[0].Dimensions, 2)
+	assert.EqualValues(t, 2_750_000, preview[0].Dimensions[0].UsdUnitPriceMicro)
+	assert.EqualValues(t, 0, preview[0].Dimensions[1].UsdUnitPriceMicro)
+}
+
 func TestConfirmChannelMatchesRejectsStaleAndUnauthorizedCandidates(t *testing.T) {
 	setPriceTestRatios(t, map[string]float64{"apigx-match-stale": 0.5}, map[string]float64{"apigx-match-stale": 2})
 	db := newPriceTestDB(t)

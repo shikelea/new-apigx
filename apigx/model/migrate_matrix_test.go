@@ -37,6 +37,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 		assert.Len(t, apigxTableNames(t, db), ExpectedTableCount)
 		assertOfferingReviewDialect(t, db)
+		assertManualOfferingPriceDialect(t, db)
 		assertQualityRoutingDialect(t, db)
 		assertStageCAsyncTaskDialect(t, db)
 		assertStageDUsageSummaryDialect(t, db)
@@ -64,6 +65,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		// MySQL 与 PostgreSQL 的表清单都用 information_schema 查
 		assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
 		assertOfferingReviewDialect(t, db)
+		assertManualOfferingPriceDialect(t, db)
 		assertQualityRoutingDialect(t, db)
 		assertStageCAsyncTaskDialect(t, db)
 		assertStageDUsageSummaryDialect(t, db)
@@ -90,6 +92,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	require.NoError(t, Migrate(db), "第二次迁移必须幂等")
 	assert.Len(t, informationSchemaApigxTables(t, db, "table_name"), ExpectedTableCount)
 	assertOfferingReviewDialect(t, db)
+	assertManualOfferingPriceDialect(t, db)
 	assertQualityRoutingDialect(t, db)
 	assertStageCAsyncTaskDialect(t, db)
 	assertStageDUsageSummaryDialect(t, db)
@@ -148,6 +151,47 @@ func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
 		return errRollbackOfferingReviewMatrix
 	})
 	require.ErrorIs(t, err, errRollbackOfferingReviewMatrix)
+}
+
+var errRollbackManualOfferingPriceMatrix = errors.New("rollback manual offering price matrix fixture")
+
+// assertManualOfferingPriceDialect verifies the owner-scoped manual price
+// snapshot and its optimistic offering attachment on every supported database.
+func assertManualOfferingPriceDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const owner int64 = 9_815_001
+		group := &ShareGroup{OwnerUserID: owner, Name: "manual-price-matrix"}
+		require.NoError(t, CreateShareGroup(tx, group))
+		channel := &Channel{
+			OwnerUserID: owner, ShareGroupID: group.ID,
+			Name: "manual-price-matrix", BaseChannelID: 9_815_001,
+		}
+		require.NoError(t, CreateChannel(tx, channel))
+		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "manual-price-matrix-model"}
+		require.NoError(t, CreateModelOffering(tx, owner, offering))
+
+		rule, priceErr := CreateManualOfferingPriceSnapshot(tx, owner, offering.ID, []PriceRuleItem{{
+			Dimension: 0, UnitScale: 0, UnitPriceMicro: 1_250_000,
+		}})
+		require.NoError(t, priceErr)
+		require.NotNil(t, rule)
+		assert.True(t, rule.ManualOverride)
+		assert.True(t, rule.Locked)
+
+		stored, getErr := GetModelOffering(tx, owner, offering.ID)
+		require.NoError(t, getErr)
+		assert.Equal(t, rule.ID, stored.PriceRuleID)
+		assert.EqualValues(t, offering.Revision+1, stored.Revision)
+		require.NoError(t, SubmitModelOffering(tx, owner, offering.ID))
+
+		_, priceErr = CreateManualOfferingPriceSnapshot(tx, owner, offering.ID, []PriceRuleItem{{
+			Dimension: 0, UnitScale: 0, UnitPriceMicro: 2_000_000,
+		}})
+		assert.ErrorIs(t, priceErr, ErrInvalidArgument)
+		return errRollbackManualOfferingPriceMatrix
+	})
+	assert.ErrorIs(t, err, errRollbackManualOfferingPriceMatrix)
 }
 
 var errRollbackQualityRoutingMatrix = errors.New("rollback quality routing matrix fixture")

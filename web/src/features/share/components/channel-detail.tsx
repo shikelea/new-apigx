@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowLeft, CircleCheck, CircleDashed } from 'lucide-react'
+import { ArrowLeft, CircleCheck, CircleDashed, Send } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -40,6 +40,7 @@ import {
   getChannel,
   getChannelKeys,
   getChannelOfferings,
+  submitChannelOfferings,
   submitOffering,
 } from '../api'
 import {
@@ -61,6 +62,28 @@ export function ChannelDetailView(props: { channelId: number }) {
     mutationFn: (offeringId: number) => submitOffering(offeringId),
     onSuccess: () => {
       toast.success(t('share.review.submitted'))
+      void queryClient.invalidateQueries({
+        queryKey: ['apigx-channel-offerings', props.channelId],
+      })
+    },
+    onError: (error) => handleServerError(error),
+  })
+
+  const submitAllMutation = useMutation({
+    mutationFn: () => submitChannelOfferings(props.channelId),
+    onSuccess: (response) => {
+      const result = response.data
+      const submitted = result?.submitted ?? 0
+      const skipped = result?.skipped.length ?? 0
+      const failed = result?.failed.length ?? 0
+      const notify = failed > 0 ? toast.warning : toast.success
+      notify(
+        t('share.review.bulkResult', {
+          submitted,
+          skipped,
+          failed,
+        })
+      )
       void queryClient.invalidateQueries({
         queryKey: ['apigx-channel-offerings', props.channelId],
       })
@@ -117,6 +140,11 @@ export function ChannelDetailView(props: { channelId: number }) {
   const draftOfferings = offerings.filter(
     (offering) => offering.status === 0 || offering.status === 3
   ).length
+  const readyToSubmit = offerings.filter(
+    (offering) =>
+      (offering.status === 0 || offering.status === 3) &&
+      offering.price_configured
+  ).length
   const ready = usableKeys > 0 && publishedOfferings > 0
 
   const offeringColumns: StaticDataTableColumn<Offering>[] = [
@@ -134,6 +162,19 @@ export function ChannelDetailView(props: { channelId: number }) {
       cell: (row) => (
         <Badge variant={row.status === 2 ? 'default' : 'outline'}>
           {t(offeringStatusLabelKey(row.status))}
+        </Badge>
+      ),
+    },
+    {
+      id: 'price',
+      header: t('share.offering.price'),
+      cell: (row) => (
+        <Badge variant={row.price_configured ? 'default' : 'outline'}>
+          {t(
+            row.price_configured
+              ? 'share.offering.priced'
+              : 'share.offering.unpriced'
+          )}
         </Badge>
       ),
     },
@@ -246,10 +287,26 @@ export function ChannelDetailView(props: { channelId: number }) {
 
           <Card id='models'>
             <CardHeader>
-              <CardTitle>{t('share.offerings')}</CardTitle>
-              <p className='text-muted-foreground text-sm'>
-                {t('share.models.description')}
-              </p>
+              <div className='flex flex-wrap items-start justify-between gap-3'>
+                <div>
+                  <CardTitle>{t('share.offerings')}</CardTitle>
+                  <p className='text-muted-foreground mt-1 text-sm'>
+                    {t('share.models.description')}
+                  </p>
+                </div>
+                {draftOfferings > 0 ? (
+                  <Button
+                    size='sm'
+                    disabled={
+                      readyToSubmit === 0 || submitAllMutation.isPending
+                    }
+                    onClick={() => submitAllMutation.mutate()}
+                  >
+                    <Send />
+                    {t('share.review.submitReady', { count: readyToSubmit })}
+                  </Button>
+                ) : null}
+              </div>
             </CardHeader>
             <CardContent>
               {offerings.length === 0 ? (
@@ -264,10 +321,7 @@ export function ChannelDetailView(props: { channelId: number }) {
             </CardContent>
           </Card>
 
-          <PriceMatchCard
-            channelId={props.channelId}
-            offeringCount={offerings.length}
-          />
+          <PriceMatchCard channelId={props.channelId} offerings={offerings} />
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>
@@ -291,6 +345,13 @@ function SubmitOfferingButton(props: {
   const { t } = useTranslation()
   if (props.offering.status !== 0 && props.offering.status !== 3) {
     return null
+  }
+  if (!props.offering.price_configured) {
+    return (
+      <Button variant='outline' size='sm' render={<a href='#price-match' />}>
+        {t('share.offering.setPriceFirst')}
+      </Button>
+    )
   }
   return (
     <Button

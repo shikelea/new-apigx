@@ -151,6 +151,69 @@ func CreatePriceRuleSnapshot(db *gorm.DB, rule *PriceRule, items []PriceRuleItem
 	})
 }
 
+// CreateManualOfferingPriceSnapshot lets one sharer append a locked manual
+// price for an offering they own. The caller supplies only price dimensions;
+// ownership and the immutable offering scope are derived on the server.
+//
+// Manual pricing is deliberately limited to drafts and rejected offerings.
+// Pending or published offerings need a revision workflow instead of silently
+// changing the price while review or routing is already in progress.
+func CreateManualOfferingPriceSnapshot(db *gorm.DB, ownerUserID, offeringID int64, items []PriceRuleItem) (*PriceRule, error) {
+	if db == nil || ownerUserID <= 0 || offeringID <= 0 {
+		return nil, fmt.Errorf("%w: owner and offering are required", ErrInvalidArgument)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("%w: at least one price dimension is required", ErrInvalidArgument)
+	}
+
+	var created *PriceRule
+	err := db.Transaction(func(tx *gorm.DB) error {
+		offering, err := GetModelOffering(tx, ownerUserID, offeringID)
+		if err != nil {
+			return err
+		}
+		if offering.Status != OfferingStatusDraft && offering.Status != OfferingStatusRejected {
+			return fmt.Errorf("%w: offering %d cannot be priced in status %d", ErrInvalidArgument, offeringID, offering.Status)
+		}
+
+		normalized := make([]PriceRuleItem, len(items))
+		copy(normalized, items)
+		for i := range normalized {
+			normalized[i].Currency = "USD"
+			normalized[i].UsdUnitPriceMicro = normalized[i].UnitPriceMicro
+			normalized[i].UsdState = UsdStateNotNeeded
+		}
+		rule := &PriceRule{
+			ScopeType: PriceScopeOffering, ScopeID: offering.ID,
+			Source: PriceRuleSourceManual, SourceRef: "share-owner-manual",
+			Currency: "USD", PricingMode: PriceModePerDimension,
+			FxRateMicro: 1_000_000, ManualOverride: true, Locked: true,
+			ValidationState: PriceValidationAccepted, CreatedByUserID: ownerUserID,
+		}
+		if err := CreatePriceRuleSnapshot(tx, rule, normalized); err != nil {
+			return err
+		}
+		result := tx.Model(&ModelOffering{}).
+			Where("id = ? AND alive_flag = ? AND revision = ? AND status IN ?",
+				offering.ID, AliveFlagAlive, offering.Revision,
+				[]int{OfferingStatusDraft, OfferingStatusRejected}).
+			Updates(map[string]any{
+				"price_rule_id": rule.ID,
+				"revision":      offering.Revision + 1,
+				"updated_at":    common.GetTimestamp(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("%w: offering %d changed while saving price", ErrInvalidArgument, offering.ID)
+		}
+		created = rule
+		return nil
+	})
+	return created, err
+}
+
 // GetEffectivePriceRule 取出某作用域在给定时刻**生效**的价格快照。
 //
 // 生效判据：`EffectiveFrom <= at` 且（`EffectiveTo == 0` 或 `at < EffectiveTo`），

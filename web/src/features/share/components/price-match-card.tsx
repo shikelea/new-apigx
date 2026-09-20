@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Calculator, Check, RefreshCw } from 'lucide-react'
+import { Calculator, Check, Pencil, RefreshCw } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -31,7 +31,13 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import { confirmChannelPriceMatch, previewChannelPriceMatch } from '../api'
-import type { PriceMatchCandidate, PriceMatchDimension } from '../types'
+import { offeringAllowsManualPrice } from '../lib/manual-price'
+import type {
+  Offering,
+  PriceMatchCandidate,
+  PriceMatchDimension,
+} from '../types'
+import { ManualPriceDialog } from './manual-price-dialog'
 
 const DIMENSION_LABELS: Record<number, string> = {
   0: 'Input tokens',
@@ -61,7 +67,7 @@ const UNIT_LABELS: Record<number, string> = {
 
 export function PriceMatchCard(props: {
   channelId: number
-  offeringCount: number
+  offerings: Offering[]
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -69,6 +75,8 @@ export function PriceMatchCard(props: {
     null
   )
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [manualCandidate, setManualCandidate] =
+    useState<PriceMatchCandidate | null>(null)
 
   const previewMutation = useMutation({
     mutationFn: () => previewChannelPriceMatch(props.channelId),
@@ -114,88 +122,114 @@ export function PriceMatchCard(props: {
 
   const confirmableCount =
     candidates?.filter((item) => item.confirmable).length ?? 0
+  const editableOfferingIds = new Set(
+    props.offerings
+      .filter(offeringAllowsManualPrice)
+      .map((offering) => offering.id)
+  )
 
   return (
-    <Card id='price-match'>
-      <CardHeader className='gap-3 sm:flex-row sm:items-center sm:justify-between'>
-        <div>
-          <CardTitle className='flex items-center gap-2'>
-            <Calculator className='size-4' />
-            {t('share.price.title')}
-          </CardTitle>
-          <p className='text-muted-foreground mt-1 text-sm'>
-            {t('share.price.description')}
-          </p>
-        </div>
-        <Button
-          variant='outline'
-          size='sm'
-          disabled={props.offeringCount === 0 || previewMutation.isPending}
-          onClick={() => previewMutation.mutate()}
-        >
-          <RefreshCw
-            className={previewMutation.isPending ? 'animate-spin' : undefined}
-          />
-          {t('share.price.preview')}
-        </Button>
-      </CardHeader>
-      <CardContent className='space-y-4'>
-        {props.offeringCount === 0 ? (
-          <EmptyState title={t('share.price.noModels')} />
-        ) : null}
+    <>
+      <Card id='price-match'>
+        <CardHeader className='gap-3 sm:flex-row sm:items-center sm:justify-between'>
+          <div>
+            <CardTitle className='flex items-center gap-2'>
+              <Calculator className='size-4' />
+              {t('share.price.title')}
+            </CardTitle>
+            <p className='text-muted-foreground mt-1 text-sm'>
+              {t('share.price.description')}
+            </p>
+          </div>
+          <Button
+            variant='outline'
+            size='sm'
+            disabled={props.offerings.length === 0 || previewMutation.isPending}
+            onClick={() => previewMutation.mutate()}
+          >
+            <RefreshCw
+              className={previewMutation.isPending ? 'animate-spin' : undefined}
+            />
+            {t('share.price.preview')}
+          </Button>
+        </CardHeader>
+        <CardContent className='space-y-4'>
+          {props.offerings.length === 0 ? (
+            <EmptyState title={t('share.price.noModels')} />
+          ) : null}
 
-        {candidates !== null && candidates.length === 0 ? (
-          <EmptyState title={t('share.price.noCandidates')} />
-        ) : null}
+          {candidates !== null && candidates.length === 0 ? (
+            <EmptyState title={t('share.price.noCandidates')} />
+          ) : null}
 
-        {candidates && candidates.length > 0 ? (
-          <>
-            <Alert>
-              <AlertTitle>{t('share.price.previewReady')}</AlertTitle>
-              <AlertDescription>
-                {t('share.price.previewSummary', {
-                  matched: confirmableCount,
-                  manual: candidates.length - confirmableCount,
-                })}
-              </AlertDescription>
-            </Alert>
-            <div className='grid gap-3 lg:grid-cols-2'>
-              {candidates.map((candidate) => (
-                <PriceCandidate
-                  key={candidate.offering_id}
-                  candidate={candidate}
-                  checked={selected.has(candidate.offering_id)}
-                  onCheckedChange={(checked) => {
-                    setSelected((current) => {
-                      const next = new Set(current)
-                      if (checked) next.add(candidate.offering_id)
-                      else next.delete(candidate.offering_id)
-                      return next
-                    })
-                  }}
-                />
-              ))}
-            </div>
-            <div className='flex justify-end'>
-              <Button
-                disabled={selected.size === 0 || confirmMutation.isPending}
-                onClick={() => confirmMutation.mutate()}
-              >
-                <Check />
-                {t('share.price.confirmSelected', { count: selected.size })}
-              </Button>
-            </div>
-          </>
-        ) : null}
-      </CardContent>
-    </Card>
+          {candidates && candidates.length > 0 ? (
+            <>
+              <Alert>
+                <AlertTitle>{t('share.price.previewReady')}</AlertTitle>
+                <AlertDescription>
+                  {t('share.price.previewSummary', {
+                    matched: confirmableCount,
+                    manual: candidates.length - confirmableCount,
+                  })}
+                </AlertDescription>
+              </Alert>
+              <div className='grid gap-3 lg:grid-cols-2'>
+                {candidates.map((candidate) => (
+                  <PriceCandidate
+                    key={candidate.offering_id}
+                    candidate={candidate}
+                    checked={selected.has(candidate.offering_id)}
+                    allowManualPrice={editableOfferingIds.has(
+                      candidate.offering_id
+                    )}
+                    onCheckedChange={(checked) => {
+                      setSelected((current) => {
+                        const next = new Set(current)
+                        if (checked) next.add(candidate.offering_id)
+                        else next.delete(candidate.offering_id)
+                        return next
+                      })
+                    }}
+                    onManualPrice={() => setManualCandidate(candidate)}
+                  />
+                ))}
+              </div>
+              <div className='flex justify-end'>
+                <Button
+                  disabled={selected.size === 0 || confirmMutation.isPending}
+                  onClick={() => confirmMutation.mutate()}
+                >
+                  <Check />
+                  {t('share.price.confirmSelected', { count: selected.size })}
+                </Button>
+              </div>
+            </>
+          ) : null}
+        </CardContent>
+      </Card>
+      <ManualPriceDialog
+        candidate={manualCandidate}
+        open={manualCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open) setManualCandidate(null)
+        }}
+        onSaved={() => {
+          void queryClient.invalidateQueries({
+            queryKey: ['apigx-channel-offerings', props.channelId],
+          })
+          previewMutation.mutate()
+        }}
+      />
+    </>
   )
 }
 
 function PriceCandidate(props: {
   candidate: PriceMatchCandidate
   checked: boolean
+  allowManualPrice: boolean
   onCheckedChange: (checked: boolean) => void
+  onManualPrice: () => void
 }) {
   const { t } = useTranslation()
   const statusKey = `share.price.status.${props.candidate.status}`
@@ -251,6 +285,23 @@ function PriceCandidate(props: {
                 `share.price.reason.${props.candidate.reason ?? props.candidate.status}`
               )}
             </p>
+          ) : null}
+          {props.allowManualPrice &&
+          !props.candidate.confirmable &&
+          props.candidate.status !== 'unchanged' ? (
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              onClick={props.onManualPrice}
+            >
+              <Pencil />
+              {t(
+                props.candidate.status === 'manual_override'
+                  ? 'share.price.updateManual'
+                  : 'share.price.setManual'
+              )}
+            </Button>
           ) : null}
         </div>
       </div>

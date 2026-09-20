@@ -1696,6 +1696,99 @@ func TestPriceRuleEndpointsEnforceAcceptanceInvariants(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestSharerCanSetOwnedOfferingManualPriceAndBulkSubmitReadyModels(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, other int64 = 8921, 8922
+	baseChannelID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseChannelID), Name: "分享者定价底座", Key: "x", Status: common.ChannelStatusEnabled,
+	}).Error)
+	groupID := env.createGroup(t, owner, "分享者定价组")
+	channelID := env.createChannel(t, owner, groupID, baseChannelID)
+
+	createOffering := func(modelID string) int64 {
+		t.Helper()
+		rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+			`{"upstream_model_id":"`+modelID+`"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return int64(body["data"].(map[string]any)["id"].(float64))
+	}
+	readyID := createOffering("owner-priced-ready")
+	unpricedID := createOffering("owner-unpriced")
+	alreadyPendingID := createOffering("owner-already-pending")
+
+	manualPriceBody := `{"items":[` +
+		`{"dimension":0,"unit_scale":0,"usd_unit_price":"2.75"},` +
+		`{"dimension":1,"unit_scale":0,"usd_unit_price":"0"}]}`
+	manualPath := "/api/offerings/" + strconv.FormatInt(readyID, 10) + "/manual-price"
+	rec, body := env.doWithRole(t, http.MethodPut, manualPath, owner, manualPriceBody, common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, true, body["data"].(map[string]any)["locked"])
+
+	rule, items, err := apigxmodel.GetEffectivePriceRule(env.db, apigxmodel.PriceScopeOffering, readyID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.PriceRuleSourceManual, rule.Source)
+	assert.True(t, rule.ManualOverride)
+	assert.True(t, rule.Locked)
+	assert.Equal(t, owner, rule.CreatedByUserID)
+	require.Len(t, items, 2)
+	assert.EqualValues(t, 2_750_000, items[0].UnitPriceMicro)
+	assert.EqualValues(t, 0, items[1].UnitPriceMicro, "显式零价必须有价格分项，不能与未知混淆")
+	var storedOffering apigxmodel.ModelOffering
+	require.NoError(t, env.db.Where("id = ?", readyID).First(&storedOffering).Error)
+	assert.Equal(t, rule.ID, storedOffering.PriceRuleID)
+
+	// Knowing an ID is not enough to price another user's offering.
+	rec, _ = env.doWithRole(t, http.MethodPut, manualPath, other, manualPriceBody, common.RoleCommonUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	// Dimension/unit mismatches are rejected by the immutable price repository.
+	rec, _ = env.doWithRole(t, http.MethodPut,
+		"/api/offerings/"+strconv.FormatInt(unpricedID, 10)+"/manual-price", owner,
+		`{"items":[{"dimension":5,"unit_scale":0,"usd_unit_price":"1"}]}`, common.RoleCommonUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// Keep the API's accepted decimal syntax aligned with the form validator.
+	rec, _ = env.doWithRole(t, http.MethodPut,
+		"/api/offerings/"+strconv.FormatInt(unpricedID, 10)+"/manual-price", owner,
+		`{"items":[{"dimension":0,"unit_scale":0,"usd_unit_price":"1."}]}`, common.RoleCommonUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// Prepare one already-pending model so the bulk response proves it does not
+	// resubmit non-draft states.
+	pendingPath := "/api/offerings/" + strconv.FormatInt(alreadyPendingID, 10) + "/manual-price"
+	rec, _ = env.doWithRole(t, http.MethodPut, pendingPath, owner,
+		`{"items":[{"dimension":9,"unit_scale":5,"usd_unit_price":"0.01"}]}`, common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec, _ = env.doWithRole(t, http.MethodPost,
+		"/api/offerings/"+strconv.FormatInt(alreadyPendingID, 10)+"/submit", owner, "", common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	bulkPath := "/api/channels/" + strconv.FormatInt(channelID, 10) + "/offerings/submit"
+	rec, body = env.doWithRole(t, http.MethodPost, bulkPath, owner, "", common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data := body["data"].(map[string]any)
+	assert.EqualValues(t, 1, data["submitted"])
+	submittedIDs := data["submitted_ids"].([]any)
+	require.Len(t, submittedIDs, 1)
+	assert.EqualValues(t, readyID, submittedIDs[0])
+	skipped := data["skipped"].([]any)
+	require.Len(t, skipped, 2)
+	reasons := map[string]bool{}
+	for _, raw := range skipped {
+		reasons[raw.(map[string]any)["reason"].(string)] = true
+	}
+	assert.True(t, reasons["price_not_configured"])
+	assert.True(t, reasons["status_not_submittable"])
+
+	rec, _ = env.doWithRole(t, http.MethodPost, bulkPath, other, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	var ready, unpriced apigxmodel.ModelOffering
+	require.NoError(t, env.db.Where("id = ?", readyID).First(&ready).Error)
+	require.NoError(t, env.db.Where("id = ?", unpricedID).First(&unpriced).Error)
+	assert.Equal(t, apigxmodel.OfferingStatusPending, ready.Status)
+	assert.Equal(t, apigxmodel.OfferingStatusDraft, unpriced.Status)
+}
+
 func TestChannelPriceMatchPreviewAndConfirmUseServerCandidates(t *testing.T) {
 	oldModels := ratio_setting.ModelRatio2JSONString()
 	oldCompletions := ratio_setting.CompletionRatio2JSONString()

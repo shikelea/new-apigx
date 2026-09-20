@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // T2.1 价格快照的三条不变量（计划书 §阶段 2 验收）。
@@ -112,6 +113,68 @@ func TestPriceSyncCannotOverwriteManualOverride(t *testing.T) {
 	third := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
 		ValidationState: PriceValidationAccepted}
 	assert.ErrorIs(t, ApplyPriceSync(db, third, nil), ErrPriceLocked, "锁定后同步必须被挡")
+}
+
+func TestManualOfferingPriceRejectsConcurrentOfferingChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(tx *gorm.DB, offering *ModelOffering) error
+	}{
+		{
+			name: "status changed before price attachment",
+			change: func(tx *gorm.DB, offering *ModelOffering) error {
+				return tx.Model(&ModelOffering{}).Where("id = ?", offering.ID).
+					Update("status", OfferingStatusPending).Error
+			},
+		},
+		{
+			name: "revision changed before price attachment",
+			change: func(tx *gorm.DB, offering *ModelOffering) error {
+				return tx.Model(&ModelOffering{}).Where("id = ?", offering.ID).
+					Update("revision", offering.Revision+1).Error
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newRepoDB(t)
+			const owner int64 = 9651
+			_, channel := seedGroupAndChannel(t, db, owner)
+			offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "manual-price-race"}
+			require.NoError(t, CreateModelOffering(db, owner, offering))
+
+			callbackName := "g4:change_offering_before_manual_price_attach:" + tt.name
+			require.NoError(t, db.Callback().Create().After("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+				if tx.Statement.Schema == nil || tx.Statement.Schema.Table != (PriceRule{}).TableName() {
+					return
+				}
+				if err := tt.change(tx.Session(&gorm.Session{NewDB: true}), offering); err != nil {
+					tx.AddError(err)
+				}
+			}))
+			t.Cleanup(func() { _ = db.Callback().Create().Remove(callbackName) })
+
+			created, err := CreateManualOfferingPriceSnapshot(db, owner, offering.ID, []PriceRuleItem{{
+				Dimension: 0, UnitScale: 0, UnitPriceMicro: 1_000_000,
+			}})
+			assert.Nil(t, created)
+			assert.ErrorIs(t, err, ErrInvalidArgument)
+
+			var ruleCount int64
+			require.NoError(t, db.Model(&PriceRule{}).
+				Where("scope_type = ? AND scope_id = ?", PriceScopeOffering, offering.ID).
+				Count(&ruleCount).Error)
+			assert.Zero(t, ruleCount, "stale offering state must roll back the new price snapshot")
+
+			var stored ModelOffering
+			require.NoError(t, db.Where("id = ?", offering.ID).First(&stored).Error)
+			assert.Equal(t, OfferingStatusDraft, stored.Status)
+			assert.EqualValues(t, offering.Revision, stored.Revision,
+				"the injected change is part of the rejected transaction and must roll back")
+			assert.Zero(t, stored.PriceRuleID)
+		})
+	}
 }
 
 // ③ 单渠道同步不污染全局或其他分享者：快照按作用域版本化，互不可见。

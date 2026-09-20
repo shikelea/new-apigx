@@ -117,6 +117,7 @@ export interface Offering {
   revision: number
   capabilities?: OfferingCapabilities
   price_rule_id: number
+  price_configured: boolean
 }
 
 export interface OfferingCapabilities {
@@ -192,6 +193,35 @@ export interface PriceMatchConfirmResponse {
     pending: number
     skipped: string[]
     notes: Record<string, string>
+  }
+}
+
+export interface ManualPriceItemInput {
+  dimension: number
+  unit_scale: number
+  usd_unit_price: string
+}
+
+export interface ManualPriceResponse {
+  success: boolean
+  data?: {
+    offering_id: number
+    price_rule_id: number
+    version: number
+    currency: 'USD'
+    locked: boolean
+    source: 'manual'
+  }
+}
+
+export interface BulkSubmitOfferingsResponse {
+  success: boolean
+  data?: {
+    channel_id: number
+    submitted: number
+    submitted_ids: number[]
+    skipped: { offering_id: number; reason: string }[]
+    failed: { offering_id: number; reason: string }[]
   }
 }
 /**

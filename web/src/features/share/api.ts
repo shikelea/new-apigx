@@ -19,9 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { api } from '@/lib/api'
 
 import type {
+  BulkSubmitOfferingsResponse,
   CapacityPolicyPayload,
   ChannelDetailResponse,
   ChannelRecipeListResponse,
+  ManualPriceItemInput,
+  ManualPriceResponse,
   OfferingListResponse,
   PriceMatchConfirmResponse,
   PriceMatchPreviewResponse,
@@ -144,6 +147,16 @@ export async function confirmChannelPriceMatch(
   )
   return res.data
 }
+
+export async function setOfferingManualPrice(
+  offeringId: number,
+  items: ManualPriceItemInput[]
+): Promise<ManualPriceResponse> {
+  const res = await api.put(`/api/apigx/offerings/${offeringId}/manual-price`, {
+    items,
+  })
+  return res.data
+}
 /**
  * 一键获取该渠道的上游模型；`import` 为 true 时**批量导入为草稿供给**。
  *
@@ -187,6 +200,15 @@ export async function submitOffering(
   offeringId: number
 ): Promise<{ success: boolean; data?: unknown }> {
   const res = await api.post(`/api/apigx/offerings/${offeringId}/submit`)
+  return res.data
+}
+
+export async function submitChannelOfferings(
+  channelId: number
+): Promise<BulkSubmitOfferingsResponse> {
+  const res = await api.post(
+    `/api/apigx/channels/${channelId}/offerings/submit`
+  )
   return res.data
 }
 

@@ -142,6 +142,16 @@ func buildMatchCandidate(db *gorm.DB, offering *apigxmodel.ModelOffering) (Match
 		candidate.CurrentSource = current.Source
 		candidate.CurrentLocked = current.Locked || current.ManualOverride
 		if candidate.CurrentLocked {
+			for i := range currentItems {
+				usdPrice, ok := apigxmodel.EffectiveUSDUnitPriceMicro(current, &currentItems[i])
+				if !ok {
+					continue
+				}
+				candidate.Dimensions = append(candidate.Dimensions, MatchDimension{
+					Dimension: currentItems[i].Dimension, UnitScale: currentItems[i].UnitScale,
+					UnitPriceMicro: usdPrice, Currency: "USD", UsdUnitPriceMicro: usdPrice,
+				})
+			}
 			candidate.Status = MatchStatusManualOverride
 			candidate.Reason = "manual_price_active"
 			return candidate, nil
