@@ -28,6 +28,8 @@ const (
 	ScopeModeAllowedOwners int = 1
 	// ScopeModePinned 固定来源：只使用 `PinnedOfferingID`。
 	ScopeModePinned int = 2
+	// ScopeModeAccessKinds 仅使用公开、私有、共享中的所选范围。
+	ScopeModeAccessKinds int = 3
 )
 
 // APIKeyStatus 取值。
@@ -115,6 +117,10 @@ func validateAPIKeyPreferences(key *APIKey) error {
 		if key.PinnedOfferingID <= 0 {
 			return fmt.Errorf("%w: scope_mode=pinned requires pinned_offering_id", ErrInvalidArgument)
 		}
+	case ScopeModeAccessKinds:
+		if len(key.AllowedAccessKindValues()) == 0 {
+			return fmt.Errorf("%w: scope_mode=access_kinds requires a non-empty access kind list", ErrInvalidArgument)
+		}
 	default:
 		return fmt.Errorf("%w: unknown scope mode %d", ErrInvalidArgument, key.ScopeMode)
 	}
@@ -131,6 +137,49 @@ func validateAPIKeyPreferences(key *APIKey) error {
 		key.AllowedModelIDs = string(encoded)
 	}
 	return nil
+}
+
+// AllowedAccessKindValues 解析公开、私有、共享范围；空字符串表示未配置该限制。
+func (k *APIKey) AllowedAccessKindValues() []string {
+	if k == nil || k.AllowedAccessKinds == "" {
+		return nil
+	}
+	var out []string
+	if err := common.UnmarshalJsonStr(k.AllowedAccessKinds, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// SetAllowedAccessKinds 校验并保存用户可理解的资源范围。
+func (k *APIKey) SetAllowedAccessKinds(kinds []string) error {
+	if len(kinds) == 0 {
+		k.AllowedAccessKinds = ""
+		return nil
+	}
+	for _, kind := range kinds {
+		switch kind {
+		case PlazaAccessKindPublic, PlazaAccessKindPrivate, PlazaAccessKindShared:
+		default:
+			return fmt.Errorf("%w: unknown access kind %q", ErrInvalidArgument, kind)
+		}
+	}
+	slices.Sort(kinds)
+	kinds = slices.Compact(kinds)
+	encoded, err := common.Marshal(kinds)
+	if err != nil {
+		return err
+	}
+	k.AllowedAccessKinds = string(encoded)
+	return nil
+}
+
+// AllowsAccessKind 报告该 Key 的资源范围是否包含给定类别。
+func (k *APIKey) AllowsAccessKind(kind string) bool {
+	if k == nil || k.ScopeMode != ScopeModeAccessKinds {
+		return true
+	}
+	return slices.Contains(k.AllowedAccessKindValues(), kind)
 }
 
 // AllowedModels 解析允许模型列表；空字符串表示未限制。

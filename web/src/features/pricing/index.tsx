@@ -16,162 +16,67 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useCallback, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
 import { PublicLayout } from '@/components/layout'
 import { PageTransition } from '@/components/page-transition'
+import { Button } from '@/components/ui/button'
 
-import {
-  LoadingSkeleton,
-  EmptyState,
-  SearchBar,
-  PricingTable,
-  PricingSidebar,
-  PricingToolbar,
-  ModelCardGrid,
-  ModelDetailsDrawer,
-} from './components'
-import { EXCLUDED_GROUPS, VIEW_MODES } from './constants'
-import { useFilters } from './hooks/use-filters'
+import { LoadingSkeleton, SearchBar } from './components'
+import { ResourceModelCard } from './components/resource-model-card'
+import { ResourceModelDrawer } from './components/resource-model-drawer'
+import { ResourceScopeTabs } from './components/resource-scope-tabs'
 import { useApigxModelSources } from './hooks/use-apigx-model-sources'
-import { usePricingData } from './hooks/use-pricing-data'
+import {
+  aggregateResourceModels,
+  type ResourceAccessKind,
+  type ResourceModelSummary,
+} from './lib/apigx-sources'
+import { RESOURCE_SCOPES } from './lib/resource-scopes'
 
 export function Pricing() {
   const { t } = useTranslation()
-  // 分享分组筛选（与底座的计费分组筛选相互独立）
-  const [shareGroupFilter, setShareGroupFilter] = useState<string>('')
-  const [selectedModelName, setSelectedModelName] = useState<string | null>(
-    null
-  )
+  const [scope, setScope] = useState<ResourceAccessKind>('public')
+  const [search, setSearch] = useState('')
+  const [selectedModel, setSelectedModel] =
+    useState<ResourceModelSummary | null>(null)
+  const plaza = useApigxModelSources()
 
-  const {
-    models,
-    vendors,
-    groupRatio,
-    usableGroup,
-    endpointMap,
-    autoGroups,
-    isLoading,
-    priceRate,
-    usdExchangeRate,
-  } = usePricingData()
-
-  // 我们的分享来源（公开页访客拿不到时静默为空，界面照常工作）
-  const { byModel: sourcesByModel } = useApigxModelSources()
-
-  const {
-    searchInput,
-    sortBy,
-    vendorFilter,
-    groupFilter,
-    quotaTypeFilter,
-    endpointTypeFilter,
-    tagFilter,
-    tokenUnit,
-    viewMode,
-    showRechargePrice,
-    setSearchInput,
-    setSortBy,
-    setVendorFilter,
-    setGroupFilter,
-    setQuotaTypeFilter,
-    setEndpointTypeFilter,
-    setTagFilter,
-    setTokenUnit,
-    setViewMode,
-    setShowRechargePrice,
-    filteredModels,
-    hasActiveFilters,
-    activeFilterCount,
-    availableTags,
-    clearFilters,
-    clearSearch,
-  } = useFilters(models || [])
-
-  // 按分享分组过滤（只影响展示；没有该分组数据的模型在选择具体分组时被排除）
-  const shareGroups = [...new Set([...sourcesByModel.values()].flatMap((s) => s.groups.map((g) => g.name)))].sort()
-  const modelsForView = useMemo(() => {
-    if (shareGroupFilter === '') {
-      return filteredModels
-    }
-    return filteredModels.filter((model) => {
-      const summary = sourcesByModel.get(model.model_name || '')
-      return summary ? summary.groups.some((g) => g.name === shareGroupFilter) : false
-    })
-  }, [filteredModels, shareGroupFilter, sourcesByModel])
-
-  const handleModelClick = useCallback((modelName: string) => {
-    setSelectedModelName(modelName)
-  }, [])
-
-  const selectedModel = useMemo(
+  const counts = useMemo(
     () =>
-      selectedModelName
-        ? (modelsForView || []).find(
-            (model) => model.model_name === selectedModelName
-          ) || null
-        : null,
-    [modelsForView, selectedModelName]
+      Object.fromEntries(
+        RESOURCE_SCOPES.map((option) => [
+          option.value,
+          aggregateResourceModels(plaza.items, option.value).length,
+        ])
+      ) as Record<ResourceAccessKind, number>,
+    [plaza.items]
   )
-
-  const availableGroups = useMemo(
-    () =>
-      Object.keys(usableGroup || {}).filter(
-        (g) => !EXCLUDED_GROUPS.includes(g)
-      ),
-    [usableGroup]
-  )
-
-  const handleClearAll = useCallback(() => {
-    clearFilters()
-    clearSearch()
-  }, [clearFilters, clearSearch])
-
-  const renderPricingContent = () => {
-    if (modelsForView.length === 0) {
-      return (
-        <EmptyState
-          searchQuery={searchInput}
-          hasActiveFilters={hasActiveFilters}
-          onClearFilters={handleClearAll}
-        />
-      )
-    }
-
-    if (viewMode === VIEW_MODES.CARD) {
-      return (
-        <ModelCardGrid
-          sourcesByModel={sourcesByModel}
-          models={modelsForView}
-          onModelClick={handleModelClick}
-          priceRate={priceRate}
-          usdExchangeRate={usdExchangeRate}
-          tokenUnit={tokenUnit}
-          showRechargePrice={showRechargePrice}
-          selectedGroup={groupFilter}
-        />
-      )
-    }
-
-    return (
-      <PricingTable
-        models={modelsForView}
-        priceRate={priceRate}
-        usdExchangeRate={usdExchangeRate}
-        tokenUnit={tokenUnit}
-        showRechargePrice={showRechargePrice}
-        selectedGroup={groupFilter}
-        onModelClick={handleModelClick}
-      />
+  const models = useMemo(() => {
+    const normalizedSearch = search.trim().toLocaleLowerCase()
+    const scoped = aggregateResourceModels(plaza.items, scope)
+    if (normalizedSearch === '') return scoped
+    return scoped.filter(
+      (model) =>
+        model.modelID.toLocaleLowerCase().includes(normalizedSearch) ||
+        model.canonicalModelID
+          ?.toLocaleLowerCase()
+          .includes(normalizedSearch) ||
+        model.description?.toLocaleLowerCase().includes(normalizedSearch)
     )
-  }
+  }, [plaza.items, scope, search])
+  const activeScope =
+    RESOURCE_SCOPES.find((option) => option.value === scope) ??
+    RESOURCE_SCOPES[0]
+  const ActiveScopeIcon = activeScope.icon
 
-  if (isLoading) {
+  if (plaza.isLoading) {
     return (
       <PublicLayout showMainContainer={false}>
-        <div className='mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>
-          <LoadingSkeleton viewMode={viewMode} />
+        <div className='mx-auto w-full max-w-7xl px-4 pt-20 pb-10'>
+          <LoadingSkeleton viewMode='card' />
         </div>
       </PublicLayout>
     )
@@ -179,133 +84,95 @@ export function Pricing() {
 
   return (
     <PublicLayout showMainContainer={false}>
-      <div className='relative'>
-        <div
-          aria-hidden
-          className='pointer-events-none absolute inset-x-0 top-0 h-[600px] opacity-20 dark:opacity-[0.10]'
-          style={{
-            background: [
-              'radial-gradient(ellipse 60% 50% at 20% 20%, oklch(0.72 0.18 250 / 80%) 0%, transparent 70%)',
-              'radial-gradient(ellipse 50% 40% at 80% 15%, oklch(0.65 0.15 200 / 60%) 0%, transparent 70%)',
-              'radial-gradient(ellipse 40% 35% at 50% 70%, oklch(0.70 0.12 280 / 40%) 0%, transparent 70%)',
-            ].join(', '),
-            maskImage:
-              'linear-gradient(to bottom, black 40%, transparent 100%)',
-            WebkitMaskImage:
-              'linear-gradient(to bottom, black 40%, transparent 100%)',
+      <PageTransition className='mx-auto w-full max-w-7xl px-4 pt-20 pb-10 sm:px-6'>
+        <header className='mx-auto max-w-3xl text-center'>
+          <p className='text-primary text-sm font-medium'>
+            {t('Shared AI resources')}
+          </p>
+          <h1 className='mt-2 text-3xl font-semibold tracking-tight sm:text-4xl'>
+            {t('Model Square')}
+          </h1>
+          <p className='text-muted-foreground mx-auto mt-3 max-w-2xl text-sm leading-relaxed sm:text-base'>
+            {t(
+              'Browse models you can actually use, then compare sources and choose routing in model details.'
+            )}
+          </p>
+          <SearchBar
+            value={search}
+            onChange={setSearch}
+            onClear={() => setSearch('')}
+            placeholder={t('Search model ID or description')}
+            className='mx-auto mt-6 max-w-2xl'
+          />
+        </header>
+
+        {plaza.isError ? (
+          <div className='mt-10'>
+            <ErrorState onRetry={() => void plaza.refetch()} />
+          </div>
+        ) : (
+          <main className='mt-8'>
+            <ResourceScopeTabs
+              value={scope}
+              counts={counts}
+              onValueChange={setScope}
+            />
+
+            <div className='mt-7'>
+              <h2 className='text-lg font-semibold'>
+                {t(activeScope.labelKey)}
+              </h2>
+              <p className='text-muted-foreground mt-1 text-sm'>
+                {t('{{count}} models available in this scope', {
+                  count: counts[scope],
+                })}
+              </p>
+            </div>
+
+            {models.length > 0 ? (
+              <div className='mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3'>
+                {models.map((model) => (
+                  <ResourceModelCard
+                    key={model.modelID}
+                    model={model}
+                    onOpen={() => setSelectedModel(model)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className='mt-4 flex min-h-64 flex-col items-center justify-center rounded-2xl border border-dashed p-8 text-center'>
+                <ActiveScopeIcon
+                  className='text-muted-foreground size-8'
+                  aria-hidden
+                />
+                <h2 className='mt-4 font-medium'>{t('No resources found')}</h2>
+                <p className='text-muted-foreground mt-1 max-w-md text-sm'>
+                  {search
+                    ? t('Try another model ID or clear the search.')
+                    : t('No models are available in this resource scope yet.')}
+                </p>
+                {search ? (
+                  <Button
+                    variant='outline'
+                    size='sm'
+                    className='mt-4'
+                    onClick={() => setSearch('')}
+                  >
+                    {t('Clear search')}
+                  </Button>
+                ) : null}
+              </div>
+            )}
+          </main>
+        )}
+
+        <ResourceModelDrawer
+          model={selectedModel}
+          onOpenChange={(open) => {
+            if (!open) setSelectedModel(null)
           }}
         />
-        <PageTransition className='relative mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>
-          <header className='mx-auto mb-5 max-w-3xl pt-5 text-center sm:mb-10 sm:pt-10'>
-            <h1 className='text-[clamp(2rem,5.5vw,3.5rem)] leading-[1.15] font-bold tracking-tight'>
-              {t('Model Square')}
-            </h1>
-            <p className='text-muted-foreground/80 mt-3 text-sm sm:mt-4 sm:text-base'>
-              {t('This site currently has {{count}} models enabled', {
-                count: models?.length || 0,
-              })}
-            </p>
-            <p className='text-muted-foreground/60 mx-auto mt-2 max-w-2xl text-xs leading-relaxed sm:text-sm'>
-              {t(
-                'Discover curated AI models, compare pricing and capabilities, and choose the right model for every scenario.'
-              )}
-            </p>
-            <SearchBar
-              value={searchInput}
-              onChange={setSearchInput}
-              onClear={clearSearch}
-              placeholder={t(
-                'Search model name, provider, endpoint, or tag...'
-              )}
-              className='mx-auto mt-4 max-w-2xl sm:mt-6'
-            />
-          </header>
-
-          <div className='grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]'>
-            <PricingSidebar
-              quotaTypeFilter={quotaTypeFilter}
-              endpointTypeFilter={endpointTypeFilter}
-              vendorFilter={vendorFilter}
-              groupFilter={groupFilter}
-              tagFilter={tagFilter}
-              onQuotaTypeChange={setQuotaTypeFilter}
-              onEndpointTypeChange={setEndpointTypeFilter}
-              onVendorChange={setVendorFilter}
-              onGroupChange={setGroupFilter}
-              onTagChange={setTagFilter}
-              vendors={vendors || []}
-              groups={availableGroups}
-              groupRatios={groupRatio}
-              tags={availableTags}
-              models={models || []}
-              hasActiveFilters={hasActiveFilters}
-              onClearFilters={clearFilters}
-              className='hover-scrollbar sticky top-20 hidden max-h-[calc(100dvh-6rem)] self-start overflow-y-auto xl:block'
-            />
-
-            <main className='min-w-0 space-y-4'>
-              <PricingToolbar
-                shareGroupFilter={shareGroupFilter}
-                shareGroups={shareGroups}
-                onShareGroupChange={setShareGroupFilter}
-                filteredCount={filteredModels.length}
-                totalCount={models?.length}
-                sortBy={sortBy}
-                onSortChange={setSortBy}
-                tokenUnit={tokenUnit}
-                onTokenUnitChange={setTokenUnit}
-                showRechargePrice={showRechargePrice}
-                onRechargePriceChange={setShowRechargePrice}
-                viewMode={viewMode}
-                onViewModeChange={setViewMode}
-                quotaTypeFilter={quotaTypeFilter}
-                endpointTypeFilter={endpointTypeFilter}
-                vendorFilter={vendorFilter}
-                groupFilter={groupFilter}
-                tagFilter={tagFilter}
-                onQuotaTypeChange={setQuotaTypeFilter}
-                onEndpointTypeChange={setEndpointTypeFilter}
-                onVendorChange={setVendorFilter}
-                onGroupChange={setGroupFilter}
-                onTagChange={setTagFilter}
-                vendors={vendors || []}
-                groups={availableGroups}
-                groupRatios={groupRatio}
-                tags={availableTags}
-                models={models || []}
-                hasActiveFilters={hasActiveFilters}
-                activeFilterCount={activeFilterCount}
-                onClearFilters={clearFilters}
-              />
-
-              {renderPricingContent()}
-            </main>
-          </div>
-
-          {selectedModel && (
-            <ModelDetailsDrawer
-              open={Boolean(selectedModel)}
-              onOpenChange={(open) => {
-                if (!open) setSelectedModelName(null)
-              }}
-              model={selectedModel}
-              groupRatio={groupRatio || {}}
-              usableGroup={usableGroup || {}}
-              endpointMap={
-                (endpointMap as Record<
-                  string,
-                  { path?: string; method?: string }
-                >) || {}
-              }
-              autoGroups={autoGroups || []}
-              priceRate={priceRate ?? 1}
-              usdExchangeRate={usdExchangeRate ?? 1}
-              tokenUnit={tokenUnit}
-              showRechargePrice={showRechargePrice}
-            />
-          )}
-        </PageTransition>
-      </div>
+      </PageTransition>
     </PublicLayout>
   )
 }

@@ -127,6 +127,7 @@ export interface PlatformKeyPreferences {
   pinned_offering_public_id?: string
   allowed_model_ids: string[]
   allowed_owner_user_ids: number[]
+  allowed_access_kinds: Array<'public' | 'private' | 'shared'>
   allow_fallback: boolean
   /** 空串与 `auto` 都表示综合自动质量路由 */
   default_route_mode: string
@@ -144,6 +145,7 @@ export interface PlatformKeyPreferencesPayload {
   pinned_offering_public_id?: string
   allowed_model_ids?: string[]
   allowed_owner_user_ids?: number[]
+  allowed_access_kinds?: Array<'public' | 'private' | 'shared'>
   allow_fallback?: boolean
   default_route_mode?: string
 }

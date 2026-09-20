@@ -141,7 +141,9 @@ func resolveSourceAccessForIdentity(db *gorm.DB, userID int64, key *apigxmodel.A
 		if allowedModels := key.AllowedModels(); len(allowedModels) > 0 && !slices.Contains(allowedModels, modelName) {
 			result.denyAll = true
 		}
-		result.requireShareSource = key.ScopeMode == apigxmodel.ScopeModePinned || key.ScopeMode == apigxmodel.ScopeModeAllowedOwners
+		result.requireShareSource = key.ScopeMode == apigxmodel.ScopeModePinned ||
+			key.ScopeMode == apigxmodel.ScopeModeAllowedOwners ||
+			key.ScopeMode == apigxmodel.ScopeModeAccessKinds
 	}
 
 	for _, resource := range snapshot.AllowedResources {
@@ -154,6 +156,17 @@ func resolveSourceAccessForIdentity(db *gorm.DB, userID int64, key *apigxmodel.A
 		if key != nil && key.ScopeMode == apigxmodel.ScopeModeAllowedOwners {
 			allowed, _ := key.AllowsOwner(resource.OwnerUserID)
 			if !allowed {
+				continue
+			}
+		}
+		if key != nil && key.ScopeMode == apigxmodel.ScopeModeAccessKinds {
+			kind := apigxmodel.PlazaAccessKindShared
+			if resource.GroupVisibility == apigxmodel.ShareGroupVisibilityPublic {
+				kind = apigxmodel.PlazaAccessKindPublic
+			} else if resource.OwnerUserID == userID {
+				kind = apigxmodel.PlazaAccessKindPrivate
+			}
+			if !key.AllowsAccessKind(kind) {
 				continue
 			}
 		}

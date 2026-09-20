@@ -21,7 +21,10 @@ import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { StaticDataTable, type StaticDataTableColumn } from '@/components/data-table'
+import {
+  StaticDataTable,
+  type StaticDataTableColumn,
+} from '@/components/data-table'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { SectionPageLayout } from '@/components/layout'
@@ -41,10 +44,16 @@ import type { PlazaOfferingItem } from '../types'
 export function PlazaGroup(props: { groupPublicID: string }) {
   const { t } = useTranslation()
 
-  const query = useQuery({ queryKey: ['apigx-plaza'], queryFn: () => getPlaza({ page: 1, page_size: 100 }) })
+  const query = useQuery({
+    queryKey: ['apigx-plaza'],
+    queryFn: () => getPlaza({ page: 1, page_size: 100 }),
+  })
 
   const items = useMemo(
-    () => (query.data?.data?.items ?? []).filter((item) => item.group_public_id === props.groupPublicID),
+    () =>
+      (query.data?.data?.items ?? []).filter(
+        (item) => item.group_public_id === props.groupPublicID
+      ),
     [query.data, props.groupPublicID]
   )
 
@@ -63,12 +72,24 @@ export function PlazaGroup(props: { groupPublicID: string }) {
 
   const columns: StaticDataTableColumn<PlazaOfferingItem>[] = [
     { id: 'model', header: t('Model'), cell: (row) => row.model },
-    { id: 'channel', header: t('Channel'), cell: (row) => row.channel_public_id },
-    { id: 'quality', header: t('Quality'), cell: (row) => describePlazaQuality(row) },
+    {
+      id: 'channel',
+      header: t('Channel'),
+      cell: (row) => row.channel_public_id,
+    },
+    {
+      id: 'quality',
+      header: t('Quality'),
+      cell: (row) => describePlazaQuality(row),
+    },
     {
       id: 'capabilities',
       header: t('Capabilities'),
-      cell: (row) => (row.capabilities ?? []).join(', '),
+      cell: (row) =>
+        Object.entries(row.capabilities ?? {})
+          .filter(([, enabled]) => enabled)
+          .map(([capability]) => capability)
+          .join(', '),
     },
   ]
 
@@ -76,7 +97,9 @@ export function PlazaGroup(props: { groupPublicID: string }) {
 
   return (
     <SectionPageLayout>
-      <SectionPageLayout.Title>{first?.group_name || t('Share group')}</SectionPageLayout.Title>
+      <SectionPageLayout.Title>
+        {first?.group_name || t('Share group')}
+      </SectionPageLayout.Title>
       <SectionPageLayout.Content>
         <div className='space-y-6'>
           <Card>
@@ -86,7 +109,9 @@ export function PlazaGroup(props: { groupPublicID: string }) {
             <CardContent className='space-y-2 text-sm'>
               {/* 介绍是不可信文本：按纯文本渲染 */}
               {first?.group_description ? (
-                <p className='text-muted-foreground whitespace-pre-wrap'>{first.group_description}</p>
+                <p className='text-muted-foreground whitespace-pre-wrap'>
+                  {first.group_description}
+                </p>
               ) : null}
               <div className='text-muted-foreground'>
                 {t('Provider')}: {first?.owner_user_id ?? '-'}
@@ -102,7 +127,11 @@ export function PlazaGroup(props: { groupPublicID: string }) {
               {items.length === 0 ? (
                 <EmptyState title={t('No visible resource in this group')} />
               ) : (
-                <StaticDataTable columns={columns} data={items} getRowKey={(row) => row.offering_public_id} />
+                <StaticDataTable
+                  columns={columns}
+                  data={items}
+                  getRowKey={(row) => row.offering_public_id}
+                />
               )}
             </CardContent>
           </Card>

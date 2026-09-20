@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import {
   Activity,
+  Accessibility,
   Box,
   ClipboardList,
   CreditCard,
@@ -37,7 +38,6 @@ import {
   Ticket,
   User,
   Users,
-  Wallet,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -112,18 +112,12 @@ export function useSidebarData(): SidebarData {
             url: '/pricing',
             icon: Store,
           },
-
         ],
       },
       {
         id: 'personal',
         title: t('Personal'),
         items: [
-          {
-            title: t('Wallet'),
-            url: '/wallet',
-            icon: Wallet,
-          },
           {
             title: t('Profile'),
             url: '/profile',
@@ -139,7 +133,11 @@ export function useSidebarData(): SidebarData {
             url: '/share',
             icon: Share2,
           },
-
+          {
+            title: t('Access and sharing'),
+            url: '/access',
+            icon: Accessibility,
+          },
         ],
       },
       {

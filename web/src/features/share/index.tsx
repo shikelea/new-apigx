@@ -31,7 +31,6 @@ import { LoadingState } from '@/components/loading-state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { AccessInviteCard } from '@/features/access/components/invite-card'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import {
@@ -43,7 +42,6 @@ import {
 import { ChannelCreateDialog } from './components/channel-create-dialog'
 import { GroupCreateDialog } from './components/group-create-dialog'
 import { GroupEditDialog } from './components/group-edit-dialog'
-import { UsageSummaryCard } from './components/usage-summary-card'
 import {
   healthLabelKey,
   keyPoolModeLabelKey,
@@ -168,9 +166,6 @@ export function MyShares() {
               </div>
             )}
           </section>
-
-          <AccessInviteCard groups={groups} />
-          <UsageSummaryCard />
         </div>
 
         <ConfirmDialog

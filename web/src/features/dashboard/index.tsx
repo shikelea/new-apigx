@@ -113,6 +113,12 @@ const LazyFlowCharts = lazy(() =>
   }))
 )
 
+const LazySharedUsage = lazy(() =>
+  import('@/features/share/components/usage-summary-card').then((m) => ({
+    default: m.UsageSummaryCard,
+  }))
+)
+
 function LogStatCardsFallback() {
   return (
     <div className='overflow-hidden rounded-lg border'>
@@ -185,6 +191,9 @@ const SECTION_META: Record<DashboardSectionId, { titleKey: string }> = {
   },
   flow: {
     titleKey: 'Flow',
+  },
+  'shared-usage': {
+    titleKey: 'Shared resource usage',
   },
   users: {
     titleKey: 'User Analytics',
@@ -408,6 +417,13 @@ export function Dashboard() {
                   filters={modelFilters}
                   sensitiveVisible={flowSensitiveVisible}
                 />
+              </Suspense>
+            </FadeIn>
+          )}
+          {activeSection === 'shared-usage' && (
+            <FadeIn>
+              <Suspense fallback={<ModelChartsFallback />}>
+                <LazySharedUsage />
               </Suspense>
             </FadeIn>
           )}

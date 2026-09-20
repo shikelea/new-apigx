@@ -1159,6 +1159,7 @@ type platformKeyPreferencesRequest struct {
 	PinnedOfferingPublicID *string  `json:"pinned_offering_public_id"`
 	AllowedModelIDs        []string `json:"allowed_model_ids"`
 	AllowedOwnerUserIDs    []int64  `json:"allowed_owner_user_ids"`
+	AllowedAccessKinds     []string `json:"allowed_access_kinds"`
 	AllowFallback          *bool    `json:"allow_fallback"`
 	// DefaultRouteMode 是「默认路由策略」（计划书 §9.1：保存到平台 Key 的偏好）。
 	// 空串与 "auto" 都表示综合自动；latency / throughput / reliability 会把它
@@ -1181,7 +1182,7 @@ func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
 		ok(c, gin.H{
 			"token_id": tokenID, "scope_mode": apigxmodel.ScopeModeDefault, "configured": false,
 			"pinned_offering_id": int64(0), "pinned_offering_public_id": "",
-			"allowed_model_ids": []string{}, "allowed_owner_user_ids": []int64{},
+			"allowed_model_ids": []string{}, "allowed_owner_user_ids": []int64{}, "allowed_access_kinds": []string{},
 			"allow_fallback": true, "default_route_mode": "auto",
 		})
 		return
@@ -1199,6 +1200,7 @@ func (h *handler) getPlatformKeyPreferences(c *gin.Context) {
 		"pinned_offering_public_id": pinnedPublicID,
 		"allowed_model_ids":         key.AllowedModels(),
 		"allowed_owner_user_ids":    key.AllowedOwnerIDs(),
+		"allowed_access_kinds":      key.AllowedAccessKindValues(),
 		"allow_fallback":            key.AllowFallback,
 		"default_route_mode":        key.DefaultRouteMode,
 	})
@@ -1267,7 +1269,12 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
 			k.AllowedModelIDs = string(encoded)
 		}
 		if req.AllowedOwnerUserIDs != nil {
-			return k.SetAllowedOwnerIDs(req.AllowedOwnerUserIDs)
+			if err := k.SetAllowedOwnerIDs(req.AllowedOwnerUserIDs); err != nil {
+				return err
+			}
+		}
+		if req.AllowedAccessKinds != nil {
+			return k.SetAllowedAccessKinds(req.AllowedAccessKinds)
 		}
 		return nil
 	})
@@ -1286,6 +1293,7 @@ func (h *handler) setPlatformKeyPreferences(c *gin.Context) {
 		"pinned_offering_public_id": pinnedPublicID,
 		"allowed_model_ids":         key.AllowedModels(),
 		"allowed_owner_user_ids":    key.AllowedOwnerIDs(),
+		"allowed_access_kinds":      key.AllowedAccessKindValues(),
 		"allow_fallback":            key.AllowFallback,
 		"default_route_mode":        key.DefaultRouteMode,
 	})
@@ -1920,8 +1928,12 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 		"channel_public_id":           item.ChannelPublicID,
 		"owner_user_id":               item.OwnerUserID,
 		"owner_display_name":          item.OwnerDisplayName,
+		"access_kind":                 item.AccessKind,
 		"capabilities":                item.Capabilities,
 		"updated_at":                  item.UpdatedAt,
+	}
+	if item.OutputTokensPerSecond > 0 {
+		out["output_tokens_per_second"] = item.OutputTokensPerSecond
 	}
 	if len(item.UnverifiedCapabilities) > 0 {
 		out["unverified_capabilities"] = item.UnverifiedCapabilities

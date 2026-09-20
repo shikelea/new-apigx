@@ -41,14 +41,23 @@ export interface PlazaOfferingItem {
   owner_user_id: number
   /** 分享者公开显示名 */
   owner_display_name?: string
+  /** 当前使用者视角的资源范围；与 New API 计费分组无关。 */
+  access_kind: 'public' | 'private' | 'shared'
   /** 该供给声明的能力（如 chat / embedding / image） */
-  capabilities?: string[]
+  capabilities?: {
+    streaming?: boolean
+    vision?: boolean
+    tools?: boolean
+    reasoning?: boolean
+  }
   /** 尚未验证的能力（后端仅在存在时返回） */
   unverified_capabilities?: string[]
   /** 质量摘要（最近 6 小时窗口）：样本不足时 insufficient 为 true，界面必须显示"样本不足" */
   sample_count?: number
   reliability_lower_bound_ppm?: number
   latency_ms_p50?: number
+  /** 有可靠文本 usage 时的输出 token/s；缺失表示未知，不能按 0 展示。 */
+  output_tokens_per_second?: number
   insufficient?: boolean
   stale?: boolean
   /** 更新时间（UTC epoch 秒） */

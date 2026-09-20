@@ -45,6 +45,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
+import { getCurrencyDisplay } from '@/lib/currency'
 import {
   DEFAULT_CURRENCY_CONFIG,
   useSystemConfigStore,
@@ -52,7 +53,6 @@ import {
 
 import { apiKeySchema, type ApiKey } from '../../types'
 import { ApiKeyQuotaCell } from '../api-key-quota-cell'
-import { useApiKeysColumns } from '../api-keys-columns'
 import { ApiKeysProvider } from '../api-keys-provider'
 import { ApiKeysTable } from '../api-keys-table'
 
@@ -80,9 +80,16 @@ await i18n.init({
 const clients: QueryClient[] = []
 
 function QuotaTable(props: { apiKey: ApiKey }) {
-  const columns = useApiKeysColumns(now).filter(
-    (column) => column.id === 'quota'
-  )
+  useSystemConfigStore((state) => state.config.currency)
+  const { meta: currency } = getCurrencyDisplay()
+  const quotaUnit = currency.kind === 'tokens' ? 'Tokens' : currency.symbol
+  const columns = [
+    {
+      id: 'quota',
+      header: `Quota (${quotaUnit})`,
+      cell: () => <ApiKeyQuotaCell apiKey={props.apiKey} now={now} />,
+    },
+  ]
   const table = useReactTable({
     columns,
     data: [props.apiKey],
@@ -311,6 +318,25 @@ async function renderKeysPage(status = 1, overrides: Partial<ApiKey> = {}) {
         data: { success: true, data: { items: [currentKey], total: 1 } },
       }
     }
+    if (url === '/api/apigx/platform-keys/7/preferences') {
+      return {
+        data: {
+          success: true,
+          data: {
+            token_id: 7,
+            configured: true,
+            scope_mode: 3,
+            pinned_offering_id: 0,
+            pinned_offering_public_id: '',
+            allowed_model_ids: [],
+            allowed_owner_user_ids: [],
+            allowed_access_kinds: ['shared'],
+            allow_fallback: true,
+            default_route_mode: 'auto',
+          },
+        },
+      }
+    }
     return { data: { success: true, data: { default: { ratio: 1 } } } }
   })
   const post = vi.spyOn(api, 'post').mockResolvedValue({
@@ -349,10 +375,13 @@ async function renderKeysPage(status = 1, overrides: Partial<ApiKey> = {}) {
   return { post, put }
 }
 
-it('combines creation and last use while keeping expiry, models and IP restrictions separate', async () => {
+it('shows the platform resource scope without legacy quota, group, or model columns', async () => {
   await renderKeysPage()
-  for (const name of ['Name', 'API Key', 'Group', 'Models', 'IP Restriction']) {
+  for (const name of ['Name', 'API Key', 'Resource scope', 'IP Restriction']) {
     expect(screen.getByRole('columnheader', { name })).toBeInTheDocument()
+  }
+  for (const name of ['Quota ($)', 'Group', 'Models']) {
+    expect(screen.queryByRole('columnheader', { name })).not.toBeInTheDocument()
   }
   expect(screen.getByRole('columnheader', { name: 'Time' })).toBeInTheDocument()
   expect(
@@ -360,12 +389,10 @@ it('combines creation and last use while keeping expiry, models and IP restricti
   ).toBeInTheDocument()
   const timeCell = screen.getByRole('cell', { name: /Created.*Last Used/ })
   expect(within(timeCell).getByText('Last Used')).toBeInTheDocument()
-  const quotaHeader = screen.getByRole('columnheader', { name: 'Quota ($)' })
-  const quotaTrigger = screen.getByRole('button', {
-    name: /Remaining 80; Remaining percentage 40%; Used amount 120/,
-  })
-  expect(quotaHeader).not.toHaveClass('pr-8')
-  expect(quotaTrigger.closest('td')).not.toHaveClass('pr-8')
+  expect(
+    screen.getByRole('button', { name: 'Configure resources' })
+  ).toBeInTheDocument()
+  expect(await screen.findByText('apigxKey.resourceScope.shared')).toBeVisible()
 })
 
 it('restores dates hidden by the old default and preserves unrelated column preferences', async () => {
@@ -446,7 +473,7 @@ it.each([true, false])(
   }
 )
 
-it('keeps full mobile information without group or quota section headings', async () => {
+it('keeps resource scope and IP access visible on mobile without billing fields', async () => {
   const matchMedia = window.matchMedia
   vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
     ...matchMedia(query),
@@ -458,19 +485,17 @@ it('keeps full mobile information without group or quota section headings', asyn
     await renderKeysPage()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(screen.queryByText('额度 ($)')).not.toBeInTheDocument()
-    expect(screen.getByText('($)')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /剩余 80;/ })).toBeInTheDocument()
-    expect(screen.getByText('80')).toBeInTheDocument()
-    expect(screen.getByText('120')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', {
+        name: zh.translation['Configure resources'],
+      })
+    ).toBeInTheDocument()
     expect(screen.getByText(zh.translation['Created'])).toBeInTheDocument()
     expect(screen.getByText(zh.translation['Last Used'])).toBeInTheDocument()
     expect(screen.getByText(zh.translation['Expires'])).toBeInTheDocument()
     expect(
       screen.queryByText(zh.translation['Group'], { exact: true })
     ).not.toBeInTheDocument()
-    expect(screen.getByText('default')).toBeInTheDocument()
-    expect(screen.getByText('1x')).toBeInTheDocument()
-    expect(screen.getByText(zh.translation['Models'])).toBeInTheDocument()
     expect(
       screen.getByText(zh.translation['IP Restriction'])
     ).toBeInTheDocument()
@@ -479,7 +504,7 @@ it('keeps full mobile information without group or quota section headings', asyn
   }
 })
 
-it('keeps mobile quota readable and opens complete model and IP restrictions by tapping', async () => {
+it('opens complete IP restrictions from the mobile resource card', async () => {
   const matchMedia = window.matchMedia
   vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
     ...matchMedia(query),
@@ -487,41 +512,15 @@ it('keeps mobile quota readable and opens complete model and IP restrictions by 
   }))
   await renderKeysPage(1, {
     name: 'production-with-a-long-key-name',
-    used_quota: 2245080000,
-    unlimited_quota: true,
-    model_limits_enabled: true,
-    model_limits: 'model-alpha,model-beta-with-a-long-name',
     allow_ips: '192.0.2.1\n2001:db8::1',
   })
-  const quota = screen.getByRole('button', {
-    name: /Unlimited; Used amount 4,490.16/,
-  })
-  expect(quota).toHaveTextContent('Remaining($)UnlimitedUsed amount4,490.16')
-  expect(quota.parentElement).toHaveClass('w-full')
-  expect(quota.parentElement).not.toHaveClass('max-w-45')
-  expect(quota.querySelector('[data-slot="api-key-quota-values"]')).toHaveClass(
-    'grid-cols-[auto_minmax(0,1fr)]'
-  )
-  expect(within(quota).getByText('Unlimited')).toHaveClass(
-    'text-right',
-    'text-sm',
-    'font-normal'
-  )
-  expect(within(quota).getByText('4,490.16')).toHaveClass(
-    'tabular-nums',
-    'text-sm',
-    'font-normal',
-    'text-right'
-  )
-  await userEvent.click(screen.getByRole('button', { name: /Models: 2 model/ }))
-  let details = await screen.findByRole('dialog')
-  expect(within(details).getByText('model-alpha')).toBeVisible()
-  expect(within(details).getByText('model-beta-with-a-long-name')).toBeVisible()
-  await userEvent.keyboard('{Escape}')
+  expect(
+    screen.getByRole('button', { name: 'Configure resources' })
+  ).toBeInTheDocument()
   await userEvent.click(
     screen.getByRole('button', { name: /IP Restriction: 2 IP/ })
   )
-  details = await screen.findByRole('dialog')
+  const details = await screen.findByRole('dialog')
   expect(within(details).getByText('192.0.2.1')).toBeVisible()
   expect(within(details).getByText('2001:db8::1')).toBeVisible()
 })

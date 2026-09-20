@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
 import { Gauge, KeyRound, Route } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -42,6 +41,7 @@ import {
   getPlatformKeyPreferences,
   setPlatformKeyPreferences,
 } from '@/features/keys/api'
+import { formatThroughput } from '@/features/performance-metrics/lib/format'
 import { getRouteExplain } from '@/features/plaza/api'
 import { formatMicroUSD, formatPpm } from '@/features/plaza/lib/format'
 import type {
@@ -52,7 +52,6 @@ import { handleServerError } from '@/lib/handle-server-error'
 
 import { useApigxModelSources } from '../hooks/use-apigx-model-sources'
 import { buildModelSourcePreferences } from '../lib/source-preferences'
-import type { PricingModel } from '../types'
 
 const STRATEGIES = [
   'auto',
@@ -63,7 +62,7 @@ const STRATEGIES = [
 ] as const
 type SourceStrategy = (typeof STRATEGIES)[number]
 
-export function ModelDetailsSources(props: { model: PricingModel }) {
+export function ModelDetailsSources(props: { modelName: string }) {
   const { t } = useTranslation()
   const { items } = useApigxModelSources()
   const [tokenId, setTokenId] = useState('')
@@ -71,7 +70,7 @@ export function ModelDetailsSources(props: { model: PricingModel }) {
   const [sourcePublicID, setSourcePublicID] = useState('')
   const [allowFallback, setAllowFallback] = useState(true)
 
-  const modelName = props.model.model_name || ''
+  const modelName = props.modelName
   const sources = useMemo(
     () =>
       items.filter(
@@ -277,26 +276,15 @@ function SourceCard(props: {
           <div className='flex flex-wrap items-start justify-between gap-2'>
             <div>
               <div className='font-medium'>{sourceName}</div>
-              {props.source.group_public_id ? (
-                <Link
-                  to='/plaza/group/$groupPublicId'
-                  params={{ groupPublicId: props.source.group_public_id }}
-                  className='text-muted-foreground text-xs hover:underline'
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  {props.source.group_name || t('Share group')}
-                </Link>
-              ) : (
-                <span className='text-muted-foreground text-xs'>
-                  {props.source.group_name}
-                </span>
-              )}
+              <span className='text-muted-foreground text-xs'>
+                {t('Share name')}: {props.source.group_name || '—'}
+              </span>
             </div>
             {props.explanation?.selected ? (
               <Badge>{t('Recommended')}</Badge>
             ) : null}
           </div>
-          <div className='grid grid-cols-2 gap-2 text-xs sm:grid-cols-3'>
+          <div className='grid grid-cols-2 gap-2 text-xs sm:grid-cols-4'>
             <SourceMetric
               label={t('Reliability (6h)')}
               value={
@@ -315,6 +303,12 @@ function SourceCard(props: {
                   ? `${props.source.latency_ms_p50} ms`
                   : '—'
               }
+            />
+            <SourceMetric
+              label={t('Throughput')}
+              value={formatThroughput(
+                props.source.output_tokens_per_second ?? 0
+              )}
             />
             <SourceMetric
               label={t('Reference price')}

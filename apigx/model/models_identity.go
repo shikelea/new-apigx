@@ -74,6 +74,8 @@ type APIKey struct {
 	AllowedModelIDs string `gorm:"type:text"`
 	// AllowedOwnerUserIDs JSON 数组：允许的分享者（可信分享者限定，§10.3）。
 	AllowedOwnerUserIDs string `gorm:"type:text"`
+	// AllowedAccessKinds JSON 数组：public/private/shared。用于使用者可理解的资源范围。
+	AllowedAccessKinds string `gorm:"type:text"`
 	// AllowFallback 是否允许回退；硬限制，请求参数不能放宽（§9.1）。
 	AllowFallback bool `gorm:"not null"`
 	// DefaultRouteMode 默认路由偏好（偏好，不是硬限制）。

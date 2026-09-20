@@ -307,6 +307,16 @@ type QualityView struct {
 	PlatformRejects  int64
 }
 
+// OutputTokensPerSecond returns the observed text-generation throughput when
+// both sides of the measurement are present. A missing numerator or
+// denominator stays unknown instead of becoming a misleading zero.
+func (view QualityView) OutputTokensPerSecond() (float64, bool) {
+	if view.OutputTokensSum <= 0 || view.GenerationMsSum <= 0 {
+		return 0, false
+	}
+	return float64(view.OutputTokensSum) * 1000 / float64(view.GenerationMsSum), true
+}
+
 // ResolveQualityView 汇总某供给在窗口内（截至 `at`）的质量视图。
 //
 // 窗口外的桶**不参与聚合**（过期数据退出窗口）；窗口内没有任何样本时，

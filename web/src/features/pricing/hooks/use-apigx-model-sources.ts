@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 
-import { getPlaza } from '@/features/plaza/api'
+import { getAllPlazaOfferings } from '@/features/plaza/api'
 
 import {
   shareGroupOptions,
@@ -37,10 +37,7 @@ import {
 export function useApigxModelSources() {
   const query = useQuery({
     queryKey: ['apigx-plaza', 'for-pricing'],
-    queryFn: async () => {
-      const result = await getPlaza({ page: 1, page_size: 100 })
-      return result.data?.items ?? []
-    },
+    queryFn: getAllPlazaOfferings,
     staleTime: 5 * 60 * 1000,
     retry: false,
   })
@@ -49,6 +46,8 @@ export function useApigxModelSources() {
 
   return {
     isLoading: query.isLoading,
+    isError: query.isError,
+    refetch: query.refetch,
     /** 模型名 -> 分享来源汇总 */
     byModel: useMemo<Map<string, ModelSourcesSummary>>(
       () => summarizeModelSources(items),

@@ -1063,6 +1063,15 @@ func TestPlatformKeyPreferencesAPI(t *testing.T) {
 	data, _ := body["data"].(map[string]any)
 	assert.Equal(t, false, data["configured"])
 	assert.Equal(t, float64(0), data["scope_mode"], "未配置 = 默认自动路由")
+	assert.Empty(t, data["allowed_access_kinds"])
+
+	// 设置公开/共享资源范围，不需要普通用户理解 owner 或 offering 内部 ID。
+	rec, body = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner,
+		`{"scope_mode":3,"allowed_access_kinds":["shared","public","shared"],"default_route_mode":"auto"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data, _ = body["data"].(map[string]any)
+	assert.Equal(t, float64(apigxmodel.ScopeModeAccessKinds), data["scope_mode"])
+	assert.Equal(t, []any{"public", "shared"}, data["allowed_access_kinds"])
 
 	// 设置「允许来源 + 允许回退」
 	rec, body = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner,
@@ -1362,6 +1371,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	require.Len(t, items, 1)
 	item, _ := items[0].(map[string]any)
 	assert.Equal(t, "m-plaza", item["model"])
+	assert.Equal(t, apigxmodel.PlazaAccessKindPublic, item["access_kind"])
 	assert.NotEmpty(t, item["channel_public_id"], "广场必须给出对外可辨识的来源标识")
 
 	// **只启用已完成能力**：只声明了流式的供给，能力里就只有流式；
@@ -1381,7 +1391,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	detail, _ := body["data"].(map[string]any)
 	assert.Equal(t, "m-plaza", detail["model"])
 
-	// 私有分组：即便已发布也不出现在广场
+	// 私有分组：发布后只在所有者自己的“私有资源”范围出现
 	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, privateGroup))
 	privateChannelID := env.createChannel(t, owner, privateGroup.ID, nextBaseChannelID())
@@ -1394,7 +1404,17 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	items, _ = body["data"].(map[string]any)["items"].([]any)
-	assert.Len(t, items, 1, "私有分组的已发布供给不得出现在广场")
+	require.Len(t, items, 2, "所有者应能在广场的私有范围选择自己的已发布供给")
+	var privateItem map[string]any
+	for _, raw := range items {
+		candidate, _ := raw.(map[string]any)
+		if candidate["model"] == "m-private" {
+			privateItem = candidate
+			break
+		}
+	}
+	require.NotNil(t, privateItem)
+	assert.Equal(t, apigxmodel.PlazaAccessKindPrivate, privateItem["access_kind"])
 
 	// 未登录不得访问广场
 	rec, _ = env.do(t, http.MethodGet, "/api/plaza", 0, "")
@@ -1852,6 +1872,30 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
 	require.Contains(t, first, "sample_count")
 	assert.Equal(t, true, first["insufficient"], "没有样本时必须标为样本不足，而不是给出一个看起来可信的数字")
 	assert.Equal(t, float64(0), first["reliability_lower_bound_ppm"])
+	assert.NotContains(t, first, "output_tokens_per_second", "吞吐未知时必须省略字段，不能伪装成 0 token/s")
+
+	// 文本成功样本同时带有效输出 token 与生成耗时后，广场应复用自动路由的同一吞吐口径。
+	now := common.GetTimestamp()
+	bucketTs := now - now%60
+	for range apigxmodel.MinSamplesForQuality {
+		require.NoError(t, apigxmodel.RecordQualitySample(env.db, apigxmodel.QualitySample{
+			OfferingID: offeringID, BucketTs: bucketTs, Outcome: apigxmodel.QualityOutcomeSuccess,
+			LatencyMs: 125, OutputTokens: 120, GenerationMs: 1000,
+		}))
+	}
+
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items, _ = body["data"].(map[string]any)["items"].([]any)
+	require.NotEmpty(t, items)
+	first, _ = items[0].(map[string]any)
+	assert.Equal(t, false, first["insufficient"])
+	assert.InDelta(t, 120, first["output_tokens_per_second"], 0.001)
+	publicID, _ := first["offering_public_id"].(string)
+	rec, body = env.do(t, http.MethodGet, "/api/plaza/"+publicID, owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	detail, _ := body["data"].(map[string]any)
+	assert.InDelta(t, 120, detail["output_tokens_per_second"], 0.001)
 }
 
 // 对外标准模型 ID 与介绍：**只有映射已确认时**广场才显示（§8.2）。未确认时显示上游名，
@@ -1989,12 +2033,12 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
 	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, stranger, "")
 	assert.Equal(t, http.StatusNotFound, rec.Code, "受限供给的详情对未授权者不存在")
 
-	// ② 所有者**也不**在广场看到它 —— 广场是"公开 or 受邀"的发现面，
-	//    分享者看自己的东西走「我的分享」页（既有用例 TestPlazaOnlyExposesPublishedAndPublic
-	//    对"私有组"就是这条口径；此处对"受限组"保持一致）。
+	// ② 所有者在同一个资源广场的“私有”范围看到自己的非公开资源。
 	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
 	items, _ := body["data"].(map[string]any)["items"].([]any)
-	assert.Empty(t, items, "广场只放行公开或受邀，所有者应去「我的分享」看自己的受限供给")
+	require.Len(t, items, 1)
+	ownerItem, _ := items[0].(map[string]any)
+	assert.Equal(t, apigxmodel.PlazaAccessKindPrivate, ownerItem["access_kind"])
 
 	// ③ 授予访问权（指定用户，§4）：受邀者可见
 	grant := apigxmodel.Grant{
@@ -2007,6 +2051,8 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
 	_, body = env.do(t, http.MethodGet, "/api/plaza", invited, "")
 	items, _ = body["data"].(map[string]any)["items"].([]any)
 	require.NotEmpty(t, items, "被授权者应当看得见受限分组的供给")
+	invitedItem, _ := items[0].(map[string]any)
+	assert.Equal(t, apigxmodel.PlazaAccessKindShared, invitedItem["access_kind"])
 	rec, _ = env.do(t, http.MethodGet, "/api/plaza/"+publicID, invited, "")
 	assert.Equal(t, http.StatusOK, rec.Code, "被授权者的详情应当可见")
 
@@ -2029,6 +2075,14 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
 func TestAccessInviteAndGrantAPIContract(t *testing.T) {
 	env := newTestEnv(t, true)
 	const owner, guest, stranger int64 = 9801, 9802, 9803
+	require.NoError(t, env.db.AutoMigrate(&basemodel.User{}))
+	for id, username := range map[int64]string{
+		owner: "access-owner", guest: "access-guest", stranger: "access-stranger",
+	} {
+		require.NoError(t, env.db.Create(&basemodel.User{
+			Id: int(id), Username: username, DisplayName: username, Password: "not-used-in-test", AffCode: username,
+		}).Error)
+	}
 
 	group := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "邀请组", DefaultVisibility: apigxmodel.ShareGroupVisibilityLimited, PublishStatus: apigxmodel.ShareGroupPublishPublished}
 	require.NoError(t, apigxmodel.CreateShareGroup(env.db, group))
@@ -2082,9 +2136,21 @@ func TestAccessInviteAndGrantAPIContract(t *testing.T) {
 
 	// ⑤ 指定用户授权 + 撤销
 	rec, body = env.do(t, http.MethodPost, "/api/access/grants", owner,
-		`{"resource_type":0,"resource_id":`+strconv.FormatInt(group.ID, 10)+`,"target_user_id":`+strconv.FormatInt(stranger, 10)+`}`)
+		`{"resource_type":0,"resource_id":`+strconv.FormatInt(group.ID, 10)+`,"target_username":"access-stranger"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	grantID := int64(body["data"].(map[string]any)["id"].(float64))
+	_, body = env.do(t, http.MethodGet, "/api/access/grants?resource_type=0&resource_id="+strconv.FormatInt(group.ID, 10), owner, "")
+	grants := body["data"].(map[string]any)["items"].([]any)
+	require.NotEmpty(t, grants)
+	foundStranger := false
+	for _, rawGrant := range grants {
+		listed := rawGrant.(map[string]any)
+		if int64(listed["subject_id"].(float64)) == stranger {
+			assert.Equal(t, "access-stranger", listed["subject_display_name"])
+			foundStranger = true
+		}
+	}
+	assert.True(t, foundStranger, "指定用户名授权应出现在授权列表")
 
 	rec, _ = env.do(t, http.MethodDelete, "/api/access/grants/"+strconv.FormatInt(grantID, 10), owner, "")
 	assert.Equal(t, http.StatusOK, rec.Code)

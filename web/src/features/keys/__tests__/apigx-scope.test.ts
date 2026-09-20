@@ -15,9 +15,16 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import { describe, expect, it } from 'vitest'
+*/ import { describe, expect, it } from 'vitest'
 
-import { buildScopePayload, parseIdList, parseNumberIdList } from '../lib/apigx-scope'
+import {
+  buildScopePayload,
+  parseIdList,
+  parseNumberIdList,
+  resourceScopeLabelKey,
+  ROUTE_MODE_OPTIONS,
+} from '../lib/apigx-scope'
+import type { PlatformKeyPreferences } from '../types'
 
 describe('ID 列表解析', () => {
   it('逗号与空格都能分隔', () => {
@@ -39,10 +46,9 @@ describe('ID 列表解析', () => {
 
 describe('偏好请求体构造', () => {
   const base = {
-    scopeMode: '0',
-    pinnedOfferingId: '',
-    allowedModelIds: '',
-    allowedOwnerUserIds: '',
+    resourceScope: 'all' as const,
+    pinnedOfferingPublicId: '',
+    allowedModelIds: [] as string[],
     allowFallback: true,
     defaultRouteMode: 'auto',
   }
@@ -50,22 +56,61 @@ describe('偏好请求体构造', () => {
   it('整体提交全部字段（表单已预填当前值，因此是幂等往返）', () => {
     const payload = buildScopePayload(base)
 
-    expect(payload.scope_mode).toBe(0)
-    expect(payload.pinned_offering_id).toBe(0)
+    expect(payload.scope_mode).toBe(3)
+    expect(payload.pinned_offering_public_id).toBe('')
     expect(payload.allowed_model_ids).toEqual([])
     expect(payload.allowed_owner_user_ids).toEqual([])
+    expect(payload.allowed_access_kinds).toEqual([
+      'public',
+      'private',
+      'shared',
+    ])
     expect(payload.allow_fallback).toBe(true)
     expect(payload.default_route_mode).toBe('auto')
   })
 
-  it('绑定来源为非法输入时提交 0（= 未绑定），而不是猜一个 ID', () => {
-    expect(buildScopePayload({ ...base, pinnedOfferingId: 'abc' }).pinned_offering_id).toBe(0)
+  it('固定来源只提交对外 offering ID，不暴露内部数字 ID', () => {
+    const payload = buildScopePayload({
+      ...base,
+      resourceScope: 'pinned',
+      pinnedOfferingPublicId: 'off_public_123',
+    })
+    expect(payload.scope_mode).toBe(2)
+    expect(payload.pinned_offering_public_id).toBe('off_public_123')
+    expect(payload.allowed_access_kinds).toEqual([])
   })
 
-  it('填写的模型与分享者被解析进请求体', () => {
-    const payload = buildScopePayload({ ...base, allowedModelIds: 'a,b', allowedOwnerUserIds: '3 4' })
+  it('单一资源范围直接映射为后端 access kind', () => {
+    const payload = buildScopePayload({ ...base, resourceScope: 'shared' })
+    expect(payload.allowed_access_kinds).toEqual(['shared'])
+  })
+})
 
-    expect(payload.allowed_model_ids).toEqual(['a', 'b'])
-    expect(payload.allowed_owner_user_ids).toEqual([3, 4])
+describe('资源范围展示', () => {
+  const preferences = {
+    token_id: 7,
+    configured: true,
+    scope_mode: 3,
+    pinned_offering_id: 0,
+    allowed_model_ids: [],
+    allowed_owner_user_ids: [],
+    allowed_access_kinds: ['shared'],
+    allow_fallback: true,
+    default_route_mode: 'auto',
+  } satisfies PlatformKeyPreferences
+
+  it('把单一共享范围显示为分享给我', () => {
+    expect(resourceScopeLabelKey(preferences)).toBe(
+      'apigxKey.resourceScope.shared'
+    )
+  })
+
+  it('路由策略使用实际存在的翻译键命名空间', () => {
+    expect(ROUTE_MODE_OPTIONS.map((option) => option.labelKey)).toEqual([
+      'apigxKey.scope.routeMode.auto',
+      'apigxKey.scope.routeMode.latency',
+      'apigxKey.scope.routeMode.throughput',
+      'apigxKey.scope.routeMode.reliability',
+    ])
   })
 })

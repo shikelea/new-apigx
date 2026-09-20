@@ -102,7 +102,7 @@ export function useSummaryCardsConfig(totals: {
   return [
     {
       key: 'todayUsage',
-      title: t('Last 24h usage'),
+      title: t('Estimated cost (24h)'),
       value: totals.todayUsageDisplay,
       description: totals.currencyEnabled
         ? `${t('Consumed in the last 24 hours')} (${totals.currencyLabel})`
@@ -111,7 +111,7 @@ export function useSummaryCardsConfig(totals: {
     },
     {
       key: 'usage',
-      title: t('Historical Usage'),
+      title: t('Estimated cost (total)'),
       value: totals.usedDisplay,
       description: totals.currencyEnabled
         ? `${t('Total consumed')} (${totals.currencyLabel})`

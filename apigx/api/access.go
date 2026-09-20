@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/apigx/model"
+	basemodel "github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 )
 
@@ -212,16 +213,26 @@ func (h *handler) createGrant(c *gin.Context) {
 		return
 	}
 	var req struct {
-		ResourceType int   `json:"resource_type"`
-		ResourceID   int64 `json:"resource_id"`
-		TargetUserID int64 `json:"target_user_id"`
-		ExpiresAt    int64 `json:"expires_at"`
+		ResourceType   int    `json:"resource_type"`
+		ResourceID     int64  `json:"resource_id"`
+		TargetUserID   int64  `json:"target_user_id"`
+		TargetUsername string `json:"target_username"`
+		ExpiresAt      int64  `json:"expires_at"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
-	grant, err := apigxmodel.CreateGrantForUser(h.db, owner, req.ResourceType, req.ResourceID, req.TargetUserID, req.ExpiresAt)
+	targetUserID := req.TargetUserID
+	if targetUserID <= 0 && strings.TrimSpace(req.TargetUsername) != "" {
+		var target basemodel.User
+		if err := h.db.Select("id").Where("username = ?", strings.TrimSpace(req.TargetUsername)).First(&target).Error; err != nil {
+			fail(c, http.StatusBadRequest, "invalid_target", "target user not found")
+			return
+		}
+		targetUserID = int64(target.Id)
+	}
+	grant, err := apigxmodel.CreateGrantForUser(h.db, owner, req.ResourceType, req.ResourceID, targetUserID, req.ExpiresAt)
 	if err != nil {
 		failFromRepo(c, err)
 		return
@@ -256,9 +267,14 @@ func (h *handler) listGrants(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
+		subjectName := ""
+		if row.SubjectType == apigxmodel.GrantSubjectUser {
+			subjectName = h.ownerDisplayNames([]int64{row.SubjectID})[row.SubjectID]
+		}
 		items = append(items, gin.H{
 			"id": row.ID, "subject_type": row.SubjectType, "subject_id": row.SubjectID,
-			"scope_kind": row.ScopeKind, "source_invite_id": row.SourceInviteID,
+			"subject_display_name": subjectName,
+			"scope_kind":           row.ScopeKind, "source_invite_id": row.SourceInviteID,
 			"expires_at": row.ExpiresAt, "created_at": row.CreatedAt,
 		})
 	}

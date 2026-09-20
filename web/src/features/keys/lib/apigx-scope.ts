@@ -15,15 +15,39 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
-*/import type { PlatformKeyPreferencesPayload } from '../types'
+*/
+import type {
+  PlatformKeyPreferences,
+  PlatformKeyPreferencesPayload,
+} from '../types'
+
+export type ResourceScope = 'all' | 'public' | 'private' | 'shared' | 'pinned'
+
+const ALL_ACCESS_KINDS = ['public', 'private', 'shared'] as const
 
 /** 路由策略选项（空串与 auto 同义：综合质量路由，由后端统一解释）。 */
 export const ROUTE_MODE_OPTIONS: { value: string; labelKey: string }[] = [
-  { value: 'auto', labelKey: 'apigxKey.routeMode.auto' },
-  { value: 'latency', labelKey: 'apigxKey.routeMode.latency' },
-  { value: 'throughput', labelKey: 'apigxKey.routeMode.throughput' },
-  { value: 'reliability', labelKey: 'apigxKey.routeMode.reliability' },
+  { value: 'auto', labelKey: 'apigxKey.scope.routeMode.auto' },
+  { value: 'latency', labelKey: 'apigxKey.scope.routeMode.latency' },
+  { value: 'throughput', labelKey: 'apigxKey.scope.routeMode.throughput' },
+  { value: 'reliability', labelKey: 'apigxKey.scope.routeMode.reliability' },
 ]
+
+/** 把后端范围配置转成列表与移动卡片共用的用户可见文案。 */
+export function resourceScopeLabelKey(
+  preferences: PlatformKeyPreferences | undefined
+): string {
+  if (preferences?.scope_mode === 2) {
+    return 'apigxKey.resourceScope.pinned'
+  }
+  if (
+    preferences?.scope_mode === 3 &&
+    preferences.allowed_access_kinds.length === 1
+  ) {
+    return `apigxKey.resourceScope.${preferences.allowed_access_kinds[0]}`
+  }
+  return 'apigxKey.resourceScope.all'
+}
 
 /** 解析逗号/空格分隔的 ID 列表；空串得到**空列表**（= 不限制）。 */
 export function parseIdList(text: string): string[] {
@@ -45,12 +69,11 @@ export function parseNumberIdList(text: string): number[] {
   return parsed
 }
 
-/** 表单状态（都是字符串，便于受控输入）。 */
+/** 平台 Key 设置页使用的用户语义，不暴露 owner/offering 内部数字 ID。 */
 export interface ScopeFormState {
-  scopeMode: string
-  pinnedOfferingId: string
-  allowedModelIds: string
-  allowedOwnerUserIds: string
+  resourceScope: ResourceScope
+  pinnedOfferingPublicId: string
+  allowedModelIds: string[]
   allowFallback: boolean
   defaultRouteMode: string
 }
@@ -61,13 +84,28 @@ export interface ScopeFormState {
  * 提交**全部**字段：表单已用 `GET` 的当前值预填，因此整体提交是**幂等的往返**
  * （不会误清空用户没动过的字段 ✓）。后端只接受非空指针字段，所以这里给出全部字段是安全的。
  */
-export function buildScopePayload(form: ScopeFormState): PlatformKeyPreferencesPayload {
-  const pinned = Number.parseInt(form.pinnedOfferingId.trim(), 10)
+export function buildScopePayload(
+  form: ScopeFormState
+): PlatformKeyPreferencesPayload {
+  const isPinned = form.resourceScope === 'pinned'
+  let allowedAccessKinds: Array<'public' | 'private' | 'shared'> = []
+  if (!isPinned && form.resourceScope === 'all') {
+    allowedAccessKinds = [...ALL_ACCESS_KINDS]
+  } else if (
+    form.resourceScope === 'public' ||
+    form.resourceScope === 'private' ||
+    form.resourceScope === 'shared'
+  ) {
+    allowedAccessKinds = [form.resourceScope]
+  }
   return {
-    scope_mode: Number.parseInt(form.scopeMode, 10) || 0,
-    pinned_offering_id: Number.isFinite(pinned) && pinned > 0 ? pinned : 0,
-    allowed_model_ids: parseIdList(form.allowedModelIds),
-    allowed_owner_user_ids: parseNumberIdList(form.allowedOwnerUserIds),
+    scope_mode: isPinned ? 2 : 3,
+    pinned_offering_public_id: isPinned
+      ? form.pinnedOfferingPublicId.trim()
+      : '',
+    allowed_model_ids: form.allowedModelIds,
+    allowed_owner_user_ids: [],
+    allowed_access_kinds: allowedAccessKinds,
     allow_fallback: form.allowFallback,
     default_route_mode: form.defaultRouteMode,
   }

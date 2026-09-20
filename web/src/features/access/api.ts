@@ -37,6 +37,7 @@ export interface AccessGrant {
   id: number
   subject_type: number
   subject_id: number
+  subject_display_name?: string
   scope_kind: number
   source_invite_id: number
   expires_at: number
@@ -71,7 +72,7 @@ export async function revokeAccessInvite(
   revokeGrants = true
 ): Promise<{ success: boolean }> {
   const res = await api.post(
-    '/api/apigx/access/invites/' + inviteId + '/revoke?revoke_grants=' + String(revokeGrants)
+    `/api/apigx/access/invites/${inviteId}/revoke?revoke_grants=${String(revokeGrants)}`
   )
   return res.data
 }
@@ -86,7 +87,19 @@ export async function listGrants(
   return res.data
 }
 
-export async function deleteGrant(grantId: number): Promise<{ success: boolean }> {
-  const res = await api.delete('/api/apigx/access/grants/' + grantId)
+export async function createGrant(input: {
+  resource_type: number
+  resource_id: number
+  target_username: string
+  expires_at?: number
+}): Promise<{ success: boolean; data?: AccessGrant }> {
+  const res = await api.post('/api/apigx/access/grants', input)
+  return res.data
+}
+
+export async function deleteGrant(
+  grantId: number
+): Promise<{ success: boolean }> {
+  const res = await api.delete(`/api/apigx/access/grants/${grantId}`)
   return res.data
 }

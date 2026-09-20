@@ -43,7 +43,130 @@ export interface ModelSourcesSummary {
   canonicalModelID?: string
 }
 
-export function summarizeModelSources(items: PlazaOfferingItem[]): Map<string, ModelSourcesSummary> {
+export type ResourceAccessKind = PlazaOfferingItem['access_kind']
+
+export interface ResourceModelQualitySummary {
+  /** 有质量字段的来源是否全部样本不足。 */
+  allInsufficient: boolean
+  /** 充分且新鲜样本中最高的 6 小时可靠性置信下界。 */
+  bestReliabilityLowerBoundPpm?: number
+  /** 所有已知来源中最低的 P50 延迟。 */
+  lowestLatencyMsP50?: number
+  /** 所有已知来源中最高的文本输出吞吐。 */
+  highestOutputTokensPerSecond?: number
+}
+
+/** 资源广场卡片的模型视图。价格留在详情，质量摘要用于快速判断。 */
+export interface ResourceModelSummary {
+  modelID: string
+  canonicalModelID?: string
+  description?: string
+  sources: PlazaOfferingItem[]
+  quality: ResourceModelQualitySummary
+}
+
+export function summarizeResourceQuality(
+  sources: PlazaOfferingItem[]
+): ResourceModelQualitySummary {
+  let qualitySourceCount = 0
+  let insufficientSourceCount = 0
+  let bestReliabilityLowerBoundPpm: number | undefined
+  let lowestLatencyMsP50: number | undefined
+  let highestOutputTokensPerSecond: number | undefined
+
+  for (const source of sources) {
+    const samples = source.sample_count
+    if (
+      typeof samples === 'number' ||
+      typeof source.insufficient === 'boolean'
+    ) {
+      qualitySourceCount += 1
+      if (source.insufficient === true || (samples ?? 0) <= 0) {
+        insufficientSourceCount += 1
+      }
+    }
+
+    const reliability = source.reliability_lower_bound_ppm
+    if (
+      source.insufficient !== true &&
+      source.stale !== true &&
+      (samples ?? 0) > 0 &&
+      typeof reliability === 'number' &&
+      Number.isFinite(reliability) &&
+      reliability >= 0 &&
+      (bestReliabilityLowerBoundPpm === undefined ||
+        reliability > bestReliabilityLowerBoundPpm)
+    ) {
+      bestReliabilityLowerBoundPpm = reliability
+    }
+
+    const latency = source.latency_ms_p50
+    if (
+      typeof latency === 'number' &&
+      Number.isFinite(latency) &&
+      latency > 0 &&
+      (lowestLatencyMsP50 === undefined || latency < lowestLatencyMsP50)
+    ) {
+      lowestLatencyMsP50 = latency
+    }
+
+    const throughput = source.output_tokens_per_second
+    if (
+      typeof throughput === 'number' &&
+      Number.isFinite(throughput) &&
+      throughput > 0 &&
+      (highestOutputTokensPerSecond === undefined ||
+        throughput > highestOutputTokensPerSecond)
+    ) {
+      highestOutputTokensPerSecond = throughput
+    }
+  }
+
+  return {
+    allInsufficient:
+      qualitySourceCount > 0 && insufficientSourceCount === qualitySourceCount,
+    bestReliabilityLowerBoundPpm,
+    lowestLatencyMsP50,
+    highestOutputTokensPerSecond,
+  }
+}
+
+/**
+ * 按用户可理解的资源范围筛选后，再把相同模型 ID 聚合为一张卡。
+ * ShareGroup 仍是后端授权边界，但不作为普通用户的一级筛选维度。
+ */
+export function aggregateResourceModels(
+  items: PlazaOfferingItem[],
+  accessKind: ResourceAccessKind
+): ResourceModelSummary[] {
+  const byModel = new Map<string, PlazaOfferingItem[]>()
+  for (const item of items) {
+    if (item.access_kind !== accessKind || item.model.trim() === '') continue
+    const current = byModel.get(item.model)
+    if (current) current.push(item)
+    else byModel.set(item.model, [item])
+  }
+
+  return [...byModel.entries()]
+    .map(([modelID, sources]) => ({
+      modelID,
+      canonicalModelID: sources.find((source) => source.canonical_model_id)
+        ?.canonical_model_id,
+      description: sources.find((source) => source.model_description)
+        ?.model_description,
+      sources: [...sources].sort((left, right) => {
+        const leftName = left.owner_display_name ?? left.group_name ?? ''
+        const rightName = right.owner_display_name ?? right.group_name ?? ''
+        return leftName.localeCompare(rightName)
+      }),
+      quality: summarizeResourceQuality(sources),
+    }))
+    .sort((left, right) => left.modelID.localeCompare(right.modelID))
+}
+
+export function summarizeModelSources(
+  items: PlazaOfferingItem[]
+): Map<string, ModelSourcesSummary> {
   const byModel = new Map<string, PlazaOfferingItem[]>()
   for (const item of items) {
     if (!item.model) {
@@ -76,13 +199,18 @@ export function summarizeModelSources(items: PlazaOfferingItem[]): Map<string, M
     const groups: ModelSourceGroup[] = [...groupMap.entries()]
       .map(([name, publicID]) => ({ publicID, name }))
       .sort((a, b) => a.name.localeCompare(b.name))
-    const withQuality = list.filter((item) => typeof item.sample_count === 'number')
+    const withQuality = list.filter(
+      (item) => typeof item.sample_count === 'number'
+    )
     out.set(model, {
       sourceCount: list.length,
       groups,
       // 只有确实拿过质量字段、且全部样本不足时才为真（不拿"没数据"冒充"质量差"）
-      allInsufficient: withQuality.length > 0 && withQuality.every((item) => item.insufficient === true),
-      canonicalModelID: list.find((item) => item.canonical_model_id)?.canonical_model_id,
+      allInsufficient:
+        withQuality.length > 0 &&
+        withQuality.every((item) => item.insufficient === true),
+      canonicalModelID: list.find((item) => item.canonical_model_id)
+        ?.canonical_model_id,
     })
   }
   return out
@@ -90,5 +218,9 @@ export function summarizeModelSources(items: PlazaOfferingItem[]): Map<string, M
 
 /** 分享分组的可选项（供篩选使用）；空值表示"全部"。 */
 export function shareGroupOptions(items: PlazaOfferingItem[]): string[] {
-  return [...new Set(items.map((item) => item.group_name ?? '').filter((name) => name !== ''))].sort()
+  return [
+    ...new Set(
+      items.map((item) => item.group_name ?? '').filter((name) => name !== '')
+    ),
+  ].sort()
 }

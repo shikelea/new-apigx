@@ -16,7 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Check, Copy, Loader2 } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { Check, Copy, Loader2, ShieldCheck } from 'lucide-react'
 import { useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -37,6 +38,8 @@ import {
 } from '@/components/ui/tooltip'
 import { copyToClipboard } from '@/lib/copy-to-clipboard'
 
+import { getPlatformKeyPreferences } from '../api'
+import { resourceScopeLabelKey } from '../lib/apigx-scope'
 import type { ApiKey } from '../types'
 import { useApiKeys } from './api-keys-provider'
 
@@ -172,6 +175,41 @@ export function IpRestrictionsCell(props: ApiKeyRestrictionProps) {
       emptyLabel={t('No restriction')}
       detailsTrigger={props.detailsTrigger}
     />
+  )
+}
+
+export function ApiKeyResourceScopeCell(props: { apiKey: ApiKey }) {
+  const { t } = useTranslation()
+  const { setCurrentRow, setOpen } = useApiKeys()
+  const preferencesQuery = useQuery({
+    queryKey: ['apigx-key-preferences', props.apiKey.id],
+    queryFn: () => getPlatformKeyPreferences(props.apiKey.id),
+    retry: false,
+    meta: { errorToast: false },
+  })
+  const label = preferencesQuery.isPending
+    ? t('Loading...')
+    : t(resourceScopeLabelKey(preferencesQuery.data?.data))
+
+  return (
+    <Button
+      variant='outline'
+      size='sm'
+      className='h-auto min-h-8 max-w-full flex-col items-start gap-0.5 py-1.5'
+      aria-label={t('Configure resources')}
+      onClick={() => {
+        setCurrentRow(props.apiKey)
+        setOpen('apigx-scope')
+      }}
+    >
+      <span className='flex max-w-full items-center gap-1.5'>
+        <ShieldCheck className='size-3.5 shrink-0' />
+        <span className='truncate font-medium'>{label}</span>
+      </span>
+      <span className='text-muted-foreground text-[11px] font-normal'>
+        {t('Configure resources')}
+      </span>
+    </Button>
   )
 }
 

@@ -438,6 +438,21 @@ func TestAPIKeyPreferencesUpsertAndValidation(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 4242, key.PinnedOfferingID)
 
+	// 使用者可理解的资源范围：公开/私有/共享必须显式选择且去重排序。
+	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = ScopeModeAccessKinds
+		return k.SetAllowedAccessKinds(nil)
+	})
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	key, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
+		k.ScopeMode = ScopeModeAccessKinds
+		return k.SetAllowedAccessKinds([]string{PlazaAccessKindShared, PlazaAccessKindPublic, PlazaAccessKindShared})
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{PlazaAccessKindPublic, PlazaAccessKindShared}, key.AllowedAccessKindValues())
+	assert.True(t, key.AllowsAccessKind(PlazaAccessKindPublic))
+	assert.False(t, key.AllowsAccessKind(PlazaAccessKindPrivate))
+
 	// 未知模式必须被拒
 	_, err = UpsertAPIKeyPreferences(db, user, token, func(k *APIKey) error {
 		k.ScopeMode = 99

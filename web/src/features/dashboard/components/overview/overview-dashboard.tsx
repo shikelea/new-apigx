@@ -26,7 +26,6 @@ import {
   ChevronUp,
   Circle,
   Copy,
-  CreditCard,
   FileText,
   KeyRound,
   ListChecks,
@@ -86,7 +85,6 @@ const SETUP_GUIDE_CODE_PATTERN = [
 
 type DashboardActionPath =
   | '/keys'
-  | '/wallet'
   | '/playground'
   | '/channels'
   | '/usage-logs'
@@ -477,8 +475,6 @@ export function OverviewDashboard() {
   >(() => getSavedSetupGuideExpanded())
 
   const requestCount = Number(user?.request_count ?? 0)
-  const remainQuota = Number(user?.quota ?? 0)
-  const usedQuota = Number(user?.used_quota ?? 0)
   const isAdmin = Boolean(user?.role && user.role >= ROLE.ADMIN)
 
   const apiKeysQuery = useQuery({
@@ -514,11 +510,11 @@ export function OverviewDashboard() {
         completed: Boolean(preferredKey),
       },
       {
-        title: t('Add credits'),
-        description: t('Keep enough balance before production traffic'),
-        to: '/wallet',
-        icon: CreditCard,
-        completed: remainQuota > 0 || usedQuota > 0,
+        title: t('Choose accessible resources'),
+        description: t('Browse public, private, or shared models'),
+        to: '/pricing',
+        icon: BookOpen,
+        completed: (modelsQuery.data?.length ?? 0) > 0,
       },
       {
         title: t('Send a request'),
@@ -528,7 +524,7 @@ export function OverviewDashboard() {
         completed: requestCount > 0,
       },
     ],
-    [preferredKey, remainQuota, requestCount, t, usedQuota]
+    [modelsQuery.data, preferredKey, requestCount, t]
   )
 
   const quickActions = useMemo<QuickAction[]>(
@@ -553,8 +549,8 @@ export function OverviewDashboard() {
         icon: FileText,
       },
       {
-        title: t('Pricing'),
-        description: t('Review model rates before scaling traffic'),
+        title: t('Model Square'),
+        description: t('Choose accessible resources and compare sources'),
         to: '/pricing',
         icon: BookOpen,
       },
@@ -669,7 +665,7 @@ export function OverviewDashboard() {
                             </h3>
                             <p className='text-muted-foreground max-w-xl text-sm leading-relaxed'>
                               {t(
-                                'A focused home for keys, balance, routing, and service health.'
+                                'Create a key, choose accessible resources, and send your first request.'
                               )}
                             </p>
                           </div>

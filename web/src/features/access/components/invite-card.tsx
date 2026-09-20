@@ -18,7 +18,6 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -33,7 +32,6 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -42,7 +40,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { redeemAccessInvite } from '@/features/access-invite/api'
 import type { ShareGroup } from '@/features/share/types'
 
 import {
@@ -81,17 +78,6 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
   const [days, setDays] = useState('7')
   const [issuedToken, setIssuedToken] = useState('')
   const [revoking, setRevoking] = useState<AccessInvite | null>(null)
-
-  // 兑换（U-2：与发放同一界面）。用别人的邀请码换取可见性，属于使用者动作。
-  const [redeemToken, setRedeemToken] = useState('')
-  const [redeemDone, setRedeemDone] = useState(false)
-  const redeem = useMutation({
-    mutationFn: () => redeemAccessInvite(redeemToken),
-    onSuccess: (res) => {
-      setRedeemDone(res.success !== false)
-      if (res.success !== false) setRedeemToken('')
-    },
-  })
 
   const query = useQuery({
     queryKey: ['apigx-access-invites'],
@@ -143,7 +129,11 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
       header: t('Invite code'),
       cell: (row) => `${row.token_prefix}…`,
     },
-    { id: 'target', header: t('Share group'), cell: (row) => groupName(row) },
+    {
+      id: 'target',
+      header: t('Shared resource'),
+      cell: (row) => groupName(row),
+    },
     {
       id: 'uses',
       header: t('Uses'),
@@ -178,15 +168,13 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
       </CardHeader>
       <CardContent className='space-y-4'>
         <p className='text-muted-foreground text-sm'>
-          {t(
-            'Issue an invite so others can see the resources of a share group.'
-          )}
+          {t('Issue an invite so others can use one of your shared resources.')}
         </p>
 
         <FieldGroup className='grid gap-3 sm:grid-cols-3'>
           <Field>
             <FieldLabel htmlFor='access-invite-group'>
-              {t('Share group')}
+              {t('Shared resource')}
             </FieldLabel>
             <Select
               value={groupId}
@@ -194,7 +182,7 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
               onValueChange={(next) => setGroupId(next ?? '')}
             >
               <SelectTrigger id='access-invite-group' className='w-full'>
-                <SelectValue placeholder={t('Select a share group')}>
+                <SelectValue placeholder={t('Select a shared resource')}>
                   {props.groups.find((group) => String(group.id) === groupId)
                     ?.name ?? ''}
                 </SelectValue>
@@ -279,7 +267,7 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
                   <dl className='grid grid-cols-2 gap-3 text-sm'>
                     <div className='min-w-0'>
                       <dt className='text-muted-foreground text-xs'>
-                        {t('Share group')}
+                        {t('Shared resource')}
                       </dt>
                       <dd className='truncate'>{groupName(invite)}</dd>
                     </div>
@@ -317,48 +305,6 @@ export function AccessInviteCard(props: { groups: ShareGroup[] }) {
           </>
         )}
 
-        {/* U-2：兑换与发放合并为同一界面（原来是一个独立页面） */}
-        <div className='space-y-2 border-t pt-4'>
-          <p className='text-sm font-medium'>{t('Redeem an invite')}</p>
-          <p className='text-muted-foreground text-sm'>
-            {t(
-              'Paste the invite code you received to unlock the shared resources.'
-            )}
-          </p>
-          <div className='flex items-end gap-2'>
-            <div className='flex-1 space-y-2'>
-              <Label htmlFor='access-invite-redeem'>{t('Invite code')}</Label>
-              <Input
-                id='access-invite-redeem'
-                value={redeemToken}
-                autoComplete='off'
-                onChange={(event) => {
-                  setRedeemToken(event.target.value)
-                  setRedeemDone(false)
-                }}
-              />
-            </div>
-            <Button
-              disabled={redeemToken.trim() === '' || redeem.isPending}
-              onClick={() => redeem.mutate()}
-            >
-              {t('Redeem')}
-            </Button>
-          </div>
-          {redeemDone ? (
-            <p className='text-sm text-emerald-600'>
-              {t('Invite redeemed. The shared resources are now visible.')}{' '}
-              <Link to='/pricing' className='underline'>
-                {t('Open the model plaza')}
-              </Link>
-            </p>
-          ) : null}
-          {redeem.isError || redeem.data?.success === false ? (
-            <p className='text-destructive text-sm'>
-              {t('Invalid or already used invite code')}
-            </p>
-          ) : null}
-        </div>
         <ConfirmDialog
           open={revoking !== null}
           onOpenChange={(next) => {

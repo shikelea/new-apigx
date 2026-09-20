@@ -152,8 +152,6 @@ function findButton(text: string, required = true): HTMLButtonElement | null {
 }
 
 function getControlByLabel(labelText: 'Name' | 'Quantity'): HTMLInputElement
-function getControlByLabel(labelText: 'Group'): HTMLButtonElement
-function getControlByLabel(labelText: 'Auto group order'): HTMLElement
 function getControlByLabel(labelText: string): HTMLElement {
   const label = [...document.querySelectorAll<HTMLLabelElement>('label')].find(
     (candidate) => candidate.textContent?.trim() === labelText
@@ -179,20 +177,6 @@ function changeInput(input: HTMLInputElement, value: string): void {
   fireEvent.input(input, { target: { value } })
 }
 
-function selectComboboxOption(
-  trigger: HTMLButtonElement,
-  optionDescription: string
-): void {
-  fireEvent.click(trigger)
-  const option = [
-    ...document.querySelectorAll<HTMLElement>('[data-slot="command-item"]'),
-  ].find((candidate) => candidate.textContent?.includes(optionDescription))
-  if (!option) {
-    throw new Error(`Expected option containing "${optionDescription}"`)
-  }
-  fireEvent.click(option)
-}
-
 afterEach(() => {
   apiClient.get = originalGet
   apiClient.post = originalPost
@@ -203,25 +187,15 @@ afterEach(() => {
   }
 })
 
-describe('API keys mutate drawer Auto group integration', () => {
-  test('inherits the root Auto order and sends an empty override for every batch-created key', async () => {
+describe('API keys mutate drawer APIGX flow', () => {
+  test('hides internal billing controls while preserving system routing defaults', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
     await renderCreateDrawer()
 
-    const groupTrigger = getControlByLabel('Group')
-    expect(groupTrigger.textContent?.includes('auto')).toBe(true)
-    expect(
-      document.body.textContent?.includes(
-        'Using the complete global Auto order (2 groups)'
-      )
-    ).toBe(true)
-    expect(
-      [
-        ...document.querySelectorAll('[data-slot="global-auto-order-name"]'),
-      ].map((item) => item.textContent)
-    ).toEqual(['vip', 'default'])
-    expect(findButton('Restore global Auto', true).disabled).toBe(true)
+    expect(screen.queryByText('Group', { exact: true })).toBeNull()
+    expect(screen.queryByText('Quota Settings')).toBeNull()
+    expect(screen.queryByText('Model Limits')).toBeNull()
 
     changeInput(getControlByLabel('Name'), 'batch')
     changeInput(getControlByLabel('Quantity'), '2')
@@ -235,46 +209,5 @@ describe('API keys mutate drawer Auto group integration', () => {
       expect(payload.auto_groups).toEqual([])
       expect(payload.cross_group_retry).toBe(true)
     }
-  })
-
-  test('preserves an unsaved custom order and mode after Auto to ordinary to Auto changes', async () => {
-    const createdPayloads: Array<Record<string, unknown>> = []
-    installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
-
-    const autoOrderControl = getControlByLabel('Auto group order')
-    const addGroupTrigger = autoOrderControl.querySelector<HTMLButtonElement>(
-      'button[role="combobox"]'
-    )
-    if (!addGroupTrigger) {
-      throw new Error('Expected Auto group order combobox')
-    }
-    selectComboboxOption(addGroupTrigger, 'Priority access')
-
-    expect(
-      document.querySelector('button[aria-label="Remove vip"]')
-    ).toBeTruthy()
-    expect(document.body.textContent?.includes('1 / 3 groups selected')).toBe(
-      true
-    )
-    expect(findButton('Restore global Auto', true).disabled).toBe(false)
-
-    const groupTrigger = getControlByLabel('Group')
-    selectComboboxOption(groupTrigger, 'Standard access')
-    expect(document.querySelector('button[aria-label="Remove vip"]')).toBe(null)
-    selectComboboxOption(groupTrigger, 'Automatic routing')
-
-    expect(
-      document.querySelector('button[aria-label="Remove vip"]')
-    ).toBeTruthy()
-    expect(document.body.textContent?.includes('1 / 3 groups selected')).toBe(
-      true
-    )
-    expect(findButton('Restore global Auto', true).disabled).toBe(false)
-
-    changeInput(getControlByLabel('Name'), 'custom')
-    fireEvent.click(findButton('Save changes', true))
-    await waitFor(() => expect(createdPayloads).toHaveLength(1))
-    expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
   })
 })

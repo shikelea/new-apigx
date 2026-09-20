@@ -282,6 +282,29 @@ func TestSourceAccessGuardIdentityAndPlatformKeyMatrix(t *testing.T) {
 	assert.ElementsMatch(t, []int{env.baseChannelID}, ids)
 	require.NotNil(t, CheckSourceAllowed(viewerCtx, env.baseChannelID+999, "breaker-model"))
 
+	// 公开/私有/共享范围使用与广场一致的分类，并形成分享渠道 allow-list。
+	_, err = apigxmodel.UpsertAPIKeyPreferences(env.db, viewer, tokenID, func(key *apigxmodel.APIKey) error {
+		key.ScopeMode = apigxmodel.ScopeModeAccessKinds
+		return key.SetAllowedAccessKinds([]string{apigxmodel.PlazaAccessKindShared})
+	})
+	require.NoError(t, err)
+	ResetPreferenceCacheForTest()
+	ids, allowList, apply, err = SourceAccessChannelFilter(viewerCtx, "breaker-model")
+	require.NoError(t, err)
+	assert.True(t, apply)
+	assert.True(t, allowList)
+	assert.Empty(t, ids, "公开资源不应进入只允许共享资源的 Key")
+	_, err = apigxmodel.UpsertAPIKeyPreferences(env.db, viewer, tokenID, func(key *apigxmodel.APIKey) error {
+		return key.SetAllowedAccessKinds([]string{apigxmodel.PlazaAccessKindPublic})
+	})
+	require.NoError(t, err)
+	ResetPreferenceCacheForTest()
+	ids, allowList, apply, err = SourceAccessChannelFilter(viewerCtx, "breaker-model")
+	require.NoError(t, err)
+	assert.True(t, apply)
+	assert.True(t, allowList)
+	assert.ElementsMatch(t, []int{env.baseChannelID}, ids)
+
 	// 固定 Offering 精确到供给：同一渠道上的另一条供给不能被当作固定来源。
 	otherOffering := &apigxmodel.ModelOffering{ChannelID: env.shareChannel.ID, UpstreamModelID: "another-model"}
 	require.NoError(t, apigxmodel.CreateModelOffering(env.db, owner, otherOffering))

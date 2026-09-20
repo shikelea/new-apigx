@@ -122,24 +122,29 @@ export function ChannelActions(props: { channelId: number }) {
           <div className='text-sm font-medium'>
             {t('share.actions.capacity')}
           </div>
-          <LimitRow
-            label={t('share.actions.concurrency')}
-            input={concurrency}
-            onChange={setConcurrency}
-            valueLabel={t('share.actions.concurrencyValue')}
-          />
-          <LimitRow
-            label={t('share.actions.rpm')}
-            input={rpm}
-            onChange={setRpm}
-            valueLabel={t('share.actions.rpmValue')}
-          />
-          <LimitRow
-            label={t('share.actions.tpm')}
-            input={tpm}
-            onChange={setTpm}
-            valueLabel={t('share.actions.tpmValue')}
-          />
+          <div className='grid gap-3 lg:grid-cols-3'>
+            <LimitField
+              id='concurrency'
+              label={t('share.actions.concurrency')}
+              input={concurrency}
+              onChange={setConcurrency}
+              valueLabel={t('share.actions.concurrencyValue')}
+            />
+            <LimitField
+              id='rpm'
+              label={t('share.actions.rpm')}
+              input={rpm}
+              onChange={setRpm}
+              valueLabel={t('share.actions.rpmValue')}
+            />
+            <LimitField
+              id='tpm'
+              label={t('share.actions.tpm')}
+              input={tpm}
+              onChange={setTpm}
+              valueLabel={t('share.actions.tpmValue')}
+            />
+          </div>
           <Button
             disabled={policyMutation.isPending}
             onClick={() => policyMutation.mutate()}
@@ -173,7 +178,8 @@ export function ChannelActions(props: { channelId: number }) {
 }
 
 /** 单个维度：模式下拉 + （仅"明确值"时）数值输入。 */
-function LimitRow(props: {
+function LimitField(props: {
+  id: string
   label: string
   valueLabel: string
   input: LimitDimensionInput
@@ -190,16 +196,22 @@ function LimitRow(props: {
   ))
 
   return (
-    <div className='grid items-end gap-2 sm:grid-cols-3'>
+    <div
+      role='group'
+      aria-label={props.label}
+      className='bg-muted/20 flex flex-col gap-3 rounded-xl border p-4'
+    >
       <div className='space-y-1'>
-        <Label>{props.label}</Label>
+        <Label htmlFor={`capacity-${props.id}-mode`} className='font-medium'>
+          {props.label}
+        </Label>
         <Select
           value={String(props.input.mode)}
           onValueChange={(next) =>
             props.onChange({ ...props.input, mode: Number(next) as LimitMode })
           }
         >
-          <SelectTrigger>
+          <SelectTrigger id={`capacity-${props.id}-mode`}>
             <SelectValue>
               {selectedMode
                 ? t(selectedMode.labelKey)
@@ -211,8 +223,11 @@ function LimitRow(props: {
       </div>
       {props.input.mode === 4 ? (
         <div className='space-y-1'>
-          <Label>{props.valueLabel}</Label>
+          <Label htmlFor={`capacity-${props.id}-value`}>
+            {props.valueLabel}
+          </Label>
           <Input
+            id={`capacity-${props.id}-value`}
             value={props.input.value}
             onChange={(event) =>
               props.onChange({ ...props.input, value: event.target.value })

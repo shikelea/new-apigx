@@ -62,7 +62,7 @@ it('uses the shared accessible Select and issues an invite for the chosen group'
   )
 
   expect(view.container.querySelector('select')).not.toBeInTheDocument()
-  await user.click(screen.getByRole('combobox', { name: 'Share group' }))
+  await user.click(screen.getByRole('combobox', { name: 'Shared resource' }))
   await user.click(await screen.findByRole('option', { name: 'Friends only' }))
   await user.click(screen.getByRole('button', { name: 'Issue invite' }))
 

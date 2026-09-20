@@ -40,6 +40,11 @@ const DASHBOARD_SECTIONS = [
     build: () => null,
   },
   {
+    id: 'shared-usage',
+    titleKey: 'Shared resource usage',
+    build: () => null,
+  },
+  {
     id: 'users',
     titleKey: 'User Analytics',
     adminOnly: true,

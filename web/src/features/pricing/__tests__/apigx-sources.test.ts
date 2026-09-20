@@ -21,10 +21,17 @@ import { describe, expect, it } from 'vitest'
 
 import type { PlazaOfferingItem } from '@/features/plaza/types'
 
-import { shareGroupOptions, summarizeModelSources } from '../lib/apigx-sources'
+import {
+  aggregateResourceModels,
+  shareGroupOptions,
+  summarizeResourceQuality,
+  summarizeModelSources,
+} from '../lib/apigx-sources'
 
-const item = (over: Partial<PlazaOfferingItem> & { model: string }): PlazaOfferingItem =>
-  ({ offering_public_id: over.model + '-o', ...over }) as PlazaOfferingItem
+const item = (
+  over: Partial<PlazaOfferingItem> & { model: string }
+): PlazaOfferingItem =>
+  ({ offering_public_id: `${over.model}-o`, ...over }) as PlazaOfferingItem
 
 describe('模型广场：分享来源聚合', () => {
   it('同一模型的多个来源被汇总，分组按名称去重排序并带上对外 ID', () => {
@@ -43,7 +50,10 @@ describe('模型广场：分享来源聚合', () => {
   })
 
   it('空模型名被忽略（不产生无意义的条目）', () => {
-    const map = summarizeModelSources([item({ model: '' }), item({ model: 'm1' })])
+    const map = summarizeModelSources([
+      item({ model: '' }),
+      item({ model: 'm1' }),
+    ])
     expect([...map.keys()]).toEqual(['m1'])
   })
 
@@ -74,5 +84,98 @@ describe('模型广场：分享来源聚合', () => {
       item({ model: 'm4' }),
     ])
     expect(options).toEqual(['A组', 'B组'])
+  })
+
+  it('按公开、私有、分享给我筛选，并按模型 ID 聚合来源', () => {
+    const items = [
+      item({ model: 'm2', access_kind: 'public' }),
+      item({
+        model: 'm1',
+        access_kind: 'public',
+        model_description: '公开模型',
+      }),
+      item({ model: 'm1', access_kind: 'public' }),
+      item({ model: 'm1', access_kind: 'private' }),
+      item({ model: 'm3', access_kind: 'shared' }),
+    ]
+
+    const publicModels = aggregateResourceModels(items, 'public')
+    expect(publicModels.map((model) => model.modelID)).toEqual(['m1', 'm2'])
+    expect(publicModels[0]?.sources).toHaveLength(2)
+    expect(publicModels[0]?.description).toBe('公开模型')
+    expect(aggregateResourceModels(items, 'private')).toHaveLength(1)
+    expect(aggregateResourceModels(items, 'shared')[0]?.modelID).toBe('m3')
+  })
+
+  it('为模型卡选择当前可访问来源中的最佳已知质量指标', () => {
+    const quality = summarizeResourceQuality([
+      item({
+        model: 'm1',
+        sample_count: 30,
+        reliability_lower_bound_ppm: 940_000,
+        latency_ms_p50: 120,
+        output_tokens_per_second: 32,
+        insufficient: false,
+      }),
+      item({
+        model: 'm1',
+        sample_count: 40,
+        reliability_lower_bound_ppm: 980_000,
+        latency_ms_p50: 180,
+        insufficient: false,
+      }),
+      item({
+        model: 'm1',
+        sample_count: 3,
+        reliability_lower_bound_ppm: 999_000,
+        latency_ms_p50: 80,
+        output_tokens_per_second: 55,
+        insufficient: true,
+      }),
+    ])
+
+    expect(quality).toEqual({
+      allInsufficient: false,
+      bestReliabilityLowerBoundPpm: 980_000,
+      lowestLatencyMsP50: 80,
+      highestOutputTokensPerSecond: 55,
+    })
+  })
+
+  it('全部来源样本不足时明确标记，但保留已知延迟和吞吐', () => {
+    const quality = summarizeResourceQuality([
+      item({
+        model: 'm1',
+        sample_count: 2,
+        reliability_lower_bound_ppm: 300_000,
+        latency_ms_p50: 90,
+        output_tokens_per_second: 12,
+        insufficient: true,
+      }),
+      item({
+        model: 'm1',
+        sample_count: 0,
+        insufficient: true,
+      }),
+    ])
+
+    expect(quality.allInsufficient).toBe(true)
+    expect(quality.bestReliabilityLowerBoundPpm).toBeUndefined()
+    expect(quality.lowestLatencyMsP50).toBe(90)
+    expect(quality.highestOutputTokensPerSecond).toBe(12)
+  })
+
+  it('部分或全部来源吞吐未知时不会把未知值聚合成 0', () => {
+    const partial = summarizeResourceQuality([
+      item({ model: 'm1' }),
+      item({ model: 'm1', output_tokens_per_second: 18 }),
+    ])
+    expect(partial.highestOutputTokensPerSecond).toBe(18)
+
+    const unknown = summarizeResourceQuality([
+      item({ model: 'm1' }),
+      item({ model: 'm1', output_tokens_per_second: 0 }),
+    ])
+    expect(unknown.highestOutputTokensPerSecond).toBeUndefined()
   })
 })

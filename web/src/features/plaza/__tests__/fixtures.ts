@@ -19,12 +19,15 @@ For commercial licensing, please contact support@quantumnous.com
 import type { PlazaOfferingItem } from '../types'
 
 /** 测试用最小 fixture：只给用例关心的字段，其余取稳定默认值。 */
-export function makeItem(overrides: Partial<PlazaOfferingItem> = {}): PlazaOfferingItem {
+export function makeItem(
+  overrides: Partial<PlazaOfferingItem> = {}
+): PlazaOfferingItem {
   return {
     offering_public_id: 'off_default',
     model: 'glm-5.3-flash',
     channel_public_id: 'ch_default',
     owner_user_id: 1,
+    access_kind: 'public',
     updated_at: 1789640000,
     ...overrides,
   }

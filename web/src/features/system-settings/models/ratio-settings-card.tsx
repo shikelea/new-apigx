@@ -33,7 +33,6 @@ import {
   buildPricingChanges,
   useModelPricing,
   useSaveModelPricing,
-  type ModelPricingConfig,
 } from '@/features/model-pricing/api'
 import { pricingOptions } from '@/features/model-pricing/pricing'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -46,6 +45,7 @@ import { GroupRatioForm } from './group-ratio-form'
 import { ModelRatioForm } from './model-ratio-form'
 import { ToolPriceSettings } from './tool-price-settings'
 import { UpstreamRatioSync } from './upstream-ratio-sync'
+import { usePricingBaseline } from './use-pricing-baseline'
 import {
   formatJsonForTextarea,
   type JsonValidationError,
@@ -177,13 +177,9 @@ export function RatioSettingsCard({
 
   const pricingQuery = useModelPricing()
   const savePricing = useSaveModelPricing()
-  const [pricingBaseline, setPricingBaseline] =
-    useState<ModelPricingConfig | null>(null)
-  useEffect(() => {
-    if (!pricingBaseline && pricingQuery.data) {
-      setPricingBaseline(pricingQuery.data)
-    }
-  }, [pricingBaseline, pricingQuery.data])
+  const [pricingBaseline, setPricingBaseline] = usePricingBaseline(
+    pricingQuery.data
+  )
   const modelDefaults = useMemo(
     () =>
       pricingBaseline
@@ -404,7 +400,14 @@ export function RatioSettingsCard({
         handleServerError(error)
       }
     },
-    [t, updateOption, pricingBaseline, savePricing, pricingQuery]
+    [
+      t,
+      updateOption,
+      pricingBaseline,
+      savePricing,
+      pricingQuery,
+      setPricingBaseline,
+    ]
   )
 
   const saveGroupRatios = useCallback(
@@ -520,7 +523,18 @@ export function RatioSettingsCard({
     if (tab === 'tool-prices') {
       return <ToolPriceSettings defaultValue={toolPricesDefault} />
     }
-    return <UpstreamRatioSync />
+    return (
+      <div className='flex h-full min-h-0 flex-col gap-3'>
+        <p className='text-muted-foreground shrink-0 text-sm leading-relaxed'>
+          {t(
+            'Applying synchronization updates the system price catalog. Existing share price snapshots stay unchanged; re-run price matching for draft share models and confirm a new version.'
+          )}
+        </p>
+        <div className='min-h-0 flex-1'>
+          <UpstreamRatioSync />
+        </div>
+      </div>
+    )
   }
 
   const renderTabSwitcher = () => (
