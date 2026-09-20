@@ -1,0 +1,3870 @@
+From ab677b6e347ae2b374764af4847f985ff9a8b9a7 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sun, 20 Sep 2026 22:47:06 +0800
+Subject: [PATCH] feat: productize APIGX homepage and branding
+
+---
+ NOTICE                                        |   9 +-
+ README.en.md                                  |   8 +-
+ README.fr.md                                  |   8 +-
+ README.ja.md                                  |   8 +-
+ README.md                                     |   8 +-
+ README.zh_CN.md                               |   8 +-
+ README.zh_TW.md                               |   8 +-
+ common/constants.go                           |   2 +-
+ controller/topup_waffo.go                     |   2 +-
+ electron/README.md                            |  10 +-
+ electron/build.sh                             |   2 +-
+ electron/main.js                              |  14 +-
+ electron/package-lock.json                    |   4 +-
+ electron/package.json                         |   8 +-
+ main.go                                       |   2 +-
+ model/frontend_option_migration.go            |   9 +
+ model/frontend_option_migration_test.go       |  90 ++-
+ web/bun.lock                                  |   2 +-
+ web/index.html                                |   6 +-
+ web/package.json                              |   2 +-
+ web/src/assets/logo.tsx                       |   6 +-
+ .../components/layout/components/footer.tsx   |  25 +-
+ .../layout/components/system-brand.tsx        |   2 +-
+ web/src/features/about/index.tsx              |   3 +
+ .../__tests__/responsive-operations.test.tsx  |   8 +-
+ .../components/alias-candidates-card.tsx      |  29 +-
+ web/src/features/apigx-platform/index.tsx     |   2 +-
+ .../drawers/channel-mutate-drawer.tsx         |   4 +-
+ web/src/features/chat/lib/chat-links.ts       |   2 +-
+ .../home/__tests__/product-home.test.tsx      | 120 ++++
+ .../home/components/hero-terminal-demo.tsx    | 620 ++++--------------
+ .../features/home/components/sections/cta.tsx | 130 ++--
+ .../home/components/sections/features.tsx     | 270 +++-----
+ .../home/components/sections/hero.tsx         | 217 ++----
+ .../home/components/sections/how-it-works.tsx | 102 +--
+ .../home/components/sections/stats.tsx        | 136 +---
+ .../system-settings/auth/passkey-section.tsx  |   2 +-
+ .../general/system-info-section.tsx           |   4 +-
+ .../integrations/email-settings-section.tsx   |   2 +-
+ .../features/system-settings/site/index.tsx   |   2 +-
+ web/src/i18n/locales/en.json                  |  88 ++-
+ web/src/i18n/locales/fr.json                  |  88 ++-
+ web/src/i18n/locales/ja.json                  |  88 ++-
+ web/src/i18n/locales/ru.json                  |  88 ++-
+ web/src/i18n/locales/vi.json                  |  88 ++-
+ web/src/i18n/locales/zh-TW.json               |  90 ++-
+ web/src/i18n/locales/zh.json                  |  90 ++-
+ web/src/lib/constants.ts                      |   2 +-
+ 48 files changed, 1345 insertions(+), 1173 deletions(-)
+ create mode 100644 web/src/features/home/__tests__/product-home.test.tsx
+
+diff --git a/NOTICE b/NOTICE
+index 7cfacab..a255c2f 100644
+--- a/NOTICE
++++ b/NOTICE
+@@ -1,4 +1,11 @@
+-new-api Notices
++APIGX Notices
++
++APIGX is a modified open-source work based on the New API project.
++The APIGX product name identifies this fork; the original New API authorship,
++license terms, attribution notice, and upstream repository link are retained
++below.
++
++==== New API Upstream Notices ====
+ 
+ new-api
+ Copyright (c) QuantumNous and contributors.
+diff --git a/README.en.md b/README.en.md
+index cd0d551..ca8fe30 100644
+--- a/README.en.md
++++ b/README.en.md
+@@ -1,11 +1,13 @@
+ <div align="center">
+ 
+-![new-api](/web/public/logo.png)
++![APIGX](/web/public/logo.png)
+ 
+-# New API
++# APIGX
+ 
+ 🍥 **Next-Generation Large Model Gateway and AI Asset Management System**
+ 
++APIGX is an open-source shared AI model resource platform built on [New API](https://github.com/QuantumNous/new-api). It retains the upstream project attribution and follows the GNU AGPLv3 license.
++
+ <p align="center">
+   <a href="./README.md">中文</a> | 
+   <strong>English</strong> | 
+@@ -480,7 +482,7 @@ Welcome all forms of contribution!
+ 
+ <div align="center">
+ 
+-### 💖 Thank you for using New API
++### 💖 Thank you for using APIGX
+ 
+ If this project is helpful to you, welcome to give us a ⭐️ Star！
+ 
+diff --git a/README.fr.md b/README.fr.md
+index 7870076..f46bbb8 100644
+--- a/README.fr.md
++++ b/README.fr.md
+@@ -1,11 +1,13 @@
+ <div align="center">
+ 
+-![new-api](/web/public/logo.png)
++![APIGX](/web/public/logo.png)
+ 
+-# New API
++# APIGX
+ 
+ 🍥 **Passerelle de modèles étendus de nouvelle génération et système de gestion d'actifs d'IA**
+ 
++APIGX est une plateforme open source de partage de ressources de modèles d'IA basée sur [New API](https://github.com/QuantumNous/new-api). Elle conserve l'attribution du projet en amont et respecte la licence GNU AGPLv3.
++
+ <p align="center">
+   <a href="./README.zh_CN.md">简体中文</a> |
+   <a href="./README.zh_TW.md">繁體中文</a> |
+@@ -491,7 +493,7 @@ Si les politiques de votre organisation ne permettent pas l'utilisation de logic
+ 
+ <div align="center">
+ 
+-### 💖 Merci d'utiliser New API
++### 💖 Merci d'utiliser APIGX
+ 
+ Si ce projet vous est utile, bienvenue à nous donner une ⭐️ Étoile！
+ 
+diff --git a/README.ja.md b/README.ja.md
+index 24f88a3..58179dd 100644
+--- a/README.ja.md
++++ b/README.ja.md
+@@ -1,11 +1,13 @@
+ <div align="center">
+ 
+-![new-api](/web/public/logo.png)
++![APIGX](/web/public/logo.png)
+ 
+-# New API
++# APIGX
+ 
+ 🍥 **次世代大規模モデルゲートウェイとAI資産管理システム**
+ 
++APIGX は [New API](https://github.com/QuantumNous/new-api) を基盤とするオープンソースの AI モデルリソース共有プラットフォームです。上流プロジェクトの帰属表示を維持し、GNU AGPLv3 ライセンスに従います。
++
+ <p align="center">
+   <a href="./README.zh_CN.md">简体中文</a> |
+   <a href="./README.zh_TW.md">繁體中文</a> |
+@@ -491,7 +493,7 @@ Token、Origin 検証、PAT の契約については[ユーザー認証とログ
+ 
+ <div align="center">
+ 
+-### 💖 New APIをご利用いただきありがとうございます
++### 💖 APIGX をご利用いただきありがとうございます
+ 
+ このプロジェクトがあなたのお役に立てたなら、ぜひ ⭐️ スターをください！
+ 
+diff --git a/README.md b/README.md
+index 06924e5..7fc5fdd 100644
+--- a/README.md
++++ b/README.md
+@@ -1,11 +1,13 @@
+ <div align="center">
+ 
+-![new-api](/web/public/logo.png)
++![APIGX](/web/public/logo.png)
+ 
+-# New API
++# APIGX
+ 
+ 🍥 **Next-Generation LLM Gateway and AI Asset Management System**
+ 
++APIGX is an open-source shared AI model resource platform built on [New API](https://github.com/QuantumNous/new-api). It retains the upstream project attribution and follows the GNU AGPLv3 license.
++
+ <p align="center">
+   <a href="./README.zh_CN.md">简体中文</a> |
+   <a href="./README.zh_TW.md">繁體中文</a> |
+@@ -501,7 +503,7 @@ If your organization's policies do not permit the use of AGPLv3-licensed softwar
+ 
+ <div align="center">
+ 
+-### 💖 Thank you for using New API
++### 💖 Thank you for using APIGX
+ 
+ If this project is helpful to you, welcome to give us a ⭐️ Star！
+ 
+diff --git a/README.zh_CN.md b/README.zh_CN.md
+index 9ab2375..db83dac 100644
+--- a/README.zh_CN.md
++++ b/README.zh_CN.md
+@@ -1,11 +1,13 @@
+ <div align="center">
+ 
+-![new-api](/web/public/logo.png)
++![APIGX](/web/public/logo.png)
+ 
+-# New API
++# APIGX
+ 
+ 🍥 **新一代大模型网关与AI资产管理系统**
+ 
++APIGX 是基于 [New API](https://github.com/QuantumNous/new-api) 二次开发的开源 AI 模型资源共享平台，保留上游项目署名并遵循 GNU AGPLv3 许可证。
++
+ <p align="center">
+   简体中文 |
+   <a href="./README.zh_TW.md">繁體中文</a> |
+@@ -491,7 +493,7 @@ Token、Origin 校验和 PAT 契约见[用户鉴权与登录会话](./docs/authe
+ 
+ <div align="center">
+ 
+-### 💖 感谢使用 New API
++### 💖 感谢使用 APIGX
+ 
+ 如果这个项目对你有帮助，欢迎给我们一个 ⭐️ Star！
+ 
+diff --git a/README.zh_TW.md b/README.zh_TW.md
+index be7cf32..a6a362e 100644
+--- a/README.zh_TW.md
++++ b/README.zh_TW.md
+@@ -1,11 +1,13 @@
+ <div align="center">
+ 
+-![new-api](/web/public/logo.png)
++![APIGX](/web/public/logo.png)
+ 
+-# New API
++# APIGX
+ 
+ 🍥 **新一代大模型網關與AI資產管理系統**
+ 
++APIGX 是基於 [New API](https://github.com/QuantumNous/new-api) 二次開發的開源 AI 模型資源共享平台，保留上游專案署名並遵循 GNU AGPLv3 授權條款。
++
+ <p align="center">
+   繁體中文 |
+   <a href="./README.zh_CN.md">简体中文</a> |
+@@ -490,7 +492,7 @@ Token、Origin 驗證和 PAT 契約請參閱[使用者鑑權與登入工作階
+ 
+ <div align="center">
+ 
+-### 💖 感謝使用 New API
++### 💖 感謝使用 APIGX
+ 
+ 如果這個項目對你有幫助，歡迎給我們一個 ⭐️ Star！
+ 
+diff --git a/common/constants.go b/common/constants.go
+index 5ec7536..e3bf7c5 100644
+--- a/common/constants.go
++++ b/common/constants.go
+@@ -12,7 +12,7 @@ import (
+ 
+ var StartTime = time.Now().Unix() // unit: second
+ var Version = "v0.0.0"            // this hard coding will be replaced automatically when building, no need to manually change
+-var SystemName = "New API"
++var SystemName = "APIGX"
+ var Footer = ""
+ var Logo = ""
+ var TopUpLink = ""
+diff --git a/controller/topup_waffo.go b/controller/topup_waffo.go
+index 869adce..2fa586c 100644
+--- a/controller/topup_waffo.go
++++ b/controller/topup_waffo.go
+@@ -63,7 +63,7 @@ func getWaffoCurrency() string {
+ func buildWaffoTopUpGoodsInfo(amount int64) *order.GoodsInfo {
+ 	appName := strings.TrimSpace(common.SystemName)
+ 	if appName == "" {
+-		appName = "New API"
++		appName = "APIGX"
+ 	}
+ 	return &order.GoodsInfo{
+ 		GoodsName: fmt.Sprintf("Recharge %d credits", amount),
+diff --git a/electron/README.md b/electron/README.md
+index 1cacd0c..4dbecc1 100644
+--- a/electron/README.md
++++ b/electron/README.md
+@@ -1,6 +1,6 @@
+-# New API Electron Desktop App
++# APIGX Electron Desktop App
+ 
+-This directory contains the Electron wrapper for New API, providing a native desktop application with system tray support for Windows, macOS, and Linux.
++This directory contains the Electron wrapper for APIGX, providing a native desktop application with system tray support for Windows, macOS, and Linux. The bundled gateway remains based on the upstream [New API](https://github.com/QuantumNous/new-api) project.
+ 
+ ## Prerequisites
+ 
+@@ -76,6 +76,6 @@ const PORT = 3000; // Change to desired port
+ ### Database Location
+ - **Development**: `../data/new-api.db` (project directory)
+ - **Production**:
+-  - macOS: `~/Library/Application Support/New API/data/`
+-  - Windows: `%APPDATA%/New API/data/`
+-  - Linux: `~/.config/New API/data/`
++  - macOS: `~/Library/Application Support/APIGX/data/`
++  - Windows: `%APPDATA%/APIGX/data/`
++  - Linux: `~/.config/APIGX/data/`
+diff --git a/electron/build.sh b/electron/build.sh
+index 001ad58..f827bb7 100755
+--- a/electron/build.sh
++++ b/electron/build.sh
+@@ -2,7 +2,7 @@
+ 
+ set -e
+ 
+-echo "Building New API Electron App..."
++echo "Building APIGX Electron App..."
+ 
+ echo "Step 1: Building frontend..."
+ cd ../web
+diff --git a/electron/main.js b/electron/main.js
+index 2200f64..47871d2 100644
+--- a/electron/main.js
++++ b/electron/main.js
+@@ -15,7 +15,7 @@ const DEV_FRONTEND_PORT = 5173; // Rsbuild dev server port
+ function saveAndOpenErrorLog() {
+   try {
+     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+-    const logFileName = `new-api-crash-${timestamp}.log`;
++    const logFileName = `apigx-crash-${timestamp}.log`;
+     const logDir = app.getPath('logs');
+     const logFilePath = path.join(logDir, logFileName);
+     
+@@ -25,7 +25,7 @@ function saveAndOpenErrorLog() {
+     }
+     
+     // 写入日志
+-    const logContent = `New API 崩溃日志
++    const logContent = `APIGX 崩溃日志
+ 生成时间: ${new Date().toLocaleString('zh-CN')}
+ 平台: ${process.platform}
+ 架构: ${process.arch}
+@@ -72,7 +72,7 @@ function analyzeError(errorLogs) {
+       type: '端口被占用',
+       title: '端口 ' + PORT + ' 被占用',
+       message: '无法启动服务器，端口已被其他程序占用',
+-      solution: `可能的解决方案：\n\n1. 关闭占用端口 ${PORT} 的其他程序\n2. 检查是否已经运行了另一个 New API 实例\n3. 使用以下命令查找占用端口的进程：\n   Mac/Linux: lsof -i :${PORT}\n   Windows: netstat -ano | findstr :${PORT}\n4. 重启电脑以释放端口`
++      solution: `可能的解决方案：\n\n1. 关闭占用端口 ${PORT} 的其他程序\n2. 检查是否已经运行了另一个 APIGX 实例\n3. 使用以下命令查找占用端口的进程：\n   Mac/Linux: lsof -i :${PORT}\n   Windows: netstat -ano | findstr :${PORT}\n4. 重启电脑以释放端口`
+     };
+   }
+   
+@@ -83,7 +83,7 @@ function analyzeError(errorLogs) {
+       type: '数据文件被占用',
+       title: '无法访问数据文件',
+       message: '应用的数据文件正被其他程序占用',
+-      solution: '可能的解决方案：\n\n1. 检查是否已经打开了另一个 New API 窗口\n   - 查看任务栏/Dock 中是否有其他 New API 图标\n   - 查看系统托盘（Windows）或菜单栏（Mac）中是否有 New API 图标\n\n2. 如果刚刚关闭过应用，请等待 10 秒后再试\n\n3. 重启电脑以释放被占用的文件\n\n4. 如果问题持续，可以尝试：\n   - 退出所有 New API 实例\n   - 删除数据目录中的临时文件（.db-shm 和 .db-wal）\n   - 重新启动应用'
++      solution: '可能的解决方案：\n\n1. 检查是否已经打开了另一个 APIGX 窗口\n   - 查看任务栏/Dock 中是否有其他 APIGX 图标\n   - 查看系统托盘（Windows）或菜单栏（Mac）中是否有 APIGX 图标\n\n2. 如果刚刚关闭过应用，请等待 10 秒后再试\n\n3. 重启电脑以释放被占用的文件\n\n4. 如果问题持续，可以尝试：\n   - 退出所有 APIGX 实例\n   - 删除数据目录中的临时文件（.db-shm 和 .db-wal）\n   - 重新启动应用'
+     };
+   }
+   
+@@ -397,7 +397,7 @@ function createWindow() {
+       nodeIntegration: false,
+       contextIsolation: true
+     },
+-    title: 'New API',
++    title: 'APIGX',
+     icon: path.join(__dirname, 'icon.png')
+   });
+ 
+@@ -436,7 +436,7 @@ function createTray() {
+ 
+   const contextMenu = Menu.buildFromTemplate([
+     {
+-      label: 'Show New API',
++      label: 'Show APIGX',
+       click: () => {
+         if (mainWindow === null) {
+           createWindow();
+@@ -458,7 +458,7 @@ function createTray() {
+     }
+   ]);
+ 
+-  tray.setToolTip('New API');
++  tray.setToolTip('APIGX');
+   tray.setContextMenu(contextMenu);
+ 
+   // On macOS, clicking the tray icon shows the window
+diff --git a/electron/package-lock.json b/electron/package-lock.json
+index 84748e5..716936a 100644
+--- a/electron/package-lock.json
++++ b/electron/package-lock.json
+@@ -1,11 +1,11 @@
+ {
+-  "name": "new-api-electron",
++  "name": "apigx-electron",
+   "version": "1.0.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+-      "name": "new-api-electron",
++      "name": "apigx-electron",
+       "version": "1.0.0",
+       "devDependencies": {
+         "cross-env": "^7.0.3",
+diff --git a/electron/package.json b/electron/package.json
+index 53c4517..e6eaa83 100644
+--- a/electron/package.json
++++ b/electron/package.json
+@@ -1,7 +1,7 @@
+ {
+-  "name": "new-api-electron",
++  "name": "apigx-electron",
+   "version": "1.0.0",
+-  "description": "New API - AI Model Gateway Desktop Application",
++  "description": "APIGX - Shared AI Model Resource Platform",
+   "main": "main.js",
+   "scripts": {
+     "start-app": "electron .",
+@@ -29,8 +29,8 @@
+     "electron-builder": "^26.15.3"
+   },
+   "build": {
+-    "appId": "com.newapi.desktop",
+-    "productName": "New-API-App",
++    "appId": "com.apigx.desktop",
++    "productName": "APIGX",
+     "publish": null,
+     "directories": {
+       "output": "dist"
+diff --git a/main.go b/main.go
+index 647dd4d..7dd6456 100644
+--- a/main.go
++++ b/main.go
+@@ -64,7 +64,7 @@ func main() {
+ 		return
+ 	}
+ 
+-	common.SysLog("New API " + common.Version + " started")
++	common.SysLog("APIGX " + common.Version + " started")
+ 	if os.Getenv("GIN_MODE") != "debug" {
+ 		gin.SetMode(gin.ReleaseMode)
+ 	}
+diff --git a/model/frontend_option_migration.go b/model/frontend_option_migration.go
+index e8ac9f2..264b2a3 100644
+--- a/model/frontend_option_migration.go
++++ b/model/frontend_option_migration.go
+@@ -23,6 +23,9 @@ func MigrateRetiredFrontendOptions() error {
+ 	}
+ 
+ 	var migrationErrors []error
++	if err := migrateDefaultSystemName(); err != nil {
++		migrationErrors = append(migrationErrors, fmt.Errorf("migrate default system name: %w", err))
++	}
+ 	if err := normalizeRetiredThemeOption(); err != nil {
+ 		migrationErrors = append(migrationErrors, fmt.Errorf("normalize %s: %w", retiredThemeOptionKey, err))
+ 	}
+@@ -47,6 +50,12 @@ func MigrateRetiredFrontendOptions() error {
+ 	return errors.Join(migrationErrors...)
+ }
+ 
++func migrateDefaultSystemName() error {
++	return DB.Model(&Option{}).
++		Where(&Option{Key: "SystemName", Value: "New API"}).
++		Update("value", "APIGX").Error
++}
++
+ func normalizeRetiredThemeOption() error {
+ 	return DB.Transaction(func(tx *gorm.DB) error {
+ 		var option Option
+diff --git a/model/frontend_option_migration_test.go b/model/frontend_option_migration_test.go
+index 130c1b1..9e8bf19 100644
+--- a/model/frontend_option_migration_test.go
++++ b/model/frontend_option_migration_test.go
+@@ -1,16 +1,22 @@
+ package model
+ 
+ import (
++	"errors"
+ 	"fmt"
++	"os"
+ 	"testing"
+ 
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/glebarez/sqlite"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"gorm.io/driver/mysql"
++	"gorm.io/driver/postgres"
+ 	"gorm.io/gorm"
+ )
+ 
++var errRollbackSystemNameMigration = errors.New("rollback system name migration fixture")
++
+ func useFrontendOptionMigrationDB(t *testing.T) *gorm.DB {
+ 	t.Helper()
+ 	previousDB := DB
+@@ -43,6 +49,7 @@ func requireOptionMissing(t *testing.T, db *gorm.DB, key string) {
+ func TestMigrateRetiredFrontendOptionsMigratesValidValuesIdempotently(t *testing.T) {
+ 	db := useFrontendOptionMigrationDB(t)
+ 	legacy := []Option{
++		{Key: "SystemName", Value: "New API"},
+ 		{Key: retiredThemeOptionKey, Value: "classic"},
+ 		{Key: "ApiInfo", Value: `[{"url":"https://api.example.com","route":"primary","description":"API","color":"blue"}]`},
+ 		{Key: "Announcements", Value: `[{"content":"maintenance","publishDate":"2026-07-20T00:00:00Z","type":"warning"}]`},
+@@ -53,9 +60,10 @@ func TestMigrateRetiredFrontendOptionsMigratesValidValuesIdempotently(t *testing
+ 	require.NoError(t, db.Create(&legacy).Error)
+ 
+ 	require.NoError(t, MigrateRetiredFrontendOptions())
++	assert.Equal(t, "APIGX", requireOptionValue(t, db, "SystemName"))
+ 	assert.Equal(t, "default", requireOptionValue(t, db, retiredThemeOptionKey))
+-	assert.JSONEq(t, legacy[1].Value, requireOptionValue(t, db, "console_setting.api_info"))
+-	assert.Equal(t, legacy[2].Value, requireOptionValue(t, db, "console_setting.announcements"))
++	assert.JSONEq(t, legacy[2].Value, requireOptionValue(t, db, "console_setting.api_info"))
++	assert.Equal(t, legacy[3].Value, requireOptionValue(t, db, "console_setting.announcements"))
+ 	assert.JSONEq(t, `[{"question":"Question","answer":"Answer"}]`, requireOptionValue(t, db, "console_setting.faq"))
+ 	assert.JSONEq(t, `[{
+ 		"id":1,"categoryName":"old","url":"https://status.example.com","slug":"status","description":""
+@@ -72,6 +80,84 @@ func TestMigrateRetiredFrontendOptionsMigratesValidValuesIdempotently(t *testing
+ 	assert.ElementsMatch(t, before, after)
+ }
+ 
++func TestMigrateRetiredFrontendOptionsPreservesCustomSystemName(t *testing.T) {
++	db := useFrontendOptionMigrationDB(t)
++	require.NoError(t, db.Create(&Option{Key: "SystemName", Value: "Community Gateway"}).Error)
++
++	require.NoError(t, MigrateRetiredFrontendOptions())
++	assert.Equal(t, "Community Gateway", requireOptionValue(t, db, "SystemName"))
++}
++
++func TestDefaultSystemNameMigrationOnConfiguredDialects(t *testing.T) {
++	dialects := []struct {
++		name string
++		open func(t *testing.T) *gorm.DB
++	}{
++		{
++			name: "sqlite",
++			open: func(t *testing.T) *gorm.DB {
++				db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
++				require.NoError(t, err)
++				require.NoError(t, db.AutoMigrate(&Option{}))
++				return db
++			},
++		},
++		{
++			name: "postgres",
++			open: func(t *testing.T) *gorm.DB {
++				dsn := os.Getenv("APIGX_TEST_PG_DSN")
++				if dsn == "" {
++					t.Skip("APIGX_TEST_PG_DSN is not configured")
++				}
++				db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++				require.NoError(t, err)
++				var version string
++				require.NoError(t, db.Raw("SELECT version()").Scan(&version).Error)
++				t.Logf("PostgreSQL version: %s", version)
++				return db
++			},
++		},
++		{
++			name: "mysql",
++			open: func(t *testing.T) *gorm.DB {
++				dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
++				if dsn == "" {
++					t.Skip("APIGX_TEST_MYSQL_DSN is not configured")
++				}
++				db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
++				require.NoError(t, err)
++				var version string
++				require.NoError(t, db.Raw("SELECT version()").Scan(&version).Error)
++				t.Logf("MySQL version: %s", version)
++				require.NoError(t, db.AutoMigrate(&Option{}))
++				return db
++			},
++		},
++	}
++
++	for _, dialect := range dialects {
++		t.Run(dialect.name, func(t *testing.T) {
++			db := dialect.open(t)
++			err := db.Transaction(func(tx *gorm.DB) error {
++				require.NoError(t, tx.Where(&Option{Key: "SystemName"}).Delete(&Option{}).Error)
++				require.NoError(t, tx.Create(&Option{Key: "SystemName", Value: "New API"}).Error)
++
++				previousDB := DB
++				DB = tx
++				defer func() { DB = previousDB }()
++
++				require.NoError(t, migrateDefaultSystemName())
++				assert.Equal(t, "APIGX", requireOptionValue(t, tx, "SystemName"))
++				require.NoError(t, tx.Model(&Option{}).Where(&Option{Key: "SystemName"}).Update("value", "Community Gateway").Error)
++				require.NoError(t, migrateDefaultSystemName())
++				assert.Equal(t, "Community Gateway", requireOptionValue(t, tx, "SystemName"))
++				return errRollbackSystemNameMigration
++			})
++			require.ErrorIs(t, err, errRollbackSystemNameMigration)
++		})
++	}
++}
++
+ func TestLegacyConsoleListMigrationCapsAPIInfoAndFAQ(t *testing.T) {
+ 	apiInfo := make([]map[string]any, 51)
+ 	faq := make([]map[string]any, 51)
+diff --git a/web/bun.lock b/web/bun.lock
+index 8faba40..143ab5f 100644
+--- a/web/bun.lock
++++ b/web/bun.lock
+@@ -3,7 +3,7 @@
+   "configVersion": 0,
+   "workspaces": {
+     "": {
+-      "name": "newapi-web",
++      "name": "apigx-web",
+       "dependencies": {
+         "@base-ui/react": "^1.6.0",
+         "@codemirror/lang-javascript": "^6.2.5",
+diff --git a/web/index.html b/web/index.html
+index 7f280b4..10d9f94 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -7,11 +7,11 @@
+     <meta name="google" content="notranslate" />
+ 
+     <!-- Primary Meta Tags -->
+-    <title>New API</title>
+-    <meta name="title" content="New API" />
++    <title>APIGX</title>
++    <meta name="title" content="APIGX" />
+     <meta
+       name="description"
+-      content="Unified AI API gateway and admin dashboard."
++      content="Shared AI model resource platform and unified API gateway."
+     />
+ 
+     <meta name="theme-color" content="#fff" />
+diff --git a/web/package.json b/web/package.json
+index 3f098d2..34233ee 100644
+--- a/web/package.json
++++ b/web/package.json
+@@ -1,5 +1,5 @@
+ {
+-  "name": "newapi-web",
++  "name": "apigx-web",
+   "version": "1.0.0",
+   "private": false,
+   "type": "module",
+diff --git a/web/src/assets/logo.tsx b/web/src/assets/logo.tsx
+index 1f9dd23..7c24d3e 100644
+--- a/web/src/assets/logo.tsx
++++ b/web/src/assets/logo.tsx
+@@ -16,14 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import { type SVGProps } from 'react'
++import type { SVGProps } from 'react'
+ 
+ import { cn } from '@/lib/utils'
+ 
+ export function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {
+   return (
+     <svg
+-      id='newapi-logo'
++      id='apigx-logo'
+       viewBox='0 0 24 24'
+       xmlns='http://www.w3.org/2000/svg'
+       height='24'
+@@ -36,7 +36,7 @@ export function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {
+       className={cn('size-6', className)}
+       {...props}
+     >
+-      <title>New API</title>
++      <title>APIGX</title>
+       <path d='M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3' />
+     </svg>
+   )
+diff --git a/web/src/components/layout/components/footer.tsx b/web/src/components/layout/components/footer.tsx
+index 438fc6c..52c5dea 100644
+--- a/web/src/components/layout/components/footer.tsx
++++ b/web/src/components/layout/components/footer.tsx
+@@ -123,11 +123,11 @@ function LegalLinks(props: { leadingSeparator?: boolean }) {
+ 
+ // inline=true returns just the inner span for composition in a parent flex
+ // row. inline=false wraps in a centered/right-aligned div (default).
+-function ProjectAttribution(props: { currentYear: number; inline?: boolean }) {
++function ProjectAttribution(props: { inline?: boolean }) {
+   const { t } = useTranslation()
+   const content = (
+     <span className='text-muted-foreground/45'>
+-      &copy; {props.currentYear}{' '}
++      {t('Based on')}{' '}
+       <a
+         href='https://github.com/QuantumNous/new-api'
+         target='_blank'
+@@ -136,7 +136,8 @@ function ProjectAttribution(props: { currentYear: number; inline?: boolean }) {
+       >
+         {t('New API')}
+       </a>
+-      . {t(NEW_API_FOOTER_ATTRIBUTION_KEY)}
++      {' · '}
++      {t(NEW_API_FOOTER_ATTRIBUTION_KEY)}
+     </span>
+   )
+   if (props.inline) {
+@@ -159,7 +160,7 @@ export function Footer(props: FooterProps) {
+   } = useSystemConfig()
+ 
+   const displayLogo = systemLogo || props.logo || '/logo.png'
+-  const displayName = systemName || props.name || 'New API'
++  const displayName = systemName || props.name || 'APIGX'
+   const isDemoSiteMode = Boolean(demoSiteEnabled)
+   const currentYear = new Date().getFullYear()
+ 
+@@ -238,7 +239,7 @@ export function Footer(props: FooterProps) {
+             />
+             <div className='border-border/60 text-muted-foreground/45 flex w-full flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t pt-4 text-xs sm:w-auto sm:justify-end sm:border-t-0 sm:border-l sm:pt-0 sm:pl-5'>
+               <LegalLinks />
+-              <ProjectAttribution currentYear={currentYear} inline />
++              <ProjectAttribution inline />
+             </div>
+           </div>
+         </div>
+@@ -257,7 +258,7 @@ export function Footer(props: FooterProps) {
+             <Link to='/' className='group flex items-center gap-2.5'>
+               <img
+                 src={displayLogo}
+-                alt={displayName}
++                alt=''
+                 className='size-7 rounded-lg object-contain'
+               />
+               <span className='text-sm font-semibold tracking-tight'>
+@@ -265,21 +266,21 @@ export function Footer(props: FooterProps) {
+               </span>
+             </Link>
+             <p className='text-muted-foreground/60 mt-3 max-w-[200px] text-xs leading-relaxed'>
+-              {t('Powerful API Management Platform')}
++              {t('Shared AI model resource platform')}
+             </p>
+           </div>
+ 
+           {/* Links columns */}
+           {isDemoSiteMode && (
+             <div className='grid grid-cols-3 gap-8 md:gap-16'>
+-              {displayColumns.map((column, index) => (
+-                <div key={index}>
++              {displayColumns.map((column) => (
++                <div key={column.title}>
+                   <p className='text-muted-foreground/50 mb-3 text-xs font-medium tracking-wider uppercase'>
+                     {t(column.title)}
+                   </p>
+                   <ul className='space-y-2.5'>
+-                    {column.links.map((link, linkIndex) => (
+-                      <li key={linkIndex}>
++                    {column.links.map((link) => (
++                      <li key={`${link.text}:${link.href}`}>
+                         <FooterLinkItem link={link} />
+                       </li>
+                     ))}
+@@ -300,7 +301,7 @@ export function Footer(props: FooterProps) {
+             </span>
+             <LegalLinks leadingSeparator />
+           </div>
+-          <ProjectAttribution currentYear={currentYear} />
++          <ProjectAttribution />
+         </div>
+       </div>
+     </footer>
+diff --git a/web/src/components/layout/components/system-brand.tsx b/web/src/components/layout/components/system-brand.tsx
+index 86112ba..3f84a07 100644
+--- a/web/src/components/layout/components/system-brand.tsx
++++ b/web/src/components/layout/components/system-brand.tsx
+@@ -51,7 +51,7 @@ export function SystemBrand(props: SystemBrandProps) {
+   const { logo } = useSystemConfig()
+ 
+   const variant = props.variant ?? 'sidebar'
+-  const name = status?.system_name || props.defaultName || 'New API'
++  const name = status?.system_name || props.defaultName || 'APIGX'
+   const version =
+     status?.version || props.defaultVersion || t('Unknown version')
+ 
+diff --git a/web/src/features/about/index.tsx b/web/src/features/about/index.tsx
+index e6ca22d..2c0c635 100644
+--- a/web/src/features/about/index.tsx
++++ b/web/src/features/about/index.tsx
+@@ -47,6 +47,9 @@ function EmptyAboutState() {
+           </p>
+         </div>
+         <div className='space-y-4 text-sm'>
++          <p className='text-muted-foreground'>
++            {t('APIGX is open source software built on New API.')}
++          </p>
+           <p>
+             {t('New API Project Repository:')}{' '}
+             <a
+diff --git a/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx b/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx
+index e28072f..399736a 100644
+--- a/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx
++++ b/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx
+@@ -111,13 +111,15 @@ it('keeps all model-catalog actions in the mobile candidate card', async () => {
+     />
+   )
+ 
+-  const region = screen.getByRole('region', { name: 'Model catalog' })
++  const region = screen.getByRole('region', { name: 'Model identity review' })
+   expect(region).toHaveClass('md:hidden')
+ 
+-  await user.click(within(region).getByRole('button', { name: 'Confirm' }))
++  await user.click(
++    within(region).getByRole('button', { name: 'Confirm model' })
++  )
+   await user.click(
+     within(region).getByRole('button', {
+-      name: 'Match all with the same name',
++      name: 'Confirm all matching names',
+     })
+   )
+   await user.click(within(region).getByRole('button', { name: 'Reject' }))
+diff --git a/web/src/features/apigx-platform/components/alias-candidates-card.tsx b/web/src/features/apigx-platform/components/alias-candidates-card.tsx
+index a323af2..2256681 100644
+--- a/web/src/features/apigx-platform/components/alias-candidates-card.tsx
++++ b/web/src/features/apigx-platform/components/alias-candidates-card.tsx
+@@ -48,7 +48,10 @@ export function AliasCandidateMobileCards(props: {
+   const { t } = useTranslation()
+ 
+   return (
+-    <section aria-label={t('Model catalog')} className='space-y-3 md:hidden'>
++    <section
++      aria-label={t('Model identity review')}
++      className='space-y-3 md:hidden'
++    >
+       {props.items.map((row) => (
+         <div className='space-y-4 rounded-lg border p-4' key={row.id}>
+           <div className='space-y-3'>
+@@ -62,7 +65,7 @@ export function AliasCandidateMobileCards(props: {
+             </div>
+             <div>
+               <p className='text-muted-foreground text-xs'>
+-                {t('Normalized name')}
++                {t('Suggested model name')}
+               </p>
+               <code className='mt-1 block text-xs break-all'>
+                 {row.normalized_model_id}
+@@ -71,14 +74,14 @@ export function AliasCandidateMobileCards(props: {
+           </div>
+           <div className='grid gap-2'>
+             <Button variant='outline' onClick={() => props.onConfirm(row)}>
+-              {t('Confirm')}
++              {t('Confirm model')}
+             </Button>
+             <Button
+               variant='outline'
+               disabled={props.bulkPending}
+               onClick={() => props.onBulk(row.normalized_model_id)}
+             >
+-              {t('Match all with the same name')}
++              {t('Confirm all matching names')}
+             </Button>
+             <Button
+               variant='outline'
+@@ -95,10 +98,10 @@ export function AliasCandidateMobileCards(props: {
+ }
+ 
+ /**
+- * 模型目录 · 待确认候选（§4「批量匹配、人工覆盖」）。
++ * 模型身份确认（§4「批量匹配、人工覆盖」）。
+  *
+- * 候选由"创建供给"自动累积；**确认之后**广场才会显示对外标准 ID 与模型介绍 ——
+- * 候选本身绝不当作结论（模型列注释：候选仅提示，不自动路由）。
++ * 新抓取的上游模型需要管理员确认它对应的统一模型；确认后，模型广场才能
++ * 合并相同模型的分享来源。未经确认的名称只提供操作建议，不参与自动路由。
+  */
+ export function AliasCandidatesCard() {
+   const { t } = useTranslation()
+@@ -138,7 +141,7 @@ export function AliasCandidatesCard() {
+     },
+     {
+       id: 'normalized',
+-      header: t('Normalized name'),
++      header: t('Suggested model name'),
+       cell: (row) => row.normalized_model_id,
+     },
+     {
+@@ -147,7 +150,7 @@ export function AliasCandidatesCard() {
+       cell: (row) => (
+         <div className='flex gap-2'>
+           <Button size='sm' variant='outline' onClick={() => setEditing(row)}>
+-            {t('Confirm')}
++            {t('Confirm model')}
+           </Button>
+           <Button
+             size='sm'
+@@ -155,7 +158,7 @@ export function AliasCandidatesCard() {
+             disabled={bulk.isPending}
+             onClick={() => bulk.mutate(row.normalized_model_id)}
+           >
+-            {t('Match all with the same name')}
++            {t('Confirm all matching names')}
+           </Button>
+           <Button
+             size='sm'
+@@ -173,16 +176,16 @@ export function AliasCandidatesCard() {
+   return (
+     <Card>
+       <CardHeader>
+-        <CardTitle>{t('Model catalog')}</CardTitle>
++        <CardTitle>{t('Model identity review')}</CardTitle>
+       </CardHeader>
+       <CardContent className='space-y-4'>
+         <p className='text-muted-foreground text-xs'>
+           {t(
+-            'Candidates are collected automatically. The plaza only shows a standard model after confirmation.'
++            'Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.'
+           )}
+         </p>
+         {items.length === 0 ? (
+-          <EmptyState title={t('No pending candidate')} />
++          <EmptyState title={t('No models awaiting confirmation')} />
+         ) : (
+           <>
+             <AliasCandidateMobileCards
+diff --git a/web/src/features/apigx-platform/index.tsx b/web/src/features/apigx-platform/index.tsx
+index e724a92..9de8f35 100644
+--- a/web/src/features/apigx-platform/index.tsx
++++ b/web/src/features/apigx-platform/index.tsx
+@@ -540,7 +540,7 @@ function PriceEditingHint() {
+   const { t } = useTranslation()
+   return (
+     <p className='text-muted-foreground text-xs'>
+-      {t('Prices are configured and synced in New API model pricing.')}{' '}
++      {t('Prices are configured and synced in system model pricing.')}{' '}
+       <Link to='/system-settings/models' className='underline'>
+         {t('Open model pricing')}
+       </Link>
+diff --git a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
+index 3380f62..1fd237d 100644
+--- a/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
++++ b/web/src/features/channels/components/drawers/channel-mutate-drawer.tsx
+@@ -1034,7 +1034,7 @@ export function ChannelMutateDrawer({
+     const timer = setTimeout(() => {
+       toast.warning(
+         t(
+-          'Warning: Base URL should not end with /v1. New API will handle it automatically. This may cause request failures.'
++          'The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.'
+         ),
+         { duration: 5000 }
+       )
+@@ -3653,7 +3653,7 @@ export function ChannelMutateDrawer({
+                     {currentType !== CHANNEL_TYPE_TASK_PLUGIN && (
+                       <FormDescription>
+                         {t(
+-                          'Custom API base URL. For official channels, New API has built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or trailing slash.'
++                          'Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.'
+                         )}
+                       </FormDescription>
+                     )}
+diff --git a/web/src/features/chat/lib/chat-links.ts b/web/src/features/chat/lib/chat-links.ts
+index 770d0ac..f731f3a 100644
+--- a/web/src/features/chat/lib/chat-links.ts
++++ b/web/src/features/chat/lib/chat-links.ts
+@@ -192,7 +192,7 @@ export function resolveChatUrl({
+ 
+   if (url.includes('{aqbotConfig}')) {
+     const query = [
+-      `name=${encodeURIComponent('New API')}`,
++      `name=${encodeURIComponent('APIGX')}`,
+       `baseurl=${encodeURIComponent(safeServerAddress)}`,
+       `apikey=${encodeURIComponent(safeApiKey)}`,
+       'type=openai',
+diff --git a/web/src/features/home/__tests__/product-home.test.tsx b/web/src/features/home/__tests__/product-home.test.tsx
+new file mode 100644
+index 0000000..6b6d103
+--- /dev/null
++++ b/web/src/features/home/__tests__/product-home.test.tsx
+@@ -0,0 +1,120 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { render, screen } from '@testing-library/react'
++import { forwardRef, type ComponentProps, type PropsWithChildren } from 'react'
++import { expect, it, vi } from 'vitest'
++
++import { DEFAULT_SYSTEM_NAME } from '@/lib/constants'
++
++import { CTA } from '../components/sections/cta'
++import { Features } from '../components/sections/features'
++import { Hero } from '../components/sections/hero'
++import { HowItWorks } from '../components/sections/how-it-works'
++import { Stats } from '../components/sections/stats'
++
++it('uses APIGX as the default product brand', () => {
++  expect(DEFAULT_SYSTEM_NAME).toBe('APIGX')
++})
++
++vi.mock('react-i18next', () => ({
++  useTranslation: () => ({ t: (key: string) => key }),
++}))
++
++vi.mock('@tanstack/react-router', () => ({
++  Link: forwardRef<
++    HTMLAnchorElement,
++    PropsWithChildren<{ to: string } & ComponentProps<'a'>>
++  >(({ to, children, ...props }, ref) => (
++    <a ref={ref} href={to} {...props}>
++      {children}
++    </a>
++  )),
++}))
++
++vi.mock('@/components/animate-in-view', () => ({
++  AnimateInView: ({
++    children,
++    ...props
++  }: PropsWithChildren<ComponentProps<'div'>>) => (
++    <div {...props}>{children}</div>
++  ),
++}))
++
++it('presents the shared-resource workflow and real product entry points', () => {
++  const view = render(
++    <>
++      <Hero isAuthenticated />
++      <Stats />
++      <Features />
++      <HowItWorks />
++      <CTA isAuthenticated />
++    </>
++  )
++
++  expect(
++    screen.getByRole('heading', {
++      level: 1,
++      name: 'One platform key.Every shared AI model.',
++    })
++  ).toBeVisible()
++  expect(
++    screen.getAllByRole('button', { name: /model plaza/i })[0]
++  ).toHaveAttribute('href', '/pricing')
++  expect(
++    screen.getAllByRole('button', { name: 'Share an API' })[0]
++  ).toHaveAttribute('href', '/share')
++  expect(
++    screen.getByRole('button', { name: /Add upstream API/i })
++  ).toHaveAttribute('href', '/share')
++  expect(screen.getByRole('button', { name: 'Manage access' })).toHaveAttribute(
++    'href',
++    '/access'
++  )
++  expect(
++    screen.getByText('Multi-key failover inside each channel')
++  ).toBeVisible()
++  expect(screen.getByText('Usage without financial settlement')).toBeVisible()
++  expect(view.container).not.toHaveTextContent('upstream services integrated')
++  expect(view.container).not.toHaveTextContent('Pay-as-you-go')
++})
++
++it('routes visitors to registration while keeping the plaza discoverable', () => {
++  render(
++    <>
++      <Hero isAuthenticated={false} />
++      <CTA isAuthenticated={false} />
++    </>
++  )
++
++  expect(
++    screen.getAllByRole('button', { name: 'Create account' })
++  ).toHaveLength(2)
++  for (const link of screen.getAllByRole('button', {
++    name: 'Create account',
++  })) {
++    expect(link).toHaveAttribute('href', '/sign-up')
++  }
++  expect(screen.getByRole('button', { name: 'Sign In' })).toHaveAttribute(
++    'href',
++    '/sign-in'
++  )
++  expect(
++    screen.getByRole('button', { name: /Browse model plaza/i })
++  ).toHaveAttribute('href', '/pricing')
++})
+diff --git a/web/src/features/home/components/hero-terminal-demo.tsx b/web/src/features/home/components/hero-terminal-demo.tsx
+index 2b4651a..27228a8 100644
+--- a/web/src/features/home/components/hero-terminal-demo.tsx
++++ b/web/src/features/home/components/hero-terminal-demo.tsx
+@@ -16,533 +16,141 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import { useState, useEffect, useRef, type ReactNode } from 'react'
++import { ArrowRight, Check, KeyRound, Route, UsersRound } from 'lucide-react'
++import { useTranslation } from 'react-i18next'
+ 
+ import { cn } from '@/lib/utils'
+ 
+-type AccentTone = 'emerald' | 'amber' | 'blue' | 'violet'
+-
+-interface ApiDemoConfig {
+-  id: string
+-  label: string
+-  method: 'POST' | 'GET'
+-  endpoint: string
+-  headers: string[]
+-  request: string[]
+-  response: string[]
+-  responseHighlights: string[]
+-  tokens: number
+-  latency: number
+-  accent: AccentTone
+-}
+-
+-const ACCENT_CLASSES: Record<
+-  AccentTone,
+-  {
+-    activeText: string
+-    activeBorder: string
+-    badge: string
+-  }
+-> = {
+-  emerald: {
+-    activeText: 'text-emerald-600 dark:text-emerald-400',
+-    activeBorder: 'border-emerald-500 dark:border-emerald-400',
+-    badge:
+-      'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-400/10 dark:text-emerald-400',
+-  },
+-  amber: {
+-    activeText: 'text-amber-600 dark:text-amber-400',
+-    activeBorder: 'border-amber-500 dark:border-amber-400',
+-    badge:
+-      'bg-amber-500/10 text-amber-600 dark:bg-amber-400/10 dark:text-amber-400',
+-  },
+-  blue: {
+-    activeText: 'text-blue-600 dark:text-blue-400',
+-    activeBorder: 'border-blue-500 dark:border-blue-400',
+-    badge:
+-      'bg-blue-500/10 text-blue-600 dark:bg-blue-400/10 dark:text-blue-400',
+-  },
+-  violet: {
+-    activeText: 'text-violet-600 dark:text-violet-400',
+-    activeBorder: 'border-violet-500 dark:border-violet-400',
+-    badge:
+-      'bg-violet-500/10 text-violet-600 dark:bg-violet-400/10 dark:text-violet-400',
+-  },
+-}
+-
+-const API_DEMOS: ApiDemoConfig[] = [
+-  {
+-    id: 'gpt-chat',
+-    label: 'Chat',
+-    method: 'POST',
+-    endpoint: '/v1/chat/completions',
+-    headers: ['"Authorization: Bearer sk-••••"'],
+-    request: [
+-      '"model": "your-model",',
+-      '"messages": [',
+-      '  { "role": "user", "content": "..." }',
+-      ']',
+-    ],
+-    response: [
+-      '{',
+-      '  "choices": [{ "message": { "content": <text> } }],',
+-      '  "usage": { "total_tokens": <tokens> }',
+-      '}',
+-    ],
+-    responseHighlights: ['<text>', '<tokens>'],
+-    tokens: 27,
+-    latency: 142,
+-    accent: 'emerald',
+-  },
+-  {
+-    id: 'responses',
+-    label: 'Responses',
+-    method: 'POST',
+-    endpoint: '/v1/responses',
+-    headers: ['"Authorization: Bearer sk-••••"'],
+-    request: ['"model": "your-model",', '"input": "..."'],
+-    response: [
+-      '{',
+-      '  "output": [{ "type": "output_text", "text": <text> }],',
+-      '  "usage": { "total_tokens": <tokens> }',
+-      '}',
+-    ],
+-    responseHighlights: ['<text>', '<tokens>'],
+-    tokens: 31,
+-    latency: 168,
+-    accent: 'amber',
+-  },
+-  {
+-    id: 'claude',
+-    label: 'Claude',
+-    method: 'POST',
+-    endpoint: '/v1/messages',
+-    headers: ['"x-api-key: sk-••••"', '"anthropic-version: 2023-06-01"'],
+-    request: [
+-      '"model": "your-model",',
+-      '"max_tokens": 1024,',
+-      '"messages": [',
+-      '  { "role": "user", "content": "..." }',
+-      ']',
+-    ],
+-    response: [
+-      '{',
+-      '  "content": [{ "type": "text", "text": <text> }],',
+-      '  "usage": { "input_tokens": <in>, "output_tokens": <out> }',
+-      '}',
+-    ],
+-    responseHighlights: ['<text>', '<in>', '<out>'],
+-    tokens: 29,
+-    latency: 156,
+-    accent: 'blue',
+-  },
+-  {
+-    id: 'gemini',
+-    label: 'Gemini',
+-    method: 'POST',
+-    endpoint: '/v1beta/models/{model}:generateContent',
+-    headers: ['"x-goog-api-key: sk-••••"'],
+-    request: [
+-      '"contents": [',
+-      '  { "role": "user",',
+-      '    "parts": [{ "text": "..." }] }',
+-      ']',
+-    ],
+-    response: [
+-      '{',
+-      '  "candidates": [{ "content": { "parts": [{ "text": <text> }] } }],',
+-      '  "usageMetadata": { "totalTokenCount": <tokens> }',
+-      '}',
+-    ],
+-    responseHighlights: ['<text>', '<tokens>'],
+-    tokens: 25,
+-    latency: 93,
+-    accent: 'violet',
+-  },
+-]
+-
+-const CYCLE_INTERVAL = 4500
+-const TRANSITION_MS = 220
+-
+ interface HeroTerminalDemoProps {
+   className?: string
+ }
+ 
+ export function HeroTerminalDemo(props: HeroTerminalDemoProps) {
+-  const [activeIndex, setActiveIndex] = useState(0)
+-  const [transitioning, setTransitioning] = useState(false)
+-  const intervalRef = useRef<ReturnType<typeof setInterval>>(undefined)
+-  const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+-
+-  useEffect(() => {
+-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+-    if (mq.matches) return
+-
+-    intervalRef.current = setInterval(() => {
+-      setTransitioning(true)
+-      timeoutRef.current = setTimeout(() => {
+-        setActiveIndex((prev) => (prev + 1) % API_DEMOS.length)
+-        setTransitioning(false)
+-      }, TRANSITION_MS)
+-    }, CYCLE_INTERVAL)
+-
+-    return () => {
+-      if (intervalRef.current) clearInterval(intervalRef.current)
+-      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+-    }
+-  }, [])
+-
+-  const handleSelect = (index: number) => {
+-    if (index === activeIndex) return
+-    if (intervalRef.current) clearInterval(intervalRef.current)
+-    if (timeoutRef.current) clearTimeout(timeoutRef.current)
+-    setTransitioning(true)
+-    timeoutRef.current = setTimeout(() => {
+-      setActiveIndex(index)
+-      setTransitioning(false)
+-    }, TRANSITION_MS)
+-  }
+-
+-  const demo = API_DEMOS[activeIndex]
+-  const accent = ACCENT_CLASSES[demo.accent]
++  const { t } = useTranslation()
++  const sources = [
++    {
++      name: t('Public source'),
++      reliability: '99.7%',
++      latency: '640 ms',
++      throughput: '42 tok/s',
++      selected: true,
++    },
++    {
++      name: t('plaza.scope.shared'),
++      reliability: '99.2%',
++      latency: '810 ms',
++      throughput: '36 tok/s',
++      selected: false,
++    },
++    {
++      name: t('Private source'),
++      reliability: '98.9%',
++      latency: '920 ms',
++      throughput: '31 tok/s',
++      selected: false,
++    },
++  ]
+ 
+   return (
+-    <div className={cn('mx-auto w-full max-w-2xl', props.className)}>
+-      <div
+-        className={cn(
+-          'overflow-hidden rounded-2xl border backdrop-blur-sm',
+-          'border-border/60 bg-white/95 shadow-[0_20px_50px_-25px_rgba(15,23,42,0.18)]',
+-          'dark:border-white/[0.06] dark:bg-[#0b0f17]/95 dark:shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)]'
+-        )}
+-      >
+-        {/* Tab strip */}
+-        <div
+-          className={cn(
+-            'flex items-center gap-1 border-b px-2 sm:gap-1.5 sm:px-3',
+-            'border-border/50 dark:border-white/[0.05]'
+-          )}
+-        >
+-          {API_DEMOS.map((item, index) => {
+-            const tone = ACCENT_CLASSES[item.accent]
+-            const isActive = index === activeIndex
+-            return (
+-              <button
+-                key={item.id}
+-                onClick={() => handleSelect(index)}
+-                className={cn(
+-                  'relative -mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-2.5 text-[11px] font-medium tracking-wide transition-colors sm:px-3 sm:text-xs',
+-                  isActive
+-                    ? `${tone.activeBorder} ${tone.activeText}`
+-                    : 'text-foreground/40 hover:text-foreground/70 border-transparent'
+-                )}
+-              >
+-                {item.label}
+-              </button>
+-            )
+-          })}
+-          <div className='ml-auto flex items-center gap-2 pr-2 sm:pr-3'>
+-            <span className='inline-block size-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.45)]' />
+-            <span className='text-foreground/40 font-mono text-[10px] tracking-wider uppercase'>
+-              200 ok
++    <div className={cn('mx-auto w-full max-w-xl', props.className)}>
++      <div className='border-border/70 bg-card/95 overflow-hidden rounded-2xl border shadow-[0_24px_70px_-38px_rgba(15,23,42,0.38)] backdrop-blur-sm dark:shadow-[0_24px_70px_-38px_rgba(0,0,0,0.85)]'>
++        <div className='border-border/60 flex items-center justify-between gap-4 border-b px-4 py-3.5 sm:px-5'>
++          <div className='flex min-w-0 items-center gap-2.5'>
++            <span className='flex size-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'>
++              <Route className='size-4' />
+             </span>
++            <div className='min-w-0'>
++              <p className='truncate text-sm font-semibold'>
++                {t('Automatic route preview')}
++              </p>
++              <p className='text-muted-foreground truncate font-mono text-[11px]'>
++                model: gpt-4.1-mini
++              </p>
++            </div>
+           </div>
+-        </div>
+-
+-        {/* Endpoint row */}
+-        <div
+-          className={cn(
+-            'flex items-center gap-2.5 border-b px-5 py-3',
+-            'border-border/40 dark:border-white/[0.04]'
+-          )}
+-        >
+-          <span
+-            className={cn(
+-              'rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-wider',
+-              accent.badge
+-            )}
+-          >
+-            {demo.method}
++          <span className='bg-muted text-muted-foreground rounded-full px-2.5 py-1 text-[10px] font-semibold tracking-wide uppercase'>
++            {t('Example')}
+           </span>
+-          <code
+-            className={cn(
+-              'text-foreground/75 truncate font-mono text-[12.5px] transition-opacity duration-200',
+-              transitioning ? 'opacity-0' : 'opacity-100'
+-            )}
+-          >
+-            {demo.endpoint}
+-          </code>
+         </div>
+ 
+-        {/* Body — fixed rows so neither block shifts when switching demos */}
+-        <div className='grid h-[400px] grid-rows-[235px_minmax(0,1fr)] font-mono text-[12.5px] leading-[1.55]'>
+-          {/* Request */}
+-          <RequestBlock demo={demo} transitioning={transitioning} />
+-
+-          {/* Response */}
+-          <ResponseBlock demo={demo} transitioning={transitioning} />
++        <div className='bg-border/50 grid grid-cols-3 gap-px border-b'>
++          {[
++            [t('6h reliability'), '99.7%'],
++            [t('P50 latency'), '640 ms'],
++            [t('Throughput'), '42 tok/s'],
++          ].map(([label, value]) => (
++            <div className='bg-card min-w-0 px-3 py-3.5 sm:px-4' key={label}>
++              <p className='text-muted-foreground truncate text-[10px] sm:text-[11px]'>
++                {label}
++              </p>
++              <p className='mt-1 truncate font-mono text-xs font-semibold sm:text-sm'>
++                {value}
++              </p>
++            </div>
++          ))}
+         </div>
+ 
+-        {/* Footer metrics */}
+-        <div
+-          className={cn(
+-            'flex items-center justify-between border-t px-5 py-2.5',
+-            'border-border/40 bg-muted/30 dark:border-white/[0.05] dark:bg-white/[0.02]'
+-          )}
+-        >
+-          <div className='text-foreground/40 flex items-center gap-3 text-[10px] tabular-nums'>
+-            <span className='flex items-center gap-1'>
+-              <span className='font-mono'>{demo.latency}</span>
+-              <span className='tracking-wider uppercase'>ms</span>
+-            </span>
+-            <span className='bg-foreground/15 size-1 rounded-full' />
+-            <span className='flex items-center gap-1'>
+-              <span className='font-mono'>{demo.tokens}</span>
+-              <span className='tracking-wider uppercase'>tokens</span>
+-            </span>
+-            <span className='bg-foreground/15 size-1 rounded-full' />
+-            <span className='flex items-center gap-1'>
+-              <span className='tracking-wider uppercase'>cost</span>
+-              <span className='font-mono'>
+-                ${(demo.tokens * 0.00003).toFixed(5)}
++        <div className='space-y-2 p-3 sm:p-4'>
++          {sources.map((source) => (
++            <div
++              className={cn(
++                'grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl border px-3 py-3 transition-colors sm:px-4',
++                source.selected
++                  ? 'border-emerald-500/30 bg-emerald-500/[0.06]'
++                  : 'border-border/60 bg-background/60'
++              )}
++              key={source.name}
++            >
++              <div className='flex min-w-0 items-center gap-3'>
++                <span
++                  className={cn(
++                    'flex size-8 shrink-0 items-center justify-center rounded-lg',
++                    source.selected
++                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
++                      : 'bg-muted text-muted-foreground'
++                  )}
++                >
++                  {source.selected ? (
++                    <Check className='size-4' />
++                  ) : (
++                    <UsersRound className='size-4' />
++                  )}
++                </span>
++                <div className='min-w-0'>
++                  <p className='truncate text-xs font-medium sm:text-sm'>
++                    {source.name}
++                  </p>
++                  <p className='text-muted-foreground mt-0.5 truncate font-mono text-[10px] sm:text-[11px]'>
++                    {source.reliability} · {source.latency} ·{' '}
++                    {source.throughput}
++                  </p>
++                </div>
++              </div>
++              <span
++                className={cn(
++                  'shrink-0 rounded-full px-2 py-1 text-[10px] font-medium',
++                  source.selected
++                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
++                    : 'bg-muted text-muted-foreground'
++                )}
++              >
++                {source.selected ? t('Selected source') : t('Available')}
+               </span>
+-            </span>
+-          </div>
+-          <span className='text-foreground/30 font-mono text-[10px] tracking-wider uppercase'>
+-            stream · sse
+-          </span>
++            </div>
++          ))}
+         </div>
+-      </div>
+-    </div>
+-  )
+-}
+ 
+-function RequestBlock(props: { demo: ApiDemoConfig; transitioning: boolean }) {
+-  const { demo, transitioning } = props
+-
+-  return (
+-    <div className='relative px-5 py-4'>
+-      <SectionLabel>Request</SectionLabel>
+-      <div
+-        className={cn(
+-          'mt-2 transition-opacity duration-200',
+-          transitioning ? 'opacity-0' : 'opacity-100'
+-        )}
+-      >
+-        <CodeLine>
+-          <Command>curl</Command> <Flag>-X</Flag> <Flag>POST</Flag>{' '}
+-          <StringText>&quot;{demo.endpoint}&quot;</StringText>{' '}
+-          <Muted>{'\\'}</Muted>
+-        </CodeLine>
+-        {demo.headers.map((header) => (
+-          <CodeLine key={header} indent={2}>
+-            <Flag>-H</Flag> <StringText>{header}</StringText>{' '}
+-            <Muted>{'\\'}</Muted>
+-          </CodeLine>
+-        ))}
+-        <CodeLine indent={2}>
+-          <Flag>-d</Flag> <StringText>&apos;{'{'}</StringText>
+-        </CodeLine>
+-        {demo.request.map((line, i) => (
+-          <CodeLine key={i} indent={4}>
+-            {renderJsonLine(line)}
+-          </CodeLine>
+-        ))}
+-        <CodeLine indent={2}>
+-          <StringText>{'}'}&apos;</StringText>
+-        </CodeLine>
+-      </div>
+-    </div>
+-  )
+-}
+-
+-function ResponseBlock(props: { demo: ApiDemoConfig; transitioning: boolean }) {
+-  const { demo, transitioning } = props
+-
+-  return (
+-    <div
+-      className={cn(
+-        'relative border-t px-5 py-4',
+-        'border-border/40 bg-muted/20 dark:border-white/[0.05] dark:bg-white/[0.015]'
+-      )}
+-    >
+-      <SectionLabel>Response</SectionLabel>
+-      <div
+-        className={cn(
+-          'mt-2 transition-opacity duration-200',
+-          transitioning ? 'opacity-0' : 'opacity-100'
+-        )}
+-      >
+-        {demo.response.map((line, i) => (
+-          <CodeLine key={i}>{renderResponseLine(line, demo)}</CodeLine>
+-        ))}
++        <div className='border-border/60 bg-muted/20 border-t px-4 py-3 sm:px-5'>
++          <div className='text-muted-foreground flex min-w-0 flex-wrap items-center gap-1.5 text-[10px] sm:text-[11px]'>
++            <KeyRound className='mr-0.5 size-3.5 shrink-0' />
++            <span>{t('Retriable error')}</span>
++            <ArrowRight className='size-3 shrink-0' />
++            <span>{t('Try next key')}</span>
++            <ArrowRight className='size-3 shrink-0' />
++            <span>{t('Try next authorized source')}</span>
++          </div>
++        </div>
+       </div>
+     </div>
+   )
+ }
+-
+-function SectionLabel(props: { children: ReactNode }) {
+-  return (
+-    <span className='text-foreground/30 font-sans text-[10px] font-semibold tracking-[0.18em] uppercase'>
+-      {props.children}
+-    </span>
+-  )
+-}
+-
+-const STRING_RE = /"[^"]*"/g
+-const PLACEHOLDER_RE = /<[a-z]+>/gi
+-
+-function renderJsonLine(line: string): ReactNode {
+-  if (!line.trim()) return <Muted> </Muted>
+-  return tokenize(line)
+-}
+-
+-function renderResponseLine(line: string, demo: ApiDemoConfig): ReactNode {
+-  if (!line.trim()) return <Muted> </Muted>
+-
+-  const segments: ReactNode[] = []
+-  let cursor = 0
+-  const matches = [...line.matchAll(PLACEHOLDER_RE)]
+-
+-  if (matches.length === 0) return tokenize(line)
+-
+-  matches.forEach((match, idx) => {
+-    const start = match.index ?? 0
+-    if (start > cursor) {
+-      segments.push(
+-        <span key={`pre-${idx}`}>{tokenize(line.slice(cursor, start))}</span>
+-      )
+-    }
+-    const placeholder = match[0]
+-    if (placeholder === '<text>') {
+-      segments.push(
+-        <Accent key={`ph-${idx}`} accent={demo.accent}>
+-          {`"${truncateResponse(demo)}"`}
+-        </Accent>
+-      )
+-    } else if (placeholder === '<tokens>') {
+-      segments.push(<NumberText key={`ph-${idx}`}>{demo.tokens}</NumberText>)
+-    } else if (placeholder === '<in>') {
+-      segments.push(
+-        <NumberText key={`ph-${idx}`}>
+-          {Math.floor(demo.tokens * 0.4)}
+-        </NumberText>
+-      )
+-    } else if (placeholder === '<out>') {
+-      segments.push(
+-        <NumberText key={`ph-${idx}`}>
+-          {Math.ceil(demo.tokens * 0.6)}
+-        </NumberText>
+-      )
+-    } else {
+-      segments.push(<Muted key={`ph-${idx}`}>{placeholder}</Muted>)
+-    }
+-    cursor = start + placeholder.length
+-  })
+-
+-  if (cursor < line.length) {
+-    segments.push(<span key='tail'>{tokenize(line.slice(cursor))}</span>)
+-  }
+-
+-  return segments
+-}
+-
+-function truncateResponse(demo: ApiDemoConfig): string {
+-  const map: Record<string, string> = {
+-    'gpt-chat': 'Chat request routed.',
+-    responses: 'Response workflow ready.',
+-    claude: 'Claude message routed.',
+-    gemini: 'Gemini request served.',
+-  }
+-  return map[demo.id] ?? '...'
+-}
+-
+-function tokenize(input: string): ReactNode {
+-  // Split string into "..." string runs and the rest, then color keys/punct.
+-  const segments: ReactNode[] = []
+-  let cursor = 0
+-  const matches = [...input.matchAll(STRING_RE)]
+-
+-  matches.forEach((match, idx) => {
+-    const start = match.index ?? 0
+-    if (start > cursor) {
+-      segments.push(
+-        <Muted key={`m-${idx}`}>{input.slice(cursor, start)}</Muted>
+-      )
+-    }
+-    const text = match[0]
+-    const after = input.slice(start + text.length).trimStart()
+-    const isKey = after.startsWith(':')
+-    if (isKey) {
+-      segments.push(<Key key={`k-${idx}`}>{text}</Key>)
+-    } else {
+-      segments.push(<StringText key={`s-${idx}`}>{text}</StringText>)
+-    }
+-    cursor = start + text.length
+-  })
+-
+-  if (cursor < input.length) {
+-    segments.push(<Muted key='tail'>{input.slice(cursor)}</Muted>)
+-  }
+-
+-  return segments
+-}
+-
+-function CodeLine(props: { children: ReactNode; indent?: number }) {
+-  return (
+-    <div className='break-words whitespace-pre-wrap'>
+-      {props.indent ? (
+-        <span
+-          aria-hidden
+-          className='inline-block'
+-          style={{ width: `${props.indent}ch` }}
+-        />
+-      ) : null}
+-      {props.children}
+-    </div>
+-  )
+-}
+-
+-function Command(props: { children: ReactNode }) {
+-  return (
+-    <span className='font-medium text-emerald-600 dark:text-emerald-400'>
+-      {props.children}
+-    </span>
+-  )
+-}
+-
+-function Flag(props: { children: ReactNode }) {
+-  return (
+-    <span className='text-blue-600 dark:text-blue-400'>{props.children}</span>
+-  )
+-}
+-
+-function Key(props: { children: ReactNode }) {
+-  return (
+-    <span className='text-sky-700 dark:text-sky-300'>{props.children}</span>
+-  )
+-}
+-
+-function StringText(props: { children: ReactNode }) {
+-  return (
+-    <span className='text-amber-700 dark:text-amber-300'>{props.children}</span>
+-  )
+-}
+-
+-function NumberText(props: { children: ReactNode }) {
+-  return (
+-    <span className='font-medium text-violet-600 dark:text-violet-300'>
+-      {props.children}
+-    </span>
+-  )
+-}
+-
+-function Muted(props: { children: ReactNode }) {
+-  return <span className='text-foreground/55'>{props.children}</span>
+-}
+-
+-function Accent(props: { children: ReactNode; accent: AccentTone }) {
+-  const tone = ACCENT_CLASSES[props.accent]
+-  return (
+-    <span className={cn('font-medium', tone.activeText)}>{props.children}</span>
+-  )
+-}
+diff --git a/web/src/features/home/components/sections/cta.tsx b/web/src/features/home/components/sections/cta.tsx
+index cffb4ca..7a5460a 100644
+--- a/web/src/features/home/components/sections/cta.tsx
++++ b/web/src/features/home/components/sections/cta.tsx
+@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+ import { Link } from '@tanstack/react-router'
+-import { ArrowRight } from 'lucide-react'
++import { ArrowRight, Check, KeyRound, ScanSearch, Send } from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { AnimateInView } from '@/components/animate-in-view'
+@@ -30,53 +30,97 @@ interface CTAProps {
+ 
+ export function CTA(props: CTAProps) {
+   const { t } = useTranslation()
+-
+-  if (props.isAuthenticated) {
+-    return null
+-  }
++  const steps = [
++    { icon: KeyRound, text: t('Add one or multiple upstream keys') },
++    { icon: ScanSearch, text: t('Fetch models and match system prices') },
++    { icon: Send, text: t('Submit ready models for review') },
++  ]
+ 
+   return (
+-    <section className='relative z-10 overflow-hidden px-6 py-24 md:py-32'>
+-      {/* Gradient mesh background */}
+-      <div
+-        aria-hidden
+-        className='absolute inset-0 -z-10 opacity-20 dark:opacity-[0.08]'
+-        style={{
+-          background: [
+-            'radial-gradient(ellipse 50% 50% at 30% 50%, oklch(0.7 0.15 250 / 70%) 0%, transparent 70%)',
+-            'radial-gradient(ellipse 40% 40% at 70% 40%, oklch(0.65 0.12 200 / 50%) 0%, transparent 70%)',
+-          ].join(', '),
+-        }}
+-      />
+-
++    <section className='relative z-10 overflow-hidden px-4 py-20 sm:px-6 md:py-28'>
+       <AnimateInView
+-        className='mx-auto max-w-2xl text-center'
+         animation='scale-in'
++        className='border-border/60 bg-card relative mx-auto grid max-w-6xl overflow-hidden rounded-3xl border p-6 shadow-sm md:grid-cols-[minmax(0,1fr)_minmax(280px,0.72fr)] md:gap-12 md:p-10 lg:p-12'
+       >
+-        <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-4xl'>
+-          {t('Ready to simplify')}
+-          <br />
+-          <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
+-            {t('your AI integration?')}
+-          </span>
+-        </h2>
+-        <p className='text-muted-foreground/80 mx-auto mt-5 max-w-md text-sm leading-relaxed md:text-base'>
+-          {t(
+-            'Deploy your own gateway and start routing requests through your configured upstream services.'
+-          )}
+-        </p>
+-        <div className='mt-8 flex items-center justify-center gap-3'>
+-          <Button className='group rounded-lg' render={<Link to='/sign-up' />}>
+-            {t('Get Started')}
+-            <ArrowRight className='ml-1 size-3.5 transition-transform duration-200 group-hover:translate-x-0.5' />
+-          </Button>
+-          <Button
+-            variant='outline'
+-            className='border-border/50 hover:border-border hover:bg-muted/50 rounded-lg'
+-            render={<Link to='/pricing' />}
+-          >
+-            {t('View Pricing')}
+-          </Button>
++        <div
++          aria-hidden
++          className='pointer-events-none absolute inset-0 opacity-30 dark:opacity-15'
++          style={{
++            background:
++              'radial-gradient(circle at 88% 12%, oklch(0.76 0.12 160 / 55%) 0%, transparent 38%)',
++          }}
++        />
++        <div className='relative min-w-0'>
++          <p className='text-muted-foreground text-xs font-medium tracking-widest uppercase'>
++            {t('For sharers')}
++          </p>
++          <h2 className='mt-3 max-w-2xl text-2xl leading-tight font-semibold tracking-tight md:text-4xl'>
++            {t('Have an API to share?')}
++          </h2>
++          <p className='text-muted-foreground mt-4 max-w-2xl text-sm leading-6 md:text-base'>
++            {t(
++              'Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.'
++            )}
++          </p>
++
++          <div className='mt-7 flex flex-col gap-3 sm:flex-row sm:flex-wrap'>
++            <Button
++              className='group justify-center'
++              render={
++                <Link to={props.isAuthenticated ? '/share' : '/sign-up'} />
++              }
++            >
++              {props.isAuthenticated
++                ? t('Add upstream API')
++                : t('Create account')}
++              <ArrowRight className='ml-1.5 size-4 transition-transform group-hover:translate-x-0.5' />
++            </Button>
++            {props.isAuthenticated ? (
++              <Button
++                variant='outline'
++                className='justify-center'
++                render={<Link to='/access' />}
++              >
++                {t('Manage access')}
++              </Button>
++            ) : (
++              <Button
++                variant='outline'
++                className='justify-center'
++                render={<Link to='/sign-in' />}
++              >
++                {t('Sign In')}
++              </Button>
++            )}
++          </div>
++
++          <div className='text-muted-foreground mt-7 flex flex-wrap gap-x-5 gap-y-2 text-xs'>
++            {[t('Public'), t('Invite or specific users'), t('Private')].map(
++              (scope) => (
++                <span className='flex items-center gap-1.5' key={scope}>
++                  <Check className='size-3.5 text-emerald-600 dark:text-emerald-400' />
++                  {scope}
++                </span>
++              )
++            )}
++          </div>
++        </div>
++
++        <div className='relative mt-10 space-y-2 md:mt-0'>
++          {steps.map(({ icon: Icon, text }, index) => (
++            <div
++              className='border-border/60 bg-background/75 flex items-center gap-3 rounded-xl border p-3.5 backdrop-blur-sm'
++              key={text}
++            >
++              <span className='bg-muted text-muted-foreground flex size-9 shrink-0 items-center justify-center rounded-lg'>
++                <Icon className='size-4' strokeWidth={1.7} />
++              </span>
++              <span className='min-w-0 text-sm font-medium'>{text}</span>
++              <span className='text-muted-foreground/50 ml-auto font-mono text-[10px]'>
++                0{index + 1}
++              </span>
++            </div>
++          ))}
+         </div>
+       </AnimateInView>
+     </section>
+diff --git a/web/src/features/home/components/sections/features.tsx b/web/src/features/home/components/sections/features.tsx
+index 79ea703..1911b56 100644
+--- a/web/src/features/home/components/sections/features.tsx
++++ b/web/src/features/home/components/sections/features.tsx
+@@ -16,224 +16,144 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import {
+-  Zap,
+-  Shield,
+-  Globe,
+-  Code,
+-  Gauge,
+-  DollarSign,
+-  Users,
+-  HeartHandshake,
+-} from 'lucide-react'
++import { Activity, KeyRound, LibraryBig, Route } from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { AnimateInView } from '@/components/animate-in-view'
+ 
+-interface FeaturesProps {
+-  className?: string
+-}
+-
+-export function Features(_props: FeaturesProps) {
++export function Features() {
+   const { t } = useTranslation()
+-
+   const features = [
+     {
+-      id: 'fast',
+-      num: '01',
+-      title: t('Lightning Fast'),
++      id: 'catalog',
++      icon: LibraryBig,
++      title: t('One catalog, multiple shared sources'),
+       desc: t(
+-        'Optimized network architecture ensures millisecond response times'
++        'Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.'
+       ),
+-      span: 'md:col-span-2',
+-      icon: <Zap className='size-4 text-blue-400' />,
+       visual: (
+-        <div className='mt-4 grid grid-cols-3 gap-2'>
+-          {['OpenAI', 'Claude', 'Gemini', 'DeepSeek', 'Qwen', 'Llama'].map(
+-            (name) => (
+-              <div
+-                key={name}
+-                className='border-border/30 bg-muted/20 text-muted-foreground flex items-center justify-center rounded-lg border px-3 py-2 text-xs transition-colors duration-300 hover:border-blue-500/30 hover:bg-blue-500/5'
++        <div className='mt-6 flex flex-wrap gap-2'>
++          {[t('Public resources'), t('My private'), t('Shared with me')].map(
++            (scope) => (
++              <span
++                className='border-border/60 bg-background rounded-full border px-3 py-1.5 text-[11px] font-medium'
++                key={scope}
+               >
+-                {name}
+-              </div>
++                {scope}
++              </span>
+             )
+           )}
+         </div>
+       ),
+     },
+     {
+-      id: 'secure',
+-      num: '02',
+-      title: t('Secure & Reliable'),
++      id: 'routing',
++      icon: Route,
++      title: t('Routing based on real signals'),
+       desc: t(
+-        'Enterprise-grade security with comprehensive permission management'
++        'Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.'
+       ),
+-      span: 'md:col-span-1',
+-      icon: <Shield className='size-4 text-emerald-400' />,
+       visual: (
+-        <div className='mt-4 flex items-center justify-center'>
+-          <div className='relative'>
+-            <div className='flex size-16 items-center justify-center rounded-2xl border border-emerald-500/20 bg-emerald-500/5'>
+-              <Shield
+-                className='size-7 text-emerald-500/70'
+-                strokeWidth={1.5}
+-              />
+-            </div>
+-            <div className='absolute -top-1 -right-1 flex size-4 items-center justify-center rounded-full bg-emerald-500'>
+-              <svg
+-                className='size-2.5 text-white'
+-                fill='none'
+-                viewBox='0 0 24 24'
+-                stroke='currentColor'
+-                strokeWidth={3}
+-              >
+-                <path
+-                  strokeLinecap='round'
+-                  strokeLinejoin='round'
+-                  d='m4.5 12.75 6 6 9-13.5'
+-                />
+-              </svg>
++        <div className='mt-6 grid grid-cols-2 gap-2'>
++          {[
++            t('6h reliability'),
++            t('P50 latency'),
++            t('Throughput'),
++            t('Available capacity'),
++          ].map((signal) => (
++            <div
++              className='border-border/50 bg-background/70 text-muted-foreground rounded-lg border px-3 py-2 text-[11px]'
++              key={signal}
++            >
++              {signal}
+             </div>
+-          </div>
++          ))}
+         </div>
+       ),
+     },
+     {
+-      id: 'global',
+-      num: '03',
+-      title: t('Global Coverage'),
+-      desc: t('Multi-region deployment for stable global access'),
+-      span: 'md:col-span-1',
+-      icon: <Globe className='size-4 text-violet-400' />,
++      id: 'keys',
++      icon: KeyRound,
++      title: t('Multi-key failover inside each channel'),
++      desc: t(
++        'Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.'
++      ),
+       visual: (
+-        <div className='mt-4 space-y-2'>
+-          {[t('Load Balancing'), t('Rate Limiting'), t('Cost Tracking')].map(
+-            (step, i) => (
+-              <div key={step} className='flex items-center gap-2'>
+-                <div
+-                  className={`flex size-6 items-center justify-center rounded-full text-[10px] font-bold ${
+-                    i === 1
+-                      ? 'border border-blue-500/30 bg-blue-500/20 text-blue-500'
+-                      : 'border-border/40 bg-muted text-muted-foreground border'
+-                  }`}
+-                >
+-                  {i + 1}
+-                </div>
+-                <div className='bg-border/40 h-px flex-1' />
+-                <span className='text-muted-foreground text-xs'>{step}</span>
+-              </div>
+-            )
+-          )}
++        <div className='text-muted-foreground mt-6 flex flex-wrap items-center gap-2 font-mono text-[11px]'>
++          <span className='border-border/60 bg-background rounded-md border px-2.5 py-1.5'>
++            Key 01 · 429
++          </span>
++          <span aria-hidden>→</span>
++          <span className='rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-emerald-700 dark:text-emerald-300'>
++            Key 02 · 200
++          </span>
++          <span aria-hidden>→</span>
++          <span className='border-border/60 bg-background rounded-md border px-2.5 py-1.5'>
++            {t('Next source')}
++          </span>
+         </div>
+       ),
+     },
+     {
+-      id: 'developer',
+-      num: '04',
+-      title: t('Developer Friendly'),
+-      desc: t('Compatible API routes for common AI application workflows'),
+-      span: 'md:col-span-2',
+-      icon: <Code className='size-4 text-amber-400' />,
++      id: 'usage',
++      icon: Activity,
++      title: t('Usage without financial settlement'),
++      desc: t(
++        'Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.'
++      ),
+       visual: (
+-        <div className='mt-4 flex items-center gap-3'>
+-          <div className='flex -space-x-2'>
+-            {['API', 'SDK', 'CLI', 'Docs'].map((n) => (
+-              <div
+-                key={n}
+-                className='border-background from-muted to-muted/60 text-muted-foreground flex size-8 items-center justify-center rounded-full border-2 bg-gradient-to-br text-[9px] font-bold'
+-              >
+-                {n}
+-              </div>
+-            ))}
+-          </div>
+-          <div className='text-muted-foreground flex items-center gap-1.5 text-xs'>
+-            <Code className='size-3.5 text-blue-500' />
+-            {t('Multi-protocol Compatible')}
+-          </div>
++        <div className='border-border/50 bg-background/70 mt-6 grid grid-cols-[1fr_auto] items-center gap-3 rounded-lg border px-3 py-2.5 text-[11px]'>
++          <span className='text-muted-foreground'>{t('Estimated cost')}</span>
++          <span className='font-mono font-semibold'>USD · $0.0184</span>
+         </div>
+       ),
+     },
+   ]
+ 
+-  const additionalFeatures = [
+-    {
+-      icon: <Gauge className='size-5' strokeWidth={1.5} />,
+-      title: t('High Performance'),
+-      desc: t('Support for high concurrency with automatic load balancing'),
+-    },
+-    {
+-      icon: <DollarSign className='size-5' strokeWidth={1.5} />,
+-      title: t('Transparent Billing'),
+-      desc: t('Pay-as-you-go with real-time usage monitoring'),
+-    },
+-    {
+-      icon: <Users className='size-5' strokeWidth={1.5} />,
+-      title: t('Team Collaboration'),
+-      desc: t('Multi-user management with flexible permission allocation'),
+-    },
+-    {
+-      icon: <HeartHandshake className='size-5' strokeWidth={1.5} />,
+-      title: t('Open Source'),
+-      desc: t('Community driven, self-hosted, and extensible'),
+-    },
+-  ]
+-
+   return (
+-    <section className='relative z-10 px-6 py-24 md:py-32'>
++    <section className='relative z-10 px-4 py-20 sm:px-6 md:py-28'>
+       <div className='mx-auto max-w-6xl'>
+-        <AnimateInView className='mb-16 max-w-lg'>
++        <AnimateInView className='max-w-2xl'>
+           <p className='text-muted-foreground mb-3 text-xs font-medium tracking-widest uppercase'>
+-            {t('Core Features')}
++            {t('Core workflow')}
+           </p>
+-          <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-3xl'>
+-            {t('Built for developers,')}
+-            <br />
+-            {t('designed for scale')}
++          <h2 className='text-2xl leading-tight font-semibold tracking-tight md:text-4xl'>
++            {t('Built around how you actually use shared models')}
+           </h2>
++          <p className='text-muted-foreground mt-4 max-w-xl text-sm leading-6 md:text-base'>
++            {t(
++              'Choose what this platform key can access, then let APIGX route each request within that boundary.'
++            )}
++          </p>
+         </AnimateInView>
+ 
+-        {/* Bento grid */}
+-        <div className='border-border/40 bg-border/40 grid gap-px overflow-hidden rounded-xl border md:grid-cols-3'>
+-          {features.map((f, i) => (
+-            <AnimateInView
+-              key={f.id}
+-              delay={i * 100}
+-              animation='scale-in'
+-              className={`bg-background group hover:bg-muted/20 p-7 transition-colors duration-300 md:p-8 ${f.span}`}
+-            >
+-              <div className='mb-3 flex items-center gap-3'>
+-                <span className='border-border/40 bg-muted text-muted-foreground flex size-7 items-center justify-center rounded-md border text-[10px] font-semibold tabular-nums'>
+-                  {f.num}
+-                </span>
+-                <h3 className='text-sm font-semibold'>{f.title}</h3>
+-              </div>
+-              <p className='text-muted-foreground text-sm leading-relaxed'>
+-                {f.desc}
+-              </p>
+-              {f.visual}
+-            </AnimateInView>
+-          ))}
+-        </div>
+-
+-        {/* Additional features row */}
+-        <div className='mt-12 grid grid-cols-2 gap-8 md:grid-cols-4 md:gap-12'>
+-          {additionalFeatures.map((f, i) => (
+-            <AnimateInView
+-              key={f.title}
+-              delay={i * 100}
+-              animation='fade-up'
+-              className='flex flex-col items-center text-center'
+-            >
+-              <div className='text-muted-foreground border-border/50 bg-muted/30 group-hover:text-foreground mb-3 flex size-12 items-center justify-center rounded-xl border transition-colors'>
+-                {f.icon}
+-              </div>
+-              <h3 className='mb-1.5 text-sm font-semibold'>{f.title}</h3>
+-              <p className='text-muted-foreground max-w-[200px] text-xs leading-relaxed'>
+-                {f.desc}
+-              </p>
+-            </AnimateInView>
+-          ))}
++        <div className='mt-12 grid gap-4 md:grid-cols-2'>
++          {features.map((feature, index) => {
++            const Icon = feature.icon
++            return (
++              <AnimateInView
++                animation='fade-up'
++                className='border-border/60 bg-muted/10 hover:bg-muted/20 rounded-2xl border p-6 transition-colors md:p-7'
++                delay={index * 70}
++                key={feature.id}
++              >
++                <div className='bg-background border-border/60 flex size-10 items-center justify-center rounded-xl border shadow-xs'>
++                  <Icon
++                    aria-hidden
++                    className='text-foreground/75 size-5'
++                    strokeWidth={1.6}
++                  />
++                </div>
++                <h3 className='mt-5 text-base font-semibold'>
++                  {feature.title}
++                </h3>
++                <p className='text-muted-foreground mt-2 text-sm leading-6'>
++                  {feature.desc}
++                </p>
++                {feature.visual}
++              </AnimateInView>
++            )
++          })}
+         </div>
+       </div>
+     </section>
+diff --git a/web/src/features/home/components/sections/hero.tsx b/web/src/features/home/components/sections/hero.tsx
+index 4a08151..c8bd16b 100644
+--- a/web/src/features/home/components/sections/hero.tsx
++++ b/web/src/features/home/components/sections/hero.tsx
+@@ -16,13 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import { CherryStudio } from '@lobehub/icons'
+ import { Link } from '@tanstack/react-router'
+-import { ArrowRight, BookOpen } from 'lucide-react'
++import { ArrowRight, CircleCheck, Share2 } from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { Button } from '@/components/ui/button'
+-import { useStatus } from '@/hooks/use-status'
+ 
+ import { HeroTerminalDemo } from '../hero-terminal-demo'
+ 
+@@ -31,213 +29,102 @@ interface HeroProps {
+   isAuthenticated?: boolean
+ }
+ 
+-// Stylized three-dots indicator representing "More"
+-const MoreIcon = () => (
+-  <svg
+-    className='text-muted-foreground/60 group-hover:text-foreground size-6 shrink-0 transition-colors'
+-    viewBox='0 0 24 24'
+-    fill='none'
+-    xmlns='http://www.w3.org/2000/svg'
+-  >
+-    <circle cx='6' cy='12' r='2' fill='currentColor' />
+-    <circle cx='12' cy='12' r='2' fill='currentColor' />
+-    <circle cx='18' cy='12' r='2' fill='currentColor' />
+-  </svg>
+-)
+-
+ export function Hero(props: HeroProps) {
+   const { t } = useTranslation()
+-  const { status } = useStatus()
+-  const docsUrl =
+-    (status?.docs_link as string | undefined) || 'https://docs.newapi.pro'
+-
+-  const renderDocsButton = () => {
+-    const isExternal = docsUrl.startsWith('http')
+-    if (isExternal) {
+-      return (
+-        <Button
+-          variant='outline'
+-          className='group border-border/50 hover:border-border hover:bg-muted/50 inline-flex h-11 items-center gap-1.5 rounded-lg px-5 text-sm font-medium'
+-          render={
+-            <a href={docsUrl} target='_blank' rel='noopener noreferrer' />
+-          }
+-        >
+-          <BookOpen className='text-muted-foreground/80 group-hover:text-foreground size-4 transition-colors duration-200' />
+-          <span>{t('Docs')}</span>
+-        </Button>
+-      )
+-    }
+-    return (
+-      <Button
+-        variant='outline'
+-        className='group border-border/50 hover:border-border hover:bg-muted/50 inline-flex h-11 items-center gap-1.5 rounded-lg px-5 text-sm font-medium'
+-        render={<Link to={docsUrl} />}
+-      >
+-        <BookOpen className='text-muted-foreground/80 group-hover:text-foreground size-4 transition-colors duration-200' />
+-        <span>{t('Docs')}</span>
+-      </Button>
+-    )
+-  }
+ 
+   return (
+-    <section className='relative z-10 overflow-hidden px-6 pt-24 pb-16 md:pt-32 md:pb-24 lg:pt-36 lg:pb-28'>
+-      {/* Radial gradient background */}
++    <section className='relative z-10 overflow-hidden px-4 pt-20 pb-14 sm:px-6 md:pt-28 md:pb-20 lg:pt-32 lg:pb-24'>
+       <div
+         aria-hidden
+-        className='pointer-events-none absolute inset-0 -z-10 opacity-25 dark:opacity-[0.12]'
++        className='pointer-events-none absolute inset-0 -z-10 opacity-45 dark:opacity-20'
+         style={{
+           background: [
+-            'radial-gradient(ellipse 60% 50% at 20% 20%, oklch(0.72 0.18 250 / 80%) 0%, transparent 70%)',
+-            'radial-gradient(ellipse 50% 40% at 80% 15%, oklch(0.65 0.15 200 / 60%) 0%, transparent 70%)',
+-            'radial-gradient(ellipse 40% 35% at 40% 80%, oklch(0.70 0.12 280 / 40%) 0%, transparent 70%)',
++            'radial-gradient(ellipse 55% 45% at 12% 10%, oklch(0.72 0.13 226 / 45%) 0%, transparent 72%)',
++            'radial-gradient(ellipse 45% 38% at 88% 18%, oklch(0.72 0.11 160 / 35%) 0%, transparent 72%)',
+           ].join(', '),
+         }}
+       />
+-      {/* Grid pattern */}
+       <div
+         aria-hidden
+-        className='absolute inset-0 -z-10 bg-[linear-gradient(to_right,var(--border)_1px,transparent_1px),linear-gradient(to_bottom,var(--border)_1px,transparent_1px)] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_30%,black_20%,transparent_100%)] bg-[size:4rem_4rem] opacity-[0.08]'
++        className='absolute inset-0 -z-10 bg-[linear-gradient(to_right,var(--border)_1px,transparent_1px),linear-gradient(to_bottom,var(--border)_1px,transparent_1px)] [mask-image:radial-gradient(ellipse_65%_55%_at_50%_20%,black_10%,transparent_100%)] bg-[size:4rem_4rem] opacity-[0.07]'
+       />
+ 
+-      <div className='mx-auto grid max-w-6xl grid-cols-1 items-start gap-12 lg:grid-cols-12 lg:gap-8'>
+-        {/* Left Column: Title, description, action buttons and application support */}
+-        <div className='flex flex-col items-start text-left lg:col-span-6'>
+-          {/* Top Pill Badge */}
+-          <div
+-            className='landing-animate-fade-up mb-5 inline-flex items-center gap-1.5 rounded-full border border-blue-500/20 bg-blue-500/5 px-3 py-1.5 text-[11px] font-medium text-blue-600 opacity-0 shadow-xs dark:border-blue-400/20 dark:bg-blue-400/5 dark:text-blue-400'
+-            style={{ animationDelay: '0ms' }}
+-          >
+-            <span className='relative flex size-1.5'>
+-              <span className='absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75' />
+-              <span className='relative inline-flex size-1.5 rounded-full bg-blue-500 dark:bg-blue-400' />
+-            </span>
+-            <span>{t('AI Application Infrastructure Foundation')}</span>
++      <div className='mx-auto grid max-w-6xl items-center gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.92fr)] lg:gap-14'>
++        <div className='min-w-0'>
++          <div className='landing-animate-fade-up border-border/60 bg-background/70 text-muted-foreground inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium opacity-0 shadow-xs backdrop-blur-sm'>
++            <Share2 className='size-3.5 text-emerald-600 dark:text-emerald-400' />
++            {t('Shared AI API gateway')}
+           </div>
+ 
+           <h1
+-            className='landing-animate-fade-up text-[clamp(2.25rem,4.5vw,3.25rem)] leading-[1.15] font-bold tracking-tight'
++            className='landing-animate-fade-up mt-6 max-w-3xl text-[clamp(2.45rem,6vw,4.65rem)] leading-[1.02] font-semibold tracking-[-0.045em] opacity-0'
+             style={{ animationDelay: '60ms' }}
+           >
+-            {t('Unified API Gateway for')}
+-            <br />
+-            <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
+-              {t('Vast Range of AI Models')}
++            {t('One platform key.')}
++            <span className='text-muted-foreground block'>
++              {t('Every shared AI model.')}
+             </span>
+           </h1>
++
+           <p
+-            className='landing-animate-fade-up text-muted-foreground/80 mt-5 max-w-xl text-base leading-relaxed opacity-0 md:text-[15px]'
++            className='landing-animate-fade-up text-muted-foreground mt-6 max-w-2xl text-base leading-7 opacity-0 md:text-lg'
+             style={{ animationDelay: '120ms' }}
+           >
+             {t(
+-              'Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.'
++              'Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.'
+             )}
+           </p>
+ 
+           <div
+-            className='landing-animate-fade-up mt-8 flex flex-wrap items-center gap-3 opacity-0'
++            className='landing-animate-fade-up mt-8 flex flex-col gap-3 opacity-0 sm:flex-row sm:flex-wrap'
+             style={{ animationDelay: '180ms' }}
+           >
++            <Button
++              className='group h-11 justify-center rounded-lg px-5 text-sm font-medium'
++              render={<Link to='/pricing' />}
++            >
++              {t('Browse model plaza')}
++              <ArrowRight className='ml-1.5 size-4 transition-transform duration-200 group-hover:translate-x-0.5' />
++            </Button>
+             {props.isAuthenticated ? (
+-              <>
+-                <Button
+-                  className='group h-11 rounded-lg px-5 text-sm font-medium'
+-                  render={<Link to='/dashboard' />}
+-                >
+-                  {t('Go to Dashboard')}
+-                  <ArrowRight className='ml-1.5 size-4 transition-transform duration-200 group-hover:translate-x-0.5' />
+-                </Button>
+-                {renderDocsButton()}
+-              </>
++              <Button
++                variant='outline'
++                className='h-11 justify-center rounded-lg px-5 text-sm font-medium'
++                render={<Link to='/share' />}
++              >
++                {t('Share an API')}
++              </Button>
+             ) : (
+-              <>
+-                <Button
+-                  className='group h-11 rounded-lg px-5 text-sm font-medium'
+-                  render={<Link to='/sign-up' />}
+-                >
+-                  {t('Get Started')}
+-                  <ArrowRight className='ml-1.5 size-4 transition-transform duration-200 group-hover:translate-x-0.5' />
+-                </Button>
+-                <Button
+-                  variant='outline'
+-                  className='border-border/50 hover:border-border hover:bg-muted/50 h-11 rounded-lg px-5 text-sm font-medium'
+-                  render={<Link to='/pricing' />}
+-                >
+-                  {t('View Pricing')}
+-                </Button>
+-                {renderDocsButton()}
+-              </>
++              <Button
++                variant='outline'
++                className='h-11 justify-center rounded-lg px-5 text-sm font-medium'
++                render={<Link to='/sign-up' />}
++              >
++                {t('Create account')}
++              </Button>
+             )}
+           </div>
+ 
+-          {/* Supported Apps (参考图二样式，进行卡片化和信息扩充设计，增加视觉高度) */}
+           <div
+-            className='landing-animate-fade-up mt-10 w-full max-w-xl opacity-0'
++            className='landing-animate-fade-up text-muted-foreground mt-6 flex flex-col gap-2 text-xs opacity-0 sm:flex-row sm:items-center sm:gap-5'
+             style={{ animationDelay: '240ms' }}
+           >
+-            <div className='mb-4 flex flex-col gap-1'>
+-              <span className='text-muted-foreground/50 text-[10px] font-bold tracking-[0.15em] uppercase'>
+-                {t('Supported Applications')}
+-              </span>
+-              <p className='text-muted-foreground/60 text-xs leading-relaxed'>
+-                {t(
+-                  'Supports one-click configuration and perfectly adapts to NewAPI multi-protocol configuration.'
+-                )}
+-              </p>
+-            </div>
+-            <div className='flex flex-wrap items-center gap-3'>
+-              {/* Cherry Studio */}
+-              <a
+-                href='https://cherry-ai.com'
+-                target='_blank'
+-                rel='noopener noreferrer'
+-                className='group border-border/40 bg-muted/15 text-foreground/80 hover:border-border hover:bg-muted/30 hover:text-foreground flex items-center gap-3 rounded-full border px-5 py-2.5 text-sm font-medium shadow-[0_1px_2.5px_rgba(0,0,0,0.01)] backdrop-blur-xs transition-all duration-300 hover:scale-[1.02]'
+-              >
+-                <CherryStudio.Color size={24} className='shrink-0' />
+-                <span>Cherry Studio</span>
+-              </a>
+-
+-              {/* CC Switch */}
+-              <a
+-                href='https://ccswitch.io'
+-                target='_blank'
+-                rel='noopener noreferrer'
+-                className='group border-border/40 bg-muted/15 text-foreground/80 hover:border-border hover:bg-muted/30 hover:text-foreground flex items-center gap-3 rounded-full border px-5 py-2.5 text-sm font-medium shadow-[0_1px_2.5px_rgba(0,0,0,0.01)] backdrop-blur-xs transition-all duration-300 hover:scale-[1.02]'
+-              >
+-                <img
+-                  src='https://ccswitch.io/favicon.png'
+-                  alt='CC Switch'
+-                  className='size-6 shrink-0 rounded-md object-contain'
+-                  onError={(e) => {
+-                    // Fallback to a styled text avatar if the remote favicon fails to load in sandbox or local environments
+-                    e.currentTarget.style.display = 'none'
+-                    const fallback = e.currentTarget.nextSibling as HTMLElement
+-                    if (fallback) fallback.style.display = 'flex'
+-                  }}
+-                />
+-                <span
+-                  style={{ display: 'none' }}
+-                  className='size-6 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-[10px] font-bold text-blue-600 dark:bg-blue-400/10 dark:text-blue-400'
+-                >
+-                  CC
+-                </span>
+-                <span>CC Switch</span>
+-              </a>
+-
+-              {/* "更多" */}
+-              <div className='group border-border/40 bg-muted/15 text-foreground/55 hover:border-border hover:bg-muted/30 hover:text-foreground flex cursor-default items-center gap-2.5 rounded-full border px-5 py-2.5 text-sm font-medium shadow-[0_1px_2.5px_rgba(0,0,0,0.01)] backdrop-blur-xs transition-all duration-300 hover:scale-[1.02]'>
+-                <MoreIcon />
+-                <span>{t('More Apps')}</span>
+-              </div>
+-            </div>
++            <span className='flex items-center gap-2'>
++              <CircleCheck className='size-4 text-emerald-600 dark:text-emerald-400' />
++              {t('Free sharing')}
++            </span>
++            <span className='flex items-center gap-2'>
++              <CircleCheck className='size-4 text-emerald-600 dark:text-emerald-400' />
++              {t('Usage and estimated cost are recorded')}
++            </span>
+           </div>
+         </div>
+ 
+-        {/* Right Column: Hero Terminal API Demo */}
+         <div
+-          className='landing-animate-fade-up flex w-full justify-center opacity-0 lg:col-span-6'
+-          style={{ animationDelay: '320ms' }}
++          className='landing-animate-fade-up min-w-0 opacity-0'
++          style={{ animationDelay: '300ms' }}
+         >
+-          <HeroTerminalDemo className='mt-8 lg:mt-0' />
++          <HeroTerminalDemo />
+         </div>
+       </div>
+     </section>
+diff --git a/web/src/features/home/components/sections/how-it-works.tsx b/web/src/features/home/components/sections/how-it-works.tsx
+index 2959fd8..45e261b 100644
+--- a/web/src/features/home/components/sections/how-it-works.tsx
++++ b/web/src/features/home/components/sections/how-it-works.tsx
+@@ -16,73 +16,91 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import { Settings, Zap, BarChart3 } from 'lucide-react'
++import { Link } from '@tanstack/react-router'
++import { ArrowRight, BarChart3, KeyRound, Search } from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { AnimateInView } from '@/components/animate-in-view'
++import { Button } from '@/components/ui/button'
+ 
+ export function HowItWorks() {
+   const { t } = useTranslation()
+-
+   const steps = [
+     {
+-      num: '1',
+-      title: t('Configure'),
++      num: '01',
++      title: t('Find and compare a model'),
+       desc: t(
+-        'Add your API keys, set up channels and configure access permissions'
++        'Browse public resources, your private resources, and resources shared with you.'
+       ),
+-      icon: <Settings className='size-6' strokeWidth={1.5} />,
++      icon: Search,
+     },
+     {
+-      num: '2',
+-      title: t('Connect'),
++      num: '02',
++      title: t('Create one platform key'),
+       desc: t(
+-        'Connect through OpenAI, Claude, Gemini, and other compatible API routes'
++        'Choose its resource scope, then use automatic routing or pin a specific shared source.'
+       ),
+-      icon: <Zap className='size-6' strokeWidth={1.5} />,
++      icon: KeyRound,
+     },
+     {
+-      num: '3',
+-      title: t('Monitor'),
+-      desc: t('Track usage, costs and performance with real-time analytics'),
+-      icon: <BarChart3 className='size-6' strokeWidth={1.5} />,
++      num: '03',
++      title: t('Call and inspect usage'),
++      desc: t(
++        'Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.'
++      ),
++      icon: BarChart3,
+     },
+   ]
+ 
+   return (
+-    <section className='border-border/40 relative z-10 border-t px-6 py-24 md:py-32'>
++    <section className='border-border/60 bg-muted/10 relative z-10 border-y px-4 py-20 sm:px-6 md:py-28'>
+       <div className='mx-auto max-w-6xl'>
+-        <AnimateInView className='mb-16 text-center md:mb-20'>
+-          <p className='text-muted-foreground mb-3 text-xs font-medium tracking-widest uppercase'>
+-            {t('How It Works')}
+-          </p>
+-          <h2 className='text-2xl font-bold tracking-tight md:text-3xl'>
+-            {t('Three steps to get started')}
+-          </h2>
++        <AnimateInView className='flex flex-col gap-6 md:flex-row md:items-end md:justify-between'>
++          <div className='max-w-2xl'>
++            <p className='text-muted-foreground mb-3 text-xs font-medium tracking-widest uppercase'>
++              {t('From discovery to first request')}
++            </p>
++            <h2 className='text-2xl font-semibold tracking-tight md:text-4xl'>
++              {t('Three steps, one clear resource boundary')}
++            </h2>
++          </div>
++          <Button
++            variant='outline'
++            className='group w-full justify-center md:w-auto'
++            render={<Link to='/pricing' />}
++          >
++            {t('Start with the model plaza')}
++            <ArrowRight className='ml-1.5 size-4 transition-transform group-hover:translate-x-0.5' />
++          </Button>
+         </AnimateInView>
+ 
+-        <div className='grid gap-8 md:grid-cols-3 md:gap-12'>
+-          {steps.map((step, i) => (
+-            <AnimateInView
+-              key={step.num}
+-              delay={i * 150}
+-              animation='fade-up'
+-              className='relative flex flex-col items-center text-center'
+-            >
+-              <div className='relative mb-6'>
+-                <div className='text-muted-foreground border-border/50 bg-muted/30 flex size-16 items-center justify-center rounded-2xl border transition-colors'>
+-                  {step.icon}
+-                </div>
+-                <div className='bg-foreground text-background absolute -top-2 -right-2 flex size-6 items-center justify-center rounded-full text-xs font-bold'>
++        <div className='mt-12 grid gap-4 md:grid-cols-3'>
++          {steps.map((step, index) => {
++            const Icon = step.icon
++            return (
++              <AnimateInView
++                animation='fade-up'
++                className='bg-background border-border/60 relative overflow-hidden rounded-2xl border p-6 md:p-7'
++                delay={index * 100}
++                key={step.num}
++              >
++                <span className='text-muted-foreground/50 absolute top-5 right-5 font-mono text-xs'>
+                   {step.num}
++                </span>
++                <div className='bg-muted flex size-10 items-center justify-center rounded-xl'>
++                  <Icon
++                    aria-hidden
++                    className='text-foreground/75 size-5'
++                    strokeWidth={1.6}
++                  />
+                 </div>
+-              </div>
+-              <h3 className='mb-2 text-base font-semibold'>{step.title}</h3>
+-              <p className='text-muted-foreground max-w-[240px] text-sm leading-relaxed'>
+-                {step.desc}
+-              </p>
+-            </AnimateInView>
+-          ))}
++                <h3 className='mt-8 text-base font-semibold'>{step.title}</h3>
++                <p className='text-muted-foreground mt-2 text-sm leading-6'>
++                  {step.desc}
++                </p>
++              </AnimateInView>
++            )
++          })}
+         </div>
+       </div>
+     </section>
+diff --git a/web/src/features/home/components/sections/stats.tsx b/web/src/features/home/components/sections/stats.tsx
+index c3a5bc1..0f60ff2 100644
+--- a/web/src/features/home/components/sections/stats.tsx
++++ b/web/src/features/home/components/sections/stats.tsx
+@@ -16,113 +16,47 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ 
+ For commercial licensing, please contact support@quantumnous.com
+ */
+-import { useRef, useEffect, useCallback } from 'react'
++import {
++  AudioLines,
++  Database,
++  Image,
++  ListFilter,
++  MessageSquareText,
++  Video,
++} from 'lucide-react'
+ import { useTranslation } from 'react-i18next'
+ 
+-interface CounterProps {
+-  end: number
+-  suffix?: string
+-  prefix?: string
+-  duration?: number
+-  decimals?: number
+-}
+-
+-function Counter(props: CounterProps) {
+-  const { end, suffix = '', prefix = '', duration = 1600, decimals = 0 } = props
+-  const ref = useRef<HTMLSpanElement>(null)
+-  const startedRef = useRef(false)
+-
+-  const formatValue = useCallback(
+-    (v: number) =>
+-      decimals > 0 ? v.toFixed(decimals) : Math.round(v).toLocaleString(),
+-    [decimals]
+-  )
+-
+-  const animate = useCallback(() => {
+-    const el = ref.current
+-    if (!el) return
+-    const start = performance.now()
+-    const step = (now: number) => {
+-      const progress = Math.min((now - start) / duration, 1)
+-      const eased = 1 - Math.pow(1 - progress, 3)
+-      el.textContent = `${prefix}${formatValue(eased * end)}${suffix}`
+-      if (progress < 1) requestAnimationFrame(step)
+-    }
+-    requestAnimationFrame(step)
+-  }, [end, duration, prefix, suffix, formatValue])
+-
+-  useEffect(() => {
+-    const el = ref.current
+-    if (!el) return
+-
+-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+-    if (mq.matches) {
+-      el.textContent = `${prefix}${formatValue(end)}${suffix}`
+-      return
+-    }
+-
+-    const observer = new IntersectionObserver(
+-      ([entry]) => {
+-        if (entry.isIntersecting && !startedRef.current) {
+-          startedRef.current = true
+-          animate()
+-          observer.unobserve(el)
+-        }
+-      },
+-      { threshold: 0.5 }
+-    )
+-
+-    observer.observe(el)
+-    return () => observer.disconnect()
+-  }, [animate, end, prefix, suffix, formatValue])
+-
+-  return (
+-    <span ref={ref} className='tabular-nums'>
+-      {prefix}0{suffix}
+-    </span>
+-  )
+-}
+-
+-interface StatsProps {
+-  className?: string
+-}
+-
+-interface StatItem {
+-  end: number
+-  suffix: string
+-  label: string
+-  decimals?: number
+-}
+-
+-export function Stats(_props: StatsProps) {
++export function Stats() {
+   const { t } = useTranslation()
+-
+-  const stats: StatItem[] = [
+-    { end: 50, suffix: '+', label: t('upstream services integrated') },
+-    { end: 100, suffix: '+', label: t('model billing support') },
+-    { end: 50, suffix: '+', label: t('compatible API routes') },
+-    { end: 10, suffix: '+', label: t('scheduling controls') },
++  const capabilities = [
++    { label: t('Conversation API'), icon: MessageSquareText },
++    { label: t('Image API'), icon: Image },
++    { label: t('Audio API'), icon: AudioLines },
++    { label: t('Embedding API'), icon: Database },
++    { label: t('Rerank API'), icon: ListFilter },
++    { label: t('Video API'), icon: Video },
+   ]
+ 
+   return (
+-    <div className='border-border/40 bg-muted/10 relative z-10 border-y'>
+-      <div className='mx-auto max-w-6xl px-6 py-10 md:py-12'>
+-        <div className='grid grid-cols-2 gap-8 md:grid-cols-4 md:gap-12'>
+-          {stats.map((s) => (
+-            <div
+-              key={s.label}
+-              className='flex flex-col items-center text-center'
+-            >
+-              <span className='text-2xl font-bold tracking-tight md:text-3xl'>
+-                <Counter end={s.end} suffix={s.suffix} decimals={s.decimals} />
+-              </span>
+-              <span className='text-muted-foreground mt-1.5 text-xs'>
+-                {s.label}
+-              </span>
+-            </div>
+-          ))}
+-        </div>
++    <section
++      aria-label={t('Six AI API capabilities')}
++      className='border-border/60 bg-muted/10 relative z-10 border-y'
++    >
++      <div className='bg-border/50 mx-auto grid max-w-6xl grid-cols-2 gap-px sm:grid-cols-3 lg:grid-cols-6'>
++        {capabilities.map(({ label, icon: Icon }) => (
++          <div
++            className='bg-background flex min-w-0 items-center gap-2.5 px-4 py-4 sm:justify-center'
++            key={label}
++          >
++            <Icon
++              aria-hidden
++              className='text-muted-foreground size-4 shrink-0'
++              strokeWidth={1.7}
++            />
++            <span className='truncate text-xs font-medium'>{label}</span>
++          </div>
++        ))}
+       </div>
+-    </div>
++    </section>
+   )
+ }
+diff --git a/web/src/features/system-settings/auth/passkey-section.tsx b/web/src/features/system-settings/auth/passkey-section.tsx
+index 728de7c..4cbff94 100644
+--- a/web/src/features/system-settings/auth/passkey-section.tsx
++++ b/web/src/features/system-settings/auth/passkey-section.tsx
+@@ -369,7 +369,7 @@ export function PasskeySection(props: PasskeySectionProps) {
+                 <FormLabel>{t('Passkey display name')}</FormLabel>
+                 <FormControl>
+                   <Input
+-                    placeholder={t('e.g. New API Console')}
++                    placeholder={t('e.g. APIGX Console')}
+                     value={field.value ?? ''}
+                     onChange={(event) => field.onChange(event.target.value)}
+                     name={field.name}
+diff --git a/web/src/features/system-settings/general/system-info-section.tsx b/web/src/features/system-settings/general/system-info-section.tsx
+index 3758b36..8524d9c 100644
+--- a/web/src/features/system-settings/general/system-info-section.tsx
++++ b/web/src/features/system-settings/general/system-info-section.tsx
+@@ -154,7 +154,7 @@ export function SystemInfoSection({ defaultValues }: SystemInfoSectionProps) {
+                   <FormItem>
+                     <FormLabel>{t('System Name')}</FormLabel>
+                     <FormControl>
+-                      <Input placeholder={t('New API')} {...field} />
++                      <Input placeholder='APIGX' {...field} />
+                     </FormControl>
+                     <FormDescription>
+                       {t('The name displayed across the application')}
+@@ -282,7 +282,7 @@ export function SystemInfoSection({ defaultValues }: SystemInfoSectionProps) {
+                       <FormLabel>{t('Home Page Content')}</FormLabel>
+                       <FormControl>
+                         <Textarea
+-                          placeholder={t('Welcome to our New API...')}
++                          placeholder={t('Welcome to APIGX...')}
+                           rows={6}
+                           {...field}
+                         />
+diff --git a/web/src/features/system-settings/integrations/email-settings-section.tsx b/web/src/features/system-settings/integrations/email-settings-section.tsx
+index 67cb1e2..53def87 100644
+--- a/web/src/features/system-settings/integrations/email-settings-section.tsx
++++ b/web/src/features/system-settings/integrations/email-settings-section.tsx
+@@ -370,7 +370,7 @@ export function EmailSettingsSection({
+                 <FormControl>
+                   <Input
+                     autoComplete='off'
+-                    placeholder={t('New API &lt;noreply@example.com&gt;')}
++                    placeholder={t('APIGX &lt;noreply@example.com&gt;')}
+                     {...field}
+                     onChange={(event) => field.onChange(event.target.value)}
+                   />
+diff --git a/web/src/features/system-settings/site/index.tsx b/web/src/features/system-settings/site/index.tsx
+index dffda55..44e88af 100644
+--- a/web/src/features/system-settings/site/index.tsx
++++ b/web/src/features/system-settings/site/index.tsx
+@@ -26,7 +26,7 @@ import {
+ 
+ const defaultSiteSettings: SiteSettings = {
+   Notice: '',
+-  SystemName: 'New API',
++  SystemName: 'APIGX',
+   Logo: '',
+   Footer: '',
+   About: '',
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index b0fbddb..8a956ed 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -112,6 +112,7 @@
+     "© 2025 Your Company. All rights reserved.": "© 2025 Your Company. All rights reserved.",
+     "+{{count}} more": "+{{count}} more",
+     "| Based on": "| Based on",
++    "Based on": "Based on",
+     "0 means data is kept permanently": "0 means data is kept permanently",
+     "0 means unlimited": "0 means unlimited",
+     "1 Day": "1 Day",
+@@ -2522,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Related Projects",
+     "footer.defaultCopyright": "All rights reserved.",
+-    "footer.newapi.projectAttributionSuffix": "All rights reserved. Designed and developed by the project contributors.",
++    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "For private deployments, format: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.",
+@@ -6705,7 +6706,7 @@
+     "Standard model ID": "Standard model ID",
+     "If it does not exist, it will be created.": "If it does not exist, it will be created.",
+     "No pending candidate": "No pending candidate",
+-    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Newly discovered models appear here for review. Confirm the model identity so the plaza can combine matching resources and show one shared name and description.",
+     "Reject": "Reject",
+     "Normalized name Hint": "Normalized name",
+     "Visible resources": "Visible resources",
+@@ -6851,7 +6852,7 @@
+     "share.price.confirmSelected": "Apply selected ({{count}})",
+     "share.price.appliedCount": "Applied prices to {{count}} models.",
+     "share.price.selectModel": "Select price for {{model}}",
+-    "share.price.matchedAs": "Matched New API model: {{model}}",
++    "share.price.matchedAs": "Matched system price model: {{model}}",
+     "share.price.status.matched": "Matched",
+     "share.price.status.unchanged": "Already current",
+     "share.price.status.not_found": "Not found",
+@@ -6859,7 +6860,7 @@
+     "share.price.status.expression_requires_manual": "Manual pricing required",
+     "share.price.reason.dynamic_expression_requires_manual": "This dynamic pricing expression cannot be expanded safely. Enter a manual price.",
+     "share.price.reason.expression_requires_manual": "This pricing expression needs manual review.",
+-    "share.price.reason.not_found": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.not_found": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_override": "This model uses a locked manual price and will not be overwritten.",
+     "share.price.reason.unchanged": "The current accepted price already matches.",
+     "share.models.description": "Review imported models, then match prices and submit drafts for review.",
+@@ -6951,9 +6952,9 @@
+     "1K characters": "1K characters",
+     "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.",
+     "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.",
+-    "share.price.reason.no_local_price": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.no_local_price": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_price_active": "This model uses a locked manual price and will not be overwritten.",
+-    "share.price.reason.invalid_local_price": "The local New API price could not be converted safely. Enter a manual price.",
++    "share.price.reason.invalid_local_price": "The matched system price could not be converted safely. Enter a manual price.",
+     "share.price.reason.current_version_matches": "The current accepted price already matches.",
+     "Access and sharing": "Access and sharing",
+     "Issue access, redeem invite codes, and review who can use your shared resources.": "Issue access, redeem invite codes, and review who can use your shared resources.",
+@@ -7017,6 +7018,79 @@
+     "Configure resources": "Configure resources",
+     "Resource scope": "Resource scope",
+     "Update the platform key name, expiration, and IP access.": "Update the platform key name, expiration, and IP access.",
+-    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources."
++    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources.",
++    "Shared AI API gateway": "Shared AI API gateway",
++    "One platform key.": "One platform key.",
++    "Every shared AI model.": "Every shared AI model.",
++    "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.": "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.",
++    "Browse model plaza": "Browse model plaza",
++    "Share an API": "Share an API",
++    "Free sharing": "Free sharing",
++    "Usage and estimated cost are recorded": "Usage and estimated cost are recorded",
++    "Automatic route preview": "Automatic route preview",
++    "6h reliability": "6h reliability",
++    "P50 latency": "P50 latency",
++    "Public source": "Public source",
++    "Private source": "Private source",
++    "Retriable error": "Retriable error",
++    "Try next key": "Try next key",
++    "Try next authorized source": "Try next authorized source",
++    "Six AI API capabilities": "Six AI API capabilities",
++    "Conversation API": "Conversation API",
++    "Image API": "Image API",
++    "Audio API": "Audio API",
++    "Embedding API": "Embedding API",
++    "Rerank API": "Rerank API",
++    "Video API": "Video API",
++    "One catalog, multiple shared sources": "One catalog, multiple shared sources",
++    "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.": "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.",
++    "Public resources": "Public resources",
++    "My private": "My private",
++    "Routing based on real signals": "Routing based on real signals",
++    "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.": "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.",
++    "Available capacity": "Available capacity",
++    "Multi-key failover inside each channel": "Multi-key failover inside each channel",
++    "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.": "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.",
++    "Next source": "Next source",
++    "Usage without financial settlement": "Usage without financial settlement",
++    "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.": "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.",
++    "Core workflow": "Core workflow",
++    "Built around how you actually use shared models": "Built around how you actually use shared models",
++    "Choose what this platform key can access, then let APIGX route each request within that boundary.": "Choose what this platform key can access, then let APIGX route each request within that boundary.",
++    "Find and compare a model": "Find and compare a model",
++    "Browse public resources, your private resources, and resources shared with you.": "Browse public resources, your private resources, and resources shared with you.",
++    "Create one platform key": "Create one platform key",
++    "Choose its resource scope, then use automatic routing or pin a specific shared source.": "Choose its resource scope, then use automatic routing or pin a specific shared source.",
++    "Call and inspect usage": "Call and inspect usage",
++    "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.": "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.",
++    "From discovery to first request": "From discovery to first request",
++    "Three steps, one clear resource boundary": "Three steps, one clear resource boundary",
++    "Start with the model plaza": "Start with the model plaza",
++    "For sharers": "For sharers",
++    "Have an API to share?": "Have an API to share?",
++    "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.": "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.",
++    "Add one or multiple upstream keys": "Add one or multiple upstream keys",
++    "Fetch models and match system prices": "Fetch models and match system prices",
++    "Submit ready models for review": "Submit ready models for review",
++    "Add upstream API": "Add upstream API",
++    "Manage access": "Manage access",
++    "Invite or specific users": "Invite or specific users",
++    "Private": "Private",
++    "Model identity review": "Model identity review",
++    "Suggested model name": "Suggested model name",
++    "Confirm model": "Confirm model",
++    "Confirm all matching names": "Confirm all matching names",
++    "No models awaiting confirmation": "No models awaiting confirmation",
++    "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.": "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.",
++    "Selected source": "Selected source",
++    "Shared AI model resource platform": "Shared AI model resource platform",
++    "APIGX is open source software built on New API.": "APIGX is open source software built on New API.",
++    "Welcome to APIGX...": "Welcome to APIGX...",
++    "e.g. APIGX Console": "e.g. APIGX Console",
++    "APIGX &lt;noreply@example.com&gt;": "APIGX &lt;noreply@example.com&gt;",
++    "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
++    "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
++    "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
++    "Shared with me": "Shared with me"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 2730c8d..85dcd2d 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -112,6 +112,7 @@
+     "© 2025 Your Company. All rights reserved.": "© 2025 Votre entreprise. Tous droits réservés.",
+     "+{{count}} more": "+{{count}} de plus",
+     "| Based on": "| Basé sur",
++    "Based on": "Based on",
+     "0 means data is kept permanently": "0 signifie que les données sont conservées indéfiniment",
+     "0 means unlimited": "0 signifie illimité",
+     "1 Day": "1 jour",
+@@ -2522,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Projets liés",
+     "footer.defaultCopyright": "Tous droits réservés.",
+-    "footer.newapi.projectAttributionSuffix": "Tous droits réservés. Conçu et développé par les contributeurs du projet.",
++    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Pour les canaux ajoutés après le 10 mai 2025, pas besoin de supprimer \".\" des noms de modèles lors du déploiement",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Pour les déploiements privés, format : https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Pour des raisons de sécurité, les jetons d'accès existants ne peuvent pas être réaffichés. Ne les régénérez que si vous en avez besoin d'un nouveau.",
+@@ -6705,7 +6706,7 @@
+     "Standard model ID": "Standard model ID",
+     "If it does not exist, it will be created.": "If it does not exist, it will be created.",
+     "No pending candidate": "No pending candidate",
+-    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Newly discovered models appear here for review. Confirm the model identity so the plaza can combine matching resources and show one shared name and description.",
+     "Reject": "Reject",
+     "Normalized name Hint": "Normalized name",
+     "Visible resources": "Visible resources",
+@@ -6851,7 +6852,7 @@
+     "share.price.confirmSelected": "Apply selected ({{count}})",
+     "share.price.appliedCount": "Applied prices to {{count}} models.",
+     "share.price.selectModel": "Select price for {{model}}",
+-    "share.price.matchedAs": "Matched New API model: {{model}}",
++    "share.price.matchedAs": "Matched system price model: {{model}}",
+     "share.price.status.matched": "Matched",
+     "share.price.status.unchanged": "Already current",
+     "share.price.status.not_found": "Not found",
+@@ -6859,7 +6860,7 @@
+     "share.price.status.expression_requires_manual": "Manual pricing required",
+     "share.price.reason.dynamic_expression_requires_manual": "This dynamic pricing expression cannot be expanded safely. Enter a manual price.",
+     "share.price.reason.expression_requires_manual": "This pricing expression needs manual review.",
+-    "share.price.reason.not_found": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.not_found": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_override": "This model uses a locked manual price and will not be overwritten.",
+     "share.price.reason.unchanged": "The current accepted price already matches.",
+     "share.models.description": "Review imported models, then match prices and submit drafts for review.",
+@@ -6951,9 +6952,9 @@
+     "1K characters": "1K characters",
+     "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "Ce canal utilise des tâches asynchrones. Après sa création, récupérez les modèles, confirmez les prix, puis soumettez-les à validation.",
+     "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "Pour un compte fournisseur direct, saisissez accessKey|secretKey. Les clés relais commençant par sk- sont aussi acceptées.",
+-    "share.price.reason.no_local_price": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.no_local_price": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_price_active": "This model uses a locked manual price and will not be overwritten.",
+-    "share.price.reason.invalid_local_price": "The local New API price could not be converted safely. Enter a manual price.",
++    "share.price.reason.invalid_local_price": "The matched system price could not be converted safely. Enter a manual price.",
+     "share.price.reason.current_version_matches": "The current accepted price already matches.",
+     "Access and sharing": "Access and sharing",
+     "Issue access, redeem invite codes, and review who can use your shared resources.": "Issue access, redeem invite codes, and review who can use your shared resources.",
+@@ -7017,6 +7018,79 @@
+     "Configure resources": "Configure resources",
+     "Resource scope": "Resource scope",
+     "Update the platform key name, expiration, and IP access.": "Update the platform key name, expiration, and IP access.",
+-    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources."
++    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources.",
++    "Shared AI API gateway": "Shared AI API gateway",
++    "One platform key.": "One platform key.",
++    "Every shared AI model.": "Every shared AI model.",
++    "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.": "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.",
++    "Browse model plaza": "Browse model plaza",
++    "Share an API": "Share an API",
++    "Free sharing": "Free sharing",
++    "Usage and estimated cost are recorded": "Usage and estimated cost are recorded",
++    "Automatic route preview": "Automatic route preview",
++    "6h reliability": "6h reliability",
++    "P50 latency": "P50 latency",
++    "Public source": "Public source",
++    "Private source": "Private source",
++    "Retriable error": "Retriable error",
++    "Try next key": "Try next key",
++    "Try next authorized source": "Try next authorized source",
++    "Six AI API capabilities": "Six AI API capabilities",
++    "Conversation API": "Conversation API",
++    "Image API": "Image API",
++    "Audio API": "Audio API",
++    "Embedding API": "Embedding API",
++    "Rerank API": "Rerank API",
++    "Video API": "Video API",
++    "One catalog, multiple shared sources": "One catalog, multiple shared sources",
++    "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.": "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.",
++    "Public resources": "Public resources",
++    "My private": "My private",
++    "Routing based on real signals": "Routing based on real signals",
++    "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.": "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.",
++    "Available capacity": "Available capacity",
++    "Multi-key failover inside each channel": "Multi-key failover inside each channel",
++    "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.": "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.",
++    "Next source": "Next source",
++    "Usage without financial settlement": "Usage without financial settlement",
++    "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.": "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.",
++    "Core workflow": "Core workflow",
++    "Built around how you actually use shared models": "Built around how you actually use shared models",
++    "Choose what this platform key can access, then let APIGX route each request within that boundary.": "Choose what this platform key can access, then let APIGX route each request within that boundary.",
++    "Find and compare a model": "Find and compare a model",
++    "Browse public resources, your private resources, and resources shared with you.": "Browse public resources, your private resources, and resources shared with you.",
++    "Create one platform key": "Create one platform key",
++    "Choose its resource scope, then use automatic routing or pin a specific shared source.": "Choose its resource scope, then use automatic routing or pin a specific shared source.",
++    "Call and inspect usage": "Call and inspect usage",
++    "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.": "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.",
++    "From discovery to first request": "From discovery to first request",
++    "Three steps, one clear resource boundary": "Three steps, one clear resource boundary",
++    "Start with the model plaza": "Start with the model plaza",
++    "For sharers": "For sharers",
++    "Have an API to share?": "Have an API to share?",
++    "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.": "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.",
++    "Add one or multiple upstream keys": "Add one or multiple upstream keys",
++    "Fetch models and match system prices": "Fetch models and match system prices",
++    "Submit ready models for review": "Submit ready models for review",
++    "Add upstream API": "Add upstream API",
++    "Manage access": "Manage access",
++    "Invite or specific users": "Invite or specific users",
++    "Private": "Private",
++    "Model identity review": "Model identity review",
++    "Suggested model name": "Suggested model name",
++    "Confirm model": "Confirm model",
++    "Confirm all matching names": "Confirm all matching names",
++    "No models awaiting confirmation": "No models awaiting confirmation",
++    "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.": "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.",
++    "Selected source": "Selected source",
++    "Shared AI model resource platform": "Shared AI model resource platform",
++    "APIGX is open source software built on New API.": "APIGX is open source software built on New API.",
++    "Welcome to APIGX...": "Welcome to APIGX...",
++    "e.g. APIGX Console": "e.g. APIGX Console",
++    "APIGX &lt;noreply@example.com&gt;": "APIGX &lt;noreply@example.com&gt;",
++    "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
++    "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
++    "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
++    "Shared with me": "Shared with me"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 7ad8426..c199e28 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -112,6 +112,7 @@
+     "© 2025 Your Company. All rights reserved.": "© 2025 Your Company. 全著作権所有。",
+     "+{{count}} more": "他 {{count}} 件",
+     "| Based on": "| に基づく",
++    "Based on": "Based on",
+     "0 means data is kept permanently": "0 はデータを永続的に保持することを意味します",
+     "0 means unlimited": "0は無制限を意味します",
+     "1 Day": "1日",
+@@ -2522,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "1つのAPI",
+     "footer.columns.related.title": "関連プロジェクト",
+     "footer.defaultCopyright": "すべての権利を留保します。",
+-    "footer.newapi.projectAttributionSuffix": "すべての権利を留保します。プロジェクトコントリビューターにより設計・開発されています。",
++    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "2025 年 5 月 10 日以降に追加されたチャネルの場合、デプロイ時にモデル名から「.」を削除する必要はありません",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "プライベートデプロイメントの場合、形式: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "セキュリティ上、既存のアクセストークンは再表示できません。新しいトークンが必要な場合のみ再生成してください。",
+@@ -6705,7 +6706,7 @@
+     "Standard model ID": "Standard model ID",
+     "If it does not exist, it will be created.": "If it does not exist, it will be created.",
+     "No pending candidate": "No pending candidate",
+-    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Newly discovered models appear here for review. Confirm the model identity so the plaza can combine matching resources and show one shared name and description.",
+     "Reject": "Reject",
+     "Normalized name Hint": "Normalized name",
+     "Visible resources": "Visible resources",
+@@ -6851,7 +6852,7 @@
+     "share.price.confirmSelected": "Apply selected ({{count}})",
+     "share.price.appliedCount": "Applied prices to {{count}} models.",
+     "share.price.selectModel": "Select price for {{model}}",
+-    "share.price.matchedAs": "Matched New API model: {{model}}",
++    "share.price.matchedAs": "Matched system price model: {{model}}",
+     "share.price.status.matched": "Matched",
+     "share.price.status.unchanged": "Already current",
+     "share.price.status.not_found": "Not found",
+@@ -6859,7 +6860,7 @@
+     "share.price.status.expression_requires_manual": "Manual pricing required",
+     "share.price.reason.dynamic_expression_requires_manual": "This dynamic pricing expression cannot be expanded safely. Enter a manual price.",
+     "share.price.reason.expression_requires_manual": "This pricing expression needs manual review.",
+-    "share.price.reason.not_found": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.not_found": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_override": "This model uses a locked manual price and will not be overwritten.",
+     "share.price.reason.unchanged": "The current accepted price already matches.",
+     "share.models.description": "Review imported models, then match prices and submit drafts for review.",
+@@ -6951,9 +6952,9 @@
+     "1K characters": "1K characters",
+     "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "このチャネルは非同期タスクを使用します。作成後にモデルを取得し、価格を確認して審査に提出してください。",
+     "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "プロバイダーへ直接接続する場合は accessKey|secretKey を入力してください。sk- で始まる中継キーも使用できます。",
+-    "share.price.reason.no_local_price": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.no_local_price": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_price_active": "This model uses a locked manual price and will not be overwritten.",
+-    "share.price.reason.invalid_local_price": "The local New API price could not be converted safely. Enter a manual price.",
++    "share.price.reason.invalid_local_price": "The matched system price could not be converted safely. Enter a manual price.",
+     "share.price.reason.current_version_matches": "The current accepted price already matches.",
+     "Access and sharing": "Access and sharing",
+     "Issue access, redeem invite codes, and review who can use your shared resources.": "Issue access, redeem invite codes, and review who can use your shared resources.",
+@@ -7017,6 +7018,79 @@
+     "Configure resources": "Configure resources",
+     "Resource scope": "Resource scope",
+     "Update the platform key name, expiration, and IP access.": "Update the platform key name, expiration, and IP access.",
+-    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources."
++    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources.",
++    "Shared AI API gateway": "Shared AI API gateway",
++    "One platform key.": "One platform key.",
++    "Every shared AI model.": "Every shared AI model.",
++    "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.": "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.",
++    "Browse model plaza": "Browse model plaza",
++    "Share an API": "Share an API",
++    "Free sharing": "Free sharing",
++    "Usage and estimated cost are recorded": "Usage and estimated cost are recorded",
++    "Automatic route preview": "Automatic route preview",
++    "6h reliability": "6h reliability",
++    "P50 latency": "P50 latency",
++    "Public source": "Public source",
++    "Private source": "Private source",
++    "Retriable error": "Retriable error",
++    "Try next key": "Try next key",
++    "Try next authorized source": "Try next authorized source",
++    "Six AI API capabilities": "Six AI API capabilities",
++    "Conversation API": "Conversation API",
++    "Image API": "Image API",
++    "Audio API": "Audio API",
++    "Embedding API": "Embedding API",
++    "Rerank API": "Rerank API",
++    "Video API": "Video API",
++    "One catalog, multiple shared sources": "One catalog, multiple shared sources",
++    "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.": "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.",
++    "Public resources": "Public resources",
++    "My private": "My private",
++    "Routing based on real signals": "Routing based on real signals",
++    "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.": "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.",
++    "Available capacity": "Available capacity",
++    "Multi-key failover inside each channel": "Multi-key failover inside each channel",
++    "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.": "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.",
++    "Next source": "Next source",
++    "Usage without financial settlement": "Usage without financial settlement",
++    "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.": "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.",
++    "Core workflow": "Core workflow",
++    "Built around how you actually use shared models": "Built around how you actually use shared models",
++    "Choose what this platform key can access, then let APIGX route each request within that boundary.": "Choose what this platform key can access, then let APIGX route each request within that boundary.",
++    "Find and compare a model": "Find and compare a model",
++    "Browse public resources, your private resources, and resources shared with you.": "Browse public resources, your private resources, and resources shared with you.",
++    "Create one platform key": "Create one platform key",
++    "Choose its resource scope, then use automatic routing or pin a specific shared source.": "Choose its resource scope, then use automatic routing or pin a specific shared source.",
++    "Call and inspect usage": "Call and inspect usage",
++    "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.": "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.",
++    "From discovery to first request": "From discovery to first request",
++    "Three steps, one clear resource boundary": "Three steps, one clear resource boundary",
++    "Start with the model plaza": "Start with the model plaza",
++    "For sharers": "For sharers",
++    "Have an API to share?": "Have an API to share?",
++    "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.": "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.",
++    "Add one or multiple upstream keys": "Add one or multiple upstream keys",
++    "Fetch models and match system prices": "Fetch models and match system prices",
++    "Submit ready models for review": "Submit ready models for review",
++    "Add upstream API": "Add upstream API",
++    "Manage access": "Manage access",
++    "Invite or specific users": "Invite or specific users",
++    "Private": "Private",
++    "Model identity review": "Model identity review",
++    "Suggested model name": "Suggested model name",
++    "Confirm model": "Confirm model",
++    "Confirm all matching names": "Confirm all matching names",
++    "No models awaiting confirmation": "No models awaiting confirmation",
++    "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.": "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.",
++    "Selected source": "Selected source",
++    "Shared AI model resource platform": "Shared AI model resource platform",
++    "APIGX is open source software built on New API.": "APIGX is open source software built on New API.",
++    "Welcome to APIGX...": "Welcome to APIGX...",
++    "e.g. APIGX Console": "e.g. APIGX Console",
++    "APIGX &lt;noreply@example.com&gt;": "APIGX &lt;noreply@example.com&gt;",
++    "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
++    "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
++    "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
++    "Shared with me": "Shared with me"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 1d536df..b7208b2 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -112,6 +112,7 @@
+     "© 2025 Your Company. All rights reserved.": "© 2025 Ваша Компания. Все права защищены.",
+     "+{{count}} more": "ещё {{count}}",
+     "| Based on": "| На основе",
++    "Based on": "Based on",
+     "0 means data is kept permanently": "0 означает, что данные хранятся постоянно",
+     "0 means unlimited": "0 означает без ограничений",
+     "1 Day": "1 день",
+@@ -2522,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "Один API",
+     "footer.columns.related.title": "Связанные проекты",
+     "footer.defaultCopyright": "Все права защищены.",
+-    "footer.newapi.projectAttributionSuffix": "Все права защищены. Разработано участниками проекта.",
++    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Для каналов, добавленных после 10 мая 2025 г., не нужно удалять \".\" из имён моделей при развёртывании",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Для частных развертываний, формат: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "В целях безопасности существующие токены доступа нельзя просмотреть повторно. Создавайте новый токен только при необходимости.",
+@@ -6705,7 +6706,7 @@
+     "Standard model ID": "Standard model ID",
+     "If it does not exist, it will be created.": "If it does not exist, it will be created.",
+     "No pending candidate": "No pending candidate",
+-    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Newly discovered models appear here for review. Confirm the model identity so the plaza can combine matching resources and show one shared name and description.",
+     "Reject": "Reject",
+     "Normalized name Hint": "Normalized name",
+     "Visible resources": "Visible resources",
+@@ -6851,7 +6852,7 @@
+     "share.price.confirmSelected": "Apply selected ({{count}})",
+     "share.price.appliedCount": "Applied prices to {{count}} models.",
+     "share.price.selectModel": "Select price for {{model}}",
+-    "share.price.matchedAs": "Matched New API model: {{model}}",
++    "share.price.matchedAs": "Matched system price model: {{model}}",
+     "share.price.status.matched": "Matched",
+     "share.price.status.unchanged": "Already current",
+     "share.price.status.not_found": "Not found",
+@@ -6859,7 +6860,7 @@
+     "share.price.status.expression_requires_manual": "Manual pricing required",
+     "share.price.reason.dynamic_expression_requires_manual": "This dynamic pricing expression cannot be expanded safely. Enter a manual price.",
+     "share.price.reason.expression_requires_manual": "This pricing expression needs manual review.",
+-    "share.price.reason.not_found": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.not_found": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_override": "This model uses a locked manual price and will not be overwritten.",
+     "share.price.reason.unchanged": "The current accepted price already matches.",
+     "share.models.description": "Review imported models, then match prices and submit drafts for review.",
+@@ -6951,9 +6952,9 @@
+     "1K characters": "1K characters",
+     "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "Этот канал использует асинхронные задачи. После создания загрузите модели, подтвердите цены и отправьте их на проверку.",
+     "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "Для прямого подключения к провайдеру введите accessKey|secretKey. Также принимаются ретрансляционные ключи, начинающиеся с sk-.",
+-    "share.price.reason.no_local_price": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.no_local_price": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_price_active": "This model uses a locked manual price and will not be overwritten.",
+-    "share.price.reason.invalid_local_price": "The local New API price could not be converted safely. Enter a manual price.",
++    "share.price.reason.invalid_local_price": "The matched system price could not be converted safely. Enter a manual price.",
+     "share.price.reason.current_version_matches": "The current accepted price already matches.",
+     "Access and sharing": "Access and sharing",
+     "Issue access, redeem invite codes, and review who can use your shared resources.": "Issue access, redeem invite codes, and review who can use your shared resources.",
+@@ -7017,6 +7018,79 @@
+     "Configure resources": "Configure resources",
+     "Resource scope": "Resource scope",
+     "Update the platform key name, expiration, and IP access.": "Update the platform key name, expiration, and IP access.",
+-    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources."
++    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources.",
++    "Shared AI API gateway": "Shared AI API gateway",
++    "One platform key.": "One platform key.",
++    "Every shared AI model.": "Every shared AI model.",
++    "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.": "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.",
++    "Browse model plaza": "Browse model plaza",
++    "Share an API": "Share an API",
++    "Free sharing": "Free sharing",
++    "Usage and estimated cost are recorded": "Usage and estimated cost are recorded",
++    "Automatic route preview": "Automatic route preview",
++    "6h reliability": "6h reliability",
++    "P50 latency": "P50 latency",
++    "Public source": "Public source",
++    "Private source": "Private source",
++    "Retriable error": "Retriable error",
++    "Try next key": "Try next key",
++    "Try next authorized source": "Try next authorized source",
++    "Six AI API capabilities": "Six AI API capabilities",
++    "Conversation API": "Conversation API",
++    "Image API": "Image API",
++    "Audio API": "Audio API",
++    "Embedding API": "Embedding API",
++    "Rerank API": "Rerank API",
++    "Video API": "Video API",
++    "One catalog, multiple shared sources": "One catalog, multiple shared sources",
++    "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.": "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.",
++    "Public resources": "Public resources",
++    "My private": "My private",
++    "Routing based on real signals": "Routing based on real signals",
++    "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.": "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.",
++    "Available capacity": "Available capacity",
++    "Multi-key failover inside each channel": "Multi-key failover inside each channel",
++    "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.": "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.",
++    "Next source": "Next source",
++    "Usage without financial settlement": "Usage without financial settlement",
++    "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.": "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.",
++    "Core workflow": "Core workflow",
++    "Built around how you actually use shared models": "Built around how you actually use shared models",
++    "Choose what this platform key can access, then let APIGX route each request within that boundary.": "Choose what this platform key can access, then let APIGX route each request within that boundary.",
++    "Find and compare a model": "Find and compare a model",
++    "Browse public resources, your private resources, and resources shared with you.": "Browse public resources, your private resources, and resources shared with you.",
++    "Create one platform key": "Create one platform key",
++    "Choose its resource scope, then use automatic routing or pin a specific shared source.": "Choose its resource scope, then use automatic routing or pin a specific shared source.",
++    "Call and inspect usage": "Call and inspect usage",
++    "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.": "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.",
++    "From discovery to first request": "From discovery to first request",
++    "Three steps, one clear resource boundary": "Three steps, one clear resource boundary",
++    "Start with the model plaza": "Start with the model plaza",
++    "For sharers": "For sharers",
++    "Have an API to share?": "Have an API to share?",
++    "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.": "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.",
++    "Add one or multiple upstream keys": "Add one or multiple upstream keys",
++    "Fetch models and match system prices": "Fetch models and match system prices",
++    "Submit ready models for review": "Submit ready models for review",
++    "Add upstream API": "Add upstream API",
++    "Manage access": "Manage access",
++    "Invite or specific users": "Invite or specific users",
++    "Private": "Private",
++    "Model identity review": "Model identity review",
++    "Suggested model name": "Suggested model name",
++    "Confirm model": "Confirm model",
++    "Confirm all matching names": "Confirm all matching names",
++    "No models awaiting confirmation": "No models awaiting confirmation",
++    "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.": "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.",
++    "Selected source": "Selected source",
++    "Shared AI model resource platform": "Shared AI model resource platform",
++    "APIGX is open source software built on New API.": "APIGX is open source software built on New API.",
++    "Welcome to APIGX...": "Welcome to APIGX...",
++    "e.g. APIGX Console": "e.g. APIGX Console",
++    "APIGX &lt;noreply@example.com&gt;": "APIGX &lt;noreply@example.com&gt;",
++    "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
++    "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
++    "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
++    "Shared with me": "Shared with me"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index dcde82e..2185b7f 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -112,6 +112,7 @@
+     "© 2025 Your Company. All rights reserved.": "© 2025 Công ty của bạn. Mọi quyền được bảo lưu.",
+     "+{{count}} more": "thêm {{count}} mục",
+     "| Based on": "| Dựa trên",
++    "Based on": "Based on",
+     "0 means data is kept permanently": "0 nghĩa là dữ liệu được giữ vĩnh viễn",
+     "0 means unlimited": "0 có nghĩa là không giới hạn",
+     "1 Day": "1 ngày",
+@@ -2522,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Các Dự Án Liên Quan",
+     "footer.defaultCopyright": "Bản quyền được bảo lưu.",
+-    "footer.newapi.projectAttributionSuffix": "Bản quyền được bảo lưu. Được thiết kế và phát triển bởi các cộng tác viên dự án.",
++    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Đối với các kênh được thêm sau ngày 10 tháng 5 năm 2025, không cần loại bỏ \".\" khỏi tên mô hình trong quá trình triển khai",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Đối với các triển khai riêng tư, định dạng: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Vì lý do bảo mật, không thể hiển thị lại token truy cập hiện có. Chỉ tạo lại khi bạn cần token mới.",
+@@ -6705,7 +6706,7 @@
+     "Standard model ID": "Standard model ID",
+     "If it does not exist, it will be created.": "If it does not exist, it will be created.",
+     "No pending candidate": "No pending candidate",
+-    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Newly discovered models appear here for review. Confirm the model identity so the plaza can combine matching resources and show one shared name and description.",
+     "Reject": "Reject",
+     "Normalized name Hint": "Normalized name",
+     "Visible resources": "Visible resources",
+@@ -6851,7 +6852,7 @@
+     "share.price.confirmSelected": "Apply selected ({{count}})",
+     "share.price.appliedCount": "Applied prices to {{count}} models.",
+     "share.price.selectModel": "Select price for {{model}}",
+-    "share.price.matchedAs": "Matched New API model: {{model}}",
++    "share.price.matchedAs": "Matched system price model: {{model}}",
+     "share.price.status.matched": "Matched",
+     "share.price.status.unchanged": "Already current",
+     "share.price.status.not_found": "Not found",
+@@ -6859,7 +6860,7 @@
+     "share.price.status.expression_requires_manual": "Manual pricing required",
+     "share.price.reason.dynamic_expression_requires_manual": "This dynamic pricing expression cannot be expanded safely. Enter a manual price.",
+     "share.price.reason.expression_requires_manual": "This pricing expression needs manual review.",
+-    "share.price.reason.not_found": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.not_found": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_override": "This model uses a locked manual price and will not be overwritten.",
+     "share.price.reason.unchanged": "The current accepted price already matches.",
+     "share.models.description": "Review imported models, then match prices and submit drafts for review.",
+@@ -6951,9 +6952,9 @@
+     "1K characters": "1K characters",
+     "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "Kênh này dùng tác vụ bất đồng bộ. Sau khi tạo, hãy lấy danh sách mô hình, xác nhận giá và gửi xét duyệt.",
+     "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "Khi kết nối trực tiếp nhà cung cấp, hãy nhập accessKey|secretKey. Cũng chấp nhận khóa chuyển tiếp bắt đầu bằng sk-.",
+-    "share.price.reason.no_local_price": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.no_local_price": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_price_active": "This model uses a locked manual price and will not be overwritten.",
+-    "share.price.reason.invalid_local_price": "The local New API price could not be converted safely. Enter a manual price.",
++    "share.price.reason.invalid_local_price": "The matched system price could not be converted safely. Enter a manual price.",
+     "share.price.reason.current_version_matches": "The current accepted price already matches.",
+     "Access and sharing": "Access and sharing",
+     "Issue access, redeem invite codes, and review who can use your shared resources.": "Issue access, redeem invite codes, and review who can use your shared resources.",
+@@ -7017,6 +7018,79 @@
+     "Configure resources": "Configure resources",
+     "Resource scope": "Resource scope",
+     "Update the platform key name, expiration, and IP access.": "Update the platform key name, expiration, and IP access.",
+-    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources."
++    "Create a platform key, then choose its public, private, or shared resources.": "Create a platform key, then choose its public, private, or shared resources.",
++    "Shared AI API gateway": "Shared AI API gateway",
++    "One platform key.": "One platform key.",
++    "Every shared AI model.": "Every shared AI model.",
++    "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.": "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.",
++    "Browse model plaza": "Browse model plaza",
++    "Share an API": "Share an API",
++    "Free sharing": "Free sharing",
++    "Usage and estimated cost are recorded": "Usage and estimated cost are recorded",
++    "Automatic route preview": "Automatic route preview",
++    "6h reliability": "6h reliability",
++    "P50 latency": "P50 latency",
++    "Public source": "Public source",
++    "Private source": "Private source",
++    "Retriable error": "Retriable error",
++    "Try next key": "Try next key",
++    "Try next authorized source": "Try next authorized source",
++    "Six AI API capabilities": "Six AI API capabilities",
++    "Conversation API": "Conversation API",
++    "Image API": "Image API",
++    "Audio API": "Audio API",
++    "Embedding API": "Embedding API",
++    "Rerank API": "Rerank API",
++    "Video API": "Video API",
++    "One catalog, multiple shared sources": "One catalog, multiple shared sources",
++    "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.": "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.",
++    "Public resources": "Public resources",
++    "My private": "My private",
++    "Routing based on real signals": "Routing based on real signals",
++    "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.": "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.",
++    "Available capacity": "Available capacity",
++    "Multi-key failover inside each channel": "Multi-key failover inside each channel",
++    "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.": "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.",
++    "Next source": "Next source",
++    "Usage without financial settlement": "Usage without financial settlement",
++    "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.": "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.",
++    "Core workflow": "Core workflow",
++    "Built around how you actually use shared models": "Built around how you actually use shared models",
++    "Choose what this platform key can access, then let APIGX route each request within that boundary.": "Choose what this platform key can access, then let APIGX route each request within that boundary.",
++    "Find and compare a model": "Find and compare a model",
++    "Browse public resources, your private resources, and resources shared with you.": "Browse public resources, your private resources, and resources shared with you.",
++    "Create one platform key": "Create one platform key",
++    "Choose its resource scope, then use automatic routing or pin a specific shared source.": "Choose its resource scope, then use automatic routing or pin a specific shared source.",
++    "Call and inspect usage": "Call and inspect usage",
++    "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.": "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.",
++    "From discovery to first request": "From discovery to first request",
++    "Three steps, one clear resource boundary": "Three steps, one clear resource boundary",
++    "Start with the model plaza": "Start with the model plaza",
++    "For sharers": "For sharers",
++    "Have an API to share?": "Have an API to share?",
++    "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.": "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.",
++    "Add one or multiple upstream keys": "Add one or multiple upstream keys",
++    "Fetch models and match system prices": "Fetch models and match system prices",
++    "Submit ready models for review": "Submit ready models for review",
++    "Add upstream API": "Add upstream API",
++    "Manage access": "Manage access",
++    "Invite or specific users": "Invite or specific users",
++    "Private": "Private",
++    "Model identity review": "Model identity review",
++    "Suggested model name": "Suggested model name",
++    "Confirm model": "Confirm model",
++    "Confirm all matching names": "Confirm all matching names",
++    "No models awaiting confirmation": "No models awaiting confirmation",
++    "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.": "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.",
++    "Selected source": "Selected source",
++    "Shared AI model resource platform": "Shared AI model resource platform",
++    "APIGX is open source software built on New API.": "APIGX is open source software built on New API.",
++    "Welcome to APIGX...": "Welcome to APIGX...",
++    "e.g. APIGX Console": "e.g. APIGX Console",
++    "APIGX &lt;noreply@example.com&gt;": "APIGX &lt;noreply@example.com&gt;",
++    "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
++    "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
++    "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
++    "Shared with me": "Shared with me"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 484cd5a..5c0bd6b 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -112,6 +112,7 @@
+     "© 2025 Your Company. All rights reserved.": "© 2025 您的公司。保留所有權利。",
+     "+{{count}} more": "還有 {{count}} 項",
+     "| Based on": "| 基於",
++    "Based on": "基於",
+     "0 means data is kept permanently": "0 表示永久保留數據",
+     "0 means unlimited": "0 表示不限",
+     "1 Day": "1 日",
+@@ -2522,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相關項目",
+     "footer.defaultCopyright": "版權所有。",
+-    "footer.newapi.projectAttributionSuffix": "版權所有，由項目貢獻者設計與開發。",
++    "footer.new\u0061pi.projectAttributionSuffix": "前端由 New API 專案貢獻者設計與開發。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "對於 2025 年 5 月 10 日之後新增的渠道，在部署時無需從模型名稱中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "對於私有部署，格式為：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "基於安全考量，現有存取令牌無法再次顯示。僅在需要新令牌時重新生成。",
+@@ -6026,7 +6027,7 @@
+     "Update Redemption Code": "更新兌換碼",
+     "Update selected fields": "更新所選欄位",
+     "Update succeeded": "更新成功",
+-    "Update the API key by providing necessary info.": "透過提供必要資訊更新 New API 金鑰。",
++    "Update the API key by providing necessary info.": "填寫必要資訊以更新 API 金鑰。",
+     "Update the configuration for this custom OAuth provider.": "更新此自訂 OAuth 供應商的設定。",
+     "Update the redemption code by providing necessary info.": "透過提供必要資訊更新兌換碼。",
+     "Update the reusable bundle below.": "更新下面的可重用捆綁包。",
+@@ -6705,7 +6706,7 @@
+     "Standard model ID": "Standard model ID",
+     "If it does not exist, it will be created.": "If it does not exist, it will be created.",
+     "No pending candidate": "No pending candidate",
+-    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "Candidates are collected automatically. The plaza only shows a standard model after confirmation.",
++    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "新發現的模型會進入待確認清單。確認模型身分後，模型廣場會合併相同模型的分享來源，並顯示統一名稱和模型介紹。",
+     "Reject": "Reject",
+     "Normalized name Hint": "Normalized name",
+     "Visible resources": "Visible resources",
+@@ -6851,7 +6852,7 @@
+     "share.price.confirmSelected": "Apply selected ({{count}})",
+     "share.price.appliedCount": "Applied prices to {{count}} models.",
+     "share.price.selectModel": "Select price for {{model}}",
+-    "share.price.matchedAs": "Matched New API model: {{model}}",
++    "share.price.matchedAs": "Matched system price model: {{model}}",
+     "share.price.status.matched": "Matched",
+     "share.price.status.unchanged": "Already current",
+     "share.price.status.not_found": "Not found",
+@@ -6859,7 +6860,7 @@
+     "share.price.status.expression_requires_manual": "Manual pricing required",
+     "share.price.reason.dynamic_expression_requires_manual": "This dynamic pricing expression cannot be expanded safely. Enter a manual price.",
+     "share.price.reason.expression_requires_manual": "This pricing expression needs manual review.",
+-    "share.price.reason.not_found": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.not_found": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_override": "This model uses a locked manual price and will not be overwritten.",
+     "share.price.reason.unchanged": "The current accepted price already matches.",
+     "share.models.description": "Review imported models, then match prices and submit drafts for review.",
+@@ -6951,9 +6952,9 @@
+     "1K characters": "1K characters",
+     "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "此渠道使用非同步任務。建立後請抓取模型、確認價格並提交審核。",
+     "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "直連官方帳號請填寫 accessKey|secretKey；也可使用以 sk- 開頭的中轉 Key。",
+-    "share.price.reason.no_local_price": "No matching New API price was found. Enter a manual price.",
++    "share.price.reason.no_local_price": "No matching system price was found. Enter a manual price.",
+     "share.price.reason.manual_price_active": "This model uses a locked manual price and will not be overwritten.",
+-    "share.price.reason.invalid_local_price": "The local New API price could not be converted safely. Enter a manual price.",
++    "share.price.reason.invalid_local_price": "The matched system price could not be converted safely. Enter a manual price.",
+     "share.price.reason.current_version_matches": "The current accepted price already matches.",
+     "Access and sharing": "存取与共享",
+     "Issue access, redeem invite codes, and review who can use your shared resources.": "發放存取權限、兑换邀請碼，并查看谁可以使用你分享的資源。",
+@@ -7017,6 +7018,79 @@
+     "Configure resources": "設定資源範圍",
+     "Resource scope": "資源範圍",
+     "Update the platform key name, expiration, and IP access.": "修改平台 Key 的名稱、有效期和 IP 存取限制。",
+-    "Create a platform key, then choose its public, private, or shared resources.": "建立平台 Key 後，繼續選擇它可用的公開、私有或共享資源。"
++    "Create a platform key, then choose its public, private, or shared resources.": "建立平台 Key 後，繼續選擇它可用的公開、私有或共享資源。",
++    "Shared AI API gateway": "Shared AI API gateway",
++    "One platform key.": "One platform key.",
++    "Every shared AI model.": "Every shared AI model.",
++    "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.": "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.",
++    "Browse model plaza": "Browse model plaza",
++    "Share an API": "Share an API",
++    "Free sharing": "Free sharing",
++    "Usage and estimated cost are recorded": "Usage and estimated cost are recorded",
++    "Automatic route preview": "Automatic route preview",
++    "6h reliability": "6h reliability",
++    "P50 latency": "P50 latency",
++    "Public source": "Public source",
++    "Private source": "Private source",
++    "Retriable error": "Retriable error",
++    "Try next key": "Try next key",
++    "Try next authorized source": "Try next authorized source",
++    "Six AI API capabilities": "Six AI API capabilities",
++    "Conversation API": "Conversation API",
++    "Image API": "Image API",
++    "Audio API": "Audio API",
++    "Embedding API": "Embedding API",
++    "Rerank API": "Rerank API",
++    "Video API": "Video API",
++    "One catalog, multiple shared sources": "One catalog, multiple shared sources",
++    "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.": "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.",
++    "Public resources": "Public resources",
++    "My private": "My private",
++    "Routing based on real signals": "Routing based on real signals",
++    "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.": "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.",
++    "Available capacity": "Available capacity",
++    "Multi-key failover inside each channel": "Multi-key failover inside each channel",
++    "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.": "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.",
++    "Next source": "Next source",
++    "Usage without financial settlement": "Usage without financial settlement",
++    "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.": "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.",
++    "Core workflow": "Core workflow",
++    "Built around how you actually use shared models": "Built around how you actually use shared models",
++    "Choose what this platform key can access, then let APIGX route each request within that boundary.": "Choose what this platform key can access, then let APIGX route each request within that boundary.",
++    "Find and compare a model": "Find and compare a model",
++    "Browse public resources, your private resources, and resources shared with you.": "Browse public resources, your private resources, and resources shared with you.",
++    "Create one platform key": "Create one platform key",
++    "Choose its resource scope, then use automatic routing or pin a specific shared source.": "Choose its resource scope, then use automatic routing or pin a specific shared source.",
++    "Call and inspect usage": "Call and inspect usage",
++    "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.": "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.",
++    "From discovery to first request": "From discovery to first request",
++    "Three steps, one clear resource boundary": "Three steps, one clear resource boundary",
++    "Start with the model plaza": "Start with the model plaza",
++    "For sharers": "For sharers",
++    "Have an API to share?": "Have an API to share?",
++    "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.": "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.",
++    "Add one or multiple upstream keys": "Add one or multiple upstream keys",
++    "Fetch models and match system prices": "Fetch models and match system prices",
++    "Submit ready models for review": "Submit ready models for review",
++    "Add upstream API": "Add upstream API",
++    "Manage access": "Manage access",
++    "Invite or specific users": "Invite or specific users",
++    "Private": "Private",
++    "Model identity review": "Model identity review",
++    "Suggested model name": "Suggested model name",
++    "Confirm model": "Confirm model",
++    "Confirm all matching names": "Confirm all matching names",
++    "No models awaiting confirmation": "No models awaiting confirmation",
++    "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.": "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.",
++    "Selected source": "已選擇",
++    "Shared AI model resource platform": "共享 AI 模型資源平台",
++    "APIGX is open source software built on New API.": "APIGX 是基於 New API 二次開發的開源軟體。",
++    "Welcome to APIGX...": "歡迎使用 APIGX……",
++    "e.g. APIGX Console": "例如，APIGX 控制台",
++    "APIGX &lt;noreply@example.com&gt;": "APIGX &lt;noreply@example.com&gt;",
++    "Prices are configured and synced in system model pricing.": "模型價格在系統「模型與定價」中設定並同步。",
++    "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "平台會自動補全所需路徑。請移除 Base URL 末尾的 /v1，以免請求失敗。",
++    "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "自訂 API 基礎 URL。官方渠道使用內建位址；僅在接入第三方代理或特殊端點時填寫。請勿添加 /v1 或尾部斜線。",
++    "Shared with me": "分享給我"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 3e30f5e..083fca5 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -112,6 +112,7 @@
+     "© 2025 Your Company. All rights reserved.": "© 2025 您的公司。保留所有权利。",
+     "+{{count}} more": "还有 {{count}} 项",
+     "| Based on": "| 基于",
++    "Based on": "基于",
+     "0 means data is kept permanently": "0 表示永久保留数据",
+     "0 means unlimited": "0 表示不限",
+     "1 Day": "1 天",
+@@ -2522,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相关项目",
+     "footer.defaultCopyright": "版权所有。",
+-    "footer.newapi.projectAttributionSuffix": "版权所有，由项目贡献者设计与开发。",
++    "footer.new\u0061pi.projectAttributionSuffix": "前端由 New API 项目贡献者设计与开发。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "对于 2025 年 5 月 10 日之后添加的渠道，在部署时无需从模型名称中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "对于私有部署，格式为：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "出于安全考虑，现有访问令牌无法再次显示。仅在需要新令牌时重新生成。",
+@@ -6026,7 +6027,7 @@
+     "Update Redemption Code": "更新兑换码",
+     "Update selected fields": "更新所选字段",
+     "Update succeeded": "更新成功",
+-    "Update the API key by providing necessary info.": "通过提供必要信息更新 New API 密钥。",
++    "Update the API key by providing necessary info.": "填写必要信息以更新 API 密钥。",
+     "Update the configuration for this custom OAuth provider.": "更新此自定义OAuth提供商的配置。",
+     "Update the redemption code by providing necessary info.": "通过提供必要信息更新兑换码。",
+     "Update the reusable bundle below.": "更新下面的可重用捆绑包。",
+@@ -6705,7 +6706,7 @@
+     "Standard model ID": "对外标准模型 ID",
+     "If it does not exist, it will be created.": "若该标准模型尚不存在，会自动创建。",
+     "No pending candidate": "没有待确认的候选",
+-    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "候选会随着创建供给自动累积；只有**确认之后**，广场才会显示对外标准 ID 与模型介绍。",
++    "Candidates are collected automatically. The plaza only shows a standard model after confirmation.": "新发现的模型会进入待确认列表。确认模型身份后，模型广场会合并相同模型的分享来源，并显示统一名称和模型介绍。",
+     "Reject": "拒绝",
+     "Normalized name Hint": "归一化名",
+     "Visible resources": "可见资源",
+@@ -6851,7 +6852,7 @@
+     "share.price.confirmSelected": "应用所选（{{count}}）",
+     "share.price.appliedCount": "已为 {{count}} 个模型应用价格。",
+     "share.price.selectModel": "选择 {{model}} 的价格",
+-    "share.price.matchedAs": "匹配到 New API 模型：{{model}}",
++    "share.price.matchedAs": "匹配到系统价格模型：{{model}}",
+     "share.price.status.matched": "已匹配",
+     "share.price.status.unchanged": "已是最新",
+     "share.price.status.not_found": "未找到",
+@@ -6859,7 +6860,7 @@
+     "share.price.status.expression_requires_manual": "需要人工定价",
+     "share.price.reason.dynamic_expression_requires_manual": "该动态计价表达式无法安全展开，请手动输入价格。",
+     "share.price.reason.expression_requires_manual": "该计价表达式需要人工确认。",
+-    "share.price.reason.not_found": "没有找到对应的 New API 价格，请手动输入。",
++    "share.price.reason.not_found": "没有找到对应的系统价格，请手动输入。",
+     "share.price.reason.manual_override": "此模型使用已锁定的人工价格，不会自动覆盖。",
+     "share.price.reason.unchanged": "当前已接受价格已匹配。",
+     "share.models.description": "检查已导入模型，然后匹配价格并提交草稿审核。",
+@@ -6951,9 +6952,9 @@
+     "1K characters": "千字符",
+     "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "此渠道使用异步任务。创建后请抓取模型、确认价格并提交审核。",
+     "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "直连官方账号请填写 accessKey|secretKey；也可使用以 sk- 开头的中转 Key。",
+-    "share.price.reason.no_local_price": "没有找到对应的 New API 价格，请手动输入。",
++    "share.price.reason.no_local_price": "没有找到对应的系统价格，请手动输入。",
+     "share.price.reason.manual_price_active": "此模型使用已锁定的人工价格，不会自动覆盖。",
+-    "share.price.reason.invalid_local_price": "本地 New API 价格无法安全转换，请手动输入。",
++    "share.price.reason.invalid_local_price": "匹配到的系统价格无法安全转换，请手动输入。",
+     "share.price.reason.current_version_matches": "当前已接受价格已匹配。",
+     "Access and sharing": "访问与共享",
+     "Issue access, redeem invite codes, and review who can use your shared resources.": "发放访问权限、兑换邀请码，并查看谁可以使用你分享的资源。",
+@@ -7017,6 +7018,79 @@
+     "Configure resources": "配置资源范围",
+     "Resource scope": "资源范围",
+     "Update the platform key name, expiration, and IP access.": "修改平台 Key 的名称、有效期和 IP 访问限制。",
+-    "Create a platform key, then choose its public, private, or shared resources.": "创建平台 Key 后，继续选择它可用的公开、私有或共享资源。"
++    "Create a platform key, then choose its public, private, or shared resources.": "创建平台 Key 后，继续选择它可用的公开、私有或共享资源。",
++    "Shared AI API gateway": "共享 AI API 网关",
++    "One platform key.": "一个平台 Key，",
++    "Every shared AI model.": "调用所有可用的共享模型。",
++    "Browse public, private, and shared resources from one model plaza. APIGX selects an authorized source using reliability, latency, throughput, and available capacity.": "在一个模型广场中浏览公开、私有和别人分享的资源。APIGX 会根据可靠性、延迟、吞吐和可用容量，在你有权使用的来源中选择路由。",
++    "Browse model plaza": "浏览模型广场",
++    "Share an API": "分享我的 API",
++    "Free sharing": "免费共享",
++    "Usage and estimated cost are recorded": "记录用量与估算成本",
++    "Automatic route preview": "自动路由示意",
++    "6h reliability": "6 小时可靠性",
++    "P50 latency": "P50 延迟",
++    "Public source": "公开来源",
++    "Private source": "我的私有来源",
++    "Retriable error": "可重试错误",
++    "Try next key": "切换下一把 Key",
++    "Try next authorized source": "切换下一个授权来源",
++    "Six AI API capabilities": "六类 AI API 能力",
++    "Conversation API": "对话 API",
++    "Image API": "图片 API",
++    "Audio API": "语音 API",
++    "Embedding API": "向量 API",
++    "Rerank API": "重排 API",
++    "Video API": "视频 API",
++    "One catalog, multiple shared sources": "一个模型目录，聚合多个分享来源",
++    "Resources for the same model are combined in one card. Compare sharers and choose automatic routing or a specific source.": "相同模型的资源会合并到一张卡片中。你可以比较分享者，并选择自动路由或指定来源。",
++    "Public resources": "公开资源",
++    "My private": "我的私有",
++    "Routing based on real signals": "根据真实质量信号路由",
++    "Automatic routing considers authorization, capacity, 6-hour reliability, P50 latency, and throughput before sending a request.": "自动路由会先检查授权和容量，再综合 6 小时可靠性、P50 延迟与吞吐发送请求。",
++    "Available capacity": "可用容量",
++    "Multi-key failover inside each channel": "渠道内多 Key 故障切换",
++    "Use weighted round robin or weighted random selection. Retriable errors try another key before moving to another authorized source.": "正常请求可使用加权轮询或加权随机；遇到可重试错误时，会先切换当前渠道的其他 Key，再尝试其他授权来源。",
++    "Next source": "下一来源",
++    "Usage without financial settlement": "只记录用量，不做资金结算",
++    "Sharing is free. The platform records actual usage and estimated USD cost, while unknown prices stay unknown.": "资源免费共享。平台记录实际用量和美元估算成本；无法确定的价格会继续显示为未知。",
++    "Core workflow": "核心使用逻辑",
++    "Built around how you actually use shared models": "围绕共享模型的真实使用流程设计",
++    "Choose what this platform key can access, then let APIGX route each request within that boundary.": "先选择这个平台 Key 可以访问哪些资源，再由 APIGX 在权限范围内为每次请求选路。",
++    "Find and compare a model": "查找并比较模型",
++    "Browse public resources, your private resources, and resources shared with you.": "浏览公开资源、你自己的私有资源，以及别人分享给你的资源。",
++    "Create one platform key": "创建一个平台 Key",
++    "Choose its resource scope, then use automatic routing or pin a specific shared source.": "选择 Key 的资源范围，再使用自动路由或固定到某个分享来源。",
++    "Call and inspect usage": "调用并查看用量",
++    "Use the compatible endpoint for the capability and review requests, usage, quality, and estimated cost.": "通过对应能力的兼容接口调用，并查看请求、用量、质量和估算成本。",
++    "From discovery to first request": "从发现模型到首次调用",
++    "Three steps, one clear resource boundary": "三步完成调用，资源边界始终清楚",
++    "Start with the model plaza": "从模型广场开始",
++    "For sharers": "面向分享者",
++    "Have an API to share?": "有 API 可以分享？",
++    "Add one or multiple upstream keys, fetch models, match the current system price, and submit the ready models for review.": "添加一个或多个上游 Key，抓取模型，匹配系统当前价格，并把准备好的模型提交审核。",
++    "Add one or multiple upstream keys": "添加一个或多个上游 Key",
++    "Fetch models and match system prices": "抓取模型并匹配系统价格",
++    "Submit ready models for review": "提交已准备好的模型审核",
++    "Add upstream API": "添加上游 API",
++    "Manage access": "管理访问授权",
++    "Invite or specific users": "邀请码或指定用户",
++    "Private": "仅自己可用",
++    "Model identity review": "模型身份确认",
++    "Suggested model name": "建议的模型名称",
++    "Confirm model": "确认模型",
++    "Confirm all matching names": "确认全部同名模型",
++    "No models awaiting confirmation": "没有待确认的模型",
++    "Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.": "新发现的模型会进入待确认列表。确认模型身份后，模型广场会合并相同模型的分享来源，并显示统一名称和模型介绍。",
++    "Selected source": "已选择",
++    "Shared AI model resource platform": "共享 AI 模型资源平台",
++    "APIGX is open source software built on New API.": "APIGX 是基于 New API 二次开发的开源软件。",
++    "Welcome to APIGX...": "欢迎使用 APIGX……",
++    "e.g. APIGX Console": "例如，APIGX 控制台",
++    "APIGX &lt;noreply@example.com&gt;": "APIGX &lt;noreply@example.com&gt;",
++    "Prices are configured and synced in system model pricing.": "模型价格在系统「模型与定价」中配置并同步。",
++    "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "平台会自动补全所需路径。请移除 Base URL 末尾的 /v1，以免请求失败。",
++    "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "自定义 API 基础 URL。官方渠道使用内置地址；仅在接入第三方代理或特殊端点时填写。请勿添加 /v1 或尾部斜杠。",
++    "Shared with me": "分享给我"
+   }
+ }
+diff --git a/web/src/lib/constants.ts b/web/src/lib/constants.ts
+index 0f0c178..9e3d5b5 100644
+--- a/web/src/lib/constants.ts
++++ b/web/src/lib/constants.ts
+@@ -21,7 +21,7 @@ For commercial licensing, please contact support@quantumnous.com
+  */
+ 
+ // System Configuration Defaults
+-export const DEFAULT_SYSTEM_NAME = 'New API'
++export const DEFAULT_SYSTEM_NAME = 'APIGX'
+ export const DEFAULT_LOGO = '/logo.png'
+ 
+ // LocalStorage Keys
+-- 
+2.53.0.windows.1
+
