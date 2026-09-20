@@ -6927,6 +6927,8 @@
     "1K tokens": "千 Token",
     "minute": "分钟",
     "1K characters": "千字符",
+    "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "此渠道使用异步任务。创建后请抓取模型、确认价格并提交审核。",
+    "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "直连官方账号请填写 accessKey|secretKey；也可使用以 sk- 开头的中转 Key。",
     "share.price.reason.no_local_price": "没有找到对应的 New API 价格，请手动输入。",
     "share.price.reason.manual_price_active": "此模型使用已锁定的人工价格，不会自动覆盖。",
     "share.price.reason.invalid_local_price": "本地 New API 价格无法安全转换，请手动输入。",

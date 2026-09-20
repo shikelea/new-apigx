@@ -34,6 +34,8 @@ import (
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	basemodel "github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	relaydto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -399,8 +401,16 @@ type selfServeChannelRecipe struct {
 	CapabilityHints    []string `json:"capability_hints"`
 	RequiresBaseURL    bool     `json:"requires_base_url"`
 	SupportsModelFetch bool     `json:"supports_model_fetch"`
+	CredentialFormat   string   `json:"credential_format"`
+	AsyncTask          bool     `json:"async_task"`
 	BaseChannelType    int      `json:"-"`
+	TaskPluginKey      string   `json:"-"`
 }
+
+const (
+	credentialFormatAPIKey                     = "api_key"
+	credentialFormatAccessSecretPairOrRelayKey = "access_secret_pair_or_relay_key"
+)
 
 // selfServeChannelRecipes 是普通分享者唯一可用的底座渠道白名单。
 //
@@ -412,28 +422,86 @@ var selfServeChannelRecipes = []selfServeChannelRecipe{
 		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeOpenAI),
 		CapabilityHints: []string{"chat", "image", "audio", "embedding", "rerank"},
 		RequiresBaseURL: true, SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeOpenAI,
+		CredentialFormat: credentialFormatAPIKey,
 	},
 	{
 		ID: "anthropic-compatible", Label: "Anthropic compatible", Protocol: "anthropic",
 		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeAnthropic),
 		CapabilityHints: []string{"chat"}, RequiresBaseURL: true,
 		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeAnthropic,
+		CredentialFormat: credentialFormatAPIKey,
 	},
 	{
 		ID: "gemini", Label: "Gemini", Protocol: "gemini",
 		DefaultBaseURL:  constant.GetChannelBaseURL(constant.ChannelTypeGemini),
 		CapabilityHints: []string{"chat", "image", "embedding"}, RequiresBaseURL: true,
 		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeGemini,
+		CredentialFormat: credentialFormatAPIKey,
 	},
 	{
 		ID: "new-api", Label: "New API instance", Protocol: "new-api",
 		CapabilityHints: []string{"chat", "image", "embedding"}, RequiresBaseURL: true,
 		SupportsModelFetch: true, BaseChannelType: constant.ChannelTypeNewAPI,
+		CredentialFormat: credentialFormatAPIKey,
+	},
+	{
+		ID: "alibaba-bailian-media", Label: "Alibaba Bailian image and video", Protocol: "alibaba-bailian-media",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeAli), CapabilityHints: []string{"image", "video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAPIKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "alibaba",
+	},
+	{
+		ID: "kling-video", Label: "Kling video", Protocol: "kling-video",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeKling), CapabilityHints: []string{"video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAccessSecretPairOrRelayKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "kling",
+	},
+	{
+		ID: "vidu-video", Label: "Vidu video", Protocol: "vidu-video",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeVidu), CapabilityHints: []string{"video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAPIKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "vidu",
+	},
+	{
+		ID: "doubao-seedance", Label: "Doubao Seedance video", Protocol: "doubao-seedance",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeDoubaoVideo), CapabilityHints: []string{"video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAPIKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "doubao",
+	},
+	{
+		ID: "gemini-veo", Label: "Gemini Veo video", Protocol: "gemini-veo",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeGemini), CapabilityHints: []string{"video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAPIKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "google",
+	},
+	{
+		ID: "openai-sora", Label: "OpenAI Sora video", Protocol: "openai-sora",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeSora), CapabilityHints: []string{"video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAPIKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "sora",
+	},
+	{
+		ID: "hailuo-video", Label: "Hailuo video", Protocol: "hailuo-video",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeMiniMax), CapabilityHints: []string{"video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAPIKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "hailuo",
+	},
+	{
+		ID: "jimeng-video", Label: "Jimeng video", Protocol: "jimeng-video",
+		DefaultBaseURL: constant.GetChannelBaseURL(constant.ChannelTypeJimeng), CapabilityHints: []string{"video"},
+		RequiresBaseURL: true, SupportsModelFetch: true, CredentialFormat: credentialFormatAccessSecretPairOrRelayKey, AsyncTask: true,
+		BaseChannelType: constant.ChannelTypeTaskPlugin, TaskPluginKey: "jimeng",
 	},
 }
 
 func (h *handler) listChannelRecipes(c *gin.Context) {
-	ok(c, gin.H{"items": selfServeChannelRecipes})
+	items := make([]selfServeChannelRecipe, 0, len(selfServeChannelRecipes))
+	for _, recipe := range selfServeChannelRecipes {
+		if selfServeChannelRecipeAvailable(recipe) {
+			items = append(items, recipe)
+		}
+	}
+	ok(c, gin.H{"items": items})
 }
 
 func (h *handler) createChannel(c *gin.Context) {
@@ -2545,6 +2613,14 @@ func provisionBaseChannelForShareChannel(
 		Status:      common.ChannelStatusEnabled,
 		CreatedTime: common.GetTimestamp(),
 	}
+	if recipe.TaskPluginKey != "" {
+		settingJSON, err := common.Marshal(relaydto.ChannelSettings{TaskPluginKey: recipe.TaskPluginKey})
+		if err != nil {
+			return fmt.Errorf("encode task plugin setting: %w", err)
+		}
+		setting := string(settingJSON)
+		base.Setting = &setting
+	}
 	if err := db.Create(&base).Error; err != nil {
 		return err
 	}
@@ -2570,8 +2646,14 @@ func validateSelfServeChannelRecipe(
 	if upstreamKey == "" {
 		return fmt.Errorf("%w: upstream_key is required", apigxmodel.ErrInvalidArgument)
 	}
+	if recipe.CredentialFormat == credentialFormatAccessSecretPairOrRelayKey && !validAccessSecretPairOrRelayKey(upstreamKey) {
+		return fmt.Errorf("%w: upstream_key must use accessKey|secretKey or a relay key beginning with sk-", apigxmodel.ErrInvalidArgument)
+	}
 	if recipe.ID == "" || channel.Protocol != recipe.Protocol {
 		return fmt.Errorf("%w: channel recipe does not match the resolved protocol", apigxmodel.ErrInvalidArgument)
+	}
+	if !selfServeChannelRecipeAvailable(recipe) {
+		return fmt.Errorf("%w: selected channel recipe is not available", apigxmodel.ErrInvalidArgument)
 	}
 	return nil
 }
@@ -2579,11 +2661,31 @@ func validateSelfServeChannelRecipe(
 func selfServeChannelRecipeByID(recipeID string) (selfServeChannelRecipe, error) {
 	recipeID = strings.TrimSpace(recipeID)
 	for _, recipe := range selfServeChannelRecipes {
-		if recipe.ID == recipeID {
+		if recipe.ID == recipeID && selfServeChannelRecipeAvailable(recipe) {
 			return recipe, nil
 		}
 	}
 	return selfServeChannelRecipe{}, fmt.Errorf("%w: unsupported channel recipe", apigxmodel.ErrInvalidArgument)
+}
+
+func selfServeChannelRecipeAvailable(recipe selfServeChannelRecipe) bool {
+	if recipe.TaskPluginKey == "" {
+		return recipe.BaseChannelType != constant.ChannelTypeTaskPlugin
+	}
+	if recipe.BaseChannelType != constant.ChannelTypeTaskPlugin {
+		return false
+	}
+	_, ok := jsplugin.DefaultRegistry.Get(recipe.TaskPluginKey)
+	return ok
+}
+
+func validAccessSecretPairOrRelayKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if strings.HasPrefix(key, "sk-") {
+		return true
+	}
+	accessKey, secretKey, ok := strings.Cut(key, "|")
+	return ok && strings.TrimSpace(accessKey) != "" && strings.TrimSpace(secretKey) != "" && !strings.Contains(secretKey, "|")
 }
 
 // prepareSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 变成待落库记录。

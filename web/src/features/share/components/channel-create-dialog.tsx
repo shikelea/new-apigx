@@ -269,6 +269,13 @@ export function ChannelCreateDialog(props: {
                   )}
                 </FieldDescription>
               ) : null}
+              {selectedRecipe.async_task ? (
+                <FieldDescription>
+                  {t(
+                    'This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.'
+                  )}
+                </FieldDescription>
+              ) : null}
             </>
           )}
         </Field>
@@ -297,6 +304,14 @@ export function ChannelCreateDialog(props: {
           <FieldDescription>
             {t('It is stored encrypted and never shown again.')}
           </FieldDescription>
+          {selectedRecipe?.credential_format ===
+          'access_secret_pair_or_relay_key' ? (
+            <FieldDescription>
+              {t(
+                'For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.'
+              )}
+            </FieldDescription>
+          ) : null}
         </Field>
       </FieldGroup>
     </Dialog>

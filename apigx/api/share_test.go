@@ -438,7 +438,7 @@ func TestSelfServeChannelRecipeCatalog(t *testing.T) {
 	require.True(t, ok)
 	items, ok := data["items"].([]any)
 	require.True(t, ok)
-	require.Len(t, items, 4)
+	require.Len(t, items, 12)
 
 	seen := make(map[string]map[string]any, len(items))
 	for _, raw := range items {
@@ -446,6 +446,8 @@ func TestSelfServeChannelRecipeCatalog(t *testing.T) {
 		require.True(t, itemOK)
 		_, leaksBaseType := item["base_channel_type"]
 		assert.False(t, leaksBaseType, "目录不能向普通用户暴露底座渠道类型")
+		_, leaksPluginKey := item["task_plugin_key"]
+		assert.False(t, leaksPluginKey, "目录不能向普通用户暴露底座任务插件身份")
 		seen[item["id"].(string)] = item
 	}
 	newAPIRecipe := seen["new-api"]
@@ -454,6 +456,11 @@ func TestSelfServeChannelRecipeCatalog(t *testing.T) {
 	assert.Equal(t, true, newAPIRecipe["requires_base_url"])
 	assert.Equal(t, true, newAPIRecipe["supports_model_fetch"])
 	assert.ElementsMatch(t, []any{"chat", "image", "embedding"}, newAPIRecipe["capability_hints"])
+	klingRecipe := seen["kling-video"]
+	require.NotNil(t, klingRecipe)
+	assert.Equal(t, true, klingRecipe["async_task"])
+	assert.Equal(t, credentialFormatAccessSecretPairOrRelayKey, klingRecipe["credential_format"])
+	assert.ElementsMatch(t, []any{"video"}, klingRecipe["capability_hints"])
 }
 
 func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
@@ -494,6 +501,51 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 			common.RoleCommonUser)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Contains(t, rec.Body.String(), "unsupported channel recipe")
+		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
+			var count int64
+			require.NoError(t, env.db.Model(target).Count(&count).Error)
+			assert.Zero(t, count)
+		}
+	})
+
+	t.Run("task recipe pins the plugin and fetches declared models", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5106
+		groupID := env.createGroup(t, owner, "视频渠道组")
+		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"可灵视频","recipe_id":"kling-video","base_url":"https://api.klingai.com","upstream_key":"access-key|secret-key"}`,
+			common.RoleCommonUser)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		channelID := int64(body["data"].(map[string]any)["id"].(float64))
+
+		shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+		require.NoError(t, err)
+		assert.Equal(t, "kling-video", shareChannel.Protocol)
+		var baseChannel basemodel.Channel
+		require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error)
+		assert.Equal(t, constant.ChannelTypeTaskPlugin, baseChannel.Type)
+		assert.Equal(t, "kling", baseChannel.GetSetting().TaskPluginKey)
+
+		fetchRec, fetchBody := env.doWithRole(t, http.MethodPost,
+			"/api/channels/"+strconv.FormatInt(channelID, 10)+"/fetch-models", owner, `{}`, common.RoleCommonUser)
+		require.Equal(t, http.StatusOK, fetchRec.Code, fetchRec.Body.String())
+		fetchData, ok := fetchBody["data"].(map[string]any)
+		require.True(t, ok)
+		models, ok := fetchData["models"].([]any)
+		require.True(t, ok)
+		assert.Contains(t, models, "kling-v1")
+		assert.Contains(t, models, "kling-v2-master")
+	})
+
+	t.Run("task recipe rejects malformed credential before writing", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5107
+		groupID := env.createGroup(t, owner, "错误视频凭据组")
+		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"错误可灵","recipe_id":"kling-video","base_url":"https://api.klingai.com","upstream_key":"missing-separator"}`,
+			common.RoleCommonUser)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "accessKey|secretKey")
 		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
 			var count int64
 			require.NoError(t, env.db.Model(target).Count(&count).Error)
@@ -717,6 +769,18 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 				require.NoError(t, getErr)
 				baseID := shareChannel.BaseChannelID
 				assertOfferingPublishProjectionAtomic(t, env, owner, owner+99, channelID, "b3-matrix-publish-"+tc.name)
+
+				taskBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+					`,"name":"三库视频线路","recipe_id":"kling-video","base_url":"https://api.klingai.com","upstream_key":"matrix-access|matrix-secret"}`
+				rec, body = env.doWithRole(t, http.MethodPost, "/api/channels", owner, taskBody, common.RoleCommonUser)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				taskChannelID := int64(body["data"].(map[string]any)["id"].(float64))
+				taskChannel, getErr := apigxmodel.GetChannel(tx, owner, taskChannelID)
+				require.NoError(t, getErr)
+				var taskBase basemodel.Channel
+				require.NoError(t, tx.Where("id = ?", taskChannel.BaseChannelID).First(&taskBase).Error)
+				assert.Equal(t, constant.ChannelTypeTaskPlugin, taskBase.Type)
+				assert.Equal(t, "kling", taskBase.GetSetting().TaskPluginKey)
 
 				var baseBefore, channelBefore, keyBefore int64
 				require.NoError(t, tx.Model(&basemodel.Channel{}).Count(&baseBefore).Error)

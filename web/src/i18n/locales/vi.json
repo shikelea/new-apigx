@@ -6927,6 +6927,8 @@
     "1K tokens": "1K tokens",
     "minute": "minute",
     "1K characters": "1K characters",
+    "This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.": "Kênh này dùng tác vụ bất đồng bộ. Sau khi tạo, hãy lấy danh sách mô hình, xác nhận giá và gửi xét duyệt.",
+    "For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.": "Khi kết nối trực tiếp nhà cung cấp, hãy nhập accessKey|secretKey. Cũng chấp nhận khóa chuyển tiếp bắt đầu bằng sk-.",
     "share.price.reason.no_local_price": "No matching New API price was found. Enter a manual price.",
     "share.price.reason.manual_price_active": "This model uses a locked manual price and will not be overwritten.",
     "share.price.reason.invalid_local_price": "The local New API price could not be converted safely. Enter a manual price.",

@@ -47,6 +47,8 @@ const recipes: ChannelRecipe[] = [
     capability_hints: ['chat', 'image', 'audio', 'embedding', 'rerank'],
     requires_base_url: true,
     supports_model_fetch: true,
+    credential_format: 'api_key',
+    async_task: false,
   },
   {
     id: 'new-api',
@@ -56,6 +58,19 @@ const recipes: ChannelRecipe[] = [
     capability_hints: ['chat', 'image', 'embedding'],
     requires_base_url: true,
     supports_model_fetch: true,
+    credential_format: 'api_key',
+    async_task: false,
+  },
+  {
+    id: 'kling-video',
+    label: 'Kling video',
+    protocol: 'kling-video',
+    default_base_url: 'https://api.klingai.com',
+    capability_hints: ['video'],
+    requires_base_url: true,
+    supports_model_fetch: true,
+    credential_format: 'access_secret_pair_or_relay_key',
+    async_task: true,
   },
 ]
 
@@ -136,6 +151,32 @@ it('disables creation while the recipe catalog is loading', () => {
 
   expect(screen.getByText('Loading...')).toBeVisible()
   expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled()
+})
+
+it('explains the async lifecycle and provider credential format for video recipes', async () => {
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: { items: recipes } },
+  })
+  const user = userEvent.setup()
+  renderDialog()
+
+  const recipeSelect = await screen.findByRole('combobox', {
+    name: 'Upstream type',
+  })
+  await user.click(recipeSelect)
+  await user.click(await screen.findByRole('option', { name: 'Kling video' }))
+
+  expect(screen.getByText('Capabilities: Video')).toBeVisible()
+  expect(
+    screen.getByText(
+      'This channel uses asynchronous tasks. After creation, fetch models, confirm prices, and submit them for review.'
+    )
+  ).toBeVisible()
+  expect(
+    screen.getByText(
+      'For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.'
+    )
+  ).toBeVisible()
 })
 
 it('shows a retryable error when the recipe catalog cannot be loaded', async () => {

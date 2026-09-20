@@ -69,6 +69,8 @@ export interface ChannelRecipe {
   >
   requires_base_url: boolean
   supports_model_fetch: boolean
+  credential_format: 'api_key' | 'access_secret_pair_or_relay_key'
+  async_task: boolean
 }
 
 export interface ChannelRecipeListResponse {
