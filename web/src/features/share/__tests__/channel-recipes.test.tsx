@@ -19,7 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, expect, it, vi } from 'vitest'
+import i18next from 'i18next'
+import { afterEach, beforeAll, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 
@@ -74,6 +75,16 @@ const recipes: ChannelRecipe[] = [
   },
 ]
 
+beforeAll(() => {
+  i18next.addResources('en', 'translation', {
+    'share.channel.keyPoolMode': 'Key pool mode',
+    'share.keyPool.polling': 'Polling',
+    'share.keyPool.random': 'Random',
+    'share.keyPool.modeDescription':
+      'Polling follows key weights in sequence; random selects by weight for each request.',
+  })
+})
+
 afterEach(() => {
   vi.restoreAllMocks()
 })
@@ -126,6 +137,8 @@ it('loads recipes from the server and submits only the selected stable recipe id
   await user.click(screen.getByRole('combobox', { name: 'Share group' }))
   await user.click(await screen.findByRole('option', { name: 'Shared lab' }))
   await user.type(screen.getByLabelText('Name'), 'Community New API')
+  await user.click(screen.getByRole('combobox', { name: 'Key pool mode' }))
+  await user.click(await screen.findByRole('option', { name: 'Random' }))
   await user.type(
     screen.getByLabelText('Upstream address'),
     'https://gateway.example/v1'
@@ -140,6 +153,7 @@ it('loads recipes from the server and submits only the selected stable recipe id
       recipe_id: 'new-api',
       base_url: 'https://gateway.example/v1',
       upstream_key: 'sk-community',
+      key_pool_mode: 1,
     })
   )
   expect(post.mock.calls[0]?.[1]).not.toHaveProperty('protocol')

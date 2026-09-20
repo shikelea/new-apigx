@@ -6823,6 +6823,8 @@
     "Includes estimates": "包含估算值",
     "{{count}} unavailable measurements": "{{count}} 项计量不可得",
     "share.keyPool.description": "管理此渠道的凭据、权重和可用状态。",
+    "share.keyPool.failoverDescription": "正常请求按当前池策略分配；遇到可重试的上游错误时，会先尝试本渠道下一把可用 Key，再切换渠道。",
+    "share.keyPool.modeDescription": "轮询会按 Key 权重依次分配；随机会在每次请求时按权重抽取。",
     "share.keyPool.apply": "应用 Key 池",
     "share.keyPool.applied": "Key 池已应用",
     "share.keyPool.pendingTitle": "更改尚未生效",

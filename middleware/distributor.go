@@ -763,16 +763,21 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	key, index, newAPIError := channel.GetNextEnabledKeyExcluding(
+		service.MultiKeyExclusionsForChannel(c, channel.Id),
+	)
 	if newAPIError != nil {
 		return newAPIError
 	}
 	if channel.ChannelInfo.IsMultiKey {
 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
 		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
+		stableID, _ := channel.ChannelInfo.MultiKeyStableIDAt(index)
+		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyStableID, stableID)
 	} else {
 		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
+		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyStableID, "")
 	}
 
 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))

@@ -508,6 +508,22 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid key pool mode writes nothing", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5108
+		groupID := env.createGroup(t, owner, "错误池策略组")
+		rec, _ := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"错误池策略","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-invalid-mode","key_pool_mode":9}`,
+			common.RoleCommonUser)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "unsupported key_pool_mode")
+		for _, target := range []any{&basemodel.Channel{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{}} {
+			var count int64
+			require.NoError(t, env.db.Model(target).Count(&count).Error)
+			assert.Zero(t, count)
+		}
+	})
+
 	t.Run("task recipe pins the plugin and fetches declared models", func(t *testing.T) {
 		env := newTestEnv(t, true)
 		const owner int64 = 5106
@@ -761,12 +777,13 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 				const owner int64 = 9_830_001
 				groupID := env.createGroup(t, owner, "三库生命周期组")
 				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
-					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success"}`
+					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success","key_pool_mode":1}`
 				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				channelID := int64(body["data"].(map[string]any)["id"].(float64))
 				shareChannel, getErr := apigxmodel.GetChannel(tx, owner, channelID)
 				require.NoError(t, getErr)
+				assert.Equal(t, apigxmodel.KeyPoolModeRandom, shareChannel.KeyPoolMode)
 				baseID := shareChannel.BaseChannelID
 				assertOfferingPublishProjectionAtomic(t, env, owner, owner+99, channelID, "b3-matrix-publish-"+tc.name)
 

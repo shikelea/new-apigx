@@ -98,6 +98,70 @@ func TestWeightedPollingAndStableStatusSurviveReorder(t *testing.T) {
 	}
 }
 
+func TestGetNextEnabledKeyExcludingNeverRepeatsFailedKey(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	for _, mode := range []constant.MultiKeyMode{constant.MultiKeyModePolling, constant.MultiKeyModeRandom} {
+		t.Run(string(mode), func(t *testing.T) {
+			channel := Channel{
+				Name:   "request-exclusion",
+				Key:    "key-a\nkey-b\nkey-c",
+				Status: common.ChannelStatusEnabled,
+				ChannelInfo: ChannelInfo{
+					IsMultiKey:        true,
+					MultiKeySize:      3,
+					MultiKeyMode:      mode,
+					MultiKeyStableIDs: []string{"stable-a", "stable-b", "stable-c"},
+					MultiKeyWeights:   []int64{16, 1, 1},
+				},
+			}
+			require.NoError(t, DB.Create(&channel).Error)
+
+			excluded := MultiKeyExclusions{StableIDs: map[string]struct{}{
+				"stable-a": {},
+				"stable-b": {},
+			}}
+			for range 8 {
+				key, index, apiErr := channel.GetNextEnabledKeyExcluding(excluded)
+				require.Nil(t, apiErr)
+				assert.Equal(t, "key-c", key)
+				assert.Equal(t, 2, index)
+			}
+			assert.True(t, channel.HasEnabledKeyExcluding(excluded))
+
+			excluded.StableIDs["stable-c"] = struct{}{}
+			_, _, apiErr := channel.GetNextEnabledKeyExcluding(excluded)
+			require.NotNil(t, apiErr)
+			assert.False(t, channel.HasEnabledKeyExcluding(excluded))
+		})
+	}
+}
+
+func TestMultiKeyExclusionFollowsStableIdentityAfterReorder(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	channel := Channel{
+		Name:   "request-exclusion-reorder",
+		Key:    "key-b\nkey-a",
+		Status: common.ChannelStatusEnabled,
+		ChannelInfo: ChannelInfo{
+			IsMultiKey:        true,
+			MultiKeySize:      2,
+			MultiKeyMode:      constant.MultiKeyModePolling,
+			MultiKeyStableIDs: []string{"stable-b", "stable-a"},
+		},
+	}
+	require.NoError(t, DB.Create(&channel).Error)
+
+	key, index, apiErr := channel.GetNextEnabledKeyExcluding(MultiKeyExclusions{
+		StableIDs: map[string]struct{}{"stable-a": {}},
+		Indexes:   map[int]struct{}{0: {}},
+	})
+	require.Nil(t, apiErr)
+	assert.Equal(t, "key-b", key)
+	assert.Equal(t, 0, index, "stable identity takes precedence over a stale positional exclusion")
+}
+
 func TestMultiKeyStatusSourcesRestoreIndependently(t *testing.T) {
 	info := ChannelInfo{
 		IsMultiKey:        true,

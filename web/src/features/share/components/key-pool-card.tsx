@@ -241,6 +241,9 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
           <p className='text-muted-foreground mt-1 text-sm'>
             {t('share.keyPool.description')}
           </p>
+          <p className='text-muted-foreground mt-1 text-xs'>
+            {t('share.keyPool.failoverDescription')}
+          </p>
         </div>
         <div className='flex flex-wrap gap-2'>
           <Button variant='outline' size='sm' onClick={() => setAddOpen(true)}>

@@ -409,7 +409,34 @@ func AcquireForAttempt(c *gin.Context, channelID int) bool {
 }
 
 // ReleaseFromContext 释放上下文里持有的租约（幂等；无租约时为空操作）。
+//
+// 这是请求最终收尾入口。此时客户端响应已经确定，可以从 Writer 推断本次尝试的结果。
+// 上游错误后的重试不能使用这个推断：错误尚未写给客户端时 Writer 仍可能是默认 200，
+// 必须改用 ReleaseFailedAttemptFromContext 传入真实上游状态。
 func ReleaseFromContext(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	state := apigxmodel.AttemptStateFailed
+	status := 0
+	if c.Writer != nil {
+		status = c.Writer.Status()
+		if status < http.StatusBadRequest {
+			state = apigxmodel.AttemptStateSucceeded
+		}
+	}
+	releaseAttemptFromContext(c, state, status)
+}
+
+// ReleaseFailedAttemptFromContext 以明确的失败状态结束当前出站尝试并释放容量租约。
+//
+// 同渠道换 Key 和跨渠道重试发生在最终错误响应写给客户端之前，因此不能依赖
+// c.Writer.Status()。调用方应传入本次上游/提交错误的真实 HTTP 状态；未知时传 0。
+func ReleaseFailedAttemptFromContext(c *gin.Context, status int) {
+	releaseAttemptFromContext(c, apigxmodel.AttemptStateFailed, status)
+}
+
+func releaseAttemptFromContext(c *gin.Context, state int, status int) {
 	if c == nil {
 		return
 	}
@@ -421,14 +448,6 @@ func ReleaseFromContext(c *gin.Context) {
 		// 先落状态再释放：顺序反过来的话，一旦释放后进程退出，尝试会永远停在「已开始」
 		// 而被对账误判为遗弃（实际上它是正常完成的）。
 		if db := channelpool.CurrentDB(); db != nil && lease.ID() != "" {
-			state := apigxmodel.AttemptStateFailed
-			status := 0
-			if c.Writer != nil {
-				status = c.Writer.Status()
-				if status < http.StatusBadRequest {
-					state = apigxmodel.AttemptStateSucceeded
-				}
-			}
 			if err := apigxmodel.CompleteAttempt(db, lease.ID(), state, status); err != nil {
 				common.SysError("apigx capacity: complete attempt failed: " + err.Error())
 			}

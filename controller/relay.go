@@ -142,14 +142,28 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	attemptIndex := 0
+	var retryChannel *model.Channel
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
-		relayInfo.RetryIndex = retryParam.GetRetry()
-		channel, channelErr := getChannel(c, relayInfo, retryParam)
-		if channelErr != nil {
-			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
-			break
+		relayInfo.RetryIndex = attemptIndex
+		attemptIndex++
+		var channel *model.Channel
+		if retryChannel != nil {
+			channel = retryChannel
+			retryChannel = nil
+			if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
+				newAPIError = setupErr
+				break
+			}
+		} else {
+			var channelErr *types.NewAPIError
+			channel, channelErr = getChannel(c, relayInfo, retryParam)
+			if channelErr != nil {
+				logger.LogError(c, channelErr.Error())
+				newAPIError = channelErr
+				break
+			}
 		}
 		addUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
@@ -187,9 +201,23 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
+		channel = hydrateMultiKeyChannel(channel, relayInfo)
+		// 上游错误尚未写回客户端，Writer 仍可能保持默认 200。先用真实状态结束
+		// 本次容量尝试，避免同渠道换 Key 时把失败错误记成成功。
+		relayhook.ReleaseFailedAttemptFromContext(c, newAPIError.StatusCode)
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
+		if service.ShouldFailoverMultiKeyRelayError(c, newAPIError) {
+			switch service.RegisterMultiKeyFailure(c, channel) {
+			case service.MultiKeyFailoverRetrySameChannel:
+				retryChannel = channel
+				retryParam.ResetRetryNextTry()
+				continue
+			case service.MultiKeyFailoverChannelExhausted:
+				excludeChannelFromRetry(c, channel.Id)
+			}
+		}
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
@@ -285,6 +313,43 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {
 	return service.ShouldRetryRelayError(c, openaiErr, retryTimes)
+}
+
+func excludeChannelFromRetry(c *gin.Context, channelID int) {
+	if c == nil || channelID <= 0 {
+		return
+	}
+	constraints := service.GetChannelConstraints(c)
+	for _, filter := range constraints.Filters {
+		if filter.Kind != taskdto.FilterDeniedChannelIds {
+			continue
+		}
+		for _, deniedID := range filter.DeniedChannelIds {
+			if deniedID == channelID {
+				return
+			}
+		}
+	}
+	constraints.AddFilter(taskdto.ChannelFilter{
+		Kind:             taskdto.FilterDeniedChannelIds,
+		DeniedChannelIds: []int{channelID},
+	})
+}
+
+// The first synchronous attempt historically carried only a lightweight
+// channel identity because Distributor had already populated the request
+// context. Hydrate the full object only after a failed multi-key attempt, when
+// key identities and pool policy are required for same-channel failover.
+func hydrateMultiKeyChannel(channel *model.Channel, relayInfo *relaycommon.RelayInfo) *model.Channel {
+	if channel == nil || channel.ChannelInfo.IsMultiKey || relayInfo == nil ||
+		relayInfo.ChannelMeta == nil || !relayInfo.ChannelMeta.ChannelIsMultiKey {
+		return channel
+	}
+	fullChannel, err := model.CacheGetChannel(channel.Id)
+	if err != nil || fullChannel == nil {
+		return channel
+	}
+	return fullChannel
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
@@ -483,19 +548,29 @@ func executeTaskSubmissionWith(
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	attemptNumber := 0
+	var retryChannel *model.Channel
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+		attemptNumber++
 		stage = "select_channel"
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
-			diagnostics.cancelled("before_attempt", retryParam.GetRetry()+1)
+			diagnostics.cancelled("before_attempt", attemptNumber)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
 			break
 		}
 		var channel *model.Channel
 
-		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
+		if retryChannel != nil {
+			channel = retryChannel
+			retryChannel = nil
+			if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
+				taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_retry_channel_failed", http.StatusInternalServerError)
+				break
+			}
+		} else if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
 			channel = lockedCh
-			if retryParam.GetRetry() > 0 {
+			if attemptNumber > 1 {
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
 					taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_locked_channel_failed", http.StatusInternalServerError)
 					break
@@ -510,7 +585,7 @@ func executeTaskSubmissionWith(
 				break
 			}
 		}
-		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
+		diagnostics.attempt(attemptNumber, channel, relayInfo.LockedChannel != nil)
 
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
@@ -528,14 +603,17 @@ func executeTaskSubmissionWith(
 		stage = "submit"
 		result, taskErr = submit(c, relayInfo)
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
-			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
+			diagnostics.cancelled("after_submit", attemptNumber)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
+			relayhook.ReleaseFailedAttemptFromContext(c, taskErr.StatusCode)
 			break
 		}
 		if taskErr == nil {
-			diagnostics.attemptSucceeded(retryParam.GetRetry()+1, result)
+			diagnostics.attemptSucceeded(attemptNumber, result)
 			break
 		}
+		relayhook.ReleaseFailedAttemptFromContext(c, taskErr.StatusCode)
+		channel = hydrateMultiKeyChannel(channel, relayInfo)
 
 		if !taskErr.LocalError {
 			processChannelError(c,
@@ -545,8 +623,25 @@ func executeTaskSubmissionWith(
 				relayInfo)
 		}
 
-		willRetry := shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
-		diagnostics.attemptFailed(retryParam.GetRetry()+1, channel, taskErr, willRetry)
+		willRetry := false
+		if shouldFailoverTaskMultiKey(c, taskErr) {
+			switch service.RegisterMultiKeyFailure(c, channel) {
+			case service.MultiKeyFailoverRetrySameChannel:
+				retryChannel = channel
+				retryParam.ResetRetryNextTry()
+				willRetry = true
+			case service.MultiKeyFailoverChannelExhausted:
+				if relayInfo.LockedChannel == nil {
+					excludeChannelFromRetry(c, channel.Id)
+					willRetry = shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
+				}
+			default:
+				willRetry = shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
+			}
+		} else {
+			willRetry = shouldRetryTaskRelay(c, channel.Id, taskErr, common.RetryTimes-retryParam.GetRetry())
+		}
+		diagnostics.attemptFailed(attemptNumber, channel, taskErr, willRetry)
 		if !willRetry {
 			break
 		}
@@ -568,7 +663,7 @@ func executeTaskSubmissionWith(
 		return nil, taskErr
 	}
 	if requestErr := c.Request.Context().Err(); requestErr != nil {
-		diagnostics.cancelled("before_reserve", retryParam.GetRetry()+1)
+		diagnostics.cancelled("before_reserve", attemptNumber)
 		return nil, service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
 	}
 
@@ -738,13 +833,20 @@ func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 }
 
 func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *taskdto.TaskError, retryTimes int) bool {
-	if taskErr == nil || taskErr.NoRetry {
+	if retryTimes <= 0 {
+		return false
+	}
+	return shouldFailoverTaskMultiKey(c, taskErr)
+}
+
+func shouldFailoverTaskMultiKey(c *gin.Context, taskErr *taskdto.TaskError) bool {
+	if taskErr == nil || taskErr.NoRetry || taskErr.LocalError {
+		return false
+	}
+	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
 		return false
 	}
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
-		return false
-	}
-	if retryTimes <= 0 {
 		return false
 	}
 	if service.GetChannelConstraints(c).SuppressesRetry() {

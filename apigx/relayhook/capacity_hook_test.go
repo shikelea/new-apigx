@@ -8,12 +8,16 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
+	"github.com/QuantumNous/new-api/apigx/channelpool"
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // 容量接线测试。
@@ -131,6 +135,58 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 0, usage, "重复释放不得把计数减成负数")
 
+	cleanupChannel(t, channelID)
+}
+
+// 上游错误发生时客户端响应尚未写出，Writer 仍是默认 200。重试前必须用真实
+// 上游状态结束旧尝试并释放租约，下一把 Key 才能取得新的独立租约。
+func TestReleaseFailedAttemptUsesExplicitUpstreamStatusBeforeRetry(t *testing.T) {
+	setupRedis(t)
+	const channelID = 90012
+	t.Cleanup(func() { Configure(Config{}) })
+	Configure(Config{Enabled: true, ChannelLimit: 1})
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&apigxmodel.Channel{}, &apigxmodel.Attempt{}))
+	previousDB := channelpool.CurrentDB()
+	channelpool.SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { channelpool.SetDBProvider(func() *gorm.DB { return previousDB }) })
+
+	c := newCtx()
+	require.True(t, AcquireForAttempt(c, channelID))
+	firstUID := leaseIDFromContext(c)
+	require.NotEmpty(t, firstUID)
+	assert.Equal(t, http.StatusOK, c.Writer.Status(), "重试前 Writer 仍是默认成功状态")
+
+	usage, err := capacity.New(common.RDB).Usage(t.Context(), capacity.ChannelConcurrency(channelID))
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, usage)
+
+	ReleaseFailedAttemptFromContext(c, http.StatusTooManyRequests)
+	assert.Empty(t, leaseIDFromContext(c))
+	usage, err = capacity.New(common.RDB).Usage(t.Context(), capacity.ChannelConcurrency(channelID))
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, usage, "失败尝试必须在换 Key 前释放容量")
+
+	firstAttempt, err := apigxmodel.GetAttemptByUID(db, firstUID)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.AttemptStateFailed, firstAttempt.State)
+	assert.Equal(t, http.StatusTooManyRequests, firstAttempt.HttpStatus)
+
+	require.True(t, AcquireForAttempt(c, channelID))
+	secondUID := leaseIDFromContext(c)
+	require.NotEmpty(t, secondUID)
+	assert.NotEqual(t, firstUID, secondUID, "新 Key 尝试必须取得新租约")
+	secondAttempt, err := apigxmodel.GetAttemptByUID(db, secondUID)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.AttemptStateStarted, secondAttempt.State)
+
+	ReleaseFromContext(c)
+	secondAttempt, err = apigxmodel.GetAttemptByUID(db, secondUID)
+	require.NoError(t, err)
+	assert.Equal(t, apigxmodel.AttemptStateSucceeded, secondAttempt.State)
+	assert.Equal(t, http.StatusOK, secondAttempt.HttpStatus)
 	cleanupChannel(t, channelID)
 }
 

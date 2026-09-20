@@ -166,7 +166,7 @@ type Channel struct {
 	BaseURL string `gorm:"size:512;not null;default:''"`
 	// AuthTarget 认证目标（域名/路径），与 base_url 一同参与「资源修订」判定。
 	AuthTarget string `gorm:"size:256;not null;default:''"`
-	// KeyPoolMode 渠道内选 Key 策略：0=轮询 / 1=随机 / 2=加权 / 3=最低占用；使用者不可见（§9.2）。
+	// KeyPoolMode 渠道内选 Key 策略：0=加权轮询 / 1=加权随机；使用者不可见（§9.2）。
 	KeyPoolMode int `gorm:"type:int;not null"`
 	// CapacityPolicyID 渠道级容量策略，apigx_capacity_policies.id（scope_type=2）。
 	CapacityPolicyID int64 `gorm:"bigint;not null;default:0"`

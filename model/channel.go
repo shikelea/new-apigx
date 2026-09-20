@@ -486,7 +486,31 @@ func (channel *Channel) GetKeys() []string {
 	return keys
 }
 
+// MultiKeyExclusions identifies keys that must not be selected for the current
+// request. Stable IDs take precedence so a concurrent key reorder cannot make
+// a failed credential eligible again; indexes preserve compatibility with
+// native New API channels that do not carry APIGX stable key identities.
+type MultiKeyExclusions struct {
+	StableIDs map[string]struct{}
+	Indexes   map[int]struct{}
+}
+
+func (excluded MultiKeyExclusions) contains(info *ChannelInfo, index int) bool {
+	if stableID, ok := info.MultiKeyStableIDAt(index); ok {
+		_, found := excluded.StableIDs[stableID]
+		return found
+	}
+	_, found := excluded.Indexes[index]
+	return found
+}
+
 func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+	return channel.GetNextEnabledKeyExcluding(MultiKeyExclusions{})
+}
+
+// GetNextEnabledKeyExcluding applies the channel's normal random or weighted
+// polling policy to enabled keys that have not already failed in this request.
+func (channel *Channel) GetNextEnabledKeyExcluding(excluded MultiKeyExclusions) (string, int, *types.NewAPIError) {
 	// If not in multi-key mode, return the original key string directly.
 	if !channel.ChannelInfo.IsMultiKey {
 		return channel.Key, 0, nil
@@ -506,7 +530,8 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	// Collect indexes of enabled keys
 	enabledIdx := make([]int, 0, len(keys))
 	for i := range keys {
-		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled {
+		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled &&
+			!excluded.contains(&channel.ChannelInfo, i) {
 			enabledIdx = append(enabledIdx, i)
 		}
 	}
@@ -575,6 +600,19 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		// Unknown mode, default to first enabled key (or original key string)
 		return keys[enabledIdx[0]], enabledIdx[0], nil
 	}
+}
+
+func (channel *Channel) HasEnabledKeyExcluding(excluded MultiKeyExclusions) bool {
+	if channel == nil || !channel.ChannelInfo.IsMultiKey {
+		return false
+	}
+	for index := range channel.GetKeys() {
+		if channel.ChannelInfo.MultiKeyStatusAt(index) == common.ChannelStatusEnabled &&
+			!excluded.contains(&channel.ChannelInfo, index) {
+			return true
+		}
+	}
+	return false
 }
 
 func (channel *Channel) SaveChannelInfo() error {

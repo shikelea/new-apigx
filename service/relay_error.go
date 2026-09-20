@@ -50,6 +50,43 @@ func ShouldRetryRelayError(c *gin.Context, openaiErr *types.NewAPIError, retryTi
 	return operation_setting.ShouldRetryByStatusCode(code)
 }
 
+// ShouldFailoverMultiKeyRelayError applies the normal retry policy without the
+// global cross-channel retry budget. A request can therefore exhaust the
+// current channel's key pool even when RetryTimes is zero. Explicit no-retry
+// errors, request cancellation, affinity rules, and single-attempt pins still
+// stop immediately.
+func ShouldFailoverMultiKeyRelayError(c *gin.Context, openaiErr *types.NewAPIError) bool {
+	if openaiErr == nil {
+		return false
+	}
+	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+		return false
+	}
+	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		return false
+	}
+	if GetChannelConstraints(c).SuppressesRetry() {
+		return false
+	}
+	if types.IsChannelError(openaiErr) {
+		return true
+	}
+	if types.IsSkipRetryError(openaiErr) {
+		return false
+	}
+	code := openaiErr.StatusCode
+	if code >= 200 && code < 300 {
+		return false
+	}
+	if code < 100 || code > 599 {
+		return true
+	}
+	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
+		return false
+	}
+	return operation_setting.ShouldRetryByStatusCode(code)
+}
+
 func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
 	if err == nil {
 		return

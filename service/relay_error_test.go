@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -55,6 +56,27 @@ func TestShouldRetryRelayErrorHonorsChannelPinOnChannelError(t *testing.T) {
 			assert.Equal(t, test.wantRetry, ShouldRetryRelayError(c, err, 1))
 		})
 	}
+}
+
+func TestShouldFailoverMultiKeyRelayErrorIgnoresOnlyRetryBudget(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	rateLimited := types.NewErrorWithStatusCode(errors.New("rate limited"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
+	assert.True(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
+	assert.False(t, ShouldRetryRelayError(c, rateLimited, 0), "cross-channel retries still respect the global budget")
+
+	badRequest := types.NewErrorWithStatusCode(errors.New("invalid request"), types.ErrorCodeInvalidRequest, http.StatusBadRequest)
+	assert.False(t, ShouldFailoverMultiKeyRelayError(c, badRequest))
+
+	capacityRejected := types.NewErrorWithStatusCode(errors.New("capacity exceeded"), types.ErrorCodeGetChannelFailed,
+		http.StatusTooManyRequests, types.ErrOptionWithSkipRetry())
+	assert.False(t, ShouldFailoverMultiKeyRelayError(c, capacityRejected))
+
+	cancelledContext, cancel := context.WithCancel(c.Request.Context())
+	cancel()
+	c.Request = c.Request.WithContext(cancelledContext)
+	assert.False(t, ShouldFailoverMultiKeyRelayError(c, rateLimited))
 }
 
 func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {

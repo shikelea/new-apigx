@@ -540,6 +540,59 @@ export function buildQueryRequest(){throw new Error("completed submissions must 
 func TestAcceptedSubmitStreamNeverRetries(t *testing.T) {
 	c := taskSubmissionTestContext()
 	assert.False(t, shouldRetryTaskRelay(c, 1, &dto.TaskError{StatusCode: 502, LocalError: true, NoRetry: true}, 3))
+	assert.False(t, shouldFailoverTaskMultiKey(c, &dto.TaskError{StatusCode: 502, LocalError: true}),
+		"local gateway failures must not rotate upstream credentials")
+}
+
+func TestTaskSubmissionFailsOverToNextKeyWithZeroGlobalRetries(t *testing.T) {
+	events := make([]string, 0, 3)
+	setupTaskSubmissionDatabase(t, true, &events)
+	previousRetries, previousErrorLog := common.RetryTimes, constant.ErrorLogEnabled
+	previousConsumeLog := common.LogConsumeEnabled
+	common.RetryTimes, constant.ErrorLogEnabled, common.LogConsumeEnabled = 0, false, false
+	t.Cleanup(func() {
+		common.RetryTimes, constant.ErrorLogEnabled = previousRetries, previousErrorLog
+		common.LogConsumeEnabled = previousConsumeLog
+	})
+
+	c := taskSubmissionTestContext()
+	common.SetContextKey(c, constant.ContextKeyChannelKey, "key-a")
+	common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
+	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 0)
+	billing := &taskSubmissionTestBilling{events: &events}
+	info := taskSubmissionRelayInfo(billing)
+	channel := &model.Channel{
+		Id: 1, Type: constant.ChannelTypeTaskPlugin, Name: "plugin", Key: "key-a\nkey-b",
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey:        true,
+			MultiKeyMode:      constant.MultiKeyModeRandom,
+			MultiKeyStableIDs: []string{"stable-a", "stable-b"},
+		},
+	}
+	info.LockedChannel = channel
+	info.ChannelMeta = &relaycommon.ChannelMeta{
+		ChannelId: 1, ChannelType: constant.ChannelTypeTaskPlugin, ChannelIsMultiKey: true,
+	}
+
+	usedKeys := make([]string, 0, 2)
+	outcome, taskErr := executeTaskSubmissionWith(c, info, func(c *gin.Context, _ *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		usedKeys = append(usedKeys, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+		if len(usedKeys) == 1 {
+			return nil, &dto.TaskError{
+				Code: "rate_limited", Message: "rate limited", StatusCode: http.StatusTooManyRequests,
+				Error: errors.New("rate limited"),
+			}
+		}
+		return &relay.TaskSubmitResult{
+			UpstreamTaskID: "upstream_private",
+			Platform:       constant.TaskPlatform("plugin"),
+		}, nil
+	})
+
+	require.Nil(t, taskErr)
+	require.NotNil(t, outcome)
+	assert.Equal(t, []string{"key-a", "key-b"}, usedKeys)
+	assert.Equal(t, []string{"reserve", "insert", "settle"}, events)
 }
 
 func TestExecuteTaskSubmissionRefundsWhenFinalReserveFails(t *testing.T) {

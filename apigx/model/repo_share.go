@@ -183,6 +183,9 @@ func CreateChannel(db *gorm.DB, channel *Channel) error {
 	if channel.BaseChannelID <= 0 {
 		return fmt.Errorf("%w: base_channel_id is required（每个分享渠道必须绑定一条底座渠道；该列有唯一索引，0 会互相冲突）", ErrInvalidArgument)
 	}
+	if channel.KeyPoolMode != KeyPoolModePolling && channel.KeyPoolMode != KeyPoolModeRandom {
+		return fmt.Errorf("%w: unsupported key_pool_mode %d", ErrInvalidArgument, channel.KeyPoolMode)
+	}
 	// **必须校验分组归属**：ShareGroupID 来自请求体，若不校验，
 	// 只要知道别人的分组 ID 就能把自己的渠道挂进去（接口层测试发现的越权）。
 	// 先验归属再看其它字段，避免通过错误信息差异探测他人分组是否存在。

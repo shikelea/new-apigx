@@ -84,6 +84,7 @@ export function ChannelCreateDialog(props: {
   const [recipeId, setRecipeId] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [upstreamKey, setUpstreamKey] = useState('')
+  const [keyPoolMode, setKeyPoolMode] = useState('0')
 
   const recipesQuery = useQuery({
     queryKey: ['apigx-channel-recipes'],
@@ -123,12 +124,14 @@ export function ChannelCreateDialog(props: {
         recipe_id: recipeId,
         base_url: baseUrl.trim(),
         upstream_key: upstreamKey.trim(),
+        key_pool_mode: Number(keyPoolMode),
       }),
     onSuccess: (res) => {
       setName('')
       setRecipeId('')
       setBaseUrl('')
       setUpstreamKey('')
+      setKeyPoolMode('0')
       props.onOpenChange(false)
       props.onSaved(res.data?.id)
     },
@@ -198,6 +201,34 @@ export function ChannelCreateDialog(props: {
             onChange={(event) => setName(event.target.value)}
             maxLength={64}
           />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor='share-channel-key-pool-mode'>
+            {t('share.channel.keyPoolMode')}
+          </FieldLabel>
+          <Select
+            value={keyPoolMode}
+            onValueChange={(next) => setKeyPoolMode(next ?? '0')}
+          >
+            <SelectTrigger id='share-channel-key-pool-mode' className='w-full'>
+              <SelectValue>
+                {t(
+                  keyPoolMode === '1'
+                    ? 'share.keyPool.random'
+                    : 'share.keyPool.polling'
+                )}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value='0'>{t('share.keyPool.polling')}</SelectItem>
+                <SelectItem value='1'>{t('share.keyPool.random')}</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <FieldDescription>
+            {t('share.keyPool.modeDescription')}
+          </FieldDescription>
         </Field>
         <Field>
           <FieldLabel htmlFor='share-channel-recipe'>
