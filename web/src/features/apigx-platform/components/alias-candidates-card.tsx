@@ -48,7 +48,10 @@ export function AliasCandidateMobileCards(props: {
   const { t } = useTranslation()
 
   return (
-    <section aria-label={t('Model catalog')} className='space-y-3 md:hidden'>
+    <section
+      aria-label={t('Model identity review')}
+      className='space-y-3 md:hidden'
+    >
       {props.items.map((row) => (
         <div className='space-y-4 rounded-lg border p-4' key={row.id}>
           <div className='space-y-3'>
@@ -62,7 +65,7 @@ export function AliasCandidateMobileCards(props: {
             </div>
             <div>
               <p className='text-muted-foreground text-xs'>
-                {t('Normalized name')}
+                {t('Suggested model name')}
               </p>
               <code className='mt-1 block text-xs break-all'>
                 {row.normalized_model_id}
@@ -71,14 +74,14 @@ export function AliasCandidateMobileCards(props: {
           </div>
           <div className='grid gap-2'>
             <Button variant='outline' onClick={() => props.onConfirm(row)}>
-              {t('Confirm')}
+              {t('Confirm model')}
             </Button>
             <Button
               variant='outline'
               disabled={props.bulkPending}
               onClick={() => props.onBulk(row.normalized_model_id)}
             >
-              {t('Match all with the same name')}
+              {t('Confirm all matching names')}
             </Button>
             <Button
               variant='outline'
@@ -95,10 +98,10 @@ export function AliasCandidateMobileCards(props: {
 }
 
 /**
- * 模型目录 · 待确认候选（§4「批量匹配、人工覆盖」）。
+ * 模型身份确认（§4「批量匹配、人工覆盖」）。
  *
- * 候选由"创建供给"自动累积；**确认之后**广场才会显示对外标准 ID 与模型介绍 ——
- * 候选本身绝不当作结论（模型列注释：候选仅提示，不自动路由）。
+ * 新抓取的上游模型需要管理员确认它对应的统一模型；确认后，模型广场才能
+ * 合并相同模型的分享来源。未经确认的名称只提供操作建议，不参与自动路由。
  */
 export function AliasCandidatesCard() {
   const { t } = useTranslation()
@@ -138,7 +141,7 @@ export function AliasCandidatesCard() {
     },
     {
       id: 'normalized',
-      header: t('Normalized name'),
+      header: t('Suggested model name'),
       cell: (row) => row.normalized_model_id,
     },
     {
@@ -147,7 +150,7 @@ export function AliasCandidatesCard() {
       cell: (row) => (
         <div className='flex gap-2'>
           <Button size='sm' variant='outline' onClick={() => setEditing(row)}>
-            {t('Confirm')}
+            {t('Confirm model')}
           </Button>
           <Button
             size='sm'
@@ -155,7 +158,7 @@ export function AliasCandidatesCard() {
             disabled={bulk.isPending}
             onClick={() => bulk.mutate(row.normalized_model_id)}
           >
-            {t('Match all with the same name')}
+            {t('Confirm all matching names')}
           </Button>
           <Button
             size='sm'
@@ -173,16 +176,16 @@ export function AliasCandidatesCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{t('Model catalog')}</CardTitle>
+        <CardTitle>{t('Model identity review')}</CardTitle>
       </CardHeader>
       <CardContent className='space-y-4'>
         <p className='text-muted-foreground text-xs'>
           {t(
-            'Candidates are collected automatically. The plaza only shows a standard model after confirmation.'
+            'Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.'
           )}
         </p>
         {items.length === 0 ? (
-          <EmptyState title={t('No pending candidate')} />
+          <EmptyState title={t('No models awaiting confirmation')} />
         ) : (
           <>
             <AliasCandidateMobileCards

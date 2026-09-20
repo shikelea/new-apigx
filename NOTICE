@@ -1,4 +1,11 @@
-new-api Notices
+APIGX Notices
+
+APIGX is a modified open-source work based on the New API project.
+The APIGX product name identifies this fork; the original New API authorship,
+license terms, attribution notice, and upstream repository link are retained
+below.
+
+==== New API Upstream Notices ====
 
 new-api
 Copyright (c) QuantumNous and contributors.

@@ -111,13 +111,15 @@ it('keeps all model-catalog actions in the mobile candidate card', async () => {
     />
   )
 
-  const region = screen.getByRole('region', { name: 'Model catalog' })
+  const region = screen.getByRole('region', { name: 'Model identity review' })
   expect(region).toHaveClass('md:hidden')
 
-  await user.click(within(region).getByRole('button', { name: 'Confirm' }))
+  await user.click(
+    within(region).getByRole('button', { name: 'Confirm model' })
+  )
   await user.click(
     within(region).getByRole('button', {
-      name: 'Match all with the same name',
+      name: 'Confirm all matching names',
     })
   )
   await user.click(within(region).getByRole('button', { name: 'Reject' }))

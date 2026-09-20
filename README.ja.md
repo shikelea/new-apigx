@@ -1,10 +1,12 @@
 <div align="center">
 
-![new-api](/web/public/logo.png)
+![APIGX](/web/public/logo.png)
 
-# New API
+# APIGX
 
 🍥 **次世代大規模モデルゲートウェイとAI資産管理システム**
+
+APIGX は [New API](https://github.com/QuantumNous/new-api) を基盤とするオープンソースの AI モデルリソース共有プラットフォームです。上流プロジェクトの帰属表示を維持し、GNU AGPLv3 ライセンスに従います。
 
 <p align="center">
   <a href="./README.zh_CN.md">简体中文</a> |
@@ -491,7 +493,7 @@ Token、Origin 検証、PAT の契約については[ユーザー認証とログ
 
 <div align="center">
 
-### 💖 New APIをご利用いただきありがとうございます
+### 💖 APIGX をご利用いただきありがとうございます
 
 このプロジェクトがあなたのお役に立てたなら、ぜひ ⭐️ スターをください！
 

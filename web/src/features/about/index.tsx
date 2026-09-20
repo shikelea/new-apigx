@@ -47,6 +47,9 @@ function EmptyAboutState() {
           </p>
         </div>
         <div className='space-y-4 text-sm'>
+          <p className='text-muted-foreground'>
+            {t('APIGX is open source software built on New API.')}
+          </p>
           <p>
             {t('New API Project Repository:')}{' '}
             <a

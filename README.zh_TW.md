@@ -1,10 +1,12 @@
 <div align="center">
 
-![new-api](/web/public/logo.png)
+![APIGX](/web/public/logo.png)
 
-# New API
+# APIGX
 
 🍥 **新一代大模型網關與AI資產管理系統**
+
+APIGX 是基於 [New API](https://github.com/QuantumNous/new-api) 二次開發的開源 AI 模型資源共享平台，保留上游專案署名並遵循 GNU AGPLv3 授權條款。
 
 <p align="center">
   繁體中文 |
@@ -490,7 +492,7 @@ Token、Origin 驗證和 PAT 契約請參閱[使用者鑑權與登入工作階�
 
 <div align="center">
 
-### 💖 感謝使用 New API
+### 💖 感謝使用 APIGX
 
 如果這個項目對你有幫助，歡迎給我們一個 ⭐️ Star！
 

@@ -1,10 +1,12 @@
 <div align="center">
 
-![new-api](/web/public/logo.png)
+![APIGX](/web/public/logo.png)
 
-# New API
+# APIGX
 
 🍥 **Next-Generation LLM Gateway and AI Asset Management System**
+
+APIGX is an open-source shared AI model resource platform built on [New API](https://github.com/QuantumNous/new-api). It retains the upstream project attribution and follows the GNU AGPLv3 license.
 
 <p align="center">
   <a href="./README.zh_CN.md">简体中文</a> |
@@ -501,7 +503,7 @@ If your organization's policies do not permit the use of AGPLv3-licensed softwar
 
 <div align="center">
 
-### 💖 Thank you for using New API
+### 💖 Thank you for using APIGX
 
 If this project is helpful to you, welcome to give us a ⭐️ Star！
 

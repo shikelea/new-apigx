@@ -23,6 +23,9 @@ func MigrateRetiredFrontendOptions() error {
 	}
 
 	var migrationErrors []error
+	if err := migrateDefaultSystemName(); err != nil {
+		migrationErrors = append(migrationErrors, fmt.Errorf("migrate default system name: %w", err))
+	}
 	if err := normalizeRetiredThemeOption(); err != nil {
 		migrationErrors = append(migrationErrors, fmt.Errorf("normalize %s: %w", retiredThemeOptionKey, err))
 	}
@@ -45,6 +48,12 @@ func MigrateRetiredFrontendOptions() error {
 		migrationErrors = append(migrationErrors, err)
 	}
 	return errors.Join(migrationErrors...)
+}
+
+func migrateDefaultSystemName() error {
+	return DB.Model(&Option{}).
+		Where(&Option{Key: "SystemName", Value: "New API"}).
+		Update("value", "APIGX").Error
 }
 
 func normalizeRetiredThemeOption() error {

@@ -1,15 +1,21 @@
 package model
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+var errRollbackSystemNameMigration = errors.New("rollback system name migration fixture")
 
 func useFrontendOptionMigrationDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -43,6 +49,7 @@ func requireOptionMissing(t *testing.T, db *gorm.DB, key string) {
 func TestMigrateRetiredFrontendOptionsMigratesValidValuesIdempotently(t *testing.T) {
 	db := useFrontendOptionMigrationDB(t)
 	legacy := []Option{
+		{Key: "SystemName", Value: "New API"},
 		{Key: retiredThemeOptionKey, Value: "classic"},
 		{Key: "ApiInfo", Value: `[{"url":"https://api.example.com","route":"primary","description":"API","color":"blue"}]`},
 		{Key: "Announcements", Value: `[{"content":"maintenance","publishDate":"2026-07-20T00:00:00Z","type":"warning"}]`},
@@ -53,9 +60,10 @@ func TestMigrateRetiredFrontendOptionsMigratesValidValuesIdempotently(t *testing
 	require.NoError(t, db.Create(&legacy).Error)
 
 	require.NoError(t, MigrateRetiredFrontendOptions())
+	assert.Equal(t, "APIGX", requireOptionValue(t, db, "SystemName"))
 	assert.Equal(t, "default", requireOptionValue(t, db, retiredThemeOptionKey))
-	assert.JSONEq(t, legacy[1].Value, requireOptionValue(t, db, "console_setting.api_info"))
-	assert.Equal(t, legacy[2].Value, requireOptionValue(t, db, "console_setting.announcements"))
+	assert.JSONEq(t, legacy[2].Value, requireOptionValue(t, db, "console_setting.api_info"))
+	assert.Equal(t, legacy[3].Value, requireOptionValue(t, db, "console_setting.announcements"))
 	assert.JSONEq(t, `[{"question":"Question","answer":"Answer"}]`, requireOptionValue(t, db, "console_setting.faq"))
 	assert.JSONEq(t, `[{
 		"id":1,"categoryName":"old","url":"https://status.example.com","slug":"status","description":""
@@ -70,6 +78,84 @@ func TestMigrateRetiredFrontendOptionsMigratesValidValuesIdempotently(t *testing
 	after, err := AllOption()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, before, after)
+}
+
+func TestMigrateRetiredFrontendOptionsPreservesCustomSystemName(t *testing.T) {
+	db := useFrontendOptionMigrationDB(t)
+	require.NoError(t, db.Create(&Option{Key: "SystemName", Value: "Community Gateway"}).Error)
+
+	require.NoError(t, MigrateRetiredFrontendOptions())
+	assert.Equal(t, "Community Gateway", requireOptionValue(t, db, "SystemName"))
+}
+
+func TestDefaultSystemNameMigrationOnConfiguredDialects(t *testing.T) {
+	dialects := []struct {
+		name string
+		open func(t *testing.T) *gorm.DB
+	}{
+		{
+			name: "sqlite",
+			open: func(t *testing.T) *gorm.DB {
+				db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+				require.NoError(t, err)
+				require.NoError(t, db.AutoMigrate(&Option{}))
+				return db
+			},
+		},
+		{
+			name: "postgres",
+			open: func(t *testing.T) *gorm.DB {
+				dsn := os.Getenv("APIGX_TEST_PG_DSN")
+				if dsn == "" {
+					t.Skip("APIGX_TEST_PG_DSN is not configured")
+				}
+				db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+				require.NoError(t, err)
+				var version string
+				require.NoError(t, db.Raw("SELECT version()").Scan(&version).Error)
+				t.Logf("PostgreSQL version: %s", version)
+				return db
+			},
+		},
+		{
+			name: "mysql",
+			open: func(t *testing.T) *gorm.DB {
+				dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("APIGX_TEST_MYSQL_DSN is not configured")
+				}
+				db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+				require.NoError(t, err)
+				var version string
+				require.NoError(t, db.Raw("SELECT version()").Scan(&version).Error)
+				t.Logf("MySQL version: %s", version)
+				require.NoError(t, db.AutoMigrate(&Option{}))
+				return db
+			},
+		},
+	}
+
+	for _, dialect := range dialects {
+		t.Run(dialect.name, func(t *testing.T) {
+			db := dialect.open(t)
+			err := db.Transaction(func(tx *gorm.DB) error {
+				require.NoError(t, tx.Where(&Option{Key: "SystemName"}).Delete(&Option{}).Error)
+				require.NoError(t, tx.Create(&Option{Key: "SystemName", Value: "New API"}).Error)
+
+				previousDB := DB
+				DB = tx
+				defer func() { DB = previousDB }()
+
+				require.NoError(t, migrateDefaultSystemName())
+				assert.Equal(t, "APIGX", requireOptionValue(t, tx, "SystemName"))
+				require.NoError(t, tx.Model(&Option{}).Where(&Option{Key: "SystemName"}).Update("value", "Community Gateway").Error)
+				require.NoError(t, migrateDefaultSystemName())
+				assert.Equal(t, "Community Gateway", requireOptionValue(t, tx, "SystemName"))
+				return errRollbackSystemNameMigration
+			})
+			require.ErrorIs(t, err, errRollbackSystemNameMigration)
+		})
+	}
 }
 
 func TestLegacyConsoleListMigrationCapsAPIInfoAndFAQ(t *testing.T) {

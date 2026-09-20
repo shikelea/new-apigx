@@ -1,10 +1,12 @@
 <div align="center">
 
-![new-api](/web/public/logo.png)
+![APIGX](/web/public/logo.png)
 
-# New API
+# APIGX
 
 🍥 **Passerelle de modèles étendus de nouvelle génération et système de gestion d'actifs d'IA**
+
+APIGX est une plateforme open source de partage de ressources de modèles d'IA basée sur [New API](https://github.com/QuantumNous/new-api). Elle conserve l'attribution du projet en amont et respecte la licence GNU AGPLv3.
 
 <p align="center">
   <a href="./README.zh_CN.md">简体中文</a> |
@@ -491,7 +493,7 @@ Si les politiques de votre organisation ne permettent pas l'utilisation de logic
 
 <div align="center">
 
-### 💖 Merci d'utiliser New API
+### 💖 Merci d'utiliser APIGX
 
 Si ce projet vous est utile, bienvenue à nous donner une ⭐️ Étoile！
 

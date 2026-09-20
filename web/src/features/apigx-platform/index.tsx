@@ -540,7 +540,7 @@ function PriceEditingHint() {
   const { t } = useTranslation()
   return (
     <p className='text-muted-foreground text-xs'>
-      {t('Prices are configured and synced in New API model pricing.')}{' '}
+      {t('Prices are configured and synced in system model pricing.')}{' '}
       <Link to='/system-settings/models' className='underline'>
         {t('Open model pricing')}
       </Link>
