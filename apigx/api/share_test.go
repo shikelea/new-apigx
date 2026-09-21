@@ -711,11 +711,8 @@ func TestDeleteChannelFailsClosedAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	var baseChannel basemodel.Channel
-	require.NoError(t, env.db.Where("id = ?", baseID).First(&baseChannel).Error)
-	assert.Equal(t, common.ChannelStatusManuallyDisabled, baseChannel.Status)
-	assert.Empty(t, baseChannel.Key)
-	assert.Empty(t, baseChannel.Models)
-	assert.False(t, baseChannel.ChannelInfo.IsMultiKey)
+	assert.ErrorIs(t, env.db.Where("id = ?", baseID).First(&baseChannel).Error, gorm.ErrRecordNotFound,
+		"平台代建的底座渠道应先被彻底移出渠道列表")
 	var abilityCount int64
 	require.NoError(t, env.db.Model(&basemodel.Ability{}).Where("channel_id = ?", baseID).Count(&abilityCount).Error)
 	assert.Zero(t, abilityCount)
@@ -727,12 +724,144 @@ func TestDeleteChannelFailsClosedAndIsIdempotent(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	_, err = apigxmodel.GetChannel(env.db, owner, channelID)
 	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
+	assert.ErrorIs(t, env.db.Where("id = ?", baseID).First(&baseChannel).Error, gorm.ErrRecordNotFound)
 
 	// 墓碑保留 base_channel_id，重复删除仍能安全重放所有收尾步骤。
 	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), stranger, "", common.RoleCommonUser)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestDeleteAdminBoundChannelPreservesBaseChannel(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 5203
+	groupID := env.createGroup(t, owner, "管理员绑定组")
+	baseID := nextBaseChannelID()
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseID), Name: "管理员既有渠道", Key: "admin-secret", Models: "admin-model",
+		Group: "default", Status: common.ChannelStatusEnabled,
+	}).Error)
+	require.NoError(t, env.db.Create(&basemodel.Ability{
+		Group: "default", Model: "admin-model", ChannelId: int(baseID), Enabled: true,
+	}).Error)
+	rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"base_channel_id":`+strconv.FormatInt(baseID, 10)+`,"name":"管理员绑定分享"}`,
+		common.RoleAdminUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	channelID := int64(body["data"].(map[string]any)["id"].(float64))
+
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/channels/"+strconv.FormatInt(channelID, 10), owner, "", common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var baseChannel basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", baseID).First(&baseChannel).Error)
+	assert.Equal(t, common.ChannelStatusManuallyDisabled, baseChannel.Status)
+	assert.Empty(t, baseChannel.Key)
+	assert.Empty(t, baseChannel.Models)
+}
+
+func TestDeleteShareGroupCascadesManagedChannels(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner, stranger int64 = 5204, 5205
+	groupID := env.createGroup(t, owner, "级联删除组")
+	channelIDs := make([]int64, 0, 2)
+	baseIDs := make([]int64, 0, 2)
+	for _, name := range []string{"级联线路一", "级联线路二"} {
+		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"`+name+`","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-cascade"}`,
+			common.RoleCommonUser)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		channelID := int64(body["data"].(map[string]any)["id"].(float64))
+		channel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+		require.NoError(t, err)
+		channelIDs = append(channelIDs, channelID)
+		baseIDs = append(baseIDs, channel.BaseChannelID)
+	}
+	const publishedModel = "cascade-plaza-model"
+	assertOfferingPublishProjectionAtomic(t, env, owner, owner+100, channelIDs[0], publishedModel)
+	rec, body := env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items, _ := body["data"].(map[string]any)["items"].([]any)
+	require.Condition(t, func() bool {
+		for _, raw := range items {
+			item, _ := raw.(map[string]any)
+			if item["model"] == publishedModel {
+				return true
+			}
+		}
+		return false
+	}, "已发布供给在删除前应出现在所有者的模型广场")
+
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner, "", common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	_, err := apigxmodel.GetShareGroup(env.db, owner, groupID)
+	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
+	for index, channelID := range channelIDs {
+		_, err = apigxmodel.GetChannel(env.db, owner, channelID)
+		assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
+		var count int64
+		require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", baseIDs[index]).Count(&count).Error)
+		assert.Zero(t, count, "平台代建底座渠道应随分组级联删除")
+	}
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items, _ = body["data"].(map[string]any)["items"].([]any)
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		assert.NotEqual(t, publishedModel, item["model"], "级联删除后供给必须立即从模型广场消失")
+	}
+
+	// 所有者重复删除会继续清理并成功；其他用户仍得到 404，避免资源枚举。
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/share-groups/"+strconv.FormatInt(groupID, 10), owner, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	rec, _ = env.doWithRole(t, http.MethodDelete, "/api/share-groups/"+strconv.FormatInt(groupID, 10), stranger, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestReconcileDeletedShareResourcesCleansLegacyResidue(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 5206
+	createManagedChannel := func(groupID int64, name string) (int64, int64) {
+		t.Helper()
+		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"`+name+`","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_key":"sk-reconcile"}`,
+			common.RoleCommonUser)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		channelID := int64(body["data"].(map[string]any)["id"].(float64))
+		channel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+		require.NoError(t, err)
+		return channelID, channel.BaseChannelID
+	}
+
+	// Older versions deleted only the parent group, leaving a live child and
+	// its base channel behind. Startup reconciliation must finish both.
+	groupID := env.createGroup(t, owner, "旧版残留分组")
+	channelID, baseID := createManagedChannel(groupID, "旧版孤儿渠道")
+	require.NoError(t, apigxmodel.DeleteShareGroup(env.db, owner, groupID))
+	_, err := apigxmodel.GetChannel(env.db, owner, channelID)
+	require.NoError(t, err)
+	cleaned, err := channelpool.ReconcileDeletedShareResources(env.db)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, cleaned, 1)
+	_, err = apigxmodel.GetChannel(env.db, owner, channelID)
+	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
+	var count int64
+	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", baseID).Count(&count).Error)
+	assert.Zero(t, count)
+
+	// Older channel deletion left a disabled base-channel tombstone. The same
+	// reconciliation removes only the APIGX-managed base row.
+	groupID = env.createGroup(t, owner, "旧版渠道墓碑组")
+	channelID, baseID = createManagedChannel(groupID, "旧版渠道墓碑")
+	_, err = channelpool.QuiesceBaseChannel(env.db, baseID)
+	require.NoError(t, err)
+	require.NoError(t, channelpool.ClearBaseChannelProjection(env.db, baseID))
+	require.NoError(t, apigxmodel.DeleteChannel(env.db, owner, channelID))
+	cleaned, err = channelpool.ReconcileDeletedShareResources(env.db)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, cleaned, 1)
+	require.NoError(t, env.db.Model(&basemodel.Channel{}).Where("id = ?", baseID).Count(&count).Error)
+	assert.Zero(t, count)
 }
 
 func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, reviewer, channelID int64, modelID string) {
@@ -890,11 +1019,8 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 				var retired basemodel.Channel
-				require.NoError(t, tx.Where("id = ?", baseID).First(&retired).Error)
-				assert.Equal(t, common.ChannelStatusManuallyDisabled, retired.Status)
-				assert.Empty(t, retired.Key)
-				assert.Empty(t, retired.Models)
-				assert.False(t, retired.ChannelInfo.IsMultiKey)
+				assert.ErrorIs(t, tx.Where("id = ?", baseID).First(&retired).Error, gorm.ErrRecordNotFound,
+					"平台代建的底座渠道应随分享渠道彻底删除")
 				var abilityCount int64
 				require.NoError(t, tx.Model(&basemodel.Ability{}).Where("channel_id = ?", baseID).Count(&abilityCount).Error)
 				assert.Zero(t, abilityCount)

@@ -346,9 +346,35 @@ func (h *handler) deleteShareGroup(c *gin.Context) {
 	if !valid {
 		return
 	}
-	if err := apigxmodel.DeleteShareGroup(h.db, owner, id); err != nil {
+	group, err := apigxmodel.GetShareGroupIncludingDeleted(h.db, owner, id)
+	if err != nil {
 		failFromRepo(c, err)
 		return
+	}
+	// Hide the group from the plaza first and prevent ordinary creates from
+	// finding it. Child cleanup is a retryable saga; a repeated DELETE by the
+	// same owner continues from the tombstone.
+	if group.AliveFlag == apigxmodel.AliveFlagAlive {
+		if err := apigxmodel.DeleteShareGroup(h.db, owner, id); err != nil {
+			failFromRepo(c, err)
+			return
+		}
+	}
+	for {
+		channels, err := apigxmodel.ListChannelsByOwnerAndGroup(h.db, owner, id, 200)
+		if err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		if len(channels) == 0 {
+			break
+		}
+		for _, shareChannel := range channels {
+			if err := channelpool.RetireShareChannel(h.db, owner, shareChannel.ID); err != nil {
+				failFromRepo(c, err)
+				return
+			}
+		}
 	}
 	ok(c, gin.H{"deleted": id})
 }
@@ -650,36 +676,9 @@ func (h *handler) deleteChannel(c *gin.Context) {
 	if !valid {
 		return
 	}
-	shareChannel, err := apigxmodel.GetChannelIncludingDeleted(h.db, owner, id)
-	if err != nil {
+	if err := channelpool.RetireShareChannel(h.db, owner, id); err != nil {
 		failFromRepo(c, err)
 		return
-	}
-	// 第一步单独提交并立即刷新缓存：从这一刻起，即使后续清理失败，底座渠道也不会
-	// 再接收新请求。重试 DELETE 会继续完成剩余步骤。
-	baseExists, err := channelpool.QuiesceBaseChannel(h.db, shareChannel.BaseChannelID)
-	if err != nil {
-		failFromRepo(c, err)
-		return
-	}
-	if baseExists {
-		basemodel.CacheUpdateChannelStatus(int(shareChannel.BaseChannelID), common.ChannelStatusManuallyDisabled)
-	}
-
-	// 第二步撤销明文 Key、多 Key 状态、模型和能力投影。底座行保留为停用墓碑，
-	// 使历史任务仍能识别原渠道，同时没有任何可再次出站的凭据或能力。
-	if err := channelpool.ClearBaseChannelProjection(h.db, shareChannel.BaseChannelID); err != nil {
-		failFromRepo(c, err)
-		return
-	}
-	if shareChannel.AliveFlag == apigxmodel.AliveFlagAlive {
-		if err := apigxmodel.DeleteChannel(h.db, owner, id); err != nil {
-			failFromRepo(c, err)
-			return
-		}
-	}
-	if basemodel.DB != nil {
-		basemodel.InitChannelCache()
 	}
 	ok(c, gin.H{"deleted": id})
 }
@@ -3004,6 +3003,7 @@ func provisionBaseChannelForShareChannel(
 		}
 	}
 
+	managedTag := channelpool.ManagedBaseChannelTag
 	base := basemodel.Channel{
 		Name:        "APIGX-" + channel.Name,
 		Type:        recipe.BaseChannelType,
@@ -3013,6 +3013,7 @@ func provisionBaseChannelForShareChannel(
 		Models:      "",
 		Status:      common.ChannelStatusEnabled,
 		CreatedTime: common.GetTimestamp(),
+		Tag:         &managedTag,
 	}
 	if len(upstreamKeys) > 1 {
 		stableIDs := make([]string, 0, len(keyRecords))

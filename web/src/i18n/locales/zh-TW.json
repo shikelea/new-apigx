@@ -6762,7 +6762,7 @@
     "Select a share group": "選擇分享分組",
     "Delete share group": "刪除分享分組",
     "Delete share channel": "刪除分享管道",
-    "The group disappears from your lists. Channels under it are not deleted.": "該分組將從你的清單中消失；其下的管道不會被刪除。",
+    "The group and its channels disappear from your lists and stop serving requests.": "該分組及其下管道將從你的清單中消失，並停止對外提供服務。",
     "The channel disappears from your lists and stops serving requests.": "該管道將從你的清單中消失，並停止對外提供服務。",
     "Access invites": "邀請碼存取",
     "Issue an invite so others can see the resources of a share group.": "發放邀請碼後，對方就能看見該分享分組的資源。",

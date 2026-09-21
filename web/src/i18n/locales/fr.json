@@ -6762,7 +6762,7 @@
     "Select a share group": "Choisir un groupe de partage",
     "Delete share group": "Supprimer le groupe de partage",
     "Delete share channel": "Supprimer le canal de partage",
-    "The group disappears from your lists. Channels under it are not deleted.": "Le groupe disparaît de vos listes. Les canaux associés ne sont pas supprimés.",
+    "The group and its channels disappear from your lists and stop serving requests.": "Le groupe et ses canaux disparaissent de vos listes et cessent de traiter les requêtes.",
     "The channel disappears from your lists and stops serving requests.": "Le canal disparaît de vos listes et cesse de servir les requêtes.",
     "Access invites": "Access invites",
     "Issue an invite so others can see the resources of a share group.": "Émettez une invitation pour que d'autres voient les ressources d'un groupe de partage.",

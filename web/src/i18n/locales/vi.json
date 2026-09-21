@@ -6762,7 +6762,7 @@
     "Select a share group": "Chọn nhóm chia sẻ",
     "Delete share group": "Xóa nhóm chia sẻ",
     "Delete share channel": "Xóa kênh chia sẻ",
-    "The group disappears from your lists. Channels under it are not deleted.": "Nhóm sẽ biến mất khỏi danh sách. Các kênh bên trong không bị xóa.",
+    "The group and its channels disappear from your lists and stop serving requests.": "Nhóm và các kênh bên trong sẽ biến mất khỏi danh sách và ngừng phục vụ yêu cầu.",
     "The channel disappears from your lists and stops serving requests.": "Kênh sẽ biến mất khỏi danh sách và ngừng phục vụ yêu cầu.",
     "Access invites": "Access invites",
     "Issue an invite so others can see the resources of a share group.": "Phát lời mời để người khác thấy tài nguyên của nhóm chia sẻ.",

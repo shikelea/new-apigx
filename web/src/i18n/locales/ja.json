@@ -6762,7 +6762,7 @@
     "Select a share group": "共有グループを選択",
     "Delete share group": "共有グループを削除",
     "Delete share channel": "共有チャネルを削除",
-    "The group disappears from your lists. Channels under it are not deleted.": "グループは一覧から消えます。配下のチャネルは削除されません。",
+    "The group and its channels disappear from your lists and stop serving requests.": "グループと配下のチャネルは一覧から消え、リクエストの処理を停止します。",
     "The channel disappears from your lists and stops serving requests.": "チャネルは一覧から消え、リクエストの処理を停止します。",
     "Access invites": "Access invites",
     "Issue an invite so others can see the resources of a share group.": "招待を発行すると、相手がその共有グループのリソースを閲覧できます。",

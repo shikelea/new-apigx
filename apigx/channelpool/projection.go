@@ -35,6 +35,12 @@ import (
 // ErrNoUsableKey 表示池内没有可用凭据——此时渠道不能接收新请求（计划书 §9.2）。
 var ErrNoUsableKey = errors.New("channelpool: no usable upstream key")
 
+// ManagedBaseChannelTag marks base channels provisioned exclusively for one
+// APIGX share channel. They can be physically removed when the share channel
+// is deleted; administrator-owned channels that were only linked to APIGX do
+// not carry this marker and must stay in the base channel list.
+const ManagedBaseChannelTag = "apigx-managed"
+
 // QuiesceBaseChannel 先把底座渠道和能力置为不可选，作为删除 saga 的失败关闭边界。
 // 它单独提交；后续清理失败时也不会重新接收新请求。返回 false 表示底座渠道已不存在。
 func QuiesceBaseChannel(db *gorm.DB, baseChannelID int64) (bool, error) {
@@ -92,6 +98,123 @@ func ClearBaseChannelProjection(db *gorm.DB, baseChannelID int64) error {
 		}
 		return tx.Where("channel_id = ?", baseChannelID).Delete(&basemodel.Ability{}).Error
 	})
+}
+
+// DeleteManagedBaseChannel removes a base channel that APIGX provisioned for
+// the given share channel. The exact legacy name check upgrades channels
+// created before ManagedBaseChannelTag was introduced without mistaking an
+// arbitrary administrator-bound channel for an APIGX-owned projection.
+//
+// Missing rows and administrator-owned rows are successful no-ops so the
+// surrounding delete saga remains safe to retry.
+func DeleteManagedBaseChannel(db *gorm.DB, baseChannelID int64, shareChannelName string) (bool, error) {
+	if db == nil {
+		return false, errors.New("channelpool: nil db")
+	}
+	if baseChannelID <= 0 {
+		return false, fmt.Errorf("channelpool: invalid base channel id %d", baseChannelID)
+	}
+	var baseChannel basemodel.Channel
+	if err := db.Where("id = ?", baseChannelID).First(&baseChannel).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	managed := baseChannel.Tag != nil && *baseChannel.Tag == ManagedBaseChannelTag
+	legacyManaged := baseChannel.Name == "APIGX-"+strings.TrimSpace(shareChannelName) &&
+		baseChannel.Group == "default"
+	if !managed && !legacyManaged {
+		return false, nil
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("channel_id = ?", baseChannelID).Delete(&basemodel.Ability{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ?", baseChannelID).Delete(&basemodel.Channel{}).Error
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RetireShareChannel removes one APIGX share channel from active discovery and
+// routing. It is deliberately retryable: a previous attempt may already have
+// disabled, cleared or deleted the base projection before the APIGX tombstone
+// was written.
+func RetireShareChannel(db *gorm.DB, ownerUserID, shareChannelID int64) error {
+	shareChannel, err := apigxmodel.GetChannelIncludingDeleted(db, ownerUserID, shareChannelID)
+	if err != nil {
+		return err
+	}
+	baseExists, err := QuiesceBaseChannel(db, shareChannel.BaseChannelID)
+	if err != nil {
+		return err
+	}
+	if baseExists {
+		basemodel.CacheUpdateChannelStatus(int(shareChannel.BaseChannelID), common.ChannelStatusManuallyDisabled)
+	}
+	if err := ClearBaseChannelProjection(db, shareChannel.BaseChannelID); err != nil {
+		return err
+	}
+	if _, err := DeleteManagedBaseChannel(db, shareChannel.BaseChannelID, shareChannel.Name); err != nil {
+		return err
+	}
+	if shareChannel.AliveFlag == apigxmodel.AliveFlagAlive {
+		if err := apigxmodel.DeleteChannel(db, ownerUserID, shareChannelID); err != nil {
+			return err
+		}
+	}
+	if basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+	return nil
+}
+
+// ReconcileDeletedShareResources finishes cleanup left by older versions:
+// live channels below a deleted group are retired, and managed base-channel
+// rows left behind by already-deleted share channels are removed. Historical
+// APIGX rows and usage snapshots remain untouched.
+func ReconcileDeletedShareResources(db *gorm.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("channelpool: nil db")
+	}
+	channelTable := apigxmodel.Channel{}.TableName()
+	groupTable := apigxmodel.ShareGroup{}.TableName()
+	var orphaned []apigxmodel.Channel
+	if err := db.Unscoped().Table(channelTable+" AS c").Select("c.*").
+		Joins("LEFT JOIN "+groupTable+" AS g ON g.id = c.share_group_id").
+		Where("c.deleted_at IS NULL AND c.alive_flag = ? AND (g.id IS NULL OR g.deleted_at IS NOT NULL OR g.alive_flag <> ?)",
+			apigxmodel.AliveFlagAlive, apigxmodel.AliveFlagAlive).
+		Scan(&orphaned).Error; err != nil {
+		return 0, err
+	}
+	cleaned := 0
+	for _, shareChannel := range orphaned {
+		if err := RetireShareChannel(db, shareChannel.OwnerUserID, shareChannel.ID); err != nil {
+			return cleaned, err
+		}
+		cleaned++
+	}
+
+	var tombstones []apigxmodel.Channel
+	if err := db.Unscoped().Where("deleted_at IS NOT NULL OR alive_flag <> ?", apigxmodel.AliveFlagAlive).
+		Find(&tombstones).Error; err != nil {
+		return cleaned, err
+	}
+	for _, shareChannel := range tombstones {
+		removed, err := DeleteManagedBaseChannel(db, shareChannel.BaseChannelID, shareChannel.Name)
+		if err != nil {
+			return cleaned, err
+		}
+		if removed {
+			cleaned++
+		}
+	}
+	if cleaned > 0 && basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+	return cleaned, nil
 }
 
 // Projection 是一次投影的结果。

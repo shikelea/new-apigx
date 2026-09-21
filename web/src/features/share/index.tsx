@@ -77,6 +77,8 @@ export function MyShares() {
       toast.success(t('share.group.deleted'))
       void queryClient.invalidateQueries({ queryKey: ['apigx-share-groups'] })
       void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
+      void queryClient.invalidateQueries({ queryKey: ['apigx-plaza'] })
+      void queryClient.invalidateQueries({ queryKey: ['channels'] })
     },
     onError: (error) => handleServerError(error),
   })
@@ -86,6 +88,8 @@ export function MyShares() {
       setDeletingChannel(null)
       toast.success(t('share.channel.deleted'))
       void queryClient.invalidateQueries({ queryKey: ['apigx-share-channels'] })
+      void queryClient.invalidateQueries({ queryKey: ['apigx-plaza'] })
+      void queryClient.invalidateQueries({ queryKey: ['channels'] })
     },
     onError: (error) => handleServerError(error),
   })
@@ -167,7 +171,7 @@ export function MyShares() {
           }}
           title={t('Delete share group')}
           desc={t(
-            'The group disappears from your lists. Channels under it are not deleted.'
+            'The group and its channels disappear from your lists and stop serving requests.'
           )}
           destructive
           confirmText={t('Delete')}

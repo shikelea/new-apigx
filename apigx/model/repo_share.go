@@ -109,6 +109,24 @@ func GetShareGroup(db *gorm.DB, ownerUserID, id int64) (*ShareGroup, error) {
 	return &group, nil
 }
 
+// GetShareGroupIncludingDeleted returns a group tombstone owned by the caller.
+// Delete-group cleanup is a retryable saga: the group is hidden first, then
+// child channels and their base projections are retired.
+func GetShareGroupIncludingDeleted(db *gorm.DB, ownerUserID, id int64) (*ShareGroup, error) {
+	if db == nil || ownerUserID <= 0 || id <= 0 {
+		return nil, fmt.Errorf("%w: owner and id are required", ErrInvalidArgument)
+	}
+	var group ShareGroup
+	err := db.Unscoped().Where("id = ? AND owner_user_id = ?", id, ownerUserID).First(&group).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &group, nil
+}
+
 // ListShareGroups 列出某所有者的存活分组（按更新时间倒序）。
 func ListShareGroups(db *gorm.DB, ownerUserID int64, limit int) ([]ShareGroup, error) {
 	if limit <= 0 || limit > 200 {
@@ -244,6 +262,19 @@ func ListChannelsByGroup(db *gorm.DB, ownerUserID, shareGroupID int64, limit int
 	if _, err := GetShareGroup(db, ownerUserID, shareGroupID); err != nil {
 		return nil, err
 	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var channels []Channel
+	err := db.Where("owner_user_id = ? AND share_group_id = ?", ownerUserID, shareGroupID).
+		Order("updated_at DESC, id DESC").Limit(limit).Find(&channels).Error
+	return channels, err
+}
+
+// ListChannelsByOwnerAndGroup lists live child channels without requiring the
+// parent group to remain live. It is used only to finish a retryable cascading
+// group deletion after the group has already disappeared from discovery.
+func ListChannelsByOwnerAndGroup(db *gorm.DB, ownerUserID, shareGroupID int64, limit int) ([]Channel, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}

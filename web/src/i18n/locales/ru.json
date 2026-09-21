@@ -6762,7 +6762,7 @@
     "Select a share group": "Выберите группу общих ресурсов",
     "Delete share group": "Удалить группу общих ресурсов",
     "Delete share channel": "Удалить общий канал",
-    "The group disappears from your lists. Channels under it are not deleted.": "Группа исчезнет из ваших списков. Каналы внутри неё не удаляются.",
+    "The group and its channels disappear from your lists and stop serving requests.": "Группа и её каналы исчезнут из списков и перестанут обслуживать запросы.",
     "The channel disappears from your lists and stops serving requests.": "Канал исчезнет из ваших списков и перестанет обслуживать запросы.",
     "Access invites": "Access invites",
     "Issue an invite so others can see the resources of a share group.": "Выдайте приглашение, чтобы другие увидели ресурсы группы общих ресурсов.",

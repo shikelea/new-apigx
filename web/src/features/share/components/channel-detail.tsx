@@ -111,7 +111,7 @@ export function ChannelDetailView(props: { channelId: number }) {
       void queryClient.invalidateQueries({
         queryKey: ['apigx-channel-offerings', props.channelId],
       })
-      void queryClient.invalidateQueries({ queryKey: ['apigx-model-sources'] })
+      void queryClient.invalidateQueries({ queryKey: ['apigx-plaza'] })
     },
     onError: (error) => handleServerError(error),
   })

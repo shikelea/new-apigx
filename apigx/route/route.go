@@ -6,7 +6,9 @@ package apigxroute
 
 import (
 	apigxapi "github.com/QuantumNous/new-api/apigx/api"
+	"github.com/QuantumNous/new-api/apigx/channelpool"
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,5 +20,10 @@ const BasePath = "/apigx"
 // 调用方负责挂认证中间件（UserAuth）；本函数只负责路由与处理器。
 // 数据库句柄由 `apigxmodel.Migrate` 在启动时捕获（见其注释），因此这里不需要额外参数。
 func Register(apiRouter *gin.RouterGroup) {
+	if cleaned, err := channelpool.ReconcileDeletedShareResources(apigxmodel.DefaultDB()); err != nil {
+		common.SysError("apigx: reconcile deleted share resources failed: " + err.Error())
+	} else if cleaned > 0 {
+		common.SysLog("apigx: reconciled deleted share resources")
+	}
 	apigxapi.Register(apiRouter.Group(BasePath), apigxmodel.DefaultDB())
 }
