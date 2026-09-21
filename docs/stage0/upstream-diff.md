@@ -13,12 +13,12 @@
 ## 当前统计
 
 - 基线提交：`69a50029819a26c53e6babd276d49cfe2f8880ad`
-- 当前 fork 提交：`ab677b6e347ae2b374764af4847f985ff9a8b9a7`
-- 相对基线提交数：**171** 个
+- 当前 fork 提交：`bf36a3a99d5e30da230898ee9eec335902163092`
+- 相对基线提交数：**172** 个
 - 变化文件：**323** 个（新增 **174**，修改上游已有文件 **149**）
-- 行数变化：新增 **46,178** 行，删除 **2,365** 行
+- 行数变化：新增 **46,185** 行，删除 **2,365** 行
 - 未跟踪文件：**0** 个
-- 核对时间：2026-09-20（`git diff --name-status/--shortstat`；阶段 G5 收口）
+- 核对时间：2026-09-21（`git diff --name-status/--shortstat`；数据看板共享用量本地化收口）
 
 > 2026-09-18 接手审查纠正：本节此前仍写“修改上游文件 0 个”，那只是阶段 0 早期快照，已经与当前 fork 不符。完整风险与整改顺序见 `docs/TAKEOVER_AUDIT.md`。
 
@@ -48,6 +48,7 @@
 | D-044 | `new-api/service/{relay_error.go,relay_error_test.go}`、`new-api/controller/{relay.go,relay_multi_key_failover_test.go}` | 流式响应后的重试边界 | 在底座跨渠道与 APIGX 渠道内重试判定前统一检查 Gin Writer；响应已写出后停止所有 HTTP 重试，顶层只记录错误，不再把 JSON 错误体追加到已开始的 SSE/普通响应；WebSocket 继续走原错误帧 | 锁定基线的重试策略没有响应提交检查；Claude/Gemini 等适配器可能在已输出部分流后返回错误，继续换 Key/渠道会把两个上游响应拼入同一客户端流 | **中**：修改公共错误判定与顶层呈现；已用真实控制器链路验证 Anthropic SSE 输出部分内容后坏帧只访问第一把 Key且无 JSON 拼接，原 429/401/400 行为、Go 全仓和三库矩阵通过；仍需真实第三方流中断压测 | 2026-09-20 | 已实施；未写出响应时继续完整复用原错误策略，写出后严格停止重试 |
 | D-045 | `new-api/apigx/{api/share.go,model/repo_price.go,price/match.go}`、`new-api/web/src/features/share/**`、七种语言文件 | 分享模型人工定价与批量送审 | 动态计价表达式或未知价格保留未知状态并给分享者人工录入入口；服务端按本人 Offering 反查作用域，保存 `manual + locked + accepted` USD 不可变快照，以状态和修订号条件更新防止送审竞态；渠道工作台显示定价状态，支持单项及批量提交已定价草稿/驳回模型，并返回成功、跳过和失败明细 | G4 分享者流程断点：动态表达式提示“手动输入”却没有入口，模型抓取后也不能从渠道工作台一键提交审核 | **低到中**：新增 APIGX owner-scoped API、价格快照和分享工作台交互；已通过权限/事务/并发回滚、SQLite/PostgreSQL/MySQL、前端 1775 项、Go 全仓、生产构建及桌面/移动真实浏览器流程 | 2026-09-20 | 已实施；明确零价与未知价继续分离，待审核/已发布状态禁止改价 |
 | D-046 | `new-api/{common/constants.go,main.go,model/frontend_option_migration.go,web/**,electron/**,README*,NOTICE}` | APIGX 产品主页、模型目录文案与品牌边界 | 默认主页围绕模型广场、统一平台 Key、质量与容量路由、渠道内多 Key 故障切换、六类 AI API 和免费共享记账重做；管理员模型身份确认改用业务语言；默认系统名、HTML、布局、About、README 与桌面应用统一为 APIGX；仅把数据库中精确等于 `New API` 的旧默认值迁移为 APIGX，自定义名称不变；上游链接、AGPLv3、原作者署名、Go 模块路径和真实 New API 渠道类型继续保留 | 用户明确要求开源产品使用 APIGX 品牌；旧页面仍以 New API 通用网关和内部数据结构为中心，用户无法从首页理解共享资源工作流 | **中**：改动默认产品身份、首页与多语言文案，并增加跨三库默认值迁移；已通过前端全量 1778 项、定向 5 项、typecheck、变更文件 lint/format、生产构建，Go common/model/controller、SQLite/PostgreSQL/MySQL 品牌迁移矩阵，以及 1440/390 浅色/深色、真实广场/About 与 console error 0 浏览器验收 | 2026-09-20 | 已实施；APIGX 为 fork 产品身份，New API 仅在上游来源、许可署名、模块路径和真实渠道语义中出现 |
+| D-047 | `new-api/web/src/i18n/locales/*.json` | 数据看板共享资源用量本地化 | 为数据看板区块、页签和共享用量卡片共同使用的 `Shared resource usage` 翻译键补齐七种语言；简体中文显示“共享资源用量” | G5 浏览器回扫发现该英文键在中文界面直接回显，影响数据看板的一致性 | **低**：只补已有翻译键，不改变数据或路由；七语言 JSON、定向 i18n 3 项、格式检查、生产构建及真实浏览器页面均通过 | 2026-09-21 | 已实施 |
 | D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
 | D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
 | D-009 | `new-api/middleware/distributor.go` | 必须修改 | 在 `SetupContextForSelectedChannel` 之后、`c.Next()` 之前插入容量钩子：`relayhook.Acquire` 取租约、`defer lease.Release()` 在下游全部结束后释放；满载 429、账本不可用 503。另加 1 行 import | T1.7 第二部分；计划书 §9.2（共享容量控制必须贯穿请求生命周期） | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。改动本身是「新增一个可开关的调用」，默认关闭时行为不变 | 2026-09-16 | 已实施（默认关闭，`APIGX_CAPACITY_ENABLED`） |
@@ -71,7 +72,7 @@
 | D-010 | `new-api/apigx/relayhook/{capacity_hook,capacity_hook_test}.go` | 新增 | 容量接线：`Acquire`/`Lease.Release`/长流续租协程/错误码映射（429+Retry-After、503）；为渠道+平台 Key+用户三维度做同一次原子预留 | T1.7 | 低（新包；不反向依赖 middleware，避免循环） | 2026-09-16 | 已实施 |
 | D-008 | `new-api/apigx/capacity/{capacity,capacity_test}.go` | 新增 | 共享容量账本：Lua 原子预留/幂等归还/租约续租与过期回收；维度 key 覆盖用户·平台 Key·渠道·供给·上游 Key·上游账户池 | T1.7；计划书 §9.2（底座没有渠道/Key 级并发上限，阶段 0 已实测确认） | 无（上游不存在同名路径） | 2026-09-16 | 已实施（核心账本） |
 | D-007 | `new-api/service/apigx_usage_only.go`、`apigx_usage_only_test.go` | 新增（同包） | 模式开关（`APIGX_USAGE_ONLY`）、`UsageOnlyFunding`、`newUsageOnlySession` 及其单测 | T1.6 | 低（新文件；与底座 `funding_source.go` 同包，便于实现 FundingSource 接口而不产生循环依赖） | 2026-09-16 | 已实施 |
-| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0171-feat-productize-APIGX-homepage-and-branding.patch`；fork 分支 `apigx`，HEAD `ab677b6` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-20 | 171 个补丁从基线重放成功，tree `64a4bd61a15459b7835a4c1007d2b988804bddf8` 一致 |
+| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0172-fix-localize-shared-resource-usage.patch`；fork 分支 `apigx`，HEAD `bf36a3a` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-21 | 172 个补丁从基线重放成功，tree `e3e041bdca20f3230ef7897e87a25feff8e7a4bd` 与 fork HEAD 一致 |
 
 ## 二、新增文件（不修改上游）
 

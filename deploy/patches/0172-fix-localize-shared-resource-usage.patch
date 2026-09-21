@@ -1,0 +1,102 @@
+From bf36a3a99d5e30da230898ee9eec335902163092 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Sun, 20 Sep 2026 23:03:26 +0800
+Subject: [PATCH] fix: localize shared resource usage
+
+---
+ web/src/i18n/locales/en.json    | 1 +
+ web/src/i18n/locales/fr.json    | 1 +
+ web/src/i18n/locales/ja.json    | 1 +
+ web/src/i18n/locales/ru.json    | 1 +
+ web/src/i18n/locales/vi.json    | 1 +
+ web/src/i18n/locales/zh-TW.json | 1 +
+ web/src/i18n/locales/zh.json    | 1 +
+ 7 files changed, 7 insertions(+)
+
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 8a956ed..0b1070f 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6961,6 +6961,7 @@
+     "Direct user access": "Direct user access",
+     "Grant a registered user access by exact username.": "Grant a registered user access by exact username.",
+     "Shared resource": "Shared resource",
++    "Shared resource usage": "Shared resource usage",
+     "Select a shared resource": "Select a shared resource",
+     "Select a shared resource to review access": "Select a shared resource to review access",
+     "No active access grants": "No active access grants",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 85dcd2d..6f8fbf3 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6961,6 +6961,7 @@
+     "Direct user access": "Direct user access",
+     "Grant a registered user access by exact username.": "Grant a registered user access by exact username.",
+     "Shared resource": "Shared resource",
++    "Shared resource usage": "Utilisation des ressources partagées",
+     "Select a shared resource": "Select a shared resource",
+     "Select a shared resource to review access": "Select a shared resource to review access",
+     "No active access grants": "No active access grants",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index c199e28..1074870 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6961,6 +6961,7 @@
+     "Direct user access": "Direct user access",
+     "Grant a registered user access by exact username.": "Grant a registered user access by exact username.",
+     "Shared resource": "Shared resource",
++    "Shared resource usage": "共有リソース使用量",
+     "Select a shared resource": "Select a shared resource",
+     "Select a shared resource to review access": "Select a shared resource to review access",
+     "No active access grants": "No active access grants",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index b7208b2..69dea0b 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6961,6 +6961,7 @@
+     "Direct user access": "Direct user access",
+     "Grant a registered user access by exact username.": "Grant a registered user access by exact username.",
+     "Shared resource": "Shared resource",
++    "Shared resource usage": "Использование общих ресурсов",
+     "Select a shared resource": "Select a shared resource",
+     "Select a shared resource to review access": "Select a shared resource to review access",
+     "No active access grants": "No active access grants",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 2185b7f..8c57eee 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6961,6 +6961,7 @@
+     "Direct user access": "Direct user access",
+     "Grant a registered user access by exact username.": "Grant a registered user access by exact username.",
+     "Shared resource": "Shared resource",
++    "Shared resource usage": "Mức sử dụng tài nguyên được chia sẻ",
+     "Select a shared resource": "Select a shared resource",
+     "Select a shared resource to review access": "Select a shared resource to review access",
+     "No active access grants": "No active access grants",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 5c0bd6b..3384311 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6961,6 +6961,7 @@
+     "Direct user access": "指定使用者授权",
+     "Grant a registered user access by exact username.": "透過准确使用者名向已注册使用者授权。",
+     "Shared resource": "分享資源",
++    "Shared resource usage": "共享資源用量",
+     "Select a shared resource": "選擇分享資源",
+     "Select a shared resource to review access": "選擇分享資源后查看授权",
+     "No active access grants": "暂无有效授权",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 083fca5..5a0990e 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6961,6 +6961,7 @@
+     "Direct user access": "指定用户授权",
+     "Grant a registered user access by exact username.": "通过准确用户名向已注册用户授权。",
+     "Shared resource": "分享资源",
++    "Shared resource usage": "共享资源用量",
+     "Select a shared resource": "选择分享资源",
+     "Select a shared resource to review access": "选择分享资源后查看授权",
+     "No active access grants": "暂无有效授权",
+-- 
+2.53.0.windows.1
+
