@@ -28,18 +28,38 @@ func BreakerProbeModality(db *gorm.DB, offeringID int64) (int, error) {
 	if db == nil || offeringID <= 0 {
 		return 0, fmt.Errorf("%w: breaker probe offering is required", ErrInvalidArgument)
 	}
-	var row struct {
-		ModalityType int
-	}
-	err := db.Table((ModelOffering{}).TableName()+" AS offering").
-		Select("canonical.modality_type AS modality_type").
-		Joins("JOIN "+(CanonicalModel{}).TableName()+" AS canonical ON canonical.id = offering.canonical_model_id").
-		Where("offering.id = ? AND offering.alive_flag = ?", offeringID, AliveFlagAlive).
-		Take(&row).Error
+	var offering ModelOffering
+	err := db.Select("canonical_model_id", "upstream_model_id").
+		Where("id = ? AND alive_flag = ?", offeringID, AliveFlagAlive).
+		Take(&offering).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, nil
 	}
-	return row.ModalityType, err
+	if err != nil {
+		return 0, err
+	}
+	if offering.CanonicalModelID > 0 {
+		var canonical CanonicalModel
+		if err := db.Select("modality_type").Where("id = ?", offering.CanonicalModelID).
+			Take(&canonical).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		return canonical.ModalityType, nil
+	}
+
+	// The normal administrator workflow confirms a catalog alias after the
+	// offering already exists. Older offerings therefore legitimately have no
+	// denormalized canonical_model_id even though their alias is confirmed.
+	// Resolve that confirmed identity here instead of treating every UI-created
+	// offering as an unknown protocol that can never enter durable recovery.
+	canonical, ok, err := ResolveCanonicalModel(db, offering.UpstreamModelID)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return canonical.ModalityType, nil
 }
 
 // BreakerProbeSupportsModality reports whether the existing channel-test path

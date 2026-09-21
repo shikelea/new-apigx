@@ -93,6 +93,23 @@ func TestBreakerProbeModalityRequiresConfirmedCatalogIdentity(t *testing.T) {
 	supported, err = CanActivelyProbeOffering(db, offering.ID)
 	require.NoError(t, err)
 	assert.False(t, supported)
+
+	// This is the real UI workflow: the offering already exists, then an
+	// administrator confirms its catalog alias. Durable probing must use that
+	// confirmed identity even though the historical offering row still has a
+	// zero denormalized canonical_model_id.
+	var alias ModelAlias
+	require.NoError(t, db.Where("normalized_model_id = ?", NormalizeModelIDForAlias(offering.UpstreamModelID)).
+		First(&alias).Error)
+	chatCanonical := &CanonicalModel{APIModelID: "vendor-chat", ModalityType: ModalityChat, Status: 1}
+	require.NoError(t, db.Create(chatCanonical).Error)
+	require.NoError(t, ConfirmAliasCandidate(db, alias.ID, chatCanonical.ID, owner))
+	modality, err = BreakerProbeModality(db, offering.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ModalityChat, modality)
+	supported, err = CanActivelyProbeOffering(db, offering.ID)
+	require.NoError(t, err)
+	assert.True(t, supported)
 }
 
 func TestResolveQualityViewSinceExcludesPreRecoveryFailures(t *testing.T) {
