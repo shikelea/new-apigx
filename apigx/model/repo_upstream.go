@@ -118,11 +118,51 @@ func ListUpstreamAccounts(db *gorm.DB, ownerUserID int64, limit int) ([]Upstream
 // 而软删除后 `alive_flag` 变为本行 ID，因此**同一个 StableKeyID 可以被重新添加**
 // （轮换/重新导入的场景，见 schema-draft §3.5）。
 func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
+	return CreateUpstreamKeys(db, ownerUserID, []*UpstreamKey{key})
+}
+
+// CreateUpstreamKeys atomically adds one or more credentials to the same
+// owner-scoped channel. Validation happens before the first INSERT; any
+// database error rolls back every key and its credential-history row.
+func CreateUpstreamKeys(db *gorm.DB, ownerUserID int64, keys []*UpstreamKey) error {
+	if len(keys) == 0 {
+		return fmt.Errorf("%w: at least one upstream key is required", ErrInvalidArgument)
+	}
+	channelID := int64(0)
+	for _, key := range keys {
+		if key == nil || key.ChannelID <= 0 {
+			return fmt.Errorf("%w: channel_id is required", ErrInvalidArgument)
+		}
+		if channelID == 0 {
+			channelID = key.ChannelID
+		} else if key.ChannelID != channelID {
+			return fmt.Errorf("%w: all upstream keys must belong to the same channel", ErrInvalidArgument)
+		}
+	}
+	if _, err := GetChannel(db, ownerUserID, channelID); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := prepareNewUpstreamKey(key); err != nil {
+			return err
+		}
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, key := range keys {
+			if err := tx.Create(key).Error; err != nil {
+				return err
+			}
+			if err := createUpstreamKeyCredential(tx, key, 0); err != nil {
+				return err
+			}
+		}
+		return RearmAuthBlockedBreakerProbesForChannel(tx, channelID, common.GetTimestamp())
+	})
+}
+
+func prepareNewUpstreamKey(key *UpstreamKey) error {
 	if key == nil || key.ChannelID <= 0 {
 		return fmt.Errorf("%w: channel_id is required", ErrInvalidArgument)
-	}
-	if _, err := GetChannel(db, ownerUserID, key.ChannelID); err != nil {
-		return err
 	}
 	if key.StableKeyID == "" {
 		return fmt.Errorf("%w: stable_key_id is required（轮询索引与历史统计都依赖它，不能用行号）", ErrInvalidArgument)
@@ -148,12 +188,7 @@ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
 	}
 	key.AliveFlag = AliveFlagAlive
 	touchTimestamps(true, &key.CreatedAt, &key.UpdatedAt)
-	return db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(key).Error; err != nil {
-			return err
-		}
-		return createUpstreamKeyCredential(tx, key, 0)
-	})
+	return nil
 }
 
 // Weights 返回用于加权挑选的权重（0 视为未设置）。
@@ -195,8 +230,14 @@ func UpdateUpstreamKeyStatus(db *gorm.DB, ownerUserID, keyID int64, status int) 
 		return err
 	}
 	now := common.GetTimestamp()
-	return db.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
-		Updates(map[string]any{"status": status, "updated_at": now}).Error
+	if err := db.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
+		Updates(map[string]any{"status": status, "updated_at": now}).Error; err != nil {
+		return err
+	}
+	if status == UpstreamKeyStatusEnabled {
+		return RearmAuthBlockedBreakerProbesForChannel(db, key.ChannelID, now)
+	}
+	return nil
 }
 
 // UpdateUpstreamKeyWeight changes only the routing weight of one owned Key.
@@ -300,7 +341,7 @@ func RotateUpstreamKeyCredential(db *gorm.DB, ownerUserID, keyID int64, secretRe
 		key.Status = UpstreamKeyStatusEnabled
 		key.UpdatedAt = now
 		updated = *key
-		return nil
+		return RearmAuthBlockedBreakerProbesForChannel(tx, key.ChannelID, now)
 	})
 	if err != nil {
 		return nil, err

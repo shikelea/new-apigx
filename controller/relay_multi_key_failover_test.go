@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -91,6 +92,87 @@ func TestRelayRetriesAnotherKeyAfterUnauthorizedWithNoGlobalRetries(t *testing.T
 
 	assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Equal(t, []string{"key-a", "key-b"}, usedKeys)
+}
+
+func TestRelayStopsAfterSixKeysWhenGlobalRetryIsDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	usedKeys := make([]string, 0, service.MaxMultiKeyAttemptsPerRequest)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usedKeys = append(usedKeys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limited"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	database := setupRelayMultiKeyDatabase(t)
+	common.RetryTimes = 0
+	keys := make([]string, service.MaxMultiKeyAttemptsPerRequest+2)
+	stableIDs := make([]string, len(keys))
+	for index := range keys {
+		keys[index] = "primary-key-" + strconv.Itoa(index)
+		stableIDs[index] = "primary-stable-" + strconv.Itoa(index)
+	}
+	channel := relayMultiKeyChannel(7251, "six-key-limit", upstream.URL, strings.Join(keys, "\n"), stableIDs)
+	require.NoError(t, database.Create(channel).Error)
+	require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
+	model.InitChannelCache()
+
+	recorder := httptest.NewRecorder()
+	c := newRelayMultiKeyContext(t, recorder, channel, nil)
+	Relay(c, types.RelayFormatOpenAI)
+
+	assert.Equal(t, http.StatusTooManyRequests, recorder.Code, recorder.Body.String())
+	assert.Len(t, usedKeys, service.MaxMultiKeyAttemptsPerRequest)
+	assert.Equal(t, len(usedKeys), distinctStringCount(usedKeys))
+	assert.Subset(t, keys, usedKeys)
+}
+
+func TestRelayGlobalRetryOneAllowsExactlyOneMoreSixKeyChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	usedKeys := make([]string, 0, service.MaxMultiKeyAttemptsPerRequest*2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usedKeys = append(usedKeys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limited"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	database := setupRelayMultiKeyDatabase(t)
+	common.RetryTimes = 1
+	firstKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest)
+	firstStableIDs := make([]string, len(firstKeys))
+	secondKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest+2)
+	secondStableIDs := make([]string, len(secondKeys))
+	for index := range firstKeys {
+		firstKeys[index] = "first-key-" + strconv.Itoa(index)
+		firstStableIDs[index] = "first-stable-" + strconv.Itoa(index)
+	}
+	for index := range secondKeys {
+		secondKeys[index] = "second-key-" + strconv.Itoa(index)
+		secondStableIDs[index] = "second-stable-" + strconv.Itoa(index)
+	}
+	first := relayMultiKeyChannel(7261, "first-six-key-channel", upstream.URL, strings.Join(firstKeys, "\n"), firstStableIDs)
+	second := relayMultiKeyChannel(7262, "second-six-key-channel", upstream.URL, strings.Join(secondKeys, "\n"), secondStableIDs)
+	for _, channel := range []*model.Channel{first, second} {
+		require.NoError(t, database.Create(channel).Error)
+		require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
+	}
+	model.InitChannelCache()
+
+	recorder := httptest.NewRecorder()
+	c := newRelayMultiKeyContext(t, recorder, first, []int{first.Id, second.Id})
+	Relay(c, types.RelayFormatOpenAI)
+
+	assert.Equal(t, http.StatusTooManyRequests, recorder.Code, recorder.Body.String())
+	require.Len(t, usedKeys, service.MaxMultiKeyAttemptsPerRequest*2)
+	firstAttempts := usedKeys[:service.MaxMultiKeyAttemptsPerRequest]
+	secondAttempts := usedKeys[service.MaxMultiKeyAttemptsPerRequest:]
+	assert.Equal(t, len(firstAttempts), distinctStringCount(firstAttempts))
+	assert.Equal(t, len(secondAttempts), distinctStringCount(secondAttempts))
+	assert.Subset(t, firstKeys, firstAttempts)
+	assert.Subset(t, secondKeys, secondAttempts)
 }
 
 func TestRelayDoesNotRotateKeyAfterBadRequest(t *testing.T) {
@@ -248,4 +330,12 @@ func relayMultiKeyAbility(channelID int) *model.Ability {
 		Group: "default", Model: "g2-failover-model", ChannelId: channelID,
 		Enabled: true, Priority: &priority, Weight: 10,
 	}
+}
+
+func distinctStringCount(values []string) int {
+	distinct := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		distinct[value] = struct{}{}
+	}
+	return len(distinct)
 }

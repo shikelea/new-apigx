@@ -66,6 +66,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.GET("/:id", h.getChannel)
 		channels.DELETE("/:id", h.deleteChannel)
 		channels.POST("/:id/keys", h.createUpstreamKey)
+		channels.POST("/:id/keys/batch", h.createUpstreamKeysBatch)
 		channels.GET("/:id/keys", h.listUpstreamKeys)
 		channels.POST("/:id/apply", h.applyChannelPool)
 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
@@ -383,11 +384,12 @@ func (h *handler) deleteShareGroup(c *gin.Context) {
 type createChannelRequest struct {
 	// 以下两项用于"分享者自建渠道"（§4「渠道 CRUD」）：不给 base_channel_id 时，
 	// 平台按这些信息**代建底座渠道**并绑定 —— 分享者不必知道管理员侧的渠道 ID。
-	UpstreamKey   string `json:"upstream_key"`
-	ShareGroupID  int64  `json:"share_group_id"`
-	BaseChannelID int64  `json:"base_channel_id"`
-	Name          string `json:"name"`
-	RecipeID      string `json:"recipe_id"`
+	UpstreamKey   string   `json:"upstream_key"`
+	UpstreamKeys  []string `json:"upstream_keys"`
+	ShareGroupID  int64    `json:"share_group_id"`
+	BaseChannelID int64    `json:"base_channel_id"`
+	Name          string   `json:"name"`
+	RecipeID      string   `json:"recipe_id"`
 	// Protocol 仅保留给管理员绑定既有底座渠道的兼容入口。普通用户自建渠道时，
 	// 服务端只接受 RecipeID，并从配方目录重新解析底座类型与协议标识。
 	Protocol    string `json:"protocol"`
@@ -517,7 +519,7 @@ func (h *handler) createChannel(c *gin.Context) {
 		return
 	}
 	// 自建渠道时随附的上游 Key 与两类渠道记录在同一事务内登记。
-	var selfServeKey string
+	var selfServeKeys []string
 
 	channel := &apigxmodel.Channel{
 		OwnerUserID:   owner,
@@ -567,29 +569,41 @@ func (h *handler) createChannel(c *gin.Context) {
 		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
 		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
 		channel.BaseURL = channelpool.NormalizeUpstreamBaseURL(baseURL)
-		selfServeKey = strings.TrimSpace(req.UpstreamKey)
-		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey, recipe); recipeErr != nil {
+		selfServeKeys, recipeErr = normalizeUpstreamKeyInputs(req.UpstreamKey, req.UpstreamKeys)
+		if recipeErr != nil {
 			failFromRepo(c, recipeErr)
 			return
 		}
-		keyRecord, keyErr := prepareSelfServeUpstreamKey(selfServeKey)
-		if keyErr != nil {
-			common.SysError("apigx api: refuse to store upstream key: " + keyErr.Error())
-			fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
-				"credential store is not configured; refusing to store the key")
-			return
+		for _, selfServeKey := range selfServeKeys {
+			if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey, recipe); recipeErr != nil {
+				failFromRepo(c, recipeErr)
+				return
+			}
 		}
-		// 底座渠道、APIGX 渠道和初始加密 Key 共用同一个主库事务。任何一步失败都会
-		// 回滚底座行，避免留下仍为 enabled 的孤儿渠道。
+		keyRecords := make([]*apigxmodel.UpstreamKey, 0, len(selfServeKeys))
+		for _, selfServeKey := range selfServeKeys {
+			keyRecord, keyErr := prepareSelfServeUpstreamKey(selfServeKey)
+			if keyErr != nil {
+				common.SysError("apigx api: refuse to store upstream key: " + keyErr.Error())
+				fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
+					"credential store is not configured; refusing to store the key")
+				return
+			}
+			keyRecords = append(keyRecords, keyRecord)
+		}
+		// 底座渠道、APIGX 渠道和全部初始加密 Key 共用同一个主库事务。任何一步失败都会
+		// 回滚整批凭据与底座行，避免半批导入或留下仍为 enabled 的孤儿渠道。
 		if err := h.db.Transaction(func(tx *gorm.DB) error {
-			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey, recipe); err != nil {
+			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKeys, keyRecords, recipe); err != nil {
 				return err
 			}
 			if err := apigxmodel.CreateChannel(tx, channel); err != nil {
 				return err
 			}
-			keyRecord.ChannelID = channel.ID
-			return apigxmodel.CreateUpstreamKey(tx, owner, keyRecord)
+			for _, keyRecord := range keyRecords {
+				keyRecord.ChannelID = channel.ID
+			}
+			return apigxmodel.CreateUpstreamKeys(tx, owner, keyRecords)
 		}); err != nil {
 			failFromRepo(c, err)
 			return
@@ -598,7 +612,10 @@ func (h *handler) createChannel(c *gin.Context) {
 			basemodel.InitChannelCache()
 		}
 	}
-	ok(c, gin.H{"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name, "key_pool_mode": channel.KeyPoolMode})
+	ok(c, gin.H{
+		"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name,
+		"key_pool_mode": channel.KeyPoolMode, "key_count": len(selfServeKeys),
+	})
 }
 
 func (h *handler) listChannels(c *gin.Context) {
@@ -705,6 +722,13 @@ type createUpstreamKeyRequest struct {
 	UpstreamAccountID *int64 `json:"upstream_account_id"`
 }
 
+const maxUpstreamKeysPerBatch = 100
+
+type createUpstreamKeysBatchRequest struct {
+	Keys   []string `json:"keys"`
+	Weight *int64   `json:"weight"`
+}
+
 func (h *handler) createUpstreamKey(c *gin.Context) {
 	owner, valid := h.ownerID(c)
 	if !valid {
@@ -776,6 +800,61 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
 		"id": key.ID, "stable_key_id": key.StableKeyID, "name": key.Name,
 		"status": key.Status, "weight": key.Weight, "masked": maskTail(req.Key),
 	})
+}
+
+func (h *handler) createUpstreamKeysBatch(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	channelID, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req createUpstreamKeysBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	plainKeys, err := normalizeUpstreamKeyInputs("", req.Keys)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if req.Weight != nil && (*req.Weight < 1 || *req.Weight > 1000) {
+		fail(c, http.StatusBadRequest, "invalid_weight", "weight must be between 1 and 1000")
+		return
+	}
+
+	keys := make([]*apigxmodel.UpstreamKey, 0, len(plainKeys))
+	for _, plain := range plainKeys {
+		key, prepareErr := prepareSelfServeUpstreamKey(plain)
+		if prepareErr != nil {
+			common.SysError("apigx api: refuse to store upstream key batch: " + prepareErr.Error())
+			fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
+				"credential store is not configured; refusing to store the keys")
+			return
+		}
+		key.ChannelID = channelID
+		key.Name = ""
+		if req.Weight != nil {
+			key.Weight = *req.Weight
+		}
+		keys = append(keys, key)
+	}
+	if err := apigxmodel.CreateUpstreamKeys(h.db, owner, keys); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+
+	items := make([]gin.H, 0, len(keys))
+	for i, key := range keys {
+		items = append(items, gin.H{
+			"id": key.ID, "stable_key_id": key.StableKeyID, "name": key.Name,
+			"status": key.Status, "weight": key.Weight, "masked": maskTail(plainKeys[i]),
+		})
+	}
+	ok(c, gin.H{"items": items, "created": len(items)})
 }
 
 // maskTail 只保留末尾 4 位。用于给分享者确认「加的是哪一把」，不构成泄露。
@@ -2767,25 +2846,48 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
 func provisionBaseChannelForShareChannel(
 	db *gorm.DB,
 	channel *apigxmodel.Channel,
-	upstreamKey string,
+	upstreamKeys []string,
+	keyRecords []*apigxmodel.UpstreamKey,
 	recipe selfServeChannelRecipe,
 ) error {
 	if db == nil {
 		return errors.New("apigx api: nil db")
 	}
-	if err := validateSelfServeChannelRecipe(channel, upstreamKey, recipe); err != nil {
-		return err
+	if len(upstreamKeys) == 0 || len(upstreamKeys) != len(keyRecords) {
+		return fmt.Errorf("%w: at least one complete upstream key is required", apigxmodel.ErrInvalidArgument)
+	}
+	for _, upstreamKey := range upstreamKeys {
+		if err := validateSelfServeChannelRecipe(channel, upstreamKey, recipe); err != nil {
+			return err
+		}
 	}
 
 	base := basemodel.Channel{
 		Name:        "APIGX-" + channel.Name,
 		Type:        recipe.BaseChannelType,
-		Key:         upstreamKey,
+		Key:         upstreamKeys[0],
 		BaseURL:     &channel.BaseURL,
 		Group:       "default",
 		Models:      "",
 		Status:      common.ChannelStatusEnabled,
 		CreatedTime: common.GetTimestamp(),
+	}
+	if len(upstreamKeys) > 1 {
+		stableIDs := make([]string, 0, len(keyRecords))
+		weights := make([]int64, 0, len(keyRecords))
+		for _, keyRecord := range keyRecords {
+			stableIDs = append(stableIDs, keyRecord.StableKeyID)
+			weights = append(weights, keyRecord.Weight)
+		}
+		mode := constant.MultiKeyModePolling
+		if channel.KeyPoolMode == apigxmodel.KeyPoolModeRandom {
+			mode = constant.MultiKeyModeRandom
+		}
+		base.Key = strings.Join(upstreamKeys, "\n")
+		base.ChannelInfo = basemodel.ChannelInfo{
+			IsMultiKey: true, MultiKeySize: len(upstreamKeys), MultiKeyMode: mode,
+			MultiKeyStableIDs: stableIDs, MultiKeyWeights: weights,
+		}
 	}
 	if recipe.TaskPluginKey != "" {
 		settingJSON, err := common.Marshal(relaydto.ChannelSettings{TaskPluginKey: recipe.TaskPluginKey})
@@ -2860,6 +2962,42 @@ func validAccessSecretPairOrRelayKey(key string) bool {
 	}
 	accessKey, secretKey, ok := strings.Cut(key, "|")
 	return ok && strings.TrimSpace(accessKey) != "" && strings.TrimSpace(secretKey) != "" && !strings.Contains(secretKey, "|")
+}
+
+// normalizeUpstreamKeyInputs accepts the legacy single-key field and the new
+// batch field, trims blank rows, removes duplicates without reordering, and
+// enforces one shared server-side batch limit. A credential containing "|" is
+// deliberately treated as one value; only array or line parsing in the client
+// separates credentials.
+func normalizeUpstreamKeyInputs(single string, batch []string) ([]string, error) {
+	inputs := make([]string, 0, len(batch)+1)
+	if strings.TrimSpace(single) != "" {
+		inputs = append(inputs, single)
+	}
+	inputs = append(inputs, batch...)
+	cleaned := make([]string, 0, len(inputs))
+	seen := make(map[string]struct{}, len(inputs))
+	nonEmptyCount := 0
+	for _, input := range inputs {
+		key := strings.TrimSpace(input)
+		if key == "" {
+			continue
+		}
+		nonEmptyCount++
+		if nonEmptyCount > maxUpstreamKeysPerBatch {
+			return nil, fmt.Errorf("%w: at most %d upstream keys may be submitted at once",
+				apigxmodel.ErrInvalidArgument, maxUpstreamKeysPerBatch)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, key)
+	}
+	if len(cleaned) == 0 {
+		return nil, fmt.Errorf("%w: upstream_key or upstream_keys is required", apigxmodel.ErrInvalidArgument)
+	}
+	return cleaned, nil
 }
 
 // prepareSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 变成待落库记录。

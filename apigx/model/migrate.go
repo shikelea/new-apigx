@@ -75,6 +75,7 @@ func AllModels() []any {
 		&Attempt{},
 		&UsageEvent{},
 		&QualityBucket{},
+		&BreakerProbeState{},
 		&AsyncTask{},
 		&UpstreamObjectRef{},
 		&AuditEvent{},
@@ -86,8 +87,8 @@ func AllModels() []any {
 // TableNamePrefix 供迁移与验收脚本筛选 APIGX 自己的表（避免与底座表混淆）。
 const TableNamePrefix = TablePrefix
 
-// ExpectedTableCount 是当前冻结设计的表数量（原 27 张 + 凭据历史表）。
+// ExpectedTableCount 是当前冻结设计的表数量（原 27 张 + 凭据历史表 + 熔断探测状态表）。
 //
 // 这是一个**契约常量**：新增表时必须同时调整它，并让 migrate_test.go 的断言继续成立；
 // 这样「漏加迁移」会立刻变成测试失败，而不是静默少建一张表。
-const ExpectedTableCount = 28
+const ExpectedTableCount = 29

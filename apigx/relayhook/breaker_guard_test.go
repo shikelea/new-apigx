@@ -48,7 +48,7 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
 	require.NoError(t, apigxmodel.Migrate(db))
 	// 底座自己的表（channels）不由 APIGX 迁移创建，但熔断的"标记渠道不可选"要写它；
 	// 同时接上底座的全局 DB，让缓存刷新路径也被覆盖（与投影测试同一处理）。
-	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}))
+	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
 	previousBaseDB := basemodel.DB
 	basemodel.DB = db
 	t.Cleanup(func() { basemodel.DB = previousBaseDB })
@@ -72,10 +72,37 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
 	require.NoError(t, apigxmodel.CreateChannel(db, channel))
 	env.shareChannel = channel
 
-	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "breaker-model"}
+	canonical := &apigxmodel.CanonicalModel{
+		APIModelID: "breaker-model-" + t.Name(), ModalityType: apigxmodel.ModalityChat, Status: 1,
+	}
+	require.NoError(t, db.Create(canonical).Error)
+	offering := &apigxmodel.ModelOffering{
+		ChannelID: channel.ID, CanonicalModelID: canonical.ID, UpstreamModelID: "breaker-model",
+	}
 	require.NoError(t, apigxmodel.CreateModelOffering(db, owner, offering))
 	env.offeringID = offering.ID
 	return env
+}
+
+func TestBreakerGuardDoesNotPersistentlyDisableUnprobeableOffering(t *testing.T) {
+	env := newBreakerTestEnv(t)
+	t.Setenv("APIGX_BREAKER_ENABLED", "true")
+	InvalidateBreakerCache()
+	t.Cleanup(InvalidateBreakerCache)
+	require.NoError(t, env.db.Model(&apigxmodel.CanonicalModel{}).
+		Where("id = (SELECT canonical_model_id FROM apigx_model_offerings WHERE id = ?)", env.offeringID).
+		Update("modality_type", apigxmodel.ModalityVideo).Error)
+	env.recordFailures(t, 20)
+
+	err := CheckBreakerAllows(env.newContext(t), env.baseChannelID, "breaker-model")
+	require.NotNil(t, err, "the failing request still participates in native retry")
+	var states int64
+	require.NoError(t, env.db.Model(&apigxmodel.BreakerProbeState{}).
+		Where("offering_id = ?", env.offeringID).Count(&states).Error)
+	assert.Zero(t, states, "an unsupported active probe must not own a durable traffic removal")
+	var base basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&base).Error)
+	assert.Equal(t, common.ChannelStatusEnabled, base.Status)
 }
 
 func (e *breakerTestEnv) newContext(t *testing.T) *gin.Context {
@@ -419,7 +446,7 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
 		Update("channel_info", prep.ChannelInfo).Error)
 
 	// 打开：三个稳定 Key 都持有熔断来源；已有底座健康/容量状态仍独立保留。
-	syncBreakerMarks(env.db, env.baseChannelID, true)
+	syncBreakerMarks(env.db, env.baseChannelID, env.offeringID, true)
 	var marked basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&marked).Error)
 	for index := range 3 {
@@ -434,9 +461,17 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
 	assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusAt(2),
 		"容量和熔断并存时兼容镜像应确定地展示更高标记")
 
-	// 恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
-	breakerOpenedAt.Store(env.baseChannelID, time.Now().Add(-breakerCooldown-time.Second))
-	syncBreakerMarks(env.db, env.baseChannelID, false)
+	// 后台连续成功两次后恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
+	var probe apigxmodel.BreakerProbeState
+	require.NoError(t, env.db.Where("offering_id = ?", env.offeringID).First(&probe).Error)
+	_, err := apigxmodel.RecordBreakerProbeResult(env.db, probe.ID, common.GetTimestamp(), true, false, "")
+	require.NoError(t, err)
+	ready, err := apigxmodel.RecordBreakerProbeResult(env.db, probe.ID, common.GetTimestamp()+15, true, false, "")
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.NoError(t, env.db.Where("id = ?", probe.ID).First(&probe).Error)
+	require.NoError(t, RestoreBreakerChannel(env.db, probe))
+	require.NoError(t, apigxmodel.FinalizeBreakerRecovery(env.db, probe.ID, common.GetTimestamp()+16))
 	var restored basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&restored).Error)
 	assert.False(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
@@ -447,14 +482,19 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
 		"熔断恢复不得清掉容量来源")
 }
 
-// 非多 Key 渠道不标记（没有可标记的条目）。
-func TestSyncBreakerMarksSkipsNonMultiKeyChannel(t *testing.T) {
+// 非多 Key 渠道没有逐 Key 标记，但仍要从候选中摘除并建立恢复状态。
+func TestSyncBreakerMarksDisablesNonMultiKeyChannel(t *testing.T) {
 	env := newBreakerTestEnv(t)
-	syncBreakerMarks(env.db, env.baseChannelID, true) // 不应 panic，也不应写坏数据
+	syncBreakerMarks(env.db, env.baseChannelID, env.offeringID, true)
 	var channel basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&channel).Error)
 	assert.False(t, channel.ChannelInfo.IsMultiKey)
 	assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, channel.Status)
+	var count int64
+	require.NoError(t, env.db.Model(&apigxmodel.BreakerProbeState{}).
+		Where("offering_id = ? AND state = ?", env.offeringID, apigxmodel.BreakerProbeStateOpen).Count(&count).Error)
+	assert.EqualValues(t, 1, count)
 }
 
 // 📌 冷却期（`breakerCooldown`）**由端到端验收覆盖**，不在这里写单测。

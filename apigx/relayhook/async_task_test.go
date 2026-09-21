@@ -62,7 +62,7 @@ func TestResolveAsyncTaskCredentialNeverFallsBackAfterSnapshotExists(t *testing.
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}, &apigxmodel.UpstreamKey{}, &apigxmodel.UpstreamKeyCredential{}))
+	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}, &apigxmodel.UpstreamKey{}, &apigxmodel.UpstreamKeyCredential{}, &apigxmodel.BreakerProbeState{}))
 	require.NoError(t, db.Create(&apigxmodel.AsyncTask{
 		PublicTaskID: "apigx_202", BaseTaskID: 202,
 		UpstreamKeyID: 303, UpstreamKeyCredentialVersion: 4,
@@ -267,6 +267,7 @@ func TestResolveAsyncTaskCredentialSurvivesKeyRotationAndDeletion(t *testing.T) 
 	require.NoError(t, db.AutoMigrate(
 		&apigxmodel.ShareGroup{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{},
 		&apigxmodel.UpstreamKeyCredential{}, &apigxmodel.AsyncTask{},
+		&apigxmodel.BreakerProbeState{},
 	))
 	withAsyncTaskDB(t, db)
 

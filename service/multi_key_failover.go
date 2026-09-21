@@ -7,7 +7,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const MaxMultiKeyAttemptsPerRequest = 10
+// MaxMultiKeyAttemptsPerRequest is the total number of different credentials
+// one request may try inside a channel: the initial key plus five failovers.
+// These attempts do not consume New API's global RetryTimes; after the sixth
+// key fails, the relay returns to the native cross-channel retry path.
+const MaxMultiKeyAttemptsPerRequest = 6
 
 const multiKeyAttemptsContextKey = "apigx_multi_key_attempts"
 

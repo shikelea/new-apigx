@@ -322,6 +322,13 @@ func (view QualityView) OutputTokensPerSecond() (float64, bool) {
 // 窗口外的桶**不参与聚合**（过期数据退出窗口）；窗口内没有任何样本时，
 // 视图是"空"的：`SampleCount == 0`、`Insufficient == true`，而不是一份"成功率 0%"的假结论。
 func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64) (QualityView, error) {
+	return ResolveQualityViewSince(db, offeringID, windowKind, at, 0)
+}
+
+// ResolveQualityViewSince is ResolveQualityView with an additional inclusive
+// lower bound. Breaker recovery uses it to start a clean reliability baseline
+// after successful probes without deleting historical quality buckets.
+func ResolveQualityViewSince(db *gorm.DB, offeringID int64, windowKind int, at, notBefore int64) (QualityView, error) {
 	view := QualityView{OfferingID: offeringID, Insufficient: true}
 	if db == nil || offeringID <= 0 {
 		return view, fmt.Errorf("%w: offering_id is required", ErrInvalidArgument)
@@ -330,6 +337,9 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
 		at = common.GetTimestamp()
 	}
 	from := at - int64(QualityWindowLength(windowKind).Seconds())
+	if notBefore > from {
+		from = notBefore
+	}
 
 	// 只聚合**分钟桶**，按请求的时长跨度取范围：
 	// 写入端永远产生分钟桶（`QualityWindowMinute`），6 小时那样的长窗口是**聚合视图**

@@ -3,14 +3,19 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/apigx/qualityhook"
 	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"gorm.io/gorm"
 )
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
@@ -23,6 +28,7 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(breakerProbeHandler{})
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -154,6 +160,202 @@ func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, run
 	}
 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+type breakerProbeHandler struct{}
+
+func (breakerProbeHandler) Type() string { return model.SystemTaskTypeBreakerProbe }
+
+func (breakerProbeHandler) Enabled() bool {
+	db := apigxmodel.DefaultDB()
+	return relayhook.BreakerEnabled() && apigxmodel.HasDueBreakerProbes(db, common.GetTimestamp())
+}
+
+func (breakerProbeHandler) Interval() time.Duration { return 15 * time.Second }
+
+func (breakerProbeHandler) NewPayload() any { return nil }
+
+type breakerProbeSummary struct {
+	Due         int `json:"due"`
+	Probed      int `json:"probed"`
+	Succeeded   int `json:"succeeded"`
+	Failed      int `json:"failed"`
+	AuthBlocked int `json:"auth_blocked"`
+	Unsupported int `json:"unsupported"`
+	Recovered   int `json:"recovered"`
+}
+
+func (breakerProbeHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := runBreakerProbeTask(ctx)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+}
+
+func runBreakerProbeTask(ctx context.Context) (breakerProbeSummary, error) {
+	db := apigxmodel.DefaultDB()
+	if db == nil {
+		return breakerProbeSummary{}, fmt.Errorf("APIGX database is not initialized")
+	}
+	now := common.GetTimestamp()
+	states, err := apigxmodel.ListDueBreakerProbes(db, now, 50)
+	if err != nil {
+		return breakerProbeSummary{}, err
+	}
+	summary := breakerProbeSummary{Due: len(states)}
+	if len(states) == 0 {
+		return summary, nil
+	}
+	testUserID, err := resolveChannelTestUserID(nil)
+	if err != nil {
+		return summary, err
+	}
+
+	for i := range states {
+		if ctx != nil && ctx.Err() != nil {
+			return summary, ctx.Err()
+		}
+		state := states[i]
+		if state.State == apigxmodel.BreakerProbeStateRecovering {
+			if err := restoreAndFinalizeBreakerProbe(db, &state, now); err != nil {
+				_ = apigxmodel.DeferBreakerRecovery(db, state.ID, now, "restore_failed")
+				summary.Failed++
+				continue
+			}
+			summary.Recovered++
+			continue
+		}
+
+		var offering apigxmodel.ModelOffering
+		if err := db.Where("id = ? AND alive_flag = ?", state.OfferingID, apigxmodel.AliveFlagAlive).First(&offering).Error; err != nil {
+			_, _ = apigxmodel.RecordBreakerProbeResult(db, state.ID, now, false, false, "offering_missing")
+			summary.Failed++
+			continue
+		}
+		endpointType, supported, resolveErr := breakerProbeEndpoint(db, offering.ID)
+		if resolveErr != nil {
+			_, _ = apigxmodel.RecordBreakerProbeResult(db, state.ID, now, false, false, "probe_protocol_error")
+			summary.Failed++
+			continue
+		}
+		if !supported {
+			released, releaseErr := apigxmodel.ReleaseUnprobeableBreaker(db, state.ID, now)
+			if releaseErr != nil {
+				summary.Failed++
+				continue
+			}
+			summary.Unsupported++
+			if released {
+				if err := db.Where("id = ?", state.ID).First(&state).Error; err != nil {
+					return summary, err
+				}
+				if err := restoreAndFinalizeBreakerProbe(db, &state, now); err != nil {
+					_ = apigxmodel.DeferBreakerRecovery(db, state.ID, now, "restore_failed")
+					summary.Failed++
+					continue
+				}
+				summary.Recovered++
+			}
+			continue
+		}
+		channel, err := model.GetChannelById(int(state.BaseChannelID), true)
+		if err != nil || channel == nil {
+			_, _ = apigxmodel.RecordBreakerProbeResult(db, state.ID, now, false, false, "channel_missing")
+			summary.Failed++
+			continue
+		}
+		probeChannel := relayhook.PrepareBreakerProbeChannel(channel)
+		result := testChannelWithOptions(ctx, probeChannel, testUserID, offering.UpstreamModelID, endpointType, false,
+			channelTestOptions{requirePricing: false, recordConsumeLog: false})
+		summary.Probed++
+
+		outcome := qualityhook.ClassifyOutcome(result.newAPIError, result.upstreamStatus)
+		if recordErr := apigxmodel.RecordQualitySample(db, apigxmodel.QualitySample{
+			OfferingID: offering.ID, Outcome: outcome, IsProbe: true,
+		}); recordErr != nil {
+			common.SysError("apigx breaker probe: record probe sample failed: " + recordErr.Error())
+		}
+		success := result.localErr == nil && result.newAPIError == nil
+		authFailure := result.upstreamStatus == http.StatusUnauthorized || result.upstreamStatus == http.StatusForbidden
+		errorCode := breakerProbeErrorCode(result)
+		ready, recordErr := apigxmodel.RecordBreakerProbeResult(db, state.ID, now, success, authFailure, errorCode)
+		if recordErr != nil {
+			return summary, recordErr
+		}
+		if authFailure {
+			summary.AuthBlocked++
+			continue
+		}
+		if !success {
+			summary.Failed++
+			continue
+		}
+		summary.Succeeded++
+		if ready {
+			if err := db.Where("id = ?", state.ID).First(&state).Error; err != nil {
+				return summary, err
+			}
+			if err := restoreAndFinalizeBreakerProbe(db, &state, now); err != nil {
+				_ = apigxmodel.DeferBreakerRecovery(db, state.ID, now, "restore_failed")
+				summary.Failed++
+				continue
+			}
+			summary.Recovered++
+		}
+	}
+	return summary, nil
+}
+
+func breakerProbeEndpoint(db *gorm.DB, offeringID int64) (string, bool, error) {
+	modality, err := apigxmodel.BreakerProbeModality(db, offeringID)
+	if err != nil {
+		return "", false, err
+	}
+	switch modality {
+	case apigxmodel.ModalityChat:
+		return "", true, nil
+	case apigxmodel.ModalityEmbedding:
+		return string(constant.EndpointTypeEmbeddings), true, nil
+	case apigxmodel.ModalityImageGeneration:
+		return string(constant.EndpointTypeImageGeneration), true, nil
+	case apigxmodel.ModalityRerank:
+		return string(constant.EndpointTypeJinaRerank), true, nil
+	default:
+		return "", false, nil
+	}
+}
+
+func restoreAndFinalizeBreakerProbe(db *gorm.DB, state *apigxmodel.BreakerProbeState, now int64) error {
+	if state == nil {
+		return fmt.Errorf("breaker probe state is required")
+	}
+	if err := relayhook.RestoreBreakerChannel(db, *state); err != nil {
+		return err
+	}
+	return apigxmodel.FinalizeBreakerRecovery(db, state.ID, now)
+}
+
+func breakerProbeErrorCode(result testResult) string {
+	if result.upstreamStatus > 0 {
+		return fmt.Sprintf("http_%d", result.upstreamStatus)
+	}
+	if result.newAPIError != nil {
+		code := string(result.newAPIError.GetErrorCode())
+		if len(code) > 64 {
+			code = code[:64]
+		}
+		return code
+	}
+	if result.localErr != nil {
+		code := strings.TrimSpace(result.localErr.Error())
+		if len(code) > 64 {
+			code = code[:64]
+		}
+		return code
+	}
+	return ""
 }
 
 func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {

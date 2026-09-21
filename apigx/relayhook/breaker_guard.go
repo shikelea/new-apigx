@@ -41,6 +41,8 @@ func breakerEnabled() bool {
 	return common.GetEnvOrDefaultBool("APIGX_BREAKER_ENABLED", false)
 }
 
+func BreakerEnabled() bool { return breakerEnabled() }
+
 const breakerCacheTTL = 30 * time.Second
 
 // breakerClosedCacheTTL 是"未打开"结论的缓存时长，故意很短：
@@ -66,14 +68,9 @@ const (
 // 冷却结束后的第一次经过才允许恢复（这也就是计划书里的"冷却后再半开探测"）。
 var breakerCooldown = 60 * time.Second
 
-// breakerOpenedAt 记录各渠道**本次**被我们打开的时刻（进程内即可：
-// 重启后 Map 为空，等价于"冷却已过"，于是会按判定恢复，不会把渠道永久锁死）。
-var breakerOpenedAt sync.Map // baseChannelID -> time.Time
-
-// ResetBreakerCooldownForTest 清空冷却记录（测试用）。
-func ResetBreakerCooldownForTest() {
-	breakerOpenedAt.Range(func(key, _ any) bool { breakerOpenedAt.Delete(key); return true })
-}
+// ResetBreakerCooldownForTest is retained for tests that predate the durable
+// probe state. Cooldown ownership now lives in apigx_breaker_probe_states.
+func ResetBreakerCooldownForTest() {}
 
 type cachedBreaker struct {
 	open      bool
@@ -116,7 +113,7 @@ func CheckBreakerAllows(c *gin.Context, channelID int, modelName string) *types.
 	open := breakerOpenCached(db, offeringID)
 	// 无论开还是关，都同步一次底座渠道的"可跳过标记"：
 	// 打开 → 标记；已恢复 → 回收我们自己的标记。
-	syncBreakerMarks(db, channelID, open)
+	syncBreakerMarks(db, channelID, offeringID, open)
 	if !open {
 		return nil
 	}
@@ -142,7 +139,23 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
 	breakerCacheMu.RUnlock()
 
 	nowTs := common.GetTimestamp()
-	view, err := apigxmodel.ResolveQualityView(db, offeringID, apigxmodel.QualityWindowSixHour, nowTs)
+	blocked, blockErr := apigxmodel.BreakerProbeBlocksTraffic(db, offeringID)
+	if blockErr != nil {
+		common.SysError("apigx breaker: resolve probe state failed: " + blockErr.Error())
+		return false
+	}
+	if blocked {
+		breakerCacheMu.Lock()
+		breakerCache[offeringID] = cachedBreaker{open: true, expiresAt: now.Add(breakerCacheTTL)}
+		breakerCacheMu.Unlock()
+		return true
+	}
+	baseline, baselineErr := apigxmodel.BreakerRecoveryBaseline(db, offeringID)
+	if baselineErr != nil {
+		common.SysError("apigx breaker: resolve recovery baseline failed: " + baselineErr.Error())
+		return false
+	}
+	view, err := apigxmodel.ResolveQualityViewSince(db, offeringID, apigxmodel.QualityWindowSixHour, nowTs, baseline)
 	if err != nil {
 		common.SysError("apigx breaker: resolve quality view failed: " + err.Error())
 		return false
@@ -191,54 +204,50 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
 //
 // 熔断不再打开时调用本函数即可**回收熔断来源**，不碰底座自己的禁用原因，
 // 也不碰容量饱和来源；兼容单值表由 ChannelInfo 重新合并。
-func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+func syncBreakerMarks(db *gorm.DB, channelID int, offeringID int64, open bool) {
+	// Recovery is deliberately background-only. Once a breaker has removed a
+	// channel, user traffic cannot safely act as the half-open probe and must
+	// not restore the channel merely because old failures aged out.
+	if !open {
+		return
+	}
+	probeSupported, probeErr := apigxmodel.CanActivelyProbeOffering(db, offeringID)
+	if probeErr != nil {
+		common.SysError("apigx breaker: resolve active probe protocol failed: " + probeErr.Error())
+		return
+	}
+	if !probeSupported {
+		// The current request is still rejected with a retryable error, so the
+		// native cross-channel path can move it elsewhere. Do not persistently
+		// remove a source that the background worker cannot safely verify and
+		// restore (audio uploads/binary TTS and asynchronous video jobs).
+		return
+	}
 	var channel basemodel.Channel
 	if err := db.Where("id = ?", channelID).First(&channel).Error; err != nil {
 		return
 	}
-	keyCount := channel.ChannelInfo.MultiKeySize
-	if !channel.ChannelInfo.IsMultiKey || keyCount <= 0 {
-		return // 非多 Key 渠道：没有可标记的条目（这类渠道的改道由底座自身的失败处理负责）
-	}
-	hadOurMark := channel.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen)
-	if !open {
-		if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
-			// 冷却未过时保持当前不可用状态；不能先删标记再返回，否则后续无法识别并恢复渠道。
-			if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
-				return
-			}
-			breakerOpenedAt.Delete(channelID)
-		}
-		if !hadOurMark {
-			return
-		}
+	if err := apigxmodel.OpenBreakerProbe(db, offeringID, int64(channelID), common.GetTimestamp(), int64(breakerCooldown.Seconds())); err != nil {
+		// Do not permanently remove a channel unless recovery ownership is
+		// durable. The current request still fails and the native retry path can
+		// select another channel.
+		common.SysError("apigx breaker: persist recovery state failed: " + err.Error())
+		return
 	}
 
 	// 复用 ChannelInfo 的来源合并：熔断、容量和底座健康分别持有标记，
 	// 恢复某个来源后重新生成兼容单值表。
-	if open {
+	keyCount := channel.ChannelInfo.MultiKeySize
+	if channel.ChannelInfo.IsMultiKey && keyCount > 0 {
 		all := make([]int, 0, keyCount)
 		for index := range keyCount {
 			all = append(all, index)
 		}
 		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, all)
-	} else {
-		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
-	}
-
-	// **刻意不动权重**：曾经的方案是"把熔断渠道的权重压到接近零"，但实测与底座语义相冲突——
-	// 底座对权重有 **+10 平滑**，权重 1 与 1 之间的分配是 11:11（≈50%），
-	// 也就是说**权重根本无法表达"接近零"**（要让它接近零，同层其他渠道的权重都得远大于 10，
-	// 而我们无权假设/改动别人的权重）。更危险的是"恢复"时无从判断原值是不是平台设置的。
-	// 因此这条被证据否掉，改走"让渠道在底座眼里不可选"（见下面的状态处理）。
-	if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
-		Update("channel_info", channel.ChannelInfo).Error; err != nil {
-		common.SysError("apigx breaker: update channel marks failed: " + err.Error())
-		return
-	}
-	if open {
-		if _, loaded := breakerOpenedAt.Load(channelID); !loaded {
-			breakerOpenedAt.Store(channelID, time.Now())
+		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+			Update("channel_info", channel.ChannelInfo).Error; err != nil {
+			common.SysError("apigx breaker: update channel marks failed: " + err.Error())
+			return
 		}
 	}
 
@@ -250,30 +259,12 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 	// 而它对多 Key 渠道会走 `handlerMultiKeyUpdate`——传入空 key 时找不到对应索引，
 	// **不会禁用整条渠道**（实测：调用后排除了个寂寞，坏上游照样被选中）。
 	// 因此直接做两件等价的事：置渠道状态 + 关掉它的**能力索引**（后者才是选择逻辑真正看的）。
-	if open {
-		// "选择器忽略了禁用" 还是 "禁用发生得太晚"（定位后删除）。
-		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
-			Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
-			common.SysError("apigx breaker: disable channel status failed: " + err.Error())
-		}
-		if err := basemodel.UpdateAbilityStatus(channelID, false); err != nil {
-			common.SysError("apigx breaker: disable ability failed: " + err.Error())
-		}
-	} else {
-		// 恢复：**只还原我们自己禁用的**（判据 = 我们的多 Key 标记仍在 + 渠道处于自动禁用），
-		// 避免把底座因鉴权失败等原因禁用的渠道顺手恢复。
-		var now basemodel.Channel
-		if err := db.Where("id = ?", channelID).First(&now).Error; err == nil {
-			if now.Status == common.ChannelStatusAutoDisabled && hadOurMark {
-				if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
-					Update("status", common.ChannelStatusEnabled).Error; err != nil {
-					common.SysError("apigx breaker: restore channel status failed: " + err.Error())
-				}
-				if err := basemodel.UpdateAbilityStatus(channelID, true); err != nil {
-					common.SysError("apigx breaker: restore ability failed: " + err.Error())
-				}
-			}
-		}
+	if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+		Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
+		common.SysError("apigx breaker: disable channel status failed: " + err.Error())
+	}
+	if err := basemodel.UpdateAbilityStatus(channelID, false); err != nil {
+		common.SysError("apigx breaker: disable ability failed: " + err.Error())
 	}
 
 	// 必须刷新底座缓存：只改库不会被选择逻辑看到（阶段 1 已经踩过同一个坑）
@@ -284,4 +275,66 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
 	if basemodel.DB != nil {
 		basemodel.InitChannelCache()
 	}
+}
+
+// PrepareBreakerProbeChannel returns an in-memory channel copy whose breaker
+// marks are removed. Other key status sources remain intact, so a probe never
+// revives credentials disabled by authentication or capacity handling.
+func PrepareBreakerProbeChannel(channel *basemodel.Channel) *basemodel.Channel {
+	if channel == nil {
+		return nil
+	}
+	probe := *channel
+	probe.ChannelInfo = channel.ChannelInfo
+	probe.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
+	return &probe
+}
+
+// RestoreBreakerChannel removes only APIGX's breaker mark and returns the
+// channel to the native selector after all offering-level breaker states on the
+// channel are ready. Authentication and capacity marks are preserved.
+func RestoreBreakerChannel(db *gorm.DB, state apigxmodel.BreakerProbeState) error {
+	mayRestore, err := apigxmodel.BreakerChannelMayRestore(db, state.BaseChannelID)
+	if err != nil || !mayRestore {
+		return err
+	}
+	var channel basemodel.Channel
+	if err := db.Where("id = ?", state.BaseChannelID).First(&channel).Error; err != nil {
+		return err
+	}
+	if channel.ChannelInfo.IsMultiKey {
+		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
+		if err := db.Model(&basemodel.Channel{}).Where("id = ?", state.BaseChannelID).
+			Update("channel_info", channel.ChannelInfo).Error; err != nil {
+			return err
+		}
+	}
+
+	canEnable := state.OwnsChannelDisable && channel.Status == common.ChannelStatusAutoDisabled
+	if canEnable && channel.ChannelInfo.IsMultiKey {
+		canEnable = false
+		for index := 0; index < channel.ChannelInfo.MultiKeySize; index++ {
+			if channel.ChannelInfo.MultiKeyStatusAt(index) == common.ChannelStatusEnabled {
+				canEnable = true
+				break
+			}
+		}
+	}
+	if canEnable {
+		if err := db.Model(&basemodel.Channel{}).Where("id = ? AND status = ?", state.BaseChannelID, common.ChannelStatusAutoDisabled).
+			Update("status", common.ChannelStatusEnabled).Error; err != nil {
+			return err
+		}
+		if err := basemodel.UpdateAbilityStatus(int(state.BaseChannelID), true); err != nil {
+			return err
+		}
+	}
+	if refreshed, err := basemodel.GetChannelById(int(state.BaseChannelID), true); err == nil && refreshed != nil {
+		basemodel.CacheUpdateChannel(refreshed)
+	}
+	if basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+	InvalidateBreakerCache()
+	return nil
 }

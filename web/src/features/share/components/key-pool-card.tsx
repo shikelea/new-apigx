@@ -35,16 +35,21 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import {
   applyChannelKeyPool,
-  createUpstreamKey,
+  createUpstreamKeysBatch,
   deleteUpstreamKey,
   rotateUpstreamKey,
   updateUpstreamKeyStatus,
   updateUpstreamKeyWeight,
 } from '../api'
+import {
+  MAX_UPSTREAM_KEYS_PER_BATCH,
+  parseCredentialLines,
+} from '../lib/credential-lines'
 import { parseKeyWeight } from '../lib/key-weight'
 import {
   isUpstreamKeyEnabled,
@@ -62,7 +67,6 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
   const [editor, setEditor] = useState<KeyEditor>(null)
   const [deleting, setDeleting] = useState<UpstreamKey | null>(null)
   const [poolChanged, setPoolChanged] = useState(false)
-  const [name, setName] = useState('')
   const [secret, setSecret] = useState('')
   const [weight, setWeight] = useState('1')
 
@@ -79,14 +83,12 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
 
   const createMutation = useMutation({
     mutationFn: () =>
-      createUpstreamKey(props.channelId, {
-        name: name.trim(),
-        key: secret.trim(),
+      createUpstreamKeysBatch(props.channelId, {
+        keys: parseCredentialLines(secret).keys,
         weight: parseKeyWeight(weight) ?? 0,
       }),
     onSuccess: () => {
       setAddOpen(false)
-      setName('')
       setSecret('')
       setWeight('1')
       setPoolChanged(true)
@@ -229,6 +231,7 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
   ]
 
   const validWeight = parseKeyWeight(weight) !== null
+  const parsedSecrets = parseCredentialLines(secret)
 
   return (
     <Card id='key-pool'>
@@ -248,7 +251,7 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
         <div className='flex flex-wrap gap-2'>
           <Button variant='outline' size='sm' onClick={() => setAddOpen(true)}>
             <Plus />
-            {t('share.key.add')}
+            {t('share.key.batchAdd')}
           </Button>
           <Button
             size='sm'
@@ -285,8 +288,10 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
       <Dialog
         open={addOpen}
         onOpenChange={setAddOpen}
-        title={t('share.key.add')}
-        description={t('share.key.addDescription')}
+        title={t('share.key.batchAdd')}
+        description={t('share.key.batchAddDescription', {
+          count: MAX_UPSTREAM_KEYS_PER_BATCH,
+        })}
         footer={
           <>
             <Button variant='outline' onClick={() => setAddOpen(false)}>
@@ -294,7 +299,10 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
             </Button>
             <Button
               disabled={
-                secret.trim() === '' || !validWeight || createMutation.isPending
+                parsedSecrets.keys.length === 0 ||
+                parsedSecrets.exceedsLimit ||
+                !validWeight ||
+                createMutation.isPending
               }
               onClick={() => createMutation.mutate()}
             >
@@ -305,22 +313,37 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
       >
         <div className='space-y-4'>
           <div className='space-y-1.5'>
-            <Label htmlFor='apigx-key-name'>{t('share.key.name')}</Label>
-            <Input
-              id='apigx-key-name'
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </div>
-          <div className='space-y-1.5'>
-            <Label htmlFor='apigx-key-secret'>{t('share.key.secret')}</Label>
-            <Input
-              id='apigx-key-secret'
-              type='password'
+            <Label htmlFor='apigx-key-secrets'>
+              {t('share.key.credentials')}
+            </Label>
+            <Textarea
+              id='apigx-key-secrets'
               autoComplete='off'
+              rows={6}
+              placeholder={'sk-...\nsk-...'}
               value={secret}
               onChange={(event) => setSecret(event.target.value)}
             />
+            <p className='text-muted-foreground text-xs'>
+              {t('share.key.batchLineHint')}
+            </p>
+            {parsedSecrets.duplicateCount > 0 ? (
+              <p className='text-muted-foreground text-xs'>
+                {t('{{count}} duplicate credential lines will be ignored.', {
+                  count: parsedSecrets.duplicateCount,
+                })}
+              </p>
+            ) : null}
+            {parsedSecrets.exceedsLimit ? (
+              <p className='text-destructive text-xs'>
+                {t(
+                  'A batch can contain at most {{count}} non-empty credential lines.',
+                  {
+                    count: MAX_UPSTREAM_KEYS_PER_BATCH,
+                  }
+                )}
+              </p>
+            ) : null}
           </div>
           <div className='space-y-1.5'>
             <Label htmlFor='apigx-key-weight'>{t('share.key.weight')}</Label>

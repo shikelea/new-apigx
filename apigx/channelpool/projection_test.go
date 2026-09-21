@@ -2,6 +2,7 @@ package channelpool
 
 import (
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -517,6 +518,34 @@ func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
 	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
 	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status, "业务错误不得使凭据失效")
 	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
+}
+
+func TestRecordFailureFromContextDoesNotCooldownRateLimitedKey(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9204
+	const baseChannelID int64 = 6265
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-rate-limit-aaaaaa"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	previous := dbProvider
+	SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
+	SetKeyStatsEnabled(true)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
+	RecordFailureFromContext(ctx, int(baseChannelID), http.StatusTooManyRequests, "rate_limited")
+
+	var key apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
+	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status)
+	assert.Zero(t, key.CooldownUntil, "429 must not create cross-request cooldown")
+	assert.True(t, apigxmodel.IsUpstreamKeyUsable(&key, common.GetTimestamp()),
+		"the next request may select the same credential again")
+	assert.Equal(t, "429_rate_limited", key.LastErrorCode)
 }
 
 // **最关键的一条**：失效必须同时落到底座，否则底座会继续使用已失效的凭据。

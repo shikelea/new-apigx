@@ -377,6 +377,19 @@ type CanonicalModel struct {
 	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
 }
 
+// Canonical model primary modalities. Keep these values aligned with the
+// persisted ModalityType contract above; routing and breaker probes must not
+// infer a protocol from an arbitrary model id.
+const (
+	ModalityChat             = 1
+	ModalityEmbedding        = 2
+	ModalityImageGeneration  = 3
+	ModalityAudioRecognition = 4
+	ModalityAudioGeneration  = 5
+	ModalityRerank           = 6
+	ModalityVideo            = 7
+)
+
 // TableName 返回表名。
 func (CanonicalModel) TableName() string { return TablePrefix + "canonical_models" }
 

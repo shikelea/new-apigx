@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -593,6 +594,68 @@ func TestTaskSubmissionFailsOverToNextKeyWithZeroGlobalRetries(t *testing.T) {
 	require.NotNil(t, outcome)
 	assert.Equal(t, []string{"key-a", "key-b"}, usedKeys)
 	assert.Equal(t, []string{"reserve", "insert", "settle"}, events)
+}
+
+func TestTaskSubmissionGlobalRetryOneAllowsExactlyOneMoreSixKeyChannel(t *testing.T) {
+	database := setupRelayMultiKeyDatabase(t)
+	common.RetryTimes = 1
+	firstKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest)
+	firstStableIDs := make([]string, len(firstKeys))
+	secondKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest+2)
+	secondStableIDs := make([]string, len(secondKeys))
+	for index := range firstKeys {
+		firstKeys[index] = "task-first-key-" + strconv.Itoa(index)
+		firstStableIDs[index] = "task-first-stable-" + strconv.Itoa(index)
+	}
+	for index := range secondKeys {
+		secondKeys[index] = "task-second-key-" + strconv.Itoa(index)
+		secondStableIDs[index] = "task-second-stable-" + strconv.Itoa(index)
+	}
+	first := relayMultiKeyChannel(7271, "task-first-channel", "http://task.invalid", strings.Join(firstKeys, "\n"), firstStableIDs)
+	second := relayMultiKeyChannel(7272, "task-second-channel", "http://task.invalid", strings.Join(secondKeys, "\n"), secondStableIDs)
+	first.Type = constant.ChannelTypeTaskPlugin
+	second.Type = constant.ChannelTypeTaskPlugin
+	for _, channel := range []*model.Channel{first, second} {
+		require.NoError(t, database.Create(channel).Error)
+		require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
+	}
+	model.InitChannelCache()
+
+	recorder := httptest.NewRecorder()
+	c := newRelayMultiKeyContext(t, recorder, first, []int{first.Id, second.Id})
+	c.Request = httptest.NewRequest(http.MethodPost, "/plugin/submit", strings.NewReader(`{}`))
+	info := taskSubmissionRelayInfo(nil)
+	info.OriginModelName = "g2-failover-model"
+	info.TokenGroup = "default"
+	info.ChannelMeta = &relaycommon.ChannelMeta{
+		ChannelId: first.Id, ChannelType: constant.ChannelTypeTaskPlugin, ChannelIsMultiKey: true,
+	}
+	info.LockedChannel = nil
+
+	usedKeys := make([]string, 0, service.MaxMultiKeyAttemptsPerRequest*2)
+	outcome, taskErr := executeTaskSubmissionWith(c, info, func(c *gin.Context, _ *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		usedKeys = append(usedKeys, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+		return nil, &dto.TaskError{
+			Code: "rate_limited", Message: "rate limited", StatusCode: http.StatusTooManyRequests,
+			Error: errors.New("rate limited"),
+		}
+	})
+
+	require.Nil(t, outcome)
+	require.NotNil(t, taskErr)
+	assert.Equal(t, http.StatusTooManyRequests, taskErr.StatusCode)
+	require.Len(t, usedKeys, service.MaxMultiKeyAttemptsPerRequest*2)
+	firstAttempts := usedKeys[:service.MaxMultiKeyAttemptsPerRequest]
+	secondAttempts := usedKeys[service.MaxMultiKeyAttemptsPerRequest:]
+	assert.Equal(t, len(firstAttempts), distinctStringCount(firstAttempts))
+	assert.Equal(t, len(secondAttempts), distinctStringCount(secondAttempts))
+	if strings.HasPrefix(firstAttempts[0], "task-first-key-") {
+		assert.Subset(t, firstKeys, firstAttempts)
+		assert.Subset(t, secondKeys, secondAttempts)
+	} else {
+		assert.Subset(t, secondKeys, firstAttempts)
+		assert.Subset(t, firstKeys, secondAttempts)
+	}
 }
 
 func TestExecuteTaskSubmissionRefundsWhenFinalReserveFails(t *testing.T) {

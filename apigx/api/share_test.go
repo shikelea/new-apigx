@@ -553,6 +553,41 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 		assert.Contains(t, models, "kling-v2-master")
 	})
 
+	t.Run("batch credentials create one multi-key channel without splitting pairs", func(t *testing.T) {
+		env := newTestEnv(t, true)
+		const owner int64 = 5109
+		groupID := env.createGroup(t, owner, "批量视频凭据组")
+		first := "access-a|secret-a"
+		second := "access-b|secret-b"
+		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"批量可灵","recipe_id":"kling-video","base_url":"https://api.klingai.com","upstream_keys":[" `+first+` ","","`+first+`","`+second+`"],"key_pool_mode":1}`,
+			common.RoleCommonUser)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		data := body["data"].(map[string]any)
+		assert.Equal(t, float64(2), data["key_count"])
+		channelID := int64(data["id"].(float64))
+
+		shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
+		require.NoError(t, err)
+		var baseChannel basemodel.Channel
+		require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error)
+		assert.Equal(t, []string{first, second}, baseChannel.GetKeys())
+		assert.True(t, baseChannel.ChannelInfo.IsMultiKey)
+		assert.Equal(t, constant.MultiKeyModeRandom, baseChannel.ChannelInfo.MultiKeyMode)
+		require.Len(t, baseChannel.ChannelInfo.MultiKeyStableIDs, 2)
+
+		stored, err := apigxmodel.ListUpstreamKeysByChannel(env.db, owner, channelID)
+		require.NoError(t, err)
+		require.Len(t, stored, 2)
+		decrypted := make([]string, 0, len(stored))
+		for i := range stored {
+			plain, decryptErr := secretbox.Decrypt(stored[i].SecretRef)
+			require.NoError(t, decryptErr)
+			decrypted = append(decrypted, plain)
+		}
+		assert.ElementsMatch(t, []string{first, second}, decrypted)
+	})
+
 	t.Run("task recipe rejects malformed credential before writing", func(t *testing.T) {
 		env := newTestEnv(t, true)
 		const owner int64 = 5107
@@ -903,6 +938,47 @@ func TestUpstreamKeyStatusAndValidation(t *testing.T) {
 	// 非法 id → 400
 	rec, _ = env.do(t, http.MethodDelete, "/api/keys/abc", owner, "")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestUpstreamKeyBatchAddIsAtomicAndDeduplicatesInput(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 6002
+	groupID := env.createGroup(t, owner, "批量 Key 组")
+	channelID := env.createChannel(t, owner, groupID, nextBaseChannelID())
+
+	rec, _ := env.do(t, http.MethodPost,
+		"/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
+		`{"key":"sk-existing"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	batchPath := "/api/channels/" + strconv.FormatInt(channelID, 10) + "/keys/batch"
+	rec, _ = env.do(t, http.MethodPost, batchPath, owner,
+		`{"keys":["sk-new-before-conflict","sk-existing"]}`)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var count int64
+	require.NoError(t, env.db.Model(&apigxmodel.UpstreamKey{}).
+		Where("channel_id = ?", channelID).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "a conflict must roll back the whole batch")
+
+	rec, body := env.do(t, http.MethodPost, batchPath, owner,
+		`{"keys":[" sk-new-a ","","sk-new-a","sk-new-b"],"weight":3}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data := body["data"].(map[string]any)
+	assert.Equal(t, float64(2), data["created"])
+	require.NoError(t, env.db.Model(&apigxmodel.UpstreamKey{}).
+		Where("channel_id = ?", channelID).Count(&count).Error)
+	assert.EqualValues(t, 3, count)
+
+	keys, err := apigxmodel.ListUpstreamKeysByChannel(env.db, owner, channelID)
+	require.NoError(t, err)
+	weights := make(map[string]int64, len(keys))
+	for i := range keys {
+		plain, decryptErr := secretbox.Decrypt(keys[i].SecretRef)
+		require.NoError(t, decryptErr)
+		weights[plain] = keys[i].Weight
+	}
+	assert.EqualValues(t, 3, weights["sk-new-a"])
+	assert.EqualValues(t, 3, weights["sk-new-b"])
 }
 
 func TestDeleteUpstreamKeyTwice(t *testing.T) {

@@ -375,6 +375,29 @@ type QualityBucket struct {
 // TableName 返回 §5.22 定义的表名。
 func (QualityBucket) TableName() string { return TablePrefix + "quality_buckets" }
 
+// BreakerProbeState persists the recovery state for one model offering after
+// its base channel has been removed from routing by the APIGX circuit breaker.
+// The state lives in the database so process restarts and multiple master
+// instances cannot lose or duplicate recovery work.
+type BreakerProbeState struct {
+	ID                 int64  `gorm:"primaryKey"`
+	OfferingID         int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_breaker_probe_offering"`
+	BaseChannelID      int64  `gorm:"bigint;not null;default:0;index:idx_breaker_probe_channel_state,priority:1"`
+	State              int    `gorm:"type:int;not null;index:idx_breaker_probe_due,priority:1;index:idx_breaker_probe_channel_state,priority:2"`
+	ConsecutiveSuccess int    `gorm:"type:int;not null;default:0"`
+	BackoffSeconds     int64  `gorm:"bigint;not null;default:0"`
+	OpenedAt           int64  `gorm:"bigint;not null;default:0"`
+	NextProbeAt        int64  `gorm:"bigint;not null;default:0;index:idx_breaker_probe_due,priority:2"`
+	LastProbeAt        int64  `gorm:"bigint;not null;default:0"`
+	RecoveryBaselineTs int64  `gorm:"bigint;not null;default:0"`
+	LastErrorCode      string `gorm:"size:64;not null;default:''"`
+	OwnsChannelDisable bool   `gorm:"not null"`
+	CreatedAt          int64  `gorm:"bigint;not null;default:0"`
+	UpdatedAt          int64  `gorm:"bigint;not null;default:0"`
+}
+
+func (BreakerProbeState) TableName() string { return TablePrefix + "breaker_probe_states" }
+
 // AsyncTask 对应 §5.23 `apigx_async_tasks`。
 //
 // 用途：平台任务 ID、上游任务 ID、用户、原渠道与 Key/凭据版本、分享者与权限版本快照、价格版本、

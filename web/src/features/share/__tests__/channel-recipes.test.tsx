@@ -143,7 +143,10 @@ it('loads recipes from the server and submits only the selected stable recipe id
     screen.getByLabelText('Upstream address'),
     'https://gateway.example/v1'
   )
-  await user.type(screen.getByLabelText('Your upstream key'), 'sk-community')
+  await user.type(
+    screen.getByLabelText('Your upstream keys'),
+    'sk-community{enter}sk-community-backup'
+  )
   await user.click(screen.getByRole('button', { name: 'Create' }))
 
   await waitFor(() =>
@@ -152,7 +155,7 @@ it('loads recipes from the server and submits only the selected stable recipe id
       name: 'Community New API',
       recipe_id: 'new-api',
       base_url: 'https://gateway.example/v1',
-      upstream_key: 'sk-community',
+      upstream_keys: ['sk-community', 'sk-community-backup'],
       key_pool_mode: 1,
     })
   )
@@ -188,7 +191,7 @@ it('explains the async lifecycle and provider credential format for video recipe
   ).toBeVisible()
   expect(
     screen.getByText(
-      'For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.'
+      'For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.'
     )
   ).toBeVisible()
 })

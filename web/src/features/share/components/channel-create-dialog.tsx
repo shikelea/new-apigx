@@ -32,6 +32,7 @@ import { Button } from '@/components/ui/button'
 import {
   Field,
   FieldDescription,
+  FieldError,
   FieldGroup,
   FieldLabel,
 } from '@/components/ui/field'
@@ -44,9 +45,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import { createShareChannel, getChannelRecipes } from '../api'
+import {
+  isAccessSecretPairOrRelayKey,
+  MAX_UPSTREAM_KEYS_PER_BATCH,
+  parseCredentialLines,
+} from '../lib/credential-lines'
 import type { ChannelRecipe, ShareGroup } from '../types'
 
 const emptyRecipes: ChannelRecipe[] = []
@@ -83,7 +90,7 @@ export function ChannelCreateDialog(props: {
   const [name, setName] = useState('')
   const [recipeId, setRecipeId] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
-  const [upstreamKey, setUpstreamKey] = useState('')
+  const [upstreamKeys, setUpstreamKeys] = useState('')
   const [keyPoolMode, setKeyPoolMode] = useState('0')
 
   const recipesQuery = useQuery({
@@ -93,6 +100,10 @@ export function ChannelCreateDialog(props: {
   })
   const recipes = recipesQuery.data?.data?.items ?? emptyRecipes
   const selectedRecipe = recipes.find((recipe) => recipe.id === recipeId)
+  const parsedKeys = parseCredentialLines(upstreamKeys)
+  const hasInvalidCredential =
+    selectedRecipe?.credential_format === 'access_secret_pair_or_relay_key' &&
+    parsedKeys.keys.some((key) => !isAccessSecretPairOrRelayKey(key))
 
   useEffect(() => {
     if (!props.open || recipes.length === 0 || selectedRecipe != null) return
@@ -123,14 +134,14 @@ export function ChannelCreateDialog(props: {
         name: name.trim(),
         recipe_id: recipeId,
         base_url: baseUrl.trim(),
-        upstream_key: upstreamKey.trim(),
+        upstream_keys: parsedKeys.keys,
         key_pool_mode: Number(keyPoolMode),
       }),
     onSuccess: (res) => {
       setName('')
       setRecipeId('')
       setBaseUrl('')
-      setUpstreamKey('')
+      setUpstreamKeys('')
       setKeyPoolMode('0')
       props.onOpenChange(false)
       props.onSaved(res.data?.id)
@@ -145,7 +156,9 @@ export function ChannelCreateDialog(props: {
     groupId === '' ||
     name.trim() === '' ||
     (selectedRecipe?.requires_base_url === true && baseUrl.trim() === '') ||
-    upstreamKey.trim() === ''
+    parsedKeys.keys.length === 0 ||
+    parsedKeys.exceedsLimit ||
+    hasInvalidCredential
 
   return (
     <Dialog
@@ -322,26 +335,57 @@ export function ChannelCreateDialog(props: {
           />
         </Field>
         <Field>
-          <FieldLabel htmlFor='share-channel-upstream-key'>
-            {t('Your upstream key')}
+          <FieldLabel htmlFor='share-channel-upstream-keys'>
+            {t('Your upstream keys')}
           </FieldLabel>
-          <Input
-            id='share-channel-upstream-key'
-            type='password'
+          <Textarea
+            id='share-channel-upstream-keys'
             autoComplete='off'
-            value={upstreamKey}
-            onChange={(event) => setUpstreamKey(event.target.value)}
+            rows={5}
+            placeholder={'sk-...\nsk-...'}
+            value={upstreamKeys}
+            onChange={(event) => setUpstreamKeys(event.target.value)}
           />
           <FieldDescription>
-            {t('It is stored encrypted and never shown again.')}
+            {t(
+              'Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.',
+              {
+                count: MAX_UPSTREAM_KEYS_PER_BATCH,
+              }
+            )}{' '}
+            {t('They are stored encrypted and never shown again.')}
           </FieldDescription>
+          {parsedKeys.duplicateCount > 0 ? (
+            <FieldDescription>
+              {t('{{count}} duplicate credential lines will be ignored.', {
+                count: parsedKeys.duplicateCount,
+              })}
+            </FieldDescription>
+          ) : null}
+          {parsedKeys.exceedsLimit ? (
+            <FieldError>
+              {t(
+                'A batch can contain at most {{count}} non-empty credential lines.',
+                {
+                  count: MAX_UPSTREAM_KEYS_PER_BATCH,
+                }
+              )}
+            </FieldError>
+          ) : null}
           {selectedRecipe?.credential_format ===
           'access_secret_pair_or_relay_key' ? (
             <FieldDescription>
               {t(
-                'For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.'
+                'For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.'
               )}
             </FieldDescription>
+          ) : null}
+          {hasInvalidCredential ? (
+            <FieldError>
+              {t(
+                'Each credential must be accessKey|secretKey or a relay key beginning with sk-.'
+              )}
+            </FieldError>
           ) : null}
         </Field>
       </FieldGroup>

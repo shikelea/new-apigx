@@ -55,7 +55,7 @@ export async function createShareChannel(input: {
   name: string
   recipe_id: string
   base_url: string
-  upstream_key: string
+  upstream_keys: string[]
   key_pool_mode?: number
 }): Promise<{ success: boolean; data?: { id: number; public_id: string } }> {
   const res = await api.post('/api/apigx/channels', input)
@@ -87,6 +87,17 @@ export async function createUpstreamKey(
   payload: { name: string; key: string; weight: number; expires_at?: number }
 ): Promise<{ success: boolean; data?: unknown }> {
   const res = await api.post(`/api/apigx/channels/${channelId}/keys`, payload)
+  return res.data
+}
+
+export async function createUpstreamKeysBatch(
+  channelId: number,
+  payload: { keys: string[]; weight: number }
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.post(
+    `/api/apigx/channels/${channelId}/keys/batch`,
+    payload
+  )
   return res.data
 }
 
