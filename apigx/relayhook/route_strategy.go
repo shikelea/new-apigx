@@ -100,6 +100,19 @@ func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing
 		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
 			candidates[i].Allowed = false
 			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
+			// The strategy filter runs before New API chooses a base channel. Once
+			// this quality verdict excludes the source, CheckBreakerAllows will no
+			// longer see that source and cannot establish durable recovery ownership.
+			// Persist and project the open breaker at the decision boundary instead.
+			if breakerEnabled() {
+				blocked, blockErr := apigxmodel.BreakerProbeBlocksTraffic(db, candidates[i].OfferingID)
+				if blockErr != nil || !blocked {
+					baseChannelID := baseChannelIDForShareChannel(db, candidates[i].ShareChannelID)
+					if baseChannelID > 0 {
+						syncBreakerMarks(db, baseChannelID, candidates[i].OfferingID, true)
+					}
+				}
+			}
 		}
 	}
 	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())

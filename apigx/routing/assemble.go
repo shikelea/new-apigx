@@ -87,8 +87,15 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
 			fillPriceFromRule(&candidate, rule, items)
 		}
 
-		// 质量：窗口内无样本时视图是"空的"（SampleCount=0 且 Insufficient）
-		view, viewErr := apigxmodel.ResolveQualityView(db, offering.ID, opts.WindowKind, opts.Now)
+		// 质量：恢复后的候选只读取恢复基线之后的自然流量，避免旧失败样本
+		// 在主动探测已经确认恢复后立刻重新打开熔断。
+		baseline, baselineErr := apigxmodel.BreakerRecoveryBaseline(db, offering.ID)
+		if baselineErr != nil {
+			baseline = 0
+		}
+		view, viewErr := apigxmodel.ResolveQualityViewSince(
+			db, offering.ID, opts.WindowKind, opts.Now, baseline,
+		)
 		if viewErr == nil {
 			candidate.Quality = view
 			if throughput, known := view.OutputTokensPerSecond(); known {
@@ -99,8 +106,9 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
 
 		// 熔断（T2.8）：失败率过高且冷却未过 → **从候选中摘除**（原因写清，便于解释）；
 		// 冷却已过则为半开（放行试探），不永久封禁。
+		blocked, blockErr := apigxmodel.BreakerProbeBlocksTraffic(db, offering.ID)
 		breaker := EvaluateBreaker(candidate.Quality, opts.Now, opts.Breaker)
-		if breaker.State == BreakerOpen {
+		if (blockErr == nil && blocked) || breaker.State == BreakerOpen {
 			candidate.Allowed = false
 			candidate.ExcludeReason = ExcludeBreakerOpen
 			// 阶段 4「告警」：熔断打开时发一条**限频**运维告警（同一供给 10 分钟最多一次），

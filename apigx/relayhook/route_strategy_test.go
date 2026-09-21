@@ -71,3 +71,27 @@ func TestComputeEligibleBaseChannelsUsesAutoQualityRanking(t *testing.T) {
 	assert.Empty(t, computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyAuto, map[int64]struct{}{}),
 		"没有授权供给时必须保持空集合，不能回退到底座随机")
 }
+
+func TestComputeEligibleBaseChannelsPersistsOpenBreakerBeforeNativeSelection(t *testing.T) {
+	env := newBreakerTestEnv(t)
+	t.Setenv("APIGX_BREAKER_ENABLED", "true")
+	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", env.offeringID).
+		Update("status", apigxmodel.OfferingStatusPublished).Error)
+	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", env.shareChannel.ShareGroupID).
+		Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
+	env.recordFailures(t, 20)
+
+	allowed := map[int64]struct{}{env.offeringID: {}}
+	assert.Empty(t, computeEligibleBaseChannels(
+		env.db, "breaker-model", routing.StrategyAuto, allowed,
+	))
+
+	var state apigxmodel.BreakerProbeState
+	require.NoError(t, env.db.Where("offering_id = ?", env.offeringID).First(&state).Error)
+	assert.Equal(t, apigxmodel.BreakerProbeStateOpen, state.State)
+	assert.EqualValues(t, env.baseChannelID, state.BaseChannelID)
+
+	var base basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&base).Error)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, base.Status)
+}

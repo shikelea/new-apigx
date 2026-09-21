@@ -401,6 +401,56 @@ func TestAssembleCandidatesCarriesSixHourTextThroughput(t *testing.T) {
 	assert.InDelta(t, 120, candidates[0].OutputTokensPerSecond, 0.001)
 }
 
+func TestAssembleCandidatesKeepsProbeOpenAndIgnoresPreRecoveryFailuresAfterClose(t *testing.T) {
+	env := newRoutingTestEnv(t)
+	seeded := env.seedChannelWithOffering(t, 1, "gpt-breaker-recovery")
+	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", seeded.OfferingID).
+		Update("status", apigxmodel.OfferingStatusPublished).Error)
+	var channel apigxmodel.Channel
+	require.NoError(t, env.db.Where("id = ?", seeded.ShareChannelID).First(&channel).Error)
+	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", channel.ShareGroupID).
+		Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
+
+	const openedAt int64 = 1_700_000_000
+	bucketTs := openedAt - openedAt%60
+	for range 20 {
+		require.NoError(t, apigxmodel.RecordQualitySample(env.db, apigxmodel.QualitySample{
+			OfferingID: seeded.OfferingID, BucketTs: bucketTs,
+			Outcome: apigxmodel.QualityOutcomeUpstream, LatencyMs: 100,
+		}))
+	}
+	require.NoError(t, apigxmodel.OpenBreakerProbe(
+		env.db, seeded.OfferingID, seeded.BaseChannelID, openedAt, 60,
+	))
+
+	candidates, _, err := AssembleCandidates(
+		env.db, nil, "gpt-breaker-recovery", AssembleOptions{Now: openedAt + 60},
+	)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	assert.False(t, candidates[0].Allowed, "an active durable probe must keep user traffic blocked")
+	assert.Equal(t, ExcludeBreakerOpen, candidates[0].ExcludeReason)
+
+	var state apigxmodel.BreakerProbeState
+	require.NoError(t, env.db.Where("offering_id = ?", seeded.OfferingID).First(&state).Error)
+	ready, err := apigxmodel.RecordBreakerProbeResult(env.db, state.ID, openedAt+60, true, false, "")
+	require.NoError(t, err)
+	assert.False(t, ready)
+	ready, err = apigxmodel.RecordBreakerProbeResult(env.db, state.ID, openedAt+75, true, false, "")
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.NoError(t, env.db.Where("id = ?", state.ID).First(&state).Error)
+	require.NoError(t, apigxmodel.FinalizeBreakerRecovery(env.db, state.ID, openedAt+76))
+
+	candidates, _, err = AssembleCandidates(
+		env.db, nil, "gpt-breaker-recovery", AssembleOptions{Now: state.RecoveryBaselineTs + 1},
+	)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	assert.True(t, candidates[0].Allowed, "pre-recovery failures must not reopen a closed breaker")
+	assert.Zero(t, candidates[0].Quality.UpstreamFailures)
+}
+
 // ---- fixture（投影测试需要真实库 + 我们的分享渠道） ----
 
 type routingTestEnv struct {
