@@ -2662,6 +2662,9 @@
     "Group Name": "Tên Nhóm",
     "Group name cannot be changed when editing.": "Tên nhóm không thể thay đổi khi chỉnh sửa.",
     "Group prices cannot be expanded because this expression is not a standard tiered pricing expression.": "Không thể mở rộng giá theo nhóm vì biểu thức này không phải là biểu thức giá theo bậc tiêu chuẩn.",
+    "Base groups (advanced)": "Nhóm nền tảng (nâng cao)",
+    "About base groups": "Giới thiệu về nhóm nền tảng",
+    "Base groups are a New API compatibility setting for channel availability, token groups, and legacy billing ratios. APIGX sharing permissions are controlled by each platform key resource scope and share access rules, not by these groups.": "Nhóm nền tảng là thiết lập tương thích New API cho phạm vi khả dụng của kênh, nhóm token và hệ số tính phí cũ. Quyền chia sẻ APIGX do phạm vi tài nguyên của từng khóa nền tảng và quy tắc truy cập chia sẻ kiểm soát, không phụ thuộc vào các nhóm này.",
     "Group Pricing": "Định giá nhóm",
     "Group pricing usage guide": "Hướng dẫn sử dụng định giá theo nhóm",
     "group ratio": "tỷ lệ nhóm",
@@ -6889,6 +6892,10 @@
     "share.offering.priced": "Priced",
     "share.offering.unpriced": "Unpriced",
     "share.offering.setPriceFirst": "Set price first",
+    "share.offering.delete": "Xóa nguồn cung",
+    "share.offering.deleteTitle": "Xóa nguồn cung mô hình",
+    "share.offering.deleteDescription": "Xóa {{model}}? Mô hình sẽ biến mất khỏi quảng trường và ngừng nhận yêu cầu mới. Lịch sử sử dụng vẫn được giữ lại.",
+    "share.offering.deleted": "Đã xóa nguồn cung mô hình.",
     "share.price.setManual": "Set manual price",
     "share.price.updateManual": "Update manual price",
     "share.price.manualTitle": "Manual model price",
@@ -7103,6 +7110,14 @@
     "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
     "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
     "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
-    "Shared with me": "Shared with me"
+    "Shared with me": "Shared with me",
+    "Registration invite created": "Đã tạo mã mời đăng ký",
+    "Registration invite revoked": "Đã thu hồi mã mời đăng ký",
+    "Registration invite codes": "Mã mời đăng ký",
+    "Generate codes here before requiring an invite for registration. The full code is shown only once.": "Hãy tạo mã tại đây trước khi yêu cầu mã mời để đăng ký. Mã đầy đủ chỉ hiển thị một lần.",
+    "Generate registration invite": "Tạo mã mời đăng ký",
+    "No registration invite yet": "Chưa có mã mời đăng ký",
+    "Revoke registration invite": "Thu hồi mã mời đăng ký",
+    "This code will stop accepting new registrations. Existing users are not affected.": "Mã này sẽ không còn chấp nhận đăng ký mới. Người dùng hiện có không bị ảnh hưởng."
   }
 }

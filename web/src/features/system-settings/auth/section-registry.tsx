@@ -23,24 +23,29 @@ import { BotProtectionSection } from './bot-protection-section'
 import { CustomOAuthSection } from './custom-oauth/custom-oauth-section'
 import { OAuthSection } from './oauth-section'
 import { PasskeySection } from './passkey-section'
+import { RegistrationInvitesCard } from './registration-invites-card'
 
 const AUTH_SECTIONS = [
   {
     id: 'basic-auth',
     titleKey: 'Basic Authentication',
     build: (settings: AuthSettings) => (
-      <BasicAuthSection
-        defaultValues={{
-          PasswordLoginEnabled: settings.PasswordLoginEnabled,
-          PasswordRegisterEnabled: settings.PasswordRegisterEnabled,
-          EmailVerificationEnabled: settings.EmailVerificationEnabled,
-          RegisterEnabled: settings.RegisterEnabled,
-          RegisterInviteRequired: settings.RegisterInviteRequired,
-          EmailDomainRestrictionEnabled: settings.EmailDomainRestrictionEnabled,
-          EmailAliasRestrictionEnabled: settings.EmailAliasRestrictionEnabled,
-          EmailDomainWhitelist: settings.EmailDomainWhitelist,
-        }}
-      />
+      <div className='space-y-6'>
+        <BasicAuthSection
+          defaultValues={{
+            PasswordLoginEnabled: settings.PasswordLoginEnabled,
+            PasswordRegisterEnabled: settings.PasswordRegisterEnabled,
+            EmailVerificationEnabled: settings.EmailVerificationEnabled,
+            RegisterEnabled: settings.RegisterEnabled,
+            RegisterInviteRequired: settings.RegisterInviteRequired,
+            EmailDomainRestrictionEnabled:
+              settings.EmailDomainRestrictionEnabled,
+            EmailAliasRestrictionEnabled: settings.EmailAliasRestrictionEnabled,
+            EmailDomainWhitelist: settings.EmailDomainWhitelist,
+          }}
+        />
+        <RegistrationInvitesCard />
+      </div>
     ),
   },
   {

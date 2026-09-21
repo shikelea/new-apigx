@@ -280,10 +280,32 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const retryAttemptsContextKey = "apigx_retry_attempts"
+
+type relayRetryAttempt struct {
+	ChannelID int `json:"channel_id"`
+	KeyNumber int `json:"key_number,omitempty"`
+}
+
 func addUsedChannel(c *gin.Context, channelId int) {
 	useChannel := c.GetStringSlice("use_channel")
 	useChannel = append(useChannel, fmt.Sprintf("%d", channelId))
 	c.Set("use_channel", useChannel)
+
+	attempts := make([]relayRetryAttempt, 0, len(useChannel))
+	if existing, ok := c.Get(retryAttemptsContextKey); ok {
+		if recorded, valid := existing.([]relayRetryAttempt); valid {
+			attempts = append(attempts, recorded...)
+		}
+	}
+	attempt := relayRetryAttempt{ChannelID: channelId}
+	if common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey) {
+		index := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+		if index >= 0 {
+			attempt.KeyNumber = index + 1
+		}
+	}
+	c.Set(retryAttemptsContextKey, append(attempts, attempt))
 }
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {

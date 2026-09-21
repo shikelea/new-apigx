@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
@@ -820,6 +821,18 @@ func AddChannel(c *gin.Context) {
 
 func DeleteChannel(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
+	managed, err := apigxmodel.ManagedBaseChannelIDs(model.DB, []int{id})
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if len(managed) > 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"message": "该渠道由 APIGX 分享资源管理，请在“我的分享”中删除对应渠道",
+		})
+		return
+	}
 	channelName := ""
 	channelProxy := ""
 	channelLookupFailed := false
@@ -830,7 +843,7 @@ func DeleteChannel(c *gin.Context) {
 		channelLookupFailed = true
 	}
 	channel := model.Channel{Id: id}
-	err := channel.Delete()
+	err = channel.Delete()
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -861,7 +874,22 @@ func DeleteDisabledChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	rows, err := model.DeleteDisabledChannel()
+	managed, err := apigxmodel.ManagedBaseChannelIDs(model.DB, ids)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	managedSet := make(map[int]struct{}, len(managed))
+	for _, id := range managed {
+		managedSet[id] = struct{}{}
+	}
+	deletable := make([]int, 0, len(ids)-len(managed))
+	for _, id := range ids {
+		if _, protected := managedSet[id]; !protected {
+			deletable = append(deletable, id)
+		}
+	}
+	rows, err := model.BatchDeleteChannels(deletable)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -873,7 +901,7 @@ func DeleteDisabledChannel(c *gin.Context) {
 	recordManageAudit(c, "channel.delete_disabled", map[string]any{
 		"count": rows,
 	})
-	closeActiveChannelWebSockets(ids)
+	closeActiveChannelWebSockets(deletable)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -1025,6 +1053,18 @@ func DeleteChannelBatch(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": "参数错误",
+		})
+		return
+	}
+	managed, err := apigxmodel.ManagedBaseChannelIDs(model.DB, channelBatch.Ids)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if len(managed) > 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"message": "所选渠道包含 APIGX 管理的分享资源，请先在“我的分享”中删除对应渠道",
 		})
 		return
 	}

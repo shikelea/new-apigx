@@ -81,6 +81,7 @@ import {
   renderAuditContent,
 } from '../../lib/format'
 import { buildQuotaAuditOperation } from '../../lib/quota-audit-operation'
+import { formatRetryTrace, retryAttemptCount } from '../../lib/retry-trace'
 import {
   getLogTypeConfig,
   isPerCallBilling,
@@ -612,8 +613,16 @@ export function DetailsDialog(props: DetailsDialogProps) {
     (other?.request_path || conversionChain.length > 0)
 
   const useChannel = other?.admin_info?.use_channel
+  const channelIds = Array.isArray(useChannel)
+    ? useChannel.map(String).filter(Boolean)
+    : []
+  const retryAttempts = Array.isArray(other?.admin_info?.retry_attempts)
+    ? other.admin_info.retry_attempts
+    : []
   const channelChain =
-    useChannel && useChannel.length > 0 ? useChannel.join(' → ') : undefined
+    retryAttemptCount(channelIds, retryAttempts) > 1
+      ? formatRetryTrace(channelIds, retryAttempts, t('Key'))
+      : undefined
   const reasoningEffortVariant = getReasoningEffortVariant(
     other?.reasoning_effort
   )

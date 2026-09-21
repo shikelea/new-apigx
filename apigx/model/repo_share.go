@@ -258,6 +258,43 @@ func ListChannelsByOwner(db *gorm.DB, ownerUserID int64, limit int) ([]Channel, 
 	return channels, err
 }
 
+// ManagedBaseChannelIDs returns the subset of New API channel IDs that are
+// currently owned by live APIGX share channels. Generic channel maintenance
+// must not delete these rows because APIGX retains the owner, encrypted Key
+// pool, ACL and offering lifecycle around them.
+func ManagedBaseChannelIDs(db *gorm.DB, candidateIDs []int) ([]int, error) {
+	if db == nil || len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	// A few isolated New API controller tests intentionally migrate only the
+	// base tables. In a real APIGX process this table is always created before
+	// routes are served; when it is absent there cannot be an APIGX-managed
+	// channel to protect.
+	if !db.Migrator().HasTable(&Channel{}) {
+		return nil, nil
+	}
+	ids64 := make([]int64, 0, len(candidateIDs))
+	for _, id := range candidateIDs {
+		if id > 0 {
+			ids64 = append(ids64, int64(id))
+		}
+	}
+	if len(ids64) == 0 {
+		return nil, nil
+	}
+	var managed64 []int64
+	if err := db.Model(&Channel{}).
+		Where("alive_flag = ? AND base_channel_id IN ?", AliveFlagAlive, ids64).
+		Distinct("base_channel_id").Pluck("base_channel_id", &managed64).Error; err != nil {
+		return nil, err
+	}
+	managed := make([]int, 0, len(managed64))
+	for _, id := range managed64 {
+		managed = append(managed, int(id))
+	}
+	return managed, nil
+}
+
 // UpdateShareGroup 更新分组的展示名与简介（计划书 §4"分享名称、介绍"）。
 //
 // 只动展示字段：更名与改简介**不影响任何授权**（Group 结构体注释已写明这一点），

@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/apigx/capacity"
 	"github.com/QuantumNous/new-api/apigx/channelpool"
@@ -160,9 +162,10 @@ func (e *testEnv) createGroup(t *testing.T, userID int64, name string) int64 {
 	data, _ := body["data"].(map[string]any)
 	id, ok := data["id"].(float64)
 	require.True(t, ok, "创建分组应返回 id：%s", rec.Body.String())
-	// 新建的**公开**分组初始为「待审核」（U-1 闸门：未发布的分组对外不可见、不可被路由）。
-	// 夹具代表"平台已审核通过"的状态，否则所有依赖广场/路由的用例都会因为闸门而看不到数据。
-	require.NoError(t, apigxmodel.SetShareGroupPublishStatus(e.db, int64(id), apigxmodel.ShareGroupPublishPublished))
+	// 分组只负责组织资源和访问范围，不再单独审核；新建后应立即生效。
+	group, err := apigxmodel.GetShareGroup(e.db, userID, int64(id))
+	require.NoError(t, err)
+	require.Equal(t, apigxmodel.ShareGroupPublishPublished, group.PublishStatus)
 	return int64(id)
 }
 
@@ -293,9 +296,8 @@ func TestShareGroupLifecycle(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	detail, _ := body["data"].(map[string]any)
 	assert.Equal(t, "小林公益站", detail["name"])
-	// 发布状态枚举：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停。公开分组新建后进入**待审核**（计划书 §12），
-	// 而不是草稿 —— 本用例的提示语一直是「默认待审核」，此前断言值 0 与枚举不符，属代码与用例一起写错，已按语义修正为 1。
-	assert.Equal(t, float64(1), detail["publish_status"], "公开分组新建后默认待审核")
+	// 分组只负责组织与访问范围，不独立审核；模型供给才是发布审核对象。
+	assert.Equal(t, float64(apigxmodel.ShareGroupPublishPublished), detail["publish_status"], "分组创建后直接生效")
 
 	// 删除后读不到
 	rec, _ = env.do(t, http.MethodDelete, "/api/share-groups/"+strconv.FormatInt(id, 10), user, "")
@@ -551,6 +553,23 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
 		require.True(t, ok)
 		assert.Contains(t, models, "kling-v1")
 		assert.Contains(t, models, "kling-v2-master")
+
+		// 回归：通用渠道管理曾允许删掉 APIGX 的影子渠道，后续同步模型只会返回 500。
+		// APIGX 持有加密 Key 与配方，因此同步时应自动重建，而不是要求用户重填凭据。
+		oldBaseID := shareChannel.BaseChannelID
+		require.NoError(t, env.db.Where("id = ?", oldBaseID).Delete(&basemodel.Channel{}).Error)
+		fetchRec, fetchBody = env.doWithRole(t, http.MethodPost,
+			"/api/channels/"+strconv.FormatInt(channelID, 10)+"/fetch-models", owner, `{}`, common.RoleCommonUser)
+		require.Equal(t, http.StatusOK, fetchRec.Code, fetchRec.Body.String())
+		models = fetchBody["data"].(map[string]any)["models"].([]any)
+		assert.Contains(t, models, "kling-v1")
+		repaired, err := apigxmodel.GetChannel(env.db, owner, channelID)
+		require.NoError(t, err)
+		assert.NotEqual(t, oldBaseID, repaired.BaseChannelID)
+		baseChannel = basemodel.Channel{}
+		require.NoError(t, env.db.Where("id = ?", repaired.BaseChannelID).First(&baseChannel).Error)
+		assert.Equal(t, constant.ChannelTypeTaskPlugin, baseChannel.Type)
+		assert.Equal(t, "kling", baseChannel.GetSetting().TaskPluginKey)
 	})
 
 	t.Run("batch credentials create one multi-key channel without splitting pairs", func(t *testing.T) {
@@ -882,6 +901,80 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 			require.ErrorIs(t, err, rollbackFixture)
 		})
 	}
+}
+
+func TestLoadOrRepairBaseChannelConvergesOnMySQL(t *testing.T) {
+	dsn := os.Getenv("APIGX_TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("未设置 APIGX_TEST_MYSQL_DSN：MySQL 影子渠道并发修复未执行")
+	}
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	migrateTestEnv(t, db)
+	env := configureTestEnv(t, db, true)
+
+	const owner int64 = 9_830_021
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	groupName := "MySQL 并发修复组-" + suffix
+	channelName := "MySQL 并发修复线路-" + suffix
+	groupID := env.createGroup(t, owner, groupName)
+	rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
+		`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"`+channelName+`","recipe_id":"openai-compatible","base_url":"https://example.com","upstream_keys":["sk-repair-a","sk-repair-b"]}`,
+		common.RoleCommonUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	channelID := int64(body["data"].(map[string]any)["id"].(float64))
+	shareChannel, err := apigxmodel.GetChannel(db, owner, channelID)
+	require.NoError(t, err)
+	oldBaseID := shareChannel.BaseChannelID
+	require.NoError(t, db.Where("channel_id = ?", oldBaseID).Delete(&basemodel.Ability{}).Error)
+	require.NoError(t, db.Where("id = ?", oldBaseID).Delete(&basemodel.Channel{}).Error)
+
+	h := &handler{db: db}
+	const workers = 6
+	start := make(chan struct{})
+	resultIDs := make(chan int64, workers)
+	errorsFound := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			copyOfChannel := *shareChannel
+			<-start
+			repaired, repairErr := h.loadOrRepairBaseChannel(&copyOfChannel)
+			if repairErr != nil {
+				errorsFound <- repairErr
+				return
+			}
+			resultIDs <- int64(repaired.Id)
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(resultIDs)
+	close(errorsFound)
+
+	for repairErr := range errorsFound {
+		require.NoError(t, repairErr)
+	}
+	var winnerID int64
+	for repairedID := range resultIDs {
+		require.Positive(t, repairedID)
+		if winnerID == 0 {
+			winnerID = repairedID
+		}
+		assert.Equal(t, winnerID, repairedID)
+	}
+	stored, err := apigxmodel.GetChannel(db, owner, channelID)
+	require.NoError(t, err)
+	assert.Equal(t, winnerID, stored.BaseChannelID)
+	assert.NotEqual(t, oldBaseID, winnerID)
+
+	var replacementCount int64
+	require.NoError(t, db.Model(&basemodel.Channel{}).
+		Where("name = ?", "APIGX-"+channelName).Count(&replacementCount).Error)
+	assert.EqualValues(t, 1, replacementCount, "losing repair transactions must roll back their replacement rows")
 }
 
 func TestUpstreamKeyStatusAndValidation(t *testing.T) {
@@ -1316,9 +1409,35 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/submit", owner, "")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
-	// 删除后同一模型可重新发布
+	var publishedBase basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", baseChannelID).First(&publishedBase).Error)
+	assert.Contains(t, strings.Split(publishedBase.Models, ","), "gpt-x")
+	var abilityCount int64
+	require.NoError(t, env.db.Model(&basemodel.Ability{}).
+		Where("channel_id = ? AND model = ?", baseChannelID, "gpt-x").Count(&abilityCount).Error)
+	assert.EqualValues(t, 1, abilityCount)
+
+	usage := &apigxmodel.UsageEvent{
+		EventUID: "offering-delete-history", UserID: owner, OwnerUserID: owner,
+		OfferingID: offeringID, ChannelID: channelID, ApiModelID: "gpt-x",
+		Currency: "USD", OccurredAt: common.GetTimestamp(), CreatedAt: common.GetTimestamp(),
+	}
+	require.NoError(t, env.db.Create(usage).Error)
+
+	// 删除已发布供给后立即从底座模型与能力表摘除，历史用量保留；同一模型可重新添加。
 	rec, _ = env.do(t, http.MethodDelete, "/api/offerings/"+strconv.FormatInt(offeringID, 10), owner, "")
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	publishedBase = basemodel.Channel{}
+	require.NoError(t, env.db.Where("id = ?", baseChannelID).First(&publishedBase).Error)
+	assert.NotContains(t, strings.Split(publishedBase.Models, ","), "gpt-x")
+	require.NoError(t, env.db.Model(&basemodel.Ability{}).
+		Where("channel_id = ? AND model = ?", baseChannelID, "gpt-x").Count(&abilityCount).Error)
+	assert.Zero(t, abilityCount)
+	var usageCount int64
+	require.NoError(t, env.db.Model(&apigxmodel.UsageEvent{}).
+		Where("offering_id = ?", offeringID).Count(&usageCount).Error)
+	assert.EqualValues(t, 1, usageCount)
+
 	rec, _ = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
 		`{"upstream_model_id":"gpt-x"}`)
 	assert.Equal(t, http.StatusOK, rec.Code, "软删除后应可重新发布")
@@ -1336,6 +1455,8 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
 		Id: int(baseChannelID), Name: "跨 owner 审核底座", Key: "x", Status: common.ChannelStatusEnabled,
 	}).Error)
 	groupID := env.createGroup(t, owner, "待审核组")
+	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", groupID).
+		Update("publish_status", apigxmodel.ShareGroupPublishPending).Error)
 	channelID := env.createChannel(t, owner, groupID, baseChannelID)
 
 	createPending := func(modelID string) int64 {
@@ -1382,6 +1503,10 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
 	assert.Equal(t, float64(owner), data["owner_user_id"])
 	assert.Equal(t, float64(apigxmodel.OfferingStatusPending), data["from_status"])
 	assert.Equal(t, float64(apigxmodel.OfferingStatusPublished), data["status"])
+	var activatedGroup apigxmodel.ShareGroup
+	require.NoError(t, env.db.Where("id = ?", groupID).First(&activatedGroup).Error)
+	assert.Equal(t, apigxmodel.ShareGroupPublishPublished, activatedGroup.PublishStatus,
+		"供给审核通过时应一并激活历史待审核分组")
 
 	// 管理资源选择器请求全部状态，已发布供给也必须返回。
 	rec, body = env.do(t, http.MethodGet, "/api/reviews/offerings?status=all&page=1&page_size=10", reviewer, "")
@@ -2352,6 +2477,43 @@ func TestAccessInviteAndGrantAPIContract(t *testing.T) {
 	canGuest, err := apigxmodel.SubjectCanAccessResource(env.db, apigxmodel.GrantSubjectUser, guest, apigxmodel.GrantResourceGroup, group.ID, 0)
 	require.NoError(t, err)
 	assert.False(t, canGuest, "连带撤销后访客不应再有访问权")
+}
+
+func TestRegistrationInviteAdminAPIContract(t *testing.T) {
+	env := newTestEnv(t, true)
+	const admin int64 = 9401
+	const otherAdmin int64 = 9402
+	const ordinary int64 = 9403
+
+	rec, _ := env.doWithRole(t, http.MethodPost, "/api/access/invites", ordinary,
+		`{"invite_type":0,"max_uses":2,"expires_at":0}`, common.RoleCommonUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	rec, body := env.doWithRole(t, http.MethodPost, "/api/access/invites", admin,
+		`{"invite_type":0,"max_uses":2,"expires_at":0}`, common.RoleAdminUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data := body["data"].(map[string]any)
+	inviteID := int64(data["id"].(float64))
+	token := data["token"].(string)
+	assert.NotEmpty(t, token)
+	assert.EqualValues(t, apigxmodel.InviteTypeRegistration, data["invite_type"])
+
+	rec, _ = env.doWithRole(t, http.MethodGet, "/api/access/invites?invite_type=0", ordinary, "", common.RoleCommonUser)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	rec, body = env.doWithRole(t, http.MethodGet, "/api/access/invites?invite_type=0", otherAdmin, "", common.RoleAdminUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items := body["data"].(map[string]any)["items"].([]any)
+	require.Len(t, items, 1)
+	item := items[0].(map[string]any)
+	assert.EqualValues(t, inviteID, item["id"])
+	assert.EqualValues(t, admin, item["created_by_user_id"])
+
+	revokePath := "/api/access/invites/" + strconv.FormatInt(inviteID, 10) + "/revoke?invite_type=0"
+	rec, _ = env.doWithRole(t, http.MethodPost, revokePath, otherAdmin, "", common.RoleAdminUser)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	_, err := apigxmodel.RedeemRegistrationInvite(env.db, token, common.GetTimestamp())
+	assert.ErrorIs(t, err, apigxmodel.ErrNotFound)
 }
 
 // TestPlazaAggregatesSameModelFromTwoSharers 覆盖阶段 4 验收表第 1 行：

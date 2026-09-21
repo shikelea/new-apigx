@@ -18,10 +18,18 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowLeft, CircleCheck, CircleDashed, Send } from 'lucide-react'
+import {
+  ArrowLeft,
+  CircleCheck,
+  CircleDashed,
+  Send,
+  Trash2,
+} from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   StaticDataTable,
   type StaticDataTableColumn,
@@ -37,6 +45,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import {
+  deleteOffering,
   getChannel,
   getChannelKeys,
   getChannelOfferings,
@@ -57,6 +66,9 @@ import { PriceMatchCard } from './price-match-card'
 export function ChannelDetailView(props: { channelId: number }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const [deletingOffering, setDeletingOffering] = useState<Offering | null>(
+    null
+  )
 
   const submitMutation = useMutation({
     mutationFn: (offeringId: number) => submitOffering(offeringId),
@@ -87,6 +99,19 @@ export function ChannelDetailView(props: { channelId: number }) {
       void queryClient.invalidateQueries({
         queryKey: ['apigx-channel-offerings', props.channelId],
       })
+    },
+    onError: (error) => handleServerError(error),
+  })
+
+  const deleteOfferingMutation = useMutation({
+    mutationFn: (offeringId: number) => deleteOffering(offeringId),
+    onSuccess: () => {
+      setDeletingOffering(null)
+      toast.success(t('share.offering.deleted'))
+      void queryClient.invalidateQueries({
+        queryKey: ['apigx-channel-offerings', props.channelId],
+      })
+      void queryClient.invalidateQueries({ queryKey: ['apigx-model-sources'] })
     },
     onError: (error) => handleServerError(error),
   })
@@ -189,11 +214,21 @@ export function ChannelDetailView(props: { channelId: number }) {
       id: 'actions',
       header: '',
       cell: (row) => (
-        <SubmitOfferingButton
-          offering={row}
-          pending={submitMutation.isPending}
-          onSubmit={submitMutation.mutate}
-        />
+        <div className='flex justify-end gap-1'>
+          <SubmitOfferingButton
+            offering={row}
+            pending={submitMutation.isPending}
+            onSubmit={submitMutation.mutate}
+          />
+          <Button
+            variant='ghost'
+            size='icon-sm'
+            aria-label={t('share.offering.delete')}
+            onClick={() => setDeletingOffering(row)}
+          >
+            <Trash2 />
+          </Button>
+        </div>
       ),
     },
   ]
@@ -322,6 +357,25 @@ export function ChannelDetailView(props: { channelId: number }) {
           </Card>
 
           <PriceMatchCard channelId={props.channelId} offerings={offerings} />
+
+          <ConfirmDialog
+            open={deletingOffering !== null}
+            onOpenChange={(open) => {
+              if (!open) setDeletingOffering(null)
+            }}
+            title={t('share.offering.deleteTitle')}
+            desc={t('share.offering.deleteDescription', {
+              model: deletingOffering?.upstream_model_id ?? '',
+            })}
+            confirmText={t('Delete')}
+            destructive
+            isLoading={deleteOfferingMutation.isPending}
+            handleConfirm={() => {
+              if (deletingOffering) {
+                deleteOfferingMutation.mutate(deletingOffering.id)
+              }
+            }}
+          />
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>

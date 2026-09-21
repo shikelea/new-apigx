@@ -266,7 +266,7 @@ func ReviewModelOffering(db *gorm.DB, id int64, toStatus int, review OfferingRev
 			return err
 		}
 		var channel Channel
-		if err := tx.Select("id", "owner_user_id").Where("id = ? AND alive_flag = ?", offering.ChannelID, AliveFlagAlive).First(&channel).Error; err != nil {
+		if err := tx.Select("id", "owner_user_id", "share_group_id").Where("id = ? AND alive_flag = ?", offering.ChannelID, AliveFlagAlive).First(&channel).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrNotFound
 			}
@@ -289,6 +289,28 @@ func ReviewModelOffering(db *gorm.DB, id int64, toStatus int, review OfferingRev
 		}
 		if updated.RowsAffected != 1 {
 			return fmt.Errorf("%w: offering was already reviewed", ErrInvalidArgument)
+		}
+		if toStatus == OfferingStatusPublished {
+			var group ShareGroup
+			if err := tx.Select("id", "publish_status").
+				Where("id = ? AND alive_flag = ?", channel.ShareGroupID, AliveFlagAlive).
+				First(&group).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrNotFound
+				}
+				return err
+			}
+			switch group.PublishStatus {
+			case ShareGroupPublishDraft, ShareGroupPublishPending:
+				if err := tx.Model(&ShareGroup{}).Where("id = ?", group.ID).
+					Update("publish_status", ShareGroupPublishPublished).Error; err != nil {
+					return err
+				}
+			case ShareGroupPublishPublished:
+				// Already active.
+			default:
+				return fmt.Errorf("%w: share group is suspended or retired", ErrInvalidArgument)
+			}
 		}
 
 		action := "offering_reject"

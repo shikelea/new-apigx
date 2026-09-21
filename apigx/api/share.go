@@ -249,10 +249,8 @@ func (h *handler) createShareGroup(c *gin.Context) {
 		Name:              strings.TrimSpace(req.Name),
 		Description:       req.Description,
 		DefaultVisibility: 0,
-		// 发布状态（字段注释为准：0=草稿 / 1=待审核 / 2=已发布 / 3=已暂停 / 4=已退役）。
-		// 规则：**公开**分组先审核（计划书 §12「新公开资源先审核」）；非公开（受限/私有）不对外暴露，
-		// 无需审核即视为已发布 —— 否则分享者每次自用都要等一次人工审核，体验不合理。
-		PublishStatus: initialGroupPublishStatus(groupVisibilityOrDefault(req.DefaultVisibility)),
+		// 分组只是资源组织和访问范围，不单独审核；具体模型供给仍需管理员审核。
+		PublishStatus: apigxmodel.ShareGroupPublishPublished,
 	}
 	if req.DefaultVisibility != nil {
 		group.DefaultVisibility = *req.DefaultVisibility
@@ -308,35 +306,13 @@ func (h *handler) getShareGroup(c *gin.Context) {
 	})
 }
 
-// initialGroupPublishStatus 返回新建分组时的初始发布状态。
-//
-// **公开**分组必须先审核（返回待审核），**非公开**分组不对外暴露，直接视为已发布。
-// groupVisibilityOrDefault 取分组的可见性，未指定时按**公开**处理。
-//
-// 保守默认：未指定可见性时宁可按「公开 ⇒ 先审核」，也不要静默变成一个对人可见的分组。
-func groupVisibilityOrDefault(input *int) int {
-	if input == nil {
-		return apigxmodel.ShareGroupVisibilityPublic
-	}
-	return *input
-}
-
-func initialGroupPublishStatus(visibility int) int {
-	if visibility == apigxmodel.ShareGroupVisibilityPublic {
-		return apigxmodel.ShareGroupPublishPending
-	}
-	return apigxmodel.ShareGroupPublishPublished
-}
-
-// setGroupPublishStatusRequest 平台的审核动作（发布 / 暂停）。
+// setGroupPublishStatusRequest 是平台的运营停用/恢复动作，不是分组审核。
 type setGroupPublishStatusRequest struct {
 	Status int `json:"status" binding:"required"`
 }
 
-// setShareGroupPublishStatus 平台侧：把分享分组置为「已发布」或「已暂停」。
-//
-// 为什么由平台做：这属于「资源审核」（§4 管理后台），分享者不能自己把草稿/待审核的分组对外放出。
-// 已在用（已发布）的分组被暂停后，新请求应停止 —— 生效点见广场可见性与路由候选的判据。
+// setShareGroupPublishStatus 仅供平台在运营处置时暂停或恢复整个分组。分组创建后
+// 默认直接生效，管理员审核对象始终是模型供给。
 func (h *handler) setShareGroupPublishStatus(c *gin.Context) {
 	if !requirePlatformReviewer(c) {
 		return
@@ -1980,9 +1956,26 @@ func (h *handler) deleteOffering(c *gin.Context) {
 	if !valid {
 		return
 	}
-	if err := apigxmodel.DeleteModelOffering(h.db, owner, id); err != nil {
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		offering, getErr := apigxmodel.GetModelOffering(tx, owner, id)
+		if getErr != nil {
+			return getErr
+		}
+		if deleteErr := apigxmodel.DeleteModelOffering(tx, owner, id); deleteErr != nil {
+			return deleteErr
+		}
+		if deleteErr := tx.Where("offering_id = ?", offering.ID).
+			Delete(&apigxmodel.BreakerProbeState{}).Error; deleteErr != nil {
+			return deleteErr
+		}
+		return syncBaseChannelStopsModel(tx, offering)
+	})
+	if err != nil {
 		failFromRepo(c, err)
 		return
+	}
+	if basemodel.DB != nil {
+		basemodel.InitChannelCache()
 	}
 	ok(c, gin.H{"deleted": id})
 }
@@ -2029,13 +2022,13 @@ func (h *handler) fetchUpstreamModels(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_channel", "share channel has no base channel")
 		return
 	}
-	var baseChannel basemodel.Channel
-	if err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error; err != nil {
+	baseChannel, err := h.loadOrRepairBaseChannel(shareChannel)
+	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
 
-	modelIDs, err := controller.FetchChannelUpstreamModelIDsForAPIGX(&baseChannel)
+	modelIDs, err := controller.FetchChannelUpstreamModelIDsForAPIGX(baseChannel)
 	if err != nil {
 		// 上游取列表失败通常是凭据/网络问题：对外给明确原因，但不泄露上游原始报文
 		common.SysError("apigx api: fetch upstream models failed: " + err.Error())
@@ -2054,6 +2047,155 @@ func (h *handler) fetchUpstreamModels(c *gin.Context) {
 		result["skipped"] = skipped
 	}
 	ok(c, result)
+}
+
+// loadOrRepairBaseChannel returns the New API channel backing one APIGX share
+// channel. Older builds allowed administrators to delete that backing row from
+// the generic channel page (especially through "delete disabled channels"),
+// leaving the APIGX resource alive but making model sync fail as a generic 500.
+//
+// APIGX already owns the normalized base URL and encrypted Key pool, so a
+// self-serve channel can be restored without asking the owner to re-enter a
+// credential. The replacement and the APIGX pointer move happen in one
+// transaction; a compare-and-swap prevents concurrent repair requests from
+// leaving an extra backing channel behind.
+func (h *handler) loadOrRepairBaseChannel(shareChannel *apigxmodel.Channel) (*basemodel.Channel, error) {
+	if shareChannel == nil || shareChannel.ID <= 0 || shareChannel.BaseChannelID <= 0 {
+		return nil, fmt.Errorf("%w: share channel has no base channel", apigxmodel.ErrInvalidArgument)
+	}
+	var baseChannel basemodel.Channel
+	err := h.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error
+	if err == nil {
+		return &baseChannel, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	recipe, err := selfServeChannelRecipeByProtocol(shareChannel.Protocol)
+	if err != nil {
+		return nil, fmt.Errorf("%w: backing channel was removed and this channel type cannot be restored automatically", apigxmodel.ErrInvalidArgument)
+	}
+	keys, err := apigxmodel.AvailableUpstreamKeys(h.db, shareChannel.OwnerUserID, shareChannel.ID, common.GetTimestamp())
+	if err != nil {
+		return nil, err
+	}
+	plainKeys := make([]string, 0, len(keys))
+	keyRecords := make([]*apigxmodel.UpstreamKey, 0, len(keys))
+	for i := range keys {
+		plain, decryptErr := secretbox.Decrypt(keys[i].SecretRef)
+		if decryptErr != nil {
+			return nil, fmt.Errorf("restore backing channel credential: %w", decryptErr)
+		}
+		plainKeys = append(plainKeys, plain)
+		keyRecords = append(keyRecords, &keys[i])
+	}
+	if len(plainKeys) == 0 {
+		return nil, fmt.Errorf("%w: backing channel was removed and no usable upstream key remains", apigxmodel.ErrInvalidArgument)
+	}
+
+	oldBaseID := shareChannel.BaseChannelID
+	var repairedBaseID int64
+	repairWonByPeer := errors.New("backing channel repair completed by another request")
+	err = h.db.Transaction(func(tx *gorm.DB) error {
+		var current apigxmodel.Channel
+		if txErr := tx.Where("id = ? AND alive_flag = ?", shareChannel.ID, apigxmodel.AliveFlagAlive).First(&current).Error; txErr != nil {
+			return txErr
+		}
+		if current.BaseChannelID != oldBaseID {
+			// Another request repaired it first. Use that committed row after this transaction.
+			repairedBaseID = current.BaseChannelID
+			return nil
+		}
+		var appeared basemodel.Channel
+		if txErr := tx.Where("id = ?", oldBaseID).First(&appeared).Error; txErr == nil {
+			repairedBaseID = oldBaseID
+			return nil
+		} else if !errors.Is(txErr, gorm.ErrRecordNotFound) {
+			return txErr
+		}
+
+		if txErr := provisionBaseChannelForShareChannel(tx, &current, plainKeys, keyRecords, recipe); txErr != nil {
+			return txErr
+		}
+		repairedBaseID = current.BaseChannelID
+		updated := tx.Model(&apigxmodel.Channel{}).
+			Where("id = ? AND alive_flag = ? AND base_channel_id = ?", current.ID, apigxmodel.AliveFlagAlive, oldBaseID).
+			Updates(map[string]any{"base_channel_id": repairedBaseID, "updated_at": common.GetTimestamp()})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			// The replacement created by this transaction must roll back, but the
+			// request can still use the row committed by the winning repair.
+			return repairWonByPeer
+		}
+
+		var published []apigxmodel.ModelOffering
+		if txErr := tx.Where("channel_id = ? AND status = ?", current.ID, apigxmodel.OfferingStatusPublished).
+			Order("id ASC").Find(&published).Error; txErr != nil {
+			return txErr
+		}
+		modelIDs := make([]string, 0, len(published))
+		offeringIDs := make([]int64, 0, len(published))
+		seen := make(map[string]struct{}, len(published))
+		for i := range published {
+			offeringIDs = append(offeringIDs, published[i].ID)
+			modelID := strings.TrimSpace(published[i].UpstreamModelID)
+			if modelID == "" {
+				continue
+			}
+			if _, exists := seen[modelID]; exists {
+				continue
+			}
+			seen[modelID] = struct{}{}
+			modelIDs = append(modelIDs, modelID)
+		}
+		if len(modelIDs) > 0 {
+			joined := strings.Join(modelIDs, ",")
+			if txErr := tx.Model(&basemodel.Channel{}).Where("id = ?", repairedBaseID).
+				Update("models", joined).Error; txErr != nil {
+				return txErr
+			}
+			var repaired basemodel.Channel
+			if txErr := tx.Where("id = ?", repairedBaseID).First(&repaired).Error; txErr != nil {
+				return txErr
+			}
+			if txErr := repaired.AddAbilities(tx); txErr != nil {
+				return txErr
+			}
+		}
+		if len(offeringIDs) > 0 {
+			return tx.Model(&apigxmodel.BreakerProbeState{}).
+				Where("base_channel_id = ? AND offering_id IN ?", oldBaseID, offeringIDs).
+				Update("base_channel_id", repairedBaseID).Error
+		}
+		return nil
+	})
+	if errors.Is(err, repairWonByPeer) {
+		var current apigxmodel.Channel
+		if getErr := h.db.Where("id = ? AND alive_flag = ?", shareChannel.ID, apigxmodel.AliveFlagAlive).
+			First(&current).Error; getErr != nil {
+			return nil, getErr
+		}
+		if current.BaseChannelID <= 0 || current.BaseChannelID == oldBaseID {
+			return nil, fmt.Errorf("%w: backing channel repair did not converge", apigxmodel.ErrInvalidArgument)
+		}
+		repairedBaseID = current.BaseChannelID
+	} else if err != nil {
+		return nil, err
+	}
+	if repairedBaseID <= 0 {
+		return nil, fmt.Errorf("%w: backing channel repair did not produce a channel", apigxmodel.ErrInvalidArgument)
+	}
+	shareChannel.BaseChannelID = repairedBaseID
+	if err := h.db.Where("id = ?", repairedBaseID).First(&baseChannel).Error; err != nil {
+		return nil, err
+	}
+	if basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+	return &baseChannel, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -2944,6 +3086,16 @@ func selfServeChannelRecipeByID(recipeID string) (selfServeChannelRecipe, error)
 	return selfServeChannelRecipe{}, fmt.Errorf("%w: unsupported channel recipe", apigxmodel.ErrInvalidArgument)
 }
 
+func selfServeChannelRecipeByProtocol(protocol string) (selfServeChannelRecipe, error) {
+	protocol = strings.TrimSpace(protocol)
+	for _, recipe := range selfServeChannelRecipes {
+		if recipe.Protocol == protocol && selfServeChannelRecipeAvailable(recipe) {
+			return recipe, nil
+		}
+	}
+	return selfServeChannelRecipe{}, fmt.Errorf("%w: unsupported channel protocol", apigxmodel.ErrInvalidArgument)
+}
+
 func selfServeChannelRecipeAvailable(recipe selfServeChannelRecipe) bool {
 	if recipe.TaskPluginKey == "" {
 		return recipe.BaseChannelType != constant.ChannelTypeTaskPlugin
@@ -3163,4 +3315,55 @@ func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
 		return err
 	}
 	return nil
+}
+
+// syncBaseChannelStopsModel removes a deleted offering from the backing New API
+// channel. Usage and attempt rows keep their immutable offering/channel snapshots,
+// while new requests lose both the APIGX candidate and the base ability in the
+// same transaction as the soft delete.
+func syncBaseChannelStopsModel(db *gorm.DB, offering *apigxmodel.ModelOffering) error {
+	if db == nil || offering == nil || offering.ChannelID <= 0 || offering.UpstreamModelID == "" {
+		return nil
+	}
+	var remaining int64
+	if err := db.Model(&apigxmodel.ModelOffering{}).
+		Where("channel_id = ? AND upstream_model_id = ? AND status = ? AND alive_flag = ?",
+			offering.ChannelID, offering.UpstreamModelID, apigxmodel.OfferingStatusPublished, apigxmodel.AliveFlagAlive).
+		Count(&remaining).Error; err != nil {
+		return err
+	}
+	if remaining > 0 {
+		return nil
+	}
+
+	var shareChannel apigxmodel.Channel
+	if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if shareChannel.BaseChannelID <= 0 {
+		return nil
+	}
+	var base basemodel.Channel
+	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	kept := make([]string, 0)
+	for _, modelID := range strings.Split(base.Models, ",") {
+		modelID = strings.TrimSpace(modelID)
+		if modelID != "" && modelID != offering.UpstreamModelID {
+			kept = append(kept, modelID)
+		}
+	}
+	if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
+		Update("models", strings.Join(kept, ",")).Error; err != nil {
+		return err
+	}
+	return db.Where("channel_id = ? AND model = ?", base.Id, offering.UpstreamModelID).
+		Delete(&basemodel.Ability{}).Error
 }

@@ -2662,6 +2662,9 @@
     "Group Name": "グループ名",
     "Group name cannot be changed when editing.": "編集時はグループ名を変更できません。",
     "Group prices cannot be expanded because this expression is not a standard tiered pricing expression.": "この式は標準の段階制料金式ではないため、グループ別価格を展開できません。",
+    "Base groups (advanced)": "基盤グループ（詳細）",
+    "About base groups": "基盤グループについて",
+    "Base groups are a New API compatibility setting for channel availability, token groups, and legacy billing ratios. APIGX sharing permissions are controlled by each platform key resource scope and share access rules, not by these groups.": "基盤グループは、チャネルの利用可否、トークングループ、旧来の課金倍率に使う New API 互換設定です。APIGX の共有権限は各プラットフォームキーのリソース範囲と共有アクセスルールで制御され、ここでのグループは使用しません。",
     "Group Pricing": "グループ料金",
     "Group pricing usage guide": "グループ料金の使用ガイド",
     "group ratio": "グループ倍率",
@@ -6889,6 +6892,10 @@
     "share.offering.priced": "Priced",
     "share.offering.unpriced": "Unpriced",
     "share.offering.setPriceFirst": "Set price first",
+    "share.offering.delete": "提供元を削除",
+    "share.offering.deleteTitle": "モデル提供元を削除",
+    "share.offering.deleteDescription": "{{model}} を削除しますか？モデル広場から直ちに消え、新しいリクエストを受け付けなくなります。過去の使用量は保持されます。",
+    "share.offering.deleted": "モデル提供元を削除しました。",
     "share.price.setManual": "Set manual price",
     "share.price.updateManual": "Update manual price",
     "share.price.manualTitle": "Manual model price",
@@ -7103,6 +7110,14 @@
     "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
     "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
     "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
-    "Shared with me": "Shared with me"
+    "Shared with me": "Shared with me",
+    "Registration invite created": "登録招待コードを作成しました",
+    "Registration invite revoked": "登録招待コードを取り消しました",
+    "Registration invite codes": "登録招待コード",
+    "Generate codes here before requiring an invite for registration. The full code is shown only once.": "招待制登録を有効にする前に、ここでコードを作成してください。完全なコードは一度だけ表示されます。",
+    "Generate registration invite": "登録招待コードを作成",
+    "No registration invite yet": "登録招待コードはまだありません",
+    "Revoke registration invite": "登録招待コードを取り消す",
+    "This code will stop accepting new registrations. Existing users are not affected.": "このコードによる新規登録を停止します。既存ユーザーには影響しません。"
   }
 }

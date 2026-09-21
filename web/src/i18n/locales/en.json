@@ -2662,6 +2662,9 @@
     "Group Name": "Group Name",
     "Group name cannot be changed when editing.": "Group name cannot be changed when editing.",
     "Group prices cannot be expanded because this expression is not a standard tiered pricing expression.": "Group prices cannot be expanded because this expression is not a standard tiered pricing expression.",
+    "Base groups (advanced)": "Base groups (advanced)",
+    "About base groups": "About base groups",
+    "Base groups are a New API compatibility setting for channel availability, token groups, and legacy billing ratios. APIGX sharing permissions are controlled by each platform key resource scope and share access rules, not by these groups.": "Base groups are a New API compatibility setting for channel availability, token groups, and legacy billing ratios. APIGX sharing permissions are controlled by each platform key resource scope and share access rules, not by these groups.",
     "Group Pricing": "Group Pricing",
     "Group pricing usage guide": "Group pricing usage guide",
     "group ratio": "group ratio",
@@ -6889,6 +6892,10 @@
     "share.offering.priced": "Priced",
     "share.offering.unpriced": "Unpriced",
     "share.offering.setPriceFirst": "Set price first",
+    "share.offering.delete": "Delete offering",
+    "share.offering.deleteTitle": "Delete model offering",
+    "share.offering.deleteDescription": "Delete {{model}}? It will disappear from the model plaza and stop receiving new requests. Historical usage will be retained.",
+    "share.offering.deleted": "Model offering deleted.",
     "share.price.setManual": "Set manual price",
     "share.price.updateManual": "Update manual price",
     "share.price.manualTitle": "Manual model price",
@@ -7103,6 +7110,14 @@
     "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
     "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
     "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
-    "Shared with me": "Shared with me"
+    "Shared with me": "Shared with me",
+    "Registration invite created": "Registration invite created",
+    "Registration invite revoked": "Registration invite revoked",
+    "Registration invite codes": "Registration invite codes",
+    "Generate codes here before requiring an invite for registration. The full code is shown only once.": "Generate codes here before requiring an invite for registration. The full code is shown only once.",
+    "Generate registration invite": "Generate registration invite",
+    "No registration invite yet": "No registration invite yet",
+    "Revoke registration invite": "Revoke registration invite",
+    "This code will stop accepting new registrations. Existing users are not affected.": "This code will stop accepting new registrations. Existing users are not affected."
   }
 }

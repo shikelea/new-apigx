@@ -2662,6 +2662,9 @@
     "Group Name": "分组名称",
     "Group name cannot be changed when editing.": "编辑时无法更改组名称。",
     "Group prices cannot be expanded because this expression is not a standard tiered pricing expression.": "该表达式不是标准分档计费表达式，无法展开分组价格。",
+    "Base groups (advanced)": "底座分组（高级）",
+    "About base groups": "关于底座分组",
+    "Base groups are a New API compatibility setting for channel availability, token groups, and legacy billing ratios. APIGX sharing permissions are controlled by each platform key resource scope and share access rules, not by these groups.": "底座分组是 New API 的兼容设置，用于控制渠道可用组、Token 分组和旧版计费倍率。APIGX 的分享权限由每个模型路由密钥的资源范围和分享访问规则控制，与这里的分组无关。",
     "Group Pricing": "分组定价",
     "Group pricing usage guide": "分组定价使用教程",
     "group ratio": "分组倍率",
@@ -6889,6 +6892,10 @@
     "share.offering.priced": "已定价",
     "share.offering.unpriced": "未定价",
     "share.offering.setPriceFirst": "先设置价格",
+    "share.offering.delete": "删除供给",
+    "share.offering.deleteTitle": "删除模型供给",
+    "share.offering.deleteDescription": "确定删除 {{model}} 吗？删除后会立即从模型广场消失并停止接收新请求，历史用量仍会保留。",
+    "share.offering.deleted": "模型供给已删除。",
     "share.price.setManual": "手动定价",
     "share.price.updateManual": "修改人工价格",
     "share.price.manualTitle": "手动设置模型价格",
@@ -7103,6 +7110,14 @@
     "Prices are configured and synced in system model pricing.": "模型价格在系统「模型与定价」中配置并同步。",
     "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "平台会自动补全所需路径。请移除 Base URL 末尾的 /v1，以免请求失败。",
     "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "自定义 API 基础 URL。官方渠道使用内置地址；仅在接入第三方代理或特殊端点时填写。请勿添加 /v1 或尾部斜杠。",
-    "Shared with me": "分享给我"
+    "Shared with me": "分享给我",
+    "Registration invite created": "注册邀请码已生成",
+    "Registration invite revoked": "注册邀请码已撤销",
+    "Registration invite codes": "注册邀请码",
+    "Generate codes here before requiring an invite for registration. The full code is shown only once.": "请先在这里生成邀请码，再开启邀请码注册。完整邀请码只显示一次。",
+    "Generate registration invite": "生成注册邀请码",
+    "No registration invite yet": "还没有注册邀请码",
+    "Revoke registration invite": "撤销注册邀请码",
+    "This code will stop accepting new registrations. Existing users are not affected.": "撤销后该邀请码不能再用于注册，已经注册的用户不受影响。"
   }
 }

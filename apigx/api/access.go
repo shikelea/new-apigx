@@ -138,6 +138,27 @@ func (h *handler) listAccessInvites(c *gin.Context) {
 	if !valid {
 		return
 	}
+	if c.Query("invite_type") == strconv.Itoa(apigxmodel.InviteTypeRegistration) {
+		if !requirePlatformReviewer(c) {
+			return
+		}
+		rows, err := apigxmodel.ListRegistrationInvites(h.db, 100)
+		if err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		items := make([]gin.H, 0, len(rows))
+		for _, row := range rows {
+			items = append(items, gin.H{
+				"id": row.ID, "invite_type": row.InviteType, "token_prefix": row.TokenPrefix,
+				"max_uses": row.MaxUses, "used_count": row.UsedCount, "status": row.Status,
+				"expires_at": row.ExpiresAt, "created_by_user_id": row.CreatedByUserID,
+				"created_at": row.CreatedAt,
+			})
+		}
+		ok(c, gin.H{"items": items, "total": len(items)})
+		return
+	}
 	rows, err := apigxmodel.ListAccessInvitesByCreator(h.db, owner, 100)
 	if err != nil {
 		failFromRepo(c, err)
@@ -163,6 +184,17 @@ func (h *handler) revokeAccessInvite(c *gin.Context) {
 	}
 	id, valid := paramID(c, "id")
 	if !valid {
+		return
+	}
+	if c.Query("invite_type") == strconv.Itoa(apigxmodel.InviteTypeRegistration) {
+		if !requirePlatformReviewer(c) {
+			return
+		}
+		if err := apigxmodel.RevokeRegistrationInvite(h.db, id, owner); err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		ok(c, gin.H{"id": id, "status": apigxmodel.InviteStatusRevoked})
 		return
 	}
 	revokeGrants := c.Query("revoke_grants") == "true"

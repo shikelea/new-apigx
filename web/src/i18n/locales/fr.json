@@ -2662,6 +2662,9 @@
     "Group Name": "Nom du groupe",
     "Group name cannot be changed when editing.": "Le nom du groupe ne peut pas être modifié lors de la modification.",
     "Group prices cannot be expanded because this expression is not a standard tiered pricing expression.": "Les prix par groupe ne peuvent pas être détaillés car cette expression n'est pas une expression tarifaire par paliers standard.",
+    "Base groups (advanced)": "Groupes de base (avancé)",
+    "About base groups": "À propos des groupes de base",
+    "Base groups are a New API compatibility setting for channel availability, token groups, and legacy billing ratios. APIGX sharing permissions are controlled by each platform key resource scope and share access rules, not by these groups.": "Les groupes de base sont un paramètre de compatibilité New API pour la disponibilité des canaux, les groupes de jetons et les anciens multiplicateurs de facturation. Les autorisations de partage APIGX dépendent de la portée des ressources de chaque clé de plateforme et des règles d’accès au partage, pas de ces groupes.",
     "Group Pricing": "Tarification des groupes",
     "Group pricing usage guide": "Guide d'utilisation des groupes tarifaires",
     "group ratio": "ratio de groupe",
@@ -6889,6 +6892,10 @@
     "share.offering.priced": "Priced",
     "share.offering.unpriced": "Unpriced",
     "share.offering.setPriceFirst": "Set price first",
+    "share.offering.delete": "Supprimer l’offre",
+    "share.offering.deleteTitle": "Supprimer l’offre de modèle",
+    "share.offering.deleteDescription": "Supprimer {{model}} ? Il disparaîtra de la place des modèles et ne recevra plus de nouvelles requêtes. L’historique d’utilisation sera conservé.",
+    "share.offering.deleted": "Offre de modèle supprimée.",
     "share.price.setManual": "Set manual price",
     "share.price.updateManual": "Update manual price",
     "share.price.manualTitle": "Manual model price",
@@ -7103,6 +7110,14 @@
     "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
     "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
     "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
-    "Shared with me": "Shared with me"
+    "Shared with me": "Shared with me",
+    "Registration invite created": "Invitation d’inscription créée",
+    "Registration invite revoked": "Invitation d’inscription révoquée",
+    "Registration invite codes": "Codes d’invitation à l’inscription",
+    "Generate codes here before requiring an invite for registration. The full code is shown only once.": "Générez les codes ici avant d’exiger une invitation à l’inscription. Le code complet n’est affiché qu’une seule fois.",
+    "Generate registration invite": "Générer une invitation d’inscription",
+    "No registration invite yet": "Aucune invitation d’inscription",
+    "Revoke registration invite": "Révoquer l’invitation d’inscription",
+    "This code will stop accepting new registrations. Existing users are not affected.": "Ce code n’acceptera plus de nouvelles inscriptions. Les utilisateurs existants ne sont pas affectés."
   }
 }

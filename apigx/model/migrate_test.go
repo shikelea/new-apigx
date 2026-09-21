@@ -61,6 +61,28 @@ func TestMigrateIsIdempotentOnSQLite(t *testing.T) {
 	assert.Len(t, second, ExpectedTableCount)
 }
 
+func TestMigrateActivatesLegacyShareGroupsWithoutUnsuspendingOperations(t *testing.T) {
+	db := newSQLiteDB(t)
+	require.NoError(t, Migrate(db))
+
+	groups := []ShareGroup{
+		{OwnerUserID: 1, Name: "legacy-draft", PublishStatus: ShareGroupPublishDraft},
+		{OwnerUserID: 1, Name: "legacy-pending", PublishStatus: ShareGroupPublishPending},
+		{OwnerUserID: 1, Name: "operator-suspended", PublishStatus: ShareGroupPublishSuspended},
+	}
+	for i := range groups {
+		require.NoError(t, CreateShareGroup(db, &groups[i]))
+	}
+
+	require.NoError(t, Migrate(db))
+	var stored []ShareGroup
+	require.NoError(t, db.Order("id ASC").Find(&stored).Error)
+	require.Len(t, stored, 3)
+	assert.Equal(t, ShareGroupPublishPublished, stored[0].PublishStatus)
+	assert.Equal(t, ShareGroupPublishPublished, stored[1].PublishStatus)
+	assert.Equal(t, ShareGroupPublishSuspended, stored[2].PublishStatus)
+}
+
 // TestMigrateAddsUsageCapabilityToExistingRows reproduces the real upgrade
 // path: Stage C already has immutable usage rows, while Stage D adds their
 // capability classification. Existing evidence must be preserved and safely

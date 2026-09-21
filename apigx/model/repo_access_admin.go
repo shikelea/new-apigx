@@ -93,6 +93,7 @@ type InviteView struct {
 	Status          int
 	ExpiresAt       int64
 	RevokeGrants    bool
+	CreatedByUserID int64
 	CreatedAt       int64
 }
 
@@ -115,10 +116,64 @@ func ListAccessInvitesByCreator(db *gorm.DB, creatorUserID int64, limit int) ([]
 			ID: row.ID, InviteType: row.InviteType, TokenPrefix: row.TokenPrefix,
 			TargetScopeType: row.TargetScopeType, TargetScopeID: row.TargetScopeID,
 			MaxUses: row.MaxUses, UsedCount: row.UsedCount, Status: row.Status,
-			ExpiresAt: row.ExpiresAt, RevokeGrants: row.RevokeGrants, CreatedAt: row.CreatedAt,
+			ExpiresAt: row.ExpiresAt, RevokeGrants: row.RevokeGrants,
+			CreatedByUserID: row.CreatedByUserID, CreatedAt: row.CreatedAt,
 		})
 	}
 	return out, nil
+}
+
+// ListRegistrationInvites lists platform registration invites for an
+// administrator. The caller performs the role check; the repository keeps the
+// type boundary explicit so resource access invites never leak into this list.
+func ListRegistrationInvites(db *gorm.DB, limit int) ([]InviteView, error) {
+	if db == nil {
+		return nil, errors.New("apigxmodel: nil db")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var rows []Invite
+	if err := db.Where("invite_type = ?", InviteTypeRegistration).
+		Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]InviteView, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, InviteView{
+			ID: row.ID, InviteType: row.InviteType, TokenPrefix: row.TokenPrefix,
+			TargetScopeType: row.TargetScopeType, TargetScopeID: row.TargetScopeID,
+			MaxUses: row.MaxUses, UsedCount: row.UsedCount, Status: row.Status,
+			ExpiresAt: row.ExpiresAt, CreatedByUserID: row.CreatedByUserID, CreatedAt: row.CreatedAt,
+		})
+	}
+	return out, nil
+}
+
+// RevokeRegistrationInvite stops future registrations with one platform
+// invite. It does not change users who already registered with the code.
+func RevokeRegistrationInvite(db *gorm.DB, inviteID, revokedByUserID int64) error {
+	if db == nil {
+		return errors.New("apigxmodel: nil db")
+	}
+	if inviteID <= 0 || revokedByUserID <= 0 {
+		return fmt.Errorf("%w: invite and revoker are required", ErrInvalidArgument)
+	}
+	now := common.GetTimestamp()
+	res := db.Model(&Invite{}).
+		Where("id = ? AND invite_type = ? AND status IN ?", inviteID, InviteTypeRegistration,
+			[]int{InviteStatusActive, InviteStatusExhaust}).
+		Updates(map[string]any{
+			"status": InviteStatusRevoked, "revoked_at": now,
+			"revoked_by_user_id": revokedByUserID, "updated_at": now,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // RevokeAccessInvite 撤销邀请；revokeGrants 为真时**连带撤销由它产生的授权**（§7 要求的可选项）。

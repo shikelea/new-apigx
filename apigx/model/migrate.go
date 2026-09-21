@@ -39,6 +39,14 @@ func Migrate(db *gorm.DB) error {
 	if err := migrateDB.AutoMigrate(AllModels()...); err != nil {
 		return err
 	}
+	// 分组不再单独审核。旧版本把公开分组建成 draft/pending，却没有完整的后台审核入口，
+	// 导致模型供给已经审核通过仍被广场和路由过滤。迁移时只激活这两种历史准备态；
+	// suspended/retired 是明确的运营停用决定，必须保留。
+	if err := db.Model(&ShareGroup{}).
+		Where("publish_status IN ?", []int{ShareGroupPublishDraft, ShareGroupPublishPending}).
+		Update("publish_status", ShareGroupPublishPublished).Error; err != nil {
+		return err
+	}
 	// 迁移成功后才捕获句柄：确保接口层拿到的一定是可用的库
 	defaultDB = db
 	return nil

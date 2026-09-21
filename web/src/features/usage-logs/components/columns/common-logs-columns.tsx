@@ -63,6 +63,7 @@ import {
   isViolationFeeLog,
   renderAuditContent,
 } from '../../lib/format'
+import { formatRetryTrace, retryAttemptCount } from '../../lib/retry-trace'
 import {
   isDisplayableLogType,
   isTimingLogType,
@@ -395,9 +396,12 @@ export function useCommonLogsColumns(
           const useChannel = Array.isArray(rawUseChannel)
             ? rawUseChannel.map(String).filter(Boolean)
             : []
-          const hasRetryChain = useChannel.length > 1
+          const retryAttempts = Array.isArray(other?.admin_info?.retry_attempts)
+            ? other.admin_info.retry_attempts
+            : []
+          const hasRetryChain = retryAttemptCount(useChannel, retryAttempts) > 1
           const channelChain = hasRetryChain
-            ? useChannel.join(' → ')
+            ? formatRetryTrace(useChannel, retryAttempts, t('Key'))
             : undefined
           const channelDisplay = log.channel_name
             ? `${log.channel_name} #${log.channel}`
@@ -429,13 +433,13 @@ export function useCommonLogsColumns(
                     />
                     {showMultiKeyIndex && (
                       <StatusBadge
-                        label={String(multiKeyIndex)}
+                        label={String(multiKeyIndex + 1)}
                         size='sm'
                         showDot={false}
                         copyable={false}
                         variant='neutral'
                         className='h-5 min-w-5 justify-center rounded-full px-1 font-mono text-xs'
-                        aria-label={`${t('Key')} ${multiKeyIndex}`}
+                        aria-label={`${t('Key')} ${multiKeyIndex + 1}`}
                       />
                     )}
                     {hasRetryChain && (
@@ -509,7 +513,7 @@ export function useCommonLogsColumns(
                     )}
                     {showMultiKeyIndex && (
                       <p className='text-muted-foreground text-xs'>
-                        {t('Key')}: {multiKeyIndex}
+                        {t('Key')}: {multiKeyIndex + 1}
                       </p>
                     )}
                     {affinity && (

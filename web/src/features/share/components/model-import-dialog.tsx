@@ -57,6 +57,7 @@ export function ModelImportDialog(props: {
     queryKey: ['apigx-upstream-models', props.channelId],
     queryFn: () => fetchUpstreamModels(props.channelId, false),
     enabled: props.open,
+    retry: false,
   })
 
   const models = useMemo<string[]>(() => {

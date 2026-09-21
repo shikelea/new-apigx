@@ -33,6 +33,18 @@ export interface AccessInvite {
   created_at: number
 }
 
+export interface RegistrationInvite {
+  id: number
+  invite_type: 0
+  token_prefix: string
+  max_uses: number
+  used_count: number
+  status: number
+  expires_at: number
+  created_by_user_id: number
+  created_at: number
+}
+
 export interface AccessGrant {
   id: number
   subject_type: number
@@ -73,6 +85,39 @@ export async function revokeAccessInvite(
 ): Promise<{ success: boolean }> {
   const res = await api.post(
     `/api/apigx/access/invites/${inviteId}/revoke?revoke_grants=${String(revokeGrants)}`
+  )
+  return res.data
+}
+
+export async function createRegistrationInvite(input: {
+  max_uses?: number
+  expires_at?: number
+}): Promise<{
+  success: boolean
+  data?: { token: string; token_prefix: string; id: number }
+}> {
+  const res = await api.post('/api/apigx/access/invites', {
+    invite_type: 0,
+    ...input,
+  })
+  return res.data
+}
+
+export async function listRegistrationInvites(): Promise<{
+  success: boolean
+  data?: { items: RegistrationInvite[] }
+}> {
+  const res = await api.get('/api/apigx/access/invites', {
+    params: { invite_type: 0 },
+  })
+  return res.data
+}
+
+export async function revokeRegistrationInvite(
+  inviteId: number
+): Promise<{ success: boolean }> {
+  const res = await api.post(
+    `/api/apigx/access/invites/${inviteId}/revoke?invite_type=0`
   )
   return res.data
 }

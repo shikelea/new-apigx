@@ -49,14 +49,6 @@ import {
 } from './lib/labels'
 import type { ShareChannel, ShareGroup } from './types'
 
-function groupPublishStatusLabelKey(status: number): string {
-  if (status === 0) return 'Draft'
-  if (status === 1) return 'Pending review'
-  if (status === 2) return 'Published'
-  if (status === 3) return 'Suspended'
-  return 'Retired'
-}
-
 export function MyShares() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -290,9 +282,6 @@ function ShareGroupCard(props: {
         <div className='flex flex-wrap gap-2 pt-1'>
           <Badge variant='outline'>
             {t(visibilityLabelKey(props.group.default_visibility))}
-          </Badge>
-          <Badge variant='outline'>
-            {t(groupPublishStatusLabelKey(props.group.publish_status))}
           </Badge>
           <Badge variant='secondary'>
             {t('{{count}} channels', { count: props.channels.length })}

@@ -2662,6 +2662,9 @@
     "Group Name": "Имя группы",
     "Group name cannot be changed when editing.": "Имя группы нельзя изменить при редактировании.",
     "Group prices cannot be expanded because this expression is not a standard tiered pricing expression.": "Цены по группам нельзя развернуть, потому что это не стандартное выражение тарифов по уровням.",
+    "Base groups (advanced)": "Базовые группы (расширенные)",
+    "About base groups": "О базовых группах",
+    "Base groups are a New API compatibility setting for channel availability, token groups, and legacy billing ratios. APIGX sharing permissions are controlled by each platform key resource scope and share access rules, not by these groups.": "Базовые группы — это настройка совместимости New API для доступности каналов, групп токенов и устаревших коэффициентов тарификации. Права общего доступа APIGX определяются областью ресурсов каждого ключа платформы и правилами доступа к ресурсам, а не этими группами.",
     "Group Pricing": "Тарификация групп",
     "Group pricing usage guide": "Руководство по групповой тарификации",
     "group ratio": "коэффициент группы",
@@ -6889,6 +6892,10 @@
     "share.offering.priced": "Priced",
     "share.offering.unpriced": "Unpriced",
     "share.offering.setPriceFirst": "Set price first",
+    "share.offering.delete": "Удалить ресурс",
+    "share.offering.deleteTitle": "Удалить ресурс модели",
+    "share.offering.deleteDescription": "Удалить {{model}}? Он исчезнет с витрины моделей и перестанет принимать новые запросы. История использования сохранится.",
+    "share.offering.deleted": "Ресурс модели удалён.",
     "share.price.setManual": "Set manual price",
     "share.price.updateManual": "Update manual price",
     "share.price.manualTitle": "Manual model price",
@@ -7103,6 +7110,14 @@
     "Prices are configured and synced in system model pricing.": "Prices are configured and synced in system model pricing.",
     "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.": "The platform adds the required path automatically. Remove /v1 from the end of the Base URL to avoid request failures.",
     "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.": "Custom API base URL. Official channels use built-in addresses. Only fill this for third-party proxy sites or special endpoints. Do not add /v1 or a trailing slash.",
-    "Shared with me": "Shared with me"
+    "Shared with me": "Shared with me",
+    "Registration invite created": "Код приглашения для регистрации создан",
+    "Registration invite revoked": "Код приглашения для регистрации отозван",
+    "Registration invite codes": "Коды приглашений для регистрации",
+    "Generate codes here before requiring an invite for registration. The full code is shown only once.": "Создайте коды здесь до включения обязательного приглашения. Полный код показывается только один раз.",
+    "Generate registration invite": "Создать приглашение для регистрации",
+    "No registration invite yet": "Кодов приглашения пока нет",
+    "Revoke registration invite": "Отозвать приглашение для регистрации",
+    "This code will stop accepting new registrations. Existing users are not affected.": "Этот код больше не позволит регистрироваться. Существующие пользователи не изменятся."
   }
 }
