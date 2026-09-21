@@ -2,7 +2,9 @@ package relayhook
 
 import (
 	"errors"
+	"maps"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -83,6 +85,18 @@ var (
 	breakerCache = map[int64]cachedBreaker{}
 )
 
+const breakerProbeContextKey = "apigx_breaker_probe"
+
+// MarkBreakerProbe marks an internally-created channel test as the active
+// recovery probe. The probe still passes ACL, Key selection, capacity and the
+// real relay path; it bypasses only the breaker that deliberately blocks user
+// traffic from reaching this source.
+func MarkBreakerProbe(c *gin.Context) {
+	if c != nil {
+		c.Set(breakerProbeContextKey, true)
+	}
+}
+
 // InvalidateBreakerCache 清空熔断判定缓存（运维/测试用）。
 func InvalidateBreakerCache() {
 	breakerCacheMu.Lock()
@@ -95,6 +109,9 @@ func InvalidateBreakerCache() {
 // 返回 nil 表示放行。
 func CheckBreakerAllows(c *gin.Context, channelID int, modelName string) *types.NewAPIError {
 	if !breakerEnabled() || c == nil || channelID <= 0 || modelName == "" {
+		return nil
+	}
+	if c.GetBool(breakerProbeContextKey) {
 		return nil
 	}
 	db := channelpool.CurrentDB()
@@ -285,9 +302,40 @@ func PrepareBreakerProbeChannel(channel *basemodel.Channel) *basemodel.Channel {
 		return nil
 	}
 	probe := *channel
-	probe.ChannelInfo = channel.ChannelInfo
+	probe.ChannelInfo = cloneBreakerProbeChannelInfo(channel.ChannelInfo)
 	probe.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
 	return &probe
+}
+
+func cloneBreakerProbeChannelInfo(source basemodel.ChannelInfo) basemodel.ChannelInfo {
+	cloned := source
+	cloned.MultiKeyStableIDs = slices.Clone(source.MultiKeyStableIDs)
+	cloned.MultiKeyWeights = slices.Clone(source.MultiKeyWeights)
+	cloned.MultiKeyStatusList = maps.Clone(source.MultiKeyStatusList)
+	cloned.MultiKeyDisabledReason = maps.Clone(source.MultiKeyDisabledReason)
+	cloned.MultiKeyDisabledTime = maps.Clone(source.MultiKeyDisabledTime)
+	cloned.MultiKeyStatusByStableID = maps.Clone(source.MultiKeyStatusByStableID)
+	cloned.MultiKeyDisabledReasonByStableID = maps.Clone(source.MultiKeyDisabledReasonByStableID)
+	cloned.MultiKeyDisabledTimeByStableID = maps.Clone(source.MultiKeyDisabledTimeByStableID)
+	cloned.MultiKeyStatusSources = cloneBreakerProbeStatusSources(source.MultiKeyStatusSources)
+	cloned.MultiKeyStatusSourcesByStableID = cloneBreakerProbeStableStatusSources(source.MultiKeyStatusSourcesByStableID)
+	return cloned
+}
+
+func cloneBreakerProbeStatusSources(source map[int]map[string]int) map[int]map[string]int {
+	cloned := maps.Clone(source)
+	for index, statuses := range cloned {
+		cloned[index] = maps.Clone(statuses)
+	}
+	return cloned
+}
+
+func cloneBreakerProbeStableStatusSources(source map[string]map[string]int) map[string]map[string]int {
+	cloned := maps.Clone(source)
+	for stableID, statuses := range cloned {
+		cloned[stableID] = maps.Clone(statuses)
+	}
+	return cloned
 }
 
 // RestoreBreakerChannel removes only APIGX's breaker mark and returns the

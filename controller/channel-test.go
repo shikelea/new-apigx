@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/middleware"
@@ -45,6 +46,7 @@ type testResult struct {
 type channelTestOptions struct {
 	requirePricing   bool
 	recordConsumeLog bool
+	breakerProbe     bool
 }
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
@@ -104,6 +106,9 @@ func testChannelWithOptions(ctx context.Context, channel *model.Channel, testUse
 	}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
+	if options.breakerProbe {
+		relayhook.MarkBreakerProbe(c)
+	}
 
 	testModel = strings.TrimSpace(testModel)
 	if testModel == "" {

@@ -497,6 +497,26 @@ func TestSyncBreakerMarksDisablesNonMultiKeyChannel(t *testing.T) {
 	assert.EqualValues(t, 1, count)
 }
 
+func TestPrepareBreakerProbeChannelRemovesOnlyBreakerMarkFromCopy(t *testing.T) {
+	channel := &basemodel.Channel{
+		Id: 701, Key: "sk-probe", Status: common.ChannelStatusAutoDisabled,
+		ChannelInfo: basemodel.ChannelInfo{
+			IsMultiKey: true, MultiKeySize: 1,
+			MultiKeyStableIDs: []string{"stable-probe"},
+			MultiKeyWeights:   []int64{1},
+			MultiKeyMode:      constant.MultiKeyModePolling,
+		},
+	}
+	channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, []int{0})
+
+	probe := PrepareBreakerProbeChannel(channel)
+	require.NotNil(t, probe)
+	assert.False(t, probe.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
+	assert.Equal(t, common.ChannelStatusEnabled, probe.ChannelInfo.MultiKeyStatusAt(0))
+	assert.True(t, channel.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen),
+		"preparing a probe must not mutate the cached source channel")
+}
+
 // 📌 冷却期（`breakerCooldown`）**由端到端验收覆盖**，不在这里写单测。
 // 原因如实记录：本包的两个 fixture 对 `channel_info` 里 map 字段的**回读**行为不一致——
 // 同一个动作在既有用例里能读回标记、在新用例里读不回（本文件上方已记录过该 fixture 限制）。

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/apigx/relayhook"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,9 @@ import (
 )
 
 func TestBreakerProbeRequiresTwoSuccessesAndRecordsProbeOnly(t *testing.T) {
+	t.Setenv("APIGX_BREAKER_ENABLED", "true")
+	relayhook.InvalidateBreakerCache()
+	t.Cleanup(relayhook.InvalidateBreakerCache)
 	var requests atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)

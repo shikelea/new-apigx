@@ -268,7 +268,7 @@ func runBreakerProbeTask(ctx context.Context) (breakerProbeSummary, error) {
 		}
 		probeChannel := relayhook.PrepareBreakerProbeChannel(channel)
 		result := testChannelWithOptions(ctx, probeChannel, testUserID, offering.UpstreamModelID, endpointType, false,
-			channelTestOptions{requirePricing: false, recordConsumeLog: false})
+			channelTestOptions{requirePricing: false, recordConsumeLog: false, breakerProbe: true})
 		summary.Probed++
 
 		outcome := qualityhook.ClassifyOutcome(result.newAPIError, result.upstreamStatus)
