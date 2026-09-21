@@ -116,3 +116,61 @@ docker compose --profile verify run --rm verify \
   --base http://app:3000 --stub http://stub:8100 \
   --upstream http://stub:8100 --rounds 8
 ```
+
+Verify the bounded retry budget. With `RetryTimes=1`, one failing request must
+try six different Keys in one channel, switch to exactly one other authorized
+channel, try six more different Keys, and then return the upstream error. A Key
+that returned 429 must remain eligible on later requests:
+
+```bash
+cd /pan/apigx-test
+docker compose --profile verify run --rm verify \
+  /work/bounded-failover-breaker.mjs --phase key-failover \
+  --base http://app:3000 --stub http://stub:8100 \
+  --upstream http://stub:8100
+```
+
+Verify durable breaker recovery in phases so the database can be inspected at
+each transition. `breaker-setup` writes the fixture IDs to
+`verify/.toolchain/_state/bounded-failover-breaker.json` and must leave the
+failed source in state `1` with its base channel automatically disabled:
+
+```bash
+cd /pan/apigx-test
+rm -f verify/.toolchain/_state/bounded-failover-breaker.json
+docker compose --profile verify run --rm verify \
+  /work/bounded-failover-breaker.mjs --phase breaker-setup \
+  --base http://app:3000 --stub http://stub:8100 \
+  --upstream http://stub:8100 --dead-upstream http://127.0.0.1:9
+```
+
+Point the fixture's failed base channel at `http://stub:8100`, restart the app,
+and confirm the probe row survives. Use the checked-in helper to make the stub
+return 401, set that row's `next_probe_at` to the current Unix time, and wait for
+the 15-second System Task. State `3` must have `next_probe_at=0`; waiting another
+20 seconds must not change `probe_count`. Probe requests increment
+`apigx_quality_buckets.probe_count` and must not add rows to `logs`.
+
+```bash
+docker compose --profile verify run --rm --no-deps verify \
+  /work/stub-profile.mjs --status 401
+```
+
+Restore the stub, rotate the fixture Key, and observe one successful probe in
+state `1` with `consecutive_success=1`. User traffic must still use only the
+healthy fallback. The second successful probe changes the row to state `4` and
+re-enables the base channel:
+
+```bash
+docker compose --profile verify run --rm --no-deps verify \
+  /work/stub-profile.mjs --status 0
+docker compose --profile verify run --rm verify \
+  /work/bounded-failover-breaker.mjs --phase rotate-breaker-key \
+  --base http://app:3000 --stub http://stub:8100
+docker compose --profile verify run --rm verify \
+  /work/bounded-failover-breaker.mjs --phase blocked-traffic \
+  --base http://app:3000 --stub http://stub:8100
+docker compose --profile verify run --rm verify \
+  /work/bounded-failover-breaker.mjs --phase recovered \
+  --base http://app:3000 --stub http://stub:8100
+```

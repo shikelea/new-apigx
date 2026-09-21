@@ -1,0 +1,2938 @@
+From 1860caf801150e90f81a165aa5f4d4eb70703346 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Mon, 21 Sep 2026 14:20:34 +0800
+Subject: [PATCH] feat: add bounded multi-key batches and breaker recovery
+
+---
+ apigx/api/share.go                            | 186 +++++++++--
+ apigx/api/share_test.go                       |  76 +++++
+ apigx/channelpool/projection_test.go          |  29 ++
+ apigx/model/migrate.go                        |   5 +-
+ apigx/model/models_identity.go                |  13 +
+ apigx/model/models_metering.go                |  23 ++
+ apigx/model/repo_breaker_probe.go             | 316 ++++++++++++++++++
+ apigx/model/repo_breaker_probe_test.go        | 114 +++++++
+ apigx/model/repo_quality.go                   |  10 +
+ apigx/model/repo_upstream.go                  |  65 +++-
+ apigx/relayhook/async_task_test.go            |   3 +-
+ apigx/relayhook/breaker_guard.go              | 191 +++++++----
+ apigx/relayhook/breaker_guard_test.go         |  58 +++-
+ controller/breaker_probe_test.go              |  88 +++++
+ controller/channel-test.go                    |  74 ++--
+ controller/relay_multi_key_failover_test.go   |  90 +++++
+ controller/relay_task_plugin_test.go          |  63 ++++
+ controller/system_task_handlers.go            | 202 +++++++++++
+ model/system_task.go                          |   1 +
+ service/multi_key_failover.go                 |   6 +-
+ .../share/__tests__/channel-recipes.test.tsx  |   9 +-
+ .../share/__tests__/credential-lines.test.ts  |  57 ++++
+ .../share/__tests__/key-pool-card.test.tsx    |  75 +++++
+ web/src/features/share/api.ts                 |  13 +-
+ .../components/channel-create-dialog.tsx      |  70 +++-
+ .../share/components/key-pool-card.tsx        |  67 ++--
+ .../features/share/lib/credential-lines.ts    |  62 ++++
+ web/src/i18n/locales/en.json                  |  11 +
+ web/src/i18n/locales/fr.json                  |  11 +
+ web/src/i18n/locales/ja.json                  |  11 +
+ web/src/i18n/locales/ru.json                  |  11 +
+ web/src/i18n/locales/vi.json                  |  11 +
+ web/src/i18n/locales/zh-TW.json               |  11 +
+ web/src/i18n/locales/zh.json                  |  11 +
+ 34 files changed, 1858 insertions(+), 185 deletions(-)
+ create mode 100644 apigx/model/repo_breaker_probe.go
+ create mode 100644 apigx/model/repo_breaker_probe_test.go
+ create mode 100644 controller/breaker_probe_test.go
+ create mode 100644 web/src/features/share/__tests__/credential-lines.test.ts
+ create mode 100644 web/src/features/share/__tests__/key-pool-card.test.tsx
+ create mode 100644 web/src/features/share/lib/credential-lines.ts
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index ad2e0f5..50fb4f3 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -66,6 +66,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 		channels.GET("/:id", h.getChannel)
+ 		channels.DELETE("/:id", h.deleteChannel)
+ 		channels.POST("/:id/keys", h.createUpstreamKey)
++		channels.POST("/:id/keys/batch", h.createUpstreamKeysBatch)
+ 		channels.GET("/:id/keys", h.listUpstreamKeys)
+ 		channels.POST("/:id/apply", h.applyChannelPool)
+ 		channels.PUT("/:id/capacity-policy", h.setChannelCapacityPolicy)
+@@ -383,11 +384,12 @@ func (h *handler) deleteShareGroup(c *gin.Context) {
+ type createChannelRequest struct {
+ 	// 以下两项用于"分享者自建渠道"（§4「渠道 CRUD」）：不给 base_channel_id 时，
+ 	// 平台按这些信息**代建底座渠道**并绑定 —— 分享者不必知道管理员侧的渠道 ID。
+-	UpstreamKey   string `json:"upstream_key"`
+-	ShareGroupID  int64  `json:"share_group_id"`
+-	BaseChannelID int64  `json:"base_channel_id"`
+-	Name          string `json:"name"`
+-	RecipeID      string `json:"recipe_id"`
++	UpstreamKey   string   `json:"upstream_key"`
++	UpstreamKeys  []string `json:"upstream_keys"`
++	ShareGroupID  int64    `json:"share_group_id"`
++	BaseChannelID int64    `json:"base_channel_id"`
++	Name          string   `json:"name"`
++	RecipeID      string   `json:"recipe_id"`
+ 	// Protocol 仅保留给管理员绑定既有底座渠道的兼容入口。普通用户自建渠道时，
+ 	// 服务端只接受 RecipeID，并从配方目录重新解析底座类型与协议标识。
+ 	Protocol    string `json:"protocol"`
+@@ -517,7 +519,7 @@ func (h *handler) createChannel(c *gin.Context) {
+ 		return
+ 	}
+ 	// 自建渠道时随附的上游 Key 与两类渠道记录在同一事务内登记。
+-	var selfServeKey string
++	var selfServeKeys []string
+ 
+ 	channel := &apigxmodel.Channel{
+ 		OwnerUserID:   owner,
+@@ -567,29 +569,41 @@ func (h *handler) createChannel(c *gin.Context) {
+ 		// 归一化上游 Base URL（真实 API 回扫发现）：用户自然会填 `https://host/v1`
+ 		// 这种"API 基址"，而底座会再拼 `/v1/...` → 变成 `/v1/v1/...`，上游返回 404。
+ 		channel.BaseURL = channelpool.NormalizeUpstreamBaseURL(baseURL)
+-		selfServeKey = strings.TrimSpace(req.UpstreamKey)
+-		if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey, recipe); recipeErr != nil {
++		selfServeKeys, recipeErr = normalizeUpstreamKeyInputs(req.UpstreamKey, req.UpstreamKeys)
++		if recipeErr != nil {
+ 			failFromRepo(c, recipeErr)
+ 			return
+ 		}
+-		keyRecord, keyErr := prepareSelfServeUpstreamKey(selfServeKey)
+-		if keyErr != nil {
+-			common.SysError("apigx api: refuse to store upstream key: " + keyErr.Error())
+-			fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
+-				"credential store is not configured; refusing to store the key")
+-			return
++		for _, selfServeKey := range selfServeKeys {
++			if recipeErr := validateSelfServeChannelRecipe(channel, selfServeKey, recipe); recipeErr != nil {
++				failFromRepo(c, recipeErr)
++				return
++			}
+ 		}
+-		// 底座渠道、APIGX 渠道和初始加密 Key 共用同一个主库事务。任何一步失败都会
+-		// 回滚底座行，避免留下仍为 enabled 的孤儿渠道。
++		keyRecords := make([]*apigxmodel.UpstreamKey, 0, len(selfServeKeys))
++		for _, selfServeKey := range selfServeKeys {
++			keyRecord, keyErr := prepareSelfServeUpstreamKey(selfServeKey)
++			if keyErr != nil {
++				common.SysError("apigx api: refuse to store upstream key: " + keyErr.Error())
++				fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
++					"credential store is not configured; refusing to store the key")
++				return
++			}
++			keyRecords = append(keyRecords, keyRecord)
++		}
++		// 底座渠道、APIGX 渠道和全部初始加密 Key 共用同一个主库事务。任何一步失败都会
++		// 回滚整批凭据与底座行，避免半批导入或留下仍为 enabled 的孤儿渠道。
+ 		if err := h.db.Transaction(func(tx *gorm.DB) error {
+-			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKey, recipe); err != nil {
++			if err := provisionBaseChannelForShareChannel(tx, channel, selfServeKeys, keyRecords, recipe); err != nil {
+ 				return err
+ 			}
+ 			if err := apigxmodel.CreateChannel(tx, channel); err != nil {
+ 				return err
+ 			}
+-			keyRecord.ChannelID = channel.ID
+-			return apigxmodel.CreateUpstreamKey(tx, owner, keyRecord)
++			for _, keyRecord := range keyRecords {
++				keyRecord.ChannelID = channel.ID
++			}
++			return apigxmodel.CreateUpstreamKeys(tx, owner, keyRecords)
+ 		}); err != nil {
+ 			failFromRepo(c, err)
+ 			return
+@@ -598,7 +612,10 @@ func (h *handler) createChannel(c *gin.Context) {
+ 			basemodel.InitChannelCache()
+ 		}
+ 	}
+-	ok(c, gin.H{"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name, "key_pool_mode": channel.KeyPoolMode})
++	ok(c, gin.H{
++		"id": channel.ID, "public_id": channel.PublicID, "name": channel.Name,
++		"key_pool_mode": channel.KeyPoolMode, "key_count": len(selfServeKeys),
++	})
+ }
+ 
+ func (h *handler) listChannels(c *gin.Context) {
+@@ -705,6 +722,13 @@ type createUpstreamKeyRequest struct {
+ 	UpstreamAccountID *int64 `json:"upstream_account_id"`
+ }
+ 
++const maxUpstreamKeysPerBatch = 100
++
++type createUpstreamKeysBatchRequest struct {
++	Keys   []string `json:"keys"`
++	Weight *int64   `json:"weight"`
++}
++
+ func (h *handler) createUpstreamKey(c *gin.Context) {
+ 	owner, valid := h.ownerID(c)
+ 	if !valid {
+@@ -778,6 +802,61 @@ func (h *handler) createUpstreamKey(c *gin.Context) {
+ 	})
+ }
+ 
++func (h *handler) createUpstreamKeysBatch(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	channelID, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req createUpstreamKeysBatchRequest
++	if err := c.ShouldBindJSON(&req); err != nil {
++		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
++		return
++	}
++	plainKeys, err := normalizeUpstreamKeyInputs("", req.Keys)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if req.Weight != nil && (*req.Weight < 1 || *req.Weight > 1000) {
++		fail(c, http.StatusBadRequest, "invalid_weight", "weight must be between 1 and 1000")
++		return
++	}
++
++	keys := make([]*apigxmodel.UpstreamKey, 0, len(plainKeys))
++	for _, plain := range plainKeys {
++		key, prepareErr := prepareSelfServeUpstreamKey(plain)
++		if prepareErr != nil {
++			common.SysError("apigx api: refuse to store upstream key batch: " + prepareErr.Error())
++			fail(c, http.StatusServiceUnavailable, "secret_store_unavailable",
++				"credential store is not configured; refusing to store the keys")
++			return
++		}
++		key.ChannelID = channelID
++		key.Name = ""
++		if req.Weight != nil {
++			key.Weight = *req.Weight
++		}
++		keys = append(keys, key)
++	}
++	if err := apigxmodel.CreateUpstreamKeys(h.db, owner, keys); err != nil {
++		failFromRepo(c, err)
++		return
++	}
++
++	items := make([]gin.H, 0, len(keys))
++	for i, key := range keys {
++		items = append(items, gin.H{
++			"id": key.ID, "stable_key_id": key.StableKeyID, "name": key.Name,
++			"status": key.Status, "weight": key.Weight, "masked": maskTail(plainKeys[i]),
++		})
++	}
++	ok(c, gin.H{"items": items, "created": len(items)})
++}
++
+ // maskTail 只保留末尾 4 位。用于给分享者确认「加的是哪一把」，不构成泄露。
+ func maskTail(secret string) string {
+ 	s := strings.TrimSpace(secret)
+@@ -2767,26 +2846,49 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
+ func provisionBaseChannelForShareChannel(
+ 	db *gorm.DB,
+ 	channel *apigxmodel.Channel,
+-	upstreamKey string,
++	upstreamKeys []string,
++	keyRecords []*apigxmodel.UpstreamKey,
+ 	recipe selfServeChannelRecipe,
+ ) error {
+ 	if db == nil {
+ 		return errors.New("apigx api: nil db")
+ 	}
+-	if err := validateSelfServeChannelRecipe(channel, upstreamKey, recipe); err != nil {
+-		return err
++	if len(upstreamKeys) == 0 || len(upstreamKeys) != len(keyRecords) {
++		return fmt.Errorf("%w: at least one complete upstream key is required", apigxmodel.ErrInvalidArgument)
++	}
++	for _, upstreamKey := range upstreamKeys {
++		if err := validateSelfServeChannelRecipe(channel, upstreamKey, recipe); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	base := basemodel.Channel{
+ 		Name:        "APIGX-" + channel.Name,
+ 		Type:        recipe.BaseChannelType,
+-		Key:         upstreamKey,
++		Key:         upstreamKeys[0],
+ 		BaseURL:     &channel.BaseURL,
+ 		Group:       "default",
+ 		Models:      "",
+ 		Status:      common.ChannelStatusEnabled,
+ 		CreatedTime: common.GetTimestamp(),
+ 	}
++	if len(upstreamKeys) > 1 {
++		stableIDs := make([]string, 0, len(keyRecords))
++		weights := make([]int64, 0, len(keyRecords))
++		for _, keyRecord := range keyRecords {
++			stableIDs = append(stableIDs, keyRecord.StableKeyID)
++			weights = append(weights, keyRecord.Weight)
++		}
++		mode := constant.MultiKeyModePolling
++		if channel.KeyPoolMode == apigxmodel.KeyPoolModeRandom {
++			mode = constant.MultiKeyModeRandom
++		}
++		base.Key = strings.Join(upstreamKeys, "\n")
++		base.ChannelInfo = basemodel.ChannelInfo{
++			IsMultiKey: true, MultiKeySize: len(upstreamKeys), MultiKeyMode: mode,
++			MultiKeyStableIDs: stableIDs, MultiKeyWeights: weights,
++		}
++	}
+ 	if recipe.TaskPluginKey != "" {
+ 		settingJSON, err := common.Marshal(relaydto.ChannelSettings{TaskPluginKey: recipe.TaskPluginKey})
+ 		if err != nil {
+@@ -2862,6 +2964,42 @@ func validAccessSecretPairOrRelayKey(key string) bool {
+ 	return ok && strings.TrimSpace(accessKey) != "" && strings.TrimSpace(secretKey) != "" && !strings.Contains(secretKey, "|")
+ }
+ 
++// normalizeUpstreamKeyInputs accepts the legacy single-key field and the new
++// batch field, trims blank rows, removes duplicates without reordering, and
++// enforces one shared server-side batch limit. A credential containing "|" is
++// deliberately treated as one value; only array or line parsing in the client
++// separates credentials.
++func normalizeUpstreamKeyInputs(single string, batch []string) ([]string, error) {
++	inputs := make([]string, 0, len(batch)+1)
++	if strings.TrimSpace(single) != "" {
++		inputs = append(inputs, single)
++	}
++	inputs = append(inputs, batch...)
++	cleaned := make([]string, 0, len(inputs))
++	seen := make(map[string]struct{}, len(inputs))
++	nonEmptyCount := 0
++	for _, input := range inputs {
++		key := strings.TrimSpace(input)
++		if key == "" {
++			continue
++		}
++		nonEmptyCount++
++		if nonEmptyCount > maxUpstreamKeysPerBatch {
++			return nil, fmt.Errorf("%w: at most %d upstream keys may be submitted at once",
++				apigxmodel.ErrInvalidArgument, maxUpstreamKeysPerBatch)
++		}
++		if _, duplicate := seen[key]; duplicate {
++			continue
++		}
++		seen[key] = struct{}{}
++		cleaned = append(cleaned, key)
++	}
++	if len(cleaned) == 0 {
++		return nil, fmt.Errorf("%w: upstream_key or upstream_keys is required", apigxmodel.ErrInvalidArgument)
++	}
++	return cleaned, nil
++}
++
+ // prepareSelfServeUpstreamKey 把"自建渠道"随附的上游 Key 变成待落库记录。
+ //
+ // 加密和指纹在任何数据库写入之前完成；ChannelID 在事务内创建 APIGX 渠道后补上。
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 47da546..bfc549c 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -553,6 +553,41 @@ func TestSelfServeChannelCreationIsAtomicAndRestrictsBaseBinding(t *testing.T) {
+ 		assert.Contains(t, models, "kling-v2-master")
+ 	})
+ 
++	t.Run("batch credentials create one multi-key channel without splitting pairs", func(t *testing.T) {
++		env := newTestEnv(t, true)
++		const owner int64 = 5109
++		groupID := env.createGroup(t, owner, "批量视频凭据组")
++		first := "access-a|secret-a"
++		second := "access-b|secret-b"
++		rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner,
++			`{"share_group_id":`+strconv.FormatInt(groupID, 10)+`,"name":"批量可灵","recipe_id":"kling-video","base_url":"https://api.klingai.com","upstream_keys":[" `+first+` ","","`+first+`","`+second+`"],"key_pool_mode":1}`,
++			common.RoleCommonUser)
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++		data := body["data"].(map[string]any)
++		assert.Equal(t, float64(2), data["key_count"])
++		channelID := int64(data["id"].(float64))
++
++		shareChannel, err := apigxmodel.GetChannel(env.db, owner, channelID)
++		require.NoError(t, err)
++		var baseChannel basemodel.Channel
++		require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&baseChannel).Error)
++		assert.Equal(t, []string{first, second}, baseChannel.GetKeys())
++		assert.True(t, baseChannel.ChannelInfo.IsMultiKey)
++		assert.Equal(t, constant.MultiKeyModeRandom, baseChannel.ChannelInfo.MultiKeyMode)
++		require.Len(t, baseChannel.ChannelInfo.MultiKeyStableIDs, 2)
++
++		stored, err := apigxmodel.ListUpstreamKeysByChannel(env.db, owner, channelID)
++		require.NoError(t, err)
++		require.Len(t, stored, 2)
++		decrypted := make([]string, 0, len(stored))
++		for i := range stored {
++			plain, decryptErr := secretbox.Decrypt(stored[i].SecretRef)
++			require.NoError(t, decryptErr)
++			decrypted = append(decrypted, plain)
++		}
++		assert.ElementsMatch(t, []string{first, second}, decrypted)
++	})
++
+ 	t.Run("task recipe rejects malformed credential before writing", func(t *testing.T) {
+ 		env := newTestEnv(t, true)
+ 		const owner int64 = 5107
+@@ -905,6 +940,47 @@ func TestUpstreamKeyStatusAndValidation(t *testing.T) {
+ 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+ }
+ 
++func TestUpstreamKeyBatchAddIsAtomicAndDeduplicatesInput(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 6002
++	groupID := env.createGroup(t, owner, "批量 Key 组")
++	channelID := env.createChannel(t, owner, groupID, nextBaseChannelID())
++
++	rec, _ := env.do(t, http.MethodPost,
++		"/api/channels/"+strconv.FormatInt(channelID, 10)+"/keys", owner,
++		`{"key":"sk-existing"}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++
++	batchPath := "/api/channels/" + strconv.FormatInt(channelID, 10) + "/keys/batch"
++	rec, _ = env.do(t, http.MethodPost, batchPath, owner,
++		`{"keys":["sk-new-before-conflict","sk-existing"]}`)
++	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
++	var count int64
++	require.NoError(t, env.db.Model(&apigxmodel.UpstreamKey{}).
++		Where("channel_id = ?", channelID).Count(&count).Error)
++	assert.EqualValues(t, 1, count, "a conflict must roll back the whole batch")
++
++	rec, body := env.do(t, http.MethodPost, batchPath, owner,
++		`{"keys":[" sk-new-a ","","sk-new-a","sk-new-b"],"weight":3}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	data := body["data"].(map[string]any)
++	assert.Equal(t, float64(2), data["created"])
++	require.NoError(t, env.db.Model(&apigxmodel.UpstreamKey{}).
++		Where("channel_id = ?", channelID).Count(&count).Error)
++	assert.EqualValues(t, 3, count)
++
++	keys, err := apigxmodel.ListUpstreamKeysByChannel(env.db, owner, channelID)
++	require.NoError(t, err)
++	weights := make(map[string]int64, len(keys))
++	for i := range keys {
++		plain, decryptErr := secretbox.Decrypt(keys[i].SecretRef)
++		require.NoError(t, decryptErr)
++		weights[plain] = keys[i].Weight
++	}
++	assert.EqualValues(t, 3, weights["sk-new-a"])
++	assert.EqualValues(t, 3, weights["sk-new-b"])
++}
++
+ func TestDeleteUpstreamKeyTwice(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const owner int64 = 7001
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index b2495b8..eba0186 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -2,6 +2,7 @@ package channelpool
+ 
+ import (
+ 	"errors"
++	"net/http"
+ 	"net/http/httptest"
+ 	"os"
+ 	"path/filepath"
+@@ -519,6 +520,34 @@ func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
+ 	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
+ }
+ 
++func TestRecordFailureFromContextDoesNotCooldownRateLimitedKey(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9204
++	const baseChannelID int64 = 6265
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, []string{"sk-rate-limit-aaaaaa"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	previous := dbProvider
++	SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
++	SetKeyStatsEnabled(true)
++
++	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
++	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
++	RecordFailureFromContext(ctx, int(baseChannelID), http.StatusTooManyRequests, "rate_limited")
++
++	var key apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
++	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status)
++	assert.Zero(t, key.CooldownUntil, "429 must not create cross-request cooldown")
++	assert.True(t, apigxmodel.IsUpstreamKeyUsable(&key, common.GetTimestamp()),
++		"the next request may select the same credential again")
++	assert.Equal(t, "429_rate_limited", key.LastErrorCode)
++}
++
+ // **最关键的一条**：失效必须同时落到底座，否则底座会继续使用已失效的凭据。
+ //
+ // 这条证明的是「我们的统计 → 底座的真实选择行为」这一整条链路：
+diff --git a/apigx/model/migrate.go b/apigx/model/migrate.go
+index 68ee83b..f69147f 100644
+--- a/apigx/model/migrate.go
++++ b/apigx/model/migrate.go
+@@ -75,6 +75,7 @@ func AllModels() []any {
+ 		&Attempt{},
+ 		&UsageEvent{},
+ 		&QualityBucket{},
++		&BreakerProbeState{},
+ 		&AsyncTask{},
+ 		&UpstreamObjectRef{},
+ 		&AuditEvent{},
+@@ -86,8 +87,8 @@ func AllModels() []any {
+ // TableNamePrefix 供迁移与验收脚本筛选 APIGX 自己的表（避免与底座表混淆）。
+ const TableNamePrefix = TablePrefix
+ 
+-// ExpectedTableCount 是当前冻结设计的表数量（原 27 张 + 凭据历史表）。
++// ExpectedTableCount 是当前冻结设计的表数量（原 27 张 + 凭据历史表 + 熔断探测状态表）。
+ //
+ // 这是一个**契约常量**：新增表时必须同时调整它，并让 migrate_test.go 的断言继续成立；
+ // 这样「漏加迁移」会立刻变成测试失败，而不是静默少建一张表。
+-const ExpectedTableCount = 28
++const ExpectedTableCount = 29
+diff --git a/apigx/model/models_identity.go b/apigx/model/models_identity.go
+index 2c2e01f..2588aaa 100644
+--- a/apigx/model/models_identity.go
++++ b/apigx/model/models_identity.go
+@@ -377,6 +377,19 @@ type CanonicalModel struct {
+ 	UpdatedAt int64 `gorm:"bigint;not null;default:0"`
+ }
+ 
++// Canonical model primary modalities. Keep these values aligned with the
++// persisted ModalityType contract above; routing and breaker probes must not
++// infer a protocol from an arbitrary model id.
++const (
++	ModalityChat             = 1
++	ModalityEmbedding        = 2
++	ModalityImageGeneration  = 3
++	ModalityAudioRecognition = 4
++	ModalityAudioGeneration  = 5
++	ModalityRerank           = 6
++	ModalityVideo            = 7
++)
++
+ // TableName 返回表名。
+ func (CanonicalModel) TableName() string { return TablePrefix + "canonical_models" }
+ 
+diff --git a/apigx/model/models_metering.go b/apigx/model/models_metering.go
+index 4e91ec4..2735def 100644
+--- a/apigx/model/models_metering.go
++++ b/apigx/model/models_metering.go
+@@ -375,6 +375,29 @@ type QualityBucket struct {
+ // TableName 返回 §5.22 定义的表名。
+ func (QualityBucket) TableName() string { return TablePrefix + "quality_buckets" }
+ 
++// BreakerProbeState persists the recovery state for one model offering after
++// its base channel has been removed from routing by the APIGX circuit breaker.
++// The state lives in the database so process restarts and multiple master
++// instances cannot lose or duplicate recovery work.
++type BreakerProbeState struct {
++	ID                 int64  `gorm:"primaryKey"`
++	OfferingID         int64  `gorm:"bigint;not null;default:0;uniqueIndex:uniq_breaker_probe_offering"`
++	BaseChannelID      int64  `gorm:"bigint;not null;default:0;index:idx_breaker_probe_channel_state,priority:1"`
++	State              int    `gorm:"type:int;not null;index:idx_breaker_probe_due,priority:1;index:idx_breaker_probe_channel_state,priority:2"`
++	ConsecutiveSuccess int    `gorm:"type:int;not null;default:0"`
++	BackoffSeconds     int64  `gorm:"bigint;not null;default:0"`
++	OpenedAt           int64  `gorm:"bigint;not null;default:0"`
++	NextProbeAt        int64  `gorm:"bigint;not null;default:0;index:idx_breaker_probe_due,priority:2"`
++	LastProbeAt        int64  `gorm:"bigint;not null;default:0"`
++	RecoveryBaselineTs int64  `gorm:"bigint;not null;default:0"`
++	LastErrorCode      string `gorm:"size:64;not null;default:''"`
++	OwnsChannelDisable bool   `gorm:"not null"`
++	CreatedAt          int64  `gorm:"bigint;not null;default:0"`
++	UpdatedAt          int64  `gorm:"bigint;not null;default:0"`
++}
++
++func (BreakerProbeState) TableName() string { return TablePrefix + "breaker_probe_states" }
++
+ // AsyncTask 对应 §5.23 `apigx_async_tasks`。
+ //
+ // 用途：平台任务 ID、上游任务 ID、用户、原渠道与 Key/凭据版本、分享者与权限版本快照、价格版本、
+diff --git a/apigx/model/repo_breaker_probe.go b/apigx/model/repo_breaker_probe.go
+new file mode 100644
+index 0000000..1e1fb23
+--- /dev/null
++++ b/apigx/model/repo_breaker_probe.go
+@@ -0,0 +1,316 @@
++package apigxmodel
++
++import (
++	"errors"
++	"fmt"
++
++	"github.com/QuantumNous/new-api/common"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++)
++
++const (
++	BreakerProbeStateOpen        = 1
++	BreakerProbeStateRecovering  = 2
++	BreakerProbeStateAuthBlocked = 3
++	BreakerProbeStateClosed      = 4
++
++	breakerProbeInitialBackoffSeconds = int64(60)
++	breakerProbeMaximumBackoffSeconds = int64(30 * 60)
++	breakerProbeSuccessDelaySeconds   = int64(15)
++	breakerProbeSuccessThreshold      = 2
++)
++
++// BreakerProbeModality resolves the administrator-confirmed protocol for an
++// offering. Missing catalog identity stays unknown: guessing from a vendor
++// model id can send a chat payload to an image, audio, or video endpoint.
++func BreakerProbeModality(db *gorm.DB, offeringID int64) (int, error) {
++	if db == nil || offeringID <= 0 {
++		return 0, fmt.Errorf("%w: breaker probe offering is required", ErrInvalidArgument)
++	}
++	var row struct {
++		ModalityType int
++	}
++	err := db.Table((ModelOffering{}).TableName()+" AS offering").
++		Select("canonical.modality_type AS modality_type").
++		Joins("JOIN "+(CanonicalModel{}).TableName()+" AS canonical ON canonical.id = offering.canonical_model_id").
++		Where("offering.id = ? AND offering.alive_flag = ?", offeringID, AliveFlagAlive).
++		Take(&row).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return 0, nil
++	}
++	return row.ModalityType, err
++}
++
++// BreakerProbeSupportsModality reports whether the existing channel-test path
++// can issue a bounded synchronous probe for the protocol. Audio requires a
++// real upload or returns binary media, while video and plugin protocols create
++// asynchronous billable jobs; those stay on request-level failover until a
++// protocol-specific health probe exists.
++func BreakerProbeSupportsModality(modality int) bool {
++	switch modality {
++	case ModalityChat, ModalityEmbedding, ModalityImageGeneration, ModalityRerank:
++		return true
++	default:
++		return false
++	}
++}
++
++func CanActivelyProbeOffering(db *gorm.DB, offeringID int64) (bool, error) {
++	modality, err := BreakerProbeModality(db, offeringID)
++	return BreakerProbeSupportsModality(modality), err
++}
++
++// ReleaseUnprobeableBreaker moves a legacy/open durable state to recovery so
++// deployments upgraded from an earlier build cannot leave an audio, video, or
++// unknown-protocol channel permanently removed from routing.
++func ReleaseUnprobeableBreaker(db *gorm.DB, id, now int64) (bool, error) {
++	if db == nil || id <= 0 {
++		return false, fmt.Errorf("%w: breaker probe id is required", ErrInvalidArgument)
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	result := db.Model(&BreakerProbeState{}).
++		Where("id = ? AND state = ?", id, BreakerProbeStateOpen).
++		Updates(map[string]any{
++			"state": BreakerProbeStateRecovering, "next_probe_at": now,
++			"recovery_baseline_ts": alignToMinute(now) + 60,
++			"last_error_code":      "active_probe_unsupported", "updated_at": now,
++		})
++	return result.RowsAffected > 0, result.Error
++}
++
++// OpenBreakerProbe records ownership of a breaker disable before the base
++// channel is removed from routing. Repeated open decisions do not postpone an
++// already scheduled probe. An auth-blocked state is only rearmed by a
++// credential change.
++func OpenBreakerProbe(db *gorm.DB, offeringID, baseChannelID, now, cooldownSeconds int64) error {
++	if db == nil || offeringID <= 0 || baseChannelID <= 0 {
++		return fmt.Errorf("%w: complete breaker probe identity is required", ErrInvalidArgument)
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	if cooldownSeconds <= 0 {
++		cooldownSeconds = breakerProbeInitialBackoffSeconds
++	}
++	return db.Transaction(func(tx *gorm.DB) error {
++		var state BreakerProbeState
++		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
++			Where("offering_id = ?", offeringID).First(&state).Error
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return tx.Create(&BreakerProbeState{
++				OfferingID: offeringID, BaseChannelID: baseChannelID,
++				State: BreakerProbeStateOpen, BackoffSeconds: breakerProbeInitialBackoffSeconds,
++				OpenedAt: now, NextProbeAt: now + cooldownSeconds, OwnsChannelDisable: true,
++				CreatedAt: now, UpdatedAt: now,
++			}).Error
++		}
++		if err != nil {
++			return err
++		}
++		if state.State != BreakerProbeStateClosed {
++			return nil
++		}
++		return tx.Model(&BreakerProbeState{}).Where("id = ?", state.ID).Updates(map[string]any{
++			"base_channel_id":      baseChannelID,
++			"state":                BreakerProbeStateOpen,
++			"consecutive_success":  0,
++			"backoff_seconds":      breakerProbeInitialBackoffSeconds,
++			"opened_at":            now,
++			"next_probe_at":        now + cooldownSeconds,
++			"last_probe_at":        0,
++			"recovery_baseline_ts": 0,
++			"last_error_code":      "",
++			"owns_channel_disable": true,
++			"updated_at":           now,
++		}).Error
++	})
++}
++
++func HasDueBreakerProbes(db *gorm.DB, now int64) bool {
++	if db == nil {
++		return false
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	var count int64
++	err := db.Model(&BreakerProbeState{}).
++		Where("state IN ? AND next_probe_at > 0 AND next_probe_at <= ?",
++			[]int{BreakerProbeStateOpen, BreakerProbeStateRecovering}, now).
++		Limit(1).Count(&count).Error
++	return err == nil && count > 0
++}
++
++func ListDueBreakerProbes(db *gorm.DB, now int64, limit int) ([]BreakerProbeState, error) {
++	if db == nil {
++		return nil, gorm.ErrInvalidDB
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	if limit <= 0 || limit > 200 {
++		limit = 50
++	}
++	var states []BreakerProbeState
++	err := db.Where("state IN ? AND next_probe_at > 0 AND next_probe_at <= ?",
++		[]int{BreakerProbeStateOpen, BreakerProbeStateRecovering}, now).
++		Order("next_probe_at ASC, id ASC").Limit(limit).Find(&states).Error
++	return states, err
++}
++
++// RecordBreakerProbeResult advances the persisted state machine. ready is true
++// after the second consecutive success; the caller must then restore the base
++// channel and finalize the state.
++func RecordBreakerProbeResult(db *gorm.DB, id, now int64, success, authFailure bool, errorCode string) (ready bool, err error) {
++	if db == nil || id <= 0 {
++		return false, fmt.Errorf("%w: breaker probe id is required", ErrInvalidArgument)
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	err = db.Transaction(func(tx *gorm.DB) error {
++		var state BreakerProbeState
++		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).First(&state).Error; err != nil {
++			return err
++		}
++		if state.State != BreakerProbeStateOpen {
++			return nil
++		}
++		updates := map[string]any{
++			"last_probe_at": now,
++			"updated_at":    now,
++		}
++		if authFailure {
++			updates["state"] = BreakerProbeStateAuthBlocked
++			updates["consecutive_success"] = 0
++			updates["next_probe_at"] = 0
++			updates["last_error_code"] = errorCode
++			return tx.Model(&BreakerProbeState{}).Where("id = ?", id).Updates(updates).Error
++		}
++		if success {
++			streak := state.ConsecutiveSuccess + 1
++			updates["consecutive_success"] = streak
++			updates["backoff_seconds"] = breakerProbeInitialBackoffSeconds
++			updates["last_error_code"] = ""
++			if streak >= breakerProbeSuccessThreshold {
++				updates["state"] = BreakerProbeStateRecovering
++				updates["next_probe_at"] = now
++				// Minute buckets cannot separate samples inside one minute. Start the
++				// recovered reliability baseline at the next full minute so the old
++				// failure bucket cannot immediately reopen the breaker.
++				updates["recovery_baseline_ts"] = alignToMinute(now) + 60
++				ready = true
++			} else {
++				updates["next_probe_at"] = now + breakerProbeSuccessDelaySeconds
++			}
++			return tx.Model(&BreakerProbeState{}).Where("id = ?", id).Updates(updates).Error
++		}
++
++		delay := state.BackoffSeconds
++		if delay < breakerProbeInitialBackoffSeconds {
++			delay = breakerProbeInitialBackoffSeconds
++		}
++		nextBackoff := delay * 2
++		if nextBackoff > breakerProbeMaximumBackoffSeconds {
++			nextBackoff = breakerProbeMaximumBackoffSeconds
++		}
++		updates["consecutive_success"] = 0
++		updates["backoff_seconds"] = nextBackoff
++		updates["next_probe_at"] = now + delay
++		updates["last_error_code"] = errorCode
++		return tx.Model(&BreakerProbeState{}).Where("id = ?", id).Updates(updates).Error
++	})
++	return ready, err
++}
++
++func FinalizeBreakerRecovery(db *gorm.DB, id, now int64) error {
++	if db == nil || id <= 0 {
++		return fmt.Errorf("%w: breaker probe id is required", ErrInvalidArgument)
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	return db.Model(&BreakerProbeState{}).
++		Where("id = ? AND state = ?", id, BreakerProbeStateRecovering).
++		Updates(map[string]any{
++			"state": BreakerProbeStateClosed, "next_probe_at": 0,
++			"owns_channel_disable": false, "updated_at": now,
++		}).Error
++}
++
++func DeferBreakerRecovery(db *gorm.DB, id, now int64, errorCode string) error {
++	if db == nil || id <= 0 {
++		return fmt.Errorf("%w: breaker probe id is required", ErrInvalidArgument)
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	return db.Model(&BreakerProbeState{}).
++		Where("id = ? AND state = ?", id, BreakerProbeStateRecovering).
++		Updates(map[string]any{
++			"next_probe_at":   now + breakerProbeSuccessDelaySeconds,
++			"last_error_code": errorCode, "updated_at": now,
++		}).Error
++}
++
++func BreakerRecoveryBaseline(db *gorm.DB, offeringID int64) (int64, error) {
++	if db == nil || offeringID <= 0 {
++		return 0, nil
++	}
++	var state BreakerProbeState
++	err := db.Select("recovery_baseline_ts").Where("offering_id = ?", offeringID).First(&state).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return 0, nil
++	}
++	return state.RecoveryBaselineTs, err
++}
++
++func BreakerProbeBlocksTraffic(db *gorm.DB, offeringID int64) (bool, error) {
++	if db == nil || offeringID <= 0 {
++		return false, nil
++	}
++	var count int64
++	err := db.Model(&BreakerProbeState{}).
++		Where("offering_id = ? AND state IN ?", offeringID,
++			[]int{BreakerProbeStateOpen, BreakerProbeStateRecovering, BreakerProbeStateAuthBlocked}).
++		Count(&count).Error
++	return count > 0, err
++}
++
++// BreakerChannelMayRestore is true only when no other offering on the same
++// base channel still needs probes or credential repair.
++func BreakerChannelMayRestore(db *gorm.DB, baseChannelID int64) (bool, error) {
++	if db == nil || baseChannelID <= 0 {
++		return false, nil
++	}
++	var count int64
++	err := db.Model(&BreakerProbeState{}).
++		Where("base_channel_id = ? AND state IN ?", baseChannelID,
++			[]int{BreakerProbeStateOpen, BreakerProbeStateAuthBlocked}).Count(&count).Error
++	return count == 0, err
++}
++
++// RearmAuthBlockedBreakerProbesForChannel resumes probes only after the owner
++// changes the credential pool. Ordinary scheduler passes never retry 401/403.
++func RearmAuthBlockedBreakerProbesForChannel(db *gorm.DB, shareChannelID, now int64) error {
++	if db == nil || shareChannelID <= 0 {
++		return nil
++	}
++	if now <= 0 {
++		now = common.GetTimestamp()
++	}
++	var channel Channel
++	if err := db.Select("base_channel_id").Where("id = ?", shareChannelID).First(&channel).Error; err != nil {
++		return err
++	}
++	return db.Model(&BreakerProbeState{}).
++		Where("base_channel_id = ? AND state = ?", channel.BaseChannelID, BreakerProbeStateAuthBlocked).
++		Updates(map[string]any{
++			"state": BreakerProbeStateOpen, "consecutive_success": 0,
++			"backoff_seconds": breakerProbeInitialBackoffSeconds,
++			"next_probe_at":   now, "last_error_code": "", "updated_at": now,
++		}).Error
++}
+diff --git a/apigx/model/repo_breaker_probe_test.go b/apigx/model/repo_breaker_probe_test.go
+new file mode 100644
+index 0000000..71b50ca
+--- /dev/null
++++ b/apigx/model/repo_breaker_probe_test.go
+@@ -0,0 +1,114 @@
++package apigxmodel
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestBreakerProbeStateMachinePersistsRecoveryAndAuthGate(t *testing.T) {
++	db := newSQLiteDB(t)
++	require.NoError(t, Migrate(db))
++
++	const (
++		offeringID  = int64(501)
++		baseChannel = int64(601)
++		openedAt    = int64(1_700_000_000)
++	)
++	require.NoError(t, OpenBreakerProbe(db, offeringID, baseChannel, openedAt, 60))
++	assert.False(t, HasDueBreakerProbes(db, openedAt+59))
++	assert.True(t, HasDueBreakerProbes(db, openedAt+60))
++
++	due, err := ListDueBreakerProbes(db, openedAt+60, 10)
++	require.NoError(t, err)
++	require.Len(t, due, 1)
++	state := due[0]
++	assert.Equal(t, BreakerProbeStateOpen, state.State)
++	assert.True(t, state.OwnsChannelDisable)
++
++	ready, err := RecordBreakerProbeResult(db, state.ID, openedAt+60, true, false, "")
++	require.NoError(t, err)
++	assert.False(t, ready)
++	ready, err = RecordBreakerProbeResult(db, state.ID, openedAt+75, true, false, "")
++	require.NoError(t, err)
++	assert.True(t, ready)
++
++	var recovering BreakerProbeState
++	require.NoError(t, db.First(&recovering, state.ID).Error)
++	assert.Equal(t, BreakerProbeStateRecovering, recovering.State)
++	assert.Equal(t, alignToMinute(openedAt+75)+60, recovering.RecoveryBaselineTs)
++	mayRestore, err := BreakerChannelMayRestore(db, baseChannel)
++	require.NoError(t, err)
++	assert.True(t, mayRestore)
++	require.NoError(t, FinalizeBreakerRecovery(db, state.ID, openedAt+76))
++
++	baseline, err := BreakerRecoveryBaseline(db, offeringID)
++	require.NoError(t, err)
++	assert.Equal(t, recovering.RecoveryBaselineTs, baseline)
++
++	// A later trip reopens the same durable row. An auth failure stops scheduled
++	// probes until the owner changes the channel credential pool.
++	require.NoError(t, OpenBreakerProbe(db, offeringID, baseChannel, openedAt+120, 60))
++	ready, err = RecordBreakerProbeResult(db, state.ID, openedAt+180, false, true, "http_401")
++	require.NoError(t, err)
++	assert.False(t, ready)
++	assert.False(t, HasDueBreakerProbes(db, openedAt+10_000))
++
++	group := &ShareGroup{OwnerUserID: 1, Name: "probe", PublicID: "probe-group"}
++	require.NoError(t, CreateShareGroup(db, group))
++	channel := &Channel{OwnerUserID: 1, ShareGroupID: group.ID, Name: "probe", BaseChannelID: baseChannel}
++	require.NoError(t, CreateChannel(db, channel))
++	require.NoError(t, RearmAuthBlockedBreakerProbesForChannel(db, channel.ID, openedAt+181))
++	assert.True(t, HasDueBreakerProbes(db, openedAt+181))
++}
++
++func TestBreakerProbeModalityRequiresConfirmedCatalogIdentity(t *testing.T) {
++	db := newSQLiteDB(t)
++	require.NoError(t, Migrate(db))
++	owner := int64(771)
++	group := &ShareGroup{OwnerUserID: owner, Name: "probe-modality"}
++	require.NoError(t, CreateShareGroup(db, group))
++	channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "probe-modality", BaseChannelID: 77_101}
++	require.NoError(t, CreateChannel(db, channel))
++	canonical := &CanonicalModel{APIModelID: "opaque-image", ModalityType: ModalityImageGeneration, Status: 1}
++	require.NoError(t, db.Create(canonical).Error)
++	offering := &ModelOffering{
++		ChannelID: channel.ID, CanonicalModelID: canonical.ID, UpstreamModelID: "vendor-opaque-id",
++	}
++	require.NoError(t, CreateModelOffering(db, owner, offering))
++
++	modality, err := BreakerProbeModality(db, offering.ID)
++	require.NoError(t, err)
++	assert.Equal(t, ModalityImageGeneration, modality)
++	supported, err := CanActivelyProbeOffering(db, offering.ID)
++	require.NoError(t, err)
++	assert.True(t, supported)
++
++	require.NoError(t, db.Model(&ModelOffering{}).Where("id = ?", offering.ID).
++		Update("canonical_model_id", 0).Error)
++	modality, err = BreakerProbeModality(db, offering.ID)
++	require.NoError(t, err)
++	assert.Zero(t, modality)
++	supported, err = CanActivelyProbeOffering(db, offering.ID)
++	require.NoError(t, err)
++	assert.False(t, supported)
++}
++
++func TestResolveQualityViewSinceExcludesPreRecoveryFailures(t *testing.T) {
++	db := newSQLiteDB(t)
++	require.NoError(t, Migrate(db))
++	const offeringID = int64(701)
++	require.NoError(t, RecordQualitySample(db, QualitySample{
++		OfferingID: offeringID, BucketTs: 1_700_000_000, Outcome: QualityOutcomeUpstream,
++	}))
++	require.NoError(t, RecordQualitySample(db, QualitySample{
++		OfferingID: offeringID, BucketTs: 1_700_000_120, Outcome: QualityOutcomeSuccess,
++	}))
++
++	view, err := ResolveQualityViewSince(db, offeringID, QualityWindowSixHour, 1_700_000_180, 1_700_000_060)
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, view.SampleCount)
++	assert.EqualValues(t, 1, view.SuccessCount)
++	assert.Zero(t, view.UpstreamFailures)
++}
+diff --git a/apigx/model/repo_quality.go b/apigx/model/repo_quality.go
+index 3a3ae9d..3585e68 100644
+--- a/apigx/model/repo_quality.go
++++ b/apigx/model/repo_quality.go
+@@ -322,6 +322,13 @@ func (view QualityView) OutputTokensPerSecond() (float64, bool) {
+ // 窗口外的桶**不参与聚合**（过期数据退出窗口）；窗口内没有任何样本时，
+ // 视图是"空"的：`SampleCount == 0`、`Insufficient == true`，而不是一份"成功率 0%"的假结论。
+ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64) (QualityView, error) {
++	return ResolveQualityViewSince(db, offeringID, windowKind, at, 0)
++}
++
++// ResolveQualityViewSince is ResolveQualityView with an additional inclusive
++// lower bound. Breaker recovery uses it to start a clean reliability baseline
++// after successful probes without deleting historical quality buckets.
++func ResolveQualityViewSince(db *gorm.DB, offeringID int64, windowKind int, at, notBefore int64) (QualityView, error) {
+ 	view := QualityView{OfferingID: offeringID, Insufficient: true}
+ 	if db == nil || offeringID <= 0 {
+ 		return view, fmt.Errorf("%w: offering_id is required", ErrInvalidArgument)
+@@ -330,6 +337,9 @@ func ResolveQualityView(db *gorm.DB, offeringID int64, windowKind int, at int64)
+ 		at = common.GetTimestamp()
+ 	}
+ 	from := at - int64(QualityWindowLength(windowKind).Seconds())
++	if notBefore > from {
++		from = notBefore
++	}
+ 
+ 	// 只聚合**分钟桶**，按请求的时长跨度取范围：
+ 	// 写入端永远产生分钟桶（`QualityWindowMinute`），6 小时那样的长窗口是**聚合视图**
+diff --git a/apigx/model/repo_upstream.go b/apigx/model/repo_upstream.go
+index 0763d0d..bc24066 100644
+--- a/apigx/model/repo_upstream.go
++++ b/apigx/model/repo_upstream.go
+@@ -118,12 +118,52 @@ func ListUpstreamAccounts(db *gorm.DB, ownerUserID int64, limit int) ([]Upstream
+ // 而软删除后 `alive_flag` 变为本行 ID，因此**同一个 StableKeyID 可以被重新添加**
+ // （轮换/重新导入的场景，见 schema-draft §3.5）。
+ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
+-	if key == nil || key.ChannelID <= 0 {
+-		return fmt.Errorf("%w: channel_id is required", ErrInvalidArgument)
++	return CreateUpstreamKeys(db, ownerUserID, []*UpstreamKey{key})
++}
++
++// CreateUpstreamKeys atomically adds one or more credentials to the same
++// owner-scoped channel. Validation happens before the first INSERT; any
++// database error rolls back every key and its credential-history row.
++func CreateUpstreamKeys(db *gorm.DB, ownerUserID int64, keys []*UpstreamKey) error {
++	if len(keys) == 0 {
++		return fmt.Errorf("%w: at least one upstream key is required", ErrInvalidArgument)
++	}
++	channelID := int64(0)
++	for _, key := range keys {
++		if key == nil || key.ChannelID <= 0 {
++			return fmt.Errorf("%w: channel_id is required", ErrInvalidArgument)
++		}
++		if channelID == 0 {
++			channelID = key.ChannelID
++		} else if key.ChannelID != channelID {
++			return fmt.Errorf("%w: all upstream keys must belong to the same channel", ErrInvalidArgument)
++		}
+ 	}
+-	if _, err := GetChannel(db, ownerUserID, key.ChannelID); err != nil {
++	if _, err := GetChannel(db, ownerUserID, channelID); err != nil {
+ 		return err
+ 	}
++	for _, key := range keys {
++		if err := prepareNewUpstreamKey(key); err != nil {
++			return err
++		}
++	}
++	return db.Transaction(func(tx *gorm.DB) error {
++		for _, key := range keys {
++			if err := tx.Create(key).Error; err != nil {
++				return err
++			}
++			if err := createUpstreamKeyCredential(tx, key, 0); err != nil {
++				return err
++			}
++		}
++		return RearmAuthBlockedBreakerProbesForChannel(tx, channelID, common.GetTimestamp())
++	})
++}
++
++func prepareNewUpstreamKey(key *UpstreamKey) error {
++	if key == nil || key.ChannelID <= 0 {
++		return fmt.Errorf("%w: channel_id is required", ErrInvalidArgument)
++	}
+ 	if key.StableKeyID == "" {
+ 		return fmt.Errorf("%w: stable_key_id is required（轮询索引与历史统计都依赖它，不能用行号）", ErrInvalidArgument)
+ 	}
+@@ -148,12 +188,7 @@ func CreateUpstreamKey(db *gorm.DB, ownerUserID int64, key *UpstreamKey) error {
+ 	}
+ 	key.AliveFlag = AliveFlagAlive
+ 	touchTimestamps(true, &key.CreatedAt, &key.UpdatedAt)
+-	return db.Transaction(func(tx *gorm.DB) error {
+-		if err := tx.Create(key).Error; err != nil {
+-			return err
+-		}
+-		return createUpstreamKeyCredential(tx, key, 0)
+-	})
++	return nil
+ }
+ 
+ // Weights 返回用于加权挑选的权重（0 视为未设置）。
+@@ -195,8 +230,14 @@ func UpdateUpstreamKeyStatus(db *gorm.DB, ownerUserID, keyID int64, status int)
+ 		return err
+ 	}
+ 	now := common.GetTimestamp()
+-	return db.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
+-		Updates(map[string]any{"status": status, "updated_at": now}).Error
++	if err := db.Model(&UpstreamKey{}).Where("id = ? AND alive_flag = ?", key.ID, AliveFlagAlive).
++		Updates(map[string]any{"status": status, "updated_at": now}).Error; err != nil {
++		return err
++	}
++	if status == UpstreamKeyStatusEnabled {
++		return RearmAuthBlockedBreakerProbesForChannel(db, key.ChannelID, now)
++	}
++	return nil
+ }
+ 
+ // UpdateUpstreamKeyWeight changes only the routing weight of one owned Key.
+@@ -300,7 +341,7 @@ func RotateUpstreamKeyCredential(db *gorm.DB, ownerUserID, keyID int64, secretRe
+ 		key.Status = UpstreamKeyStatusEnabled
+ 		key.UpdatedAt = now
+ 		updated = *key
+-		return nil
++		return RearmAuthBlockedBreakerProbesForChannel(tx, key.ChannelID, now)
+ 	})
+ 	if err != nil {
+ 		return nil, err
+diff --git a/apigx/relayhook/async_task_test.go b/apigx/relayhook/async_task_test.go
+index cec1ec0..f922665 100644
+--- a/apigx/relayhook/async_task_test.go
++++ b/apigx/relayhook/async_task_test.go
+@@ -62,7 +62,7 @@ func TestResolveAsyncTaskCredentialNeverFallsBackAfterSnapshotExists(t *testing.
+ 	sqlDB, err := db.DB()
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { _ = sqlDB.Close() })
+-	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}, &apigxmodel.UpstreamKey{}, &apigxmodel.UpstreamKeyCredential{}))
++	require.NoError(t, db.AutoMigrate(&apigxmodel.AsyncTask{}, &apigxmodel.UpstreamKey{}, &apigxmodel.UpstreamKeyCredential{}, &apigxmodel.BreakerProbeState{}))
+ 	require.NoError(t, db.Create(&apigxmodel.AsyncTask{
+ 		PublicTaskID: "apigx_202", BaseTaskID: 202,
+ 		UpstreamKeyID: 303, UpstreamKeyCredentialVersion: 4,
+@@ -267,6 +267,7 @@ func TestResolveAsyncTaskCredentialSurvivesKeyRotationAndDeletion(t *testing.T)
+ 	require.NoError(t, db.AutoMigrate(
+ 		&apigxmodel.ShareGroup{}, &apigxmodel.Channel{}, &apigxmodel.UpstreamKey{},
+ 		&apigxmodel.UpstreamKeyCredential{}, &apigxmodel.AsyncTask{},
++		&apigxmodel.BreakerProbeState{},
+ 	))
+ 	withAsyncTaskDB(t, db)
+ 
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+index 1a7fdec..404e012 100644
+--- a/apigx/relayhook/breaker_guard.go
++++ b/apigx/relayhook/breaker_guard.go
+@@ -41,6 +41,8 @@ func breakerEnabled() bool {
+ 	return common.GetEnvOrDefaultBool("APIGX_BREAKER_ENABLED", false)
+ }
+ 
++func BreakerEnabled() bool { return breakerEnabled() }
++
+ const breakerCacheTTL = 30 * time.Second
+ 
+ // breakerClosedCacheTTL 是"未打开"结论的缓存时长，故意很短：
+@@ -66,14 +68,9 @@ const (
+ // 冷却结束后的第一次经过才允许恢复（这也就是计划书里的"冷却后再半开探测"）。
+ var breakerCooldown = 60 * time.Second
+ 
+-// breakerOpenedAt 记录各渠道**本次**被我们打开的时刻（进程内即可：
+-// 重启后 Map 为空，等价于"冷却已过"，于是会按判定恢复，不会把渠道永久锁死）。
+-var breakerOpenedAt sync.Map // baseChannelID -> time.Time
+-
+-// ResetBreakerCooldownForTest 清空冷却记录（测试用）。
+-func ResetBreakerCooldownForTest() {
+-	breakerOpenedAt.Range(func(key, _ any) bool { breakerOpenedAt.Delete(key); return true })
+-}
++// ResetBreakerCooldownForTest is retained for tests that predate the durable
++// probe state. Cooldown ownership now lives in apigx_breaker_probe_states.
++func ResetBreakerCooldownForTest() {}
+ 
+ type cachedBreaker struct {
+ 	open      bool
+@@ -116,7 +113,7 @@ func CheckBreakerAllows(c *gin.Context, channelID int, modelName string) *types.
+ 	open := breakerOpenCached(db, offeringID)
+ 	// 无论开还是关，都同步一次底座渠道的"可跳过标记"：
+ 	// 打开 → 标记；已恢复 → 回收我们自己的标记。
+-	syncBreakerMarks(db, channelID, open)
++	syncBreakerMarks(db, channelID, offeringID, open)
+ 	if !open {
+ 		return nil
+ 	}
+@@ -142,7 +139,23 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
+ 	breakerCacheMu.RUnlock()
+ 
+ 	nowTs := common.GetTimestamp()
+-	view, err := apigxmodel.ResolveQualityView(db, offeringID, apigxmodel.QualityWindowSixHour, nowTs)
++	blocked, blockErr := apigxmodel.BreakerProbeBlocksTraffic(db, offeringID)
++	if blockErr != nil {
++		common.SysError("apigx breaker: resolve probe state failed: " + blockErr.Error())
++		return false
++	}
++	if blocked {
++		breakerCacheMu.Lock()
++		breakerCache[offeringID] = cachedBreaker{open: true, expiresAt: now.Add(breakerCacheTTL)}
++		breakerCacheMu.Unlock()
++		return true
++	}
++	baseline, baselineErr := apigxmodel.BreakerRecoveryBaseline(db, offeringID)
++	if baselineErr != nil {
++		common.SysError("apigx breaker: resolve recovery baseline failed: " + baselineErr.Error())
++		return false
++	}
++	view, err := apigxmodel.ResolveQualityViewSince(db, offeringID, apigxmodel.QualityWindowSixHour, nowTs, baseline)
+ 	if err != nil {
+ 		common.SysError("apigx breaker: resolve quality view failed: " + err.Error())
+ 		return false
+@@ -191,54 +204,50 @@ func breakerOpenCached(db *gorm.DB, offeringID int64) bool {
+ //
+ // 熔断不再打开时调用本函数即可**回收熔断来源**，不碰底座自己的禁用原因，
+ // 也不碰容量饱和来源；兼容单值表由 ChannelInfo 重新合并。
+-func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
++func syncBreakerMarks(db *gorm.DB, channelID int, offeringID int64, open bool) {
++	// Recovery is deliberately background-only. Once a breaker has removed a
++	// channel, user traffic cannot safely act as the half-open probe and must
++	// not restore the channel merely because old failures aged out.
++	if !open {
++		return
++	}
++	probeSupported, probeErr := apigxmodel.CanActivelyProbeOffering(db, offeringID)
++	if probeErr != nil {
++		common.SysError("apigx breaker: resolve active probe protocol failed: " + probeErr.Error())
++		return
++	}
++	if !probeSupported {
++		// The current request is still rejected with a retryable error, so the
++		// native cross-channel path can move it elsewhere. Do not persistently
++		// remove a source that the background worker cannot safely verify and
++		// restore (audio uploads/binary TTS and asynchronous video jobs).
++		return
++	}
+ 	var channel basemodel.Channel
+ 	if err := db.Where("id = ?", channelID).First(&channel).Error; err != nil {
+ 		return
+ 	}
+-	keyCount := channel.ChannelInfo.MultiKeySize
+-	if !channel.ChannelInfo.IsMultiKey || keyCount <= 0 {
+-		return // 非多 Key 渠道：没有可标记的条目（这类渠道的改道由底座自身的失败处理负责）
+-	}
+-	hadOurMark := channel.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen)
+-	if !open {
+-		if openedAt, loaded := breakerOpenedAt.Load(channelID); loaded {
+-			// 冷却未过时保持当前不可用状态；不能先删标记再返回，否则后续无法识别并恢复渠道。
+-			if since, ok := openedAt.(time.Time); ok && time.Since(since) < breakerCooldown {
+-				return
+-			}
+-			breakerOpenedAt.Delete(channelID)
+-		}
+-		if !hadOurMark {
+-			return
+-		}
++	if err := apigxmodel.OpenBreakerProbe(db, offeringID, int64(channelID), common.GetTimestamp(), int64(breakerCooldown.Seconds())); err != nil {
++		// Do not permanently remove a channel unless recovery ownership is
++		// durable. The current request still fails and the native retry path can
++		// select another channel.
++		common.SysError("apigx breaker: persist recovery state failed: " + err.Error())
++		return
+ 	}
+ 
+ 	// 复用 ChannelInfo 的来源合并：熔断、容量和底座健康分别持有标记，
+ 	// 恢复某个来源后重新生成兼容单值表。
+-	if open {
++	keyCount := channel.ChannelInfo.MultiKeySize
++	if channel.ChannelInfo.IsMultiKey && keyCount > 0 {
+ 		all := make([]int, 0, keyCount)
+ 		for index := range keyCount {
+ 			all = append(all, index)
+ 		}
+ 		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, all)
+-	} else {
+-		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
+-	}
+-
+-	// **刻意不动权重**：曾经的方案是"把熔断渠道的权重压到接近零"，但实测与底座语义相冲突——
+-	// 底座对权重有 **+10 平滑**，权重 1 与 1 之间的分配是 11:11（≈50%），
+-	// 也就是说**权重根本无法表达"接近零"**（要让它接近零，同层其他渠道的权重都得远大于 10，
+-	// 而我们无权假设/改动别人的权重）。更危险的是"恢复"时无从判断原值是不是平台设置的。
+-	// 因此这条被证据否掉，改走"让渠道在底座眼里不可选"（见下面的状态处理）。
+-	if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+-		Update("channel_info", channel.ChannelInfo).Error; err != nil {
+-		common.SysError("apigx breaker: update channel marks failed: " + err.Error())
+-		return
+-	}
+-	if open {
+-		if _, loaded := breakerOpenedAt.Load(channelID); !loaded {
+-			breakerOpenedAt.Store(channelID, time.Now())
++		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
++			Update("channel_info", channel.ChannelInfo).Error; err != nil {
++			common.SysError("apigx breaker: update channel marks failed: " + err.Error())
++			return
+ 		}
+ 	}
+ 
+@@ -250,30 +259,12 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 	// 而它对多 Key 渠道会走 `handlerMultiKeyUpdate`——传入空 key 时找不到对应索引，
+ 	// **不会禁用整条渠道**（实测：调用后排除了个寂寞，坏上游照样被选中）。
+ 	// 因此直接做两件等价的事：置渠道状态 + 关掉它的**能力索引**（后者才是选择逻辑真正看的）。
+-	if open {
+-		// "选择器忽略了禁用" 还是 "禁用发生得太晚"（定位后删除）。
+-		if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+-			Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
+-			common.SysError("apigx breaker: disable channel status failed: " + err.Error())
+-		}
+-		if err := basemodel.UpdateAbilityStatus(channelID, false); err != nil {
+-			common.SysError("apigx breaker: disable ability failed: " + err.Error())
+-		}
+-	} else {
+-		// 恢复：**只还原我们自己禁用的**（判据 = 我们的多 Key 标记仍在 + 渠道处于自动禁用），
+-		// 避免把底座因鉴权失败等原因禁用的渠道顺手恢复。
+-		var now basemodel.Channel
+-		if err := db.Where("id = ?", channelID).First(&now).Error; err == nil {
+-			if now.Status == common.ChannelStatusAutoDisabled && hadOurMark {
+-				if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
+-					Update("status", common.ChannelStatusEnabled).Error; err != nil {
+-					common.SysError("apigx breaker: restore channel status failed: " + err.Error())
+-				}
+-				if err := basemodel.UpdateAbilityStatus(channelID, true); err != nil {
+-					common.SysError("apigx breaker: restore ability failed: " + err.Error())
+-				}
+-			}
+-		}
++	if err := db.Model(&basemodel.Channel{}).Where("id = ?", channelID).
++		Update("status", common.ChannelStatusAutoDisabled).Error; err != nil {
++		common.SysError("apigx breaker: disable channel status failed: " + err.Error())
++	}
++	if err := basemodel.UpdateAbilityStatus(channelID, false); err != nil {
++		common.SysError("apigx breaker: disable ability failed: " + err.Error())
+ 	}
+ 
+ 	// 必须刷新底座缓存：只改库不会被选择逻辑看到（阶段 1 已经踩过同一个坑）
+@@ -285,3 +276,65 @@ func syncBreakerMarks(db *gorm.DB, channelID int, open bool) {
+ 		basemodel.InitChannelCache()
+ 	}
+ }
++
++// PrepareBreakerProbeChannel returns an in-memory channel copy whose breaker
++// marks are removed. Other key status sources remain intact, so a probe never
++// revives credentials disabled by authentication or capacity handling.
++func PrepareBreakerProbeChannel(channel *basemodel.Channel) *basemodel.Channel {
++	if channel == nil {
++		return nil
++	}
++	probe := *channel
++	probe.ChannelInfo = channel.ChannelInfo
++	probe.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
++	return &probe
++}
++
++// RestoreBreakerChannel removes only APIGX's breaker mark and returns the
++// channel to the native selector after all offering-level breaker states on the
++// channel are ready. Authentication and capacity marks are preserved.
++func RestoreBreakerChannel(db *gorm.DB, state apigxmodel.BreakerProbeState) error {
++	mayRestore, err := apigxmodel.BreakerChannelMayRestore(db, state.BaseChannelID)
++	if err != nil || !mayRestore {
++		return err
++	}
++	var channel basemodel.Channel
++	if err := db.Where("id = ?", state.BaseChannelID).First(&channel).Error; err != nil {
++		return err
++	}
++	if channel.ChannelInfo.IsMultiKey {
++		channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
++		if err := db.Model(&basemodel.Channel{}).Where("id = ?", state.BaseChannelID).
++			Update("channel_info", channel.ChannelInfo).Error; err != nil {
++			return err
++		}
++	}
++
++	canEnable := state.OwnsChannelDisable && channel.Status == common.ChannelStatusAutoDisabled
++	if canEnable && channel.ChannelInfo.IsMultiKey {
++		canEnable = false
++		for index := 0; index < channel.ChannelInfo.MultiKeySize; index++ {
++			if channel.ChannelInfo.MultiKeyStatusAt(index) == common.ChannelStatusEnabled {
++				canEnable = true
++				break
++			}
++		}
++	}
++	if canEnable {
++		if err := db.Model(&basemodel.Channel{}).Where("id = ? AND status = ?", state.BaseChannelID, common.ChannelStatusAutoDisabled).
++			Update("status", common.ChannelStatusEnabled).Error; err != nil {
++			return err
++		}
++		if err := basemodel.UpdateAbilityStatus(int(state.BaseChannelID), true); err != nil {
++			return err
++		}
++	}
++	if refreshed, err := basemodel.GetChannelById(int(state.BaseChannelID), true); err == nil && refreshed != nil {
++		basemodel.CacheUpdateChannel(refreshed)
++	}
++	if basemodel.DB != nil {
++		basemodel.InitChannelCache()
++	}
++	InvalidateBreakerCache()
++	return nil
++}
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+index e5d5739..cf8391a 100644
+--- a/apigx/relayhook/breaker_guard_test.go
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -48,7 +48,7 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
+ 	require.NoError(t, apigxmodel.Migrate(db))
+ 	// 底座自己的表（channels）不由 APIGX 迁移创建，但熔断的"标记渠道不可选"要写它；
+ 	// 同时接上底座的全局 DB，让缓存刷新路径也被覆盖（与投影测试同一处理）。
+-	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}))
++	require.NoError(t, db.AutoMigrate(&basemodel.Channel{}, &basemodel.Ability{}))
+ 	previousBaseDB := basemodel.DB
+ 	basemodel.DB = db
+ 	t.Cleanup(func() { basemodel.DB = previousBaseDB })
+@@ -72,12 +72,39 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
+ 	require.NoError(t, apigxmodel.CreateChannel(db, channel))
+ 	env.shareChannel = channel
+ 
+-	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "breaker-model"}
++	canonical := &apigxmodel.CanonicalModel{
++		APIModelID: "breaker-model-" + t.Name(), ModalityType: apigxmodel.ModalityChat, Status: 1,
++	}
++	require.NoError(t, db.Create(canonical).Error)
++	offering := &apigxmodel.ModelOffering{
++		ChannelID: channel.ID, CanonicalModelID: canonical.ID, UpstreamModelID: "breaker-model",
++	}
+ 	require.NoError(t, apigxmodel.CreateModelOffering(db, owner, offering))
+ 	env.offeringID = offering.ID
+ 	return env
+ }
+ 
++func TestBreakerGuardDoesNotPersistentlyDisableUnprobeableOffering(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	InvalidateBreakerCache()
++	t.Cleanup(InvalidateBreakerCache)
++	require.NoError(t, env.db.Model(&apigxmodel.CanonicalModel{}).
++		Where("id = (SELECT canonical_model_id FROM apigx_model_offerings WHERE id = ?)", env.offeringID).
++		Update("modality_type", apigxmodel.ModalityVideo).Error)
++	env.recordFailures(t, 20)
++
++	err := CheckBreakerAllows(env.newContext(t), env.baseChannelID, "breaker-model")
++	require.NotNil(t, err, "the failing request still participates in native retry")
++	var states int64
++	require.NoError(t, env.db.Model(&apigxmodel.BreakerProbeState{}).
++		Where("offering_id = ?", env.offeringID).Count(&states).Error)
++	assert.Zero(t, states, "an unsupported active probe must not own a durable traffic removal")
++	var base basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&base).Error)
++	assert.Equal(t, common.ChannelStatusEnabled, base.Status)
++}
++
+ func (e *breakerTestEnv) newContext(t *testing.T) *gin.Context {
+ 	t.Helper()
+ 	gin.SetMode(gin.TestMode)
+@@ -419,7 +446,7 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
+ 		Update("channel_info", prep.ChannelInfo).Error)
+ 
+ 	// 打开：三个稳定 Key 都持有熔断来源；已有底座健康/容量状态仍独立保留。
+-	syncBreakerMarks(env.db, env.baseChannelID, true)
++	syncBreakerMarks(env.db, env.baseChannelID, env.offeringID, true)
+ 	var marked basemodel.Channel
+ 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&marked).Error)
+ 	for index := range 3 {
+@@ -434,9 +461,17 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
+ 	assert.Equal(t, apigxmodel.StatusBreakerOpen, marked.ChannelInfo.MultiKeyStatusAt(2),
+ 		"容量和熔断并存时兼容镜像应确定地展示更高标记")
+ 
+-	// 恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
+-	breakerOpenedAt.Store(env.baseChannelID, time.Now().Add(-breakerCooldown-time.Second))
+-	syncBreakerMarks(env.db, env.baseChannelID, false)
++	// 后台连续成功两次后恢复：只回收熔断标记，底座自己的禁用原因与容量饱和标记都要保留
++	var probe apigxmodel.BreakerProbeState
++	require.NoError(t, env.db.Where("offering_id = ?", env.offeringID).First(&probe).Error)
++	_, err := apigxmodel.RecordBreakerProbeResult(env.db, probe.ID, common.GetTimestamp(), true, false, "")
++	require.NoError(t, err)
++	ready, err := apigxmodel.RecordBreakerProbeResult(env.db, probe.ID, common.GetTimestamp()+15, true, false, "")
++	require.NoError(t, err)
++	require.True(t, ready)
++	require.NoError(t, env.db.Where("id = ?", probe.ID).First(&probe).Error)
++	require.NoError(t, RestoreBreakerChannel(env.db, probe))
++	require.NoError(t, apigxmodel.FinalizeBreakerRecovery(env.db, probe.ID, common.GetTimestamp()+16))
+ 	var restored basemodel.Channel
+ 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&restored).Error)
+ 	assert.False(t, restored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
+@@ -447,14 +482,19 @@ func TestSyncBreakerMarksMarksAndRestores(t *testing.T) {
+ 		"熔断恢复不得清掉容量来源")
+ }
+ 
+-// 非多 Key 渠道不标记（没有可标记的条目）。
+-func TestSyncBreakerMarksSkipsNonMultiKeyChannel(t *testing.T) {
++// 非多 Key 渠道没有逐 Key 标记，但仍要从候选中摘除并建立恢复状态。
++func TestSyncBreakerMarksDisablesNonMultiKeyChannel(t *testing.T) {
+ 	env := newBreakerTestEnv(t)
+-	syncBreakerMarks(env.db, env.baseChannelID, true) // 不应 panic，也不应写坏数据
++	syncBreakerMarks(env.db, env.baseChannelID, env.offeringID, true)
+ 	var channel basemodel.Channel
+ 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&channel).Error)
+ 	assert.False(t, channel.ChannelInfo.IsMultiKey)
+ 	assert.Empty(t, channel.ChannelInfo.MultiKeyStatusList)
++	assert.Equal(t, common.ChannelStatusAutoDisabled, channel.Status)
++	var count int64
++	require.NoError(t, env.db.Model(&apigxmodel.BreakerProbeState{}).
++		Where("offering_id = ? AND state = ?", env.offeringID, apigxmodel.BreakerProbeStateOpen).Count(&count).Error)
++	assert.EqualValues(t, 1, count)
+ }
+ 
+ // 📌 冷却期（`breakerCooldown`）**由端到端验收覆盖**，不在这里写单测。
+diff --git a/controller/breaker_probe_test.go b/controller/breaker_probe_test.go
+new file mode 100644
+index 0000000..9aa28c6
+--- /dev/null
++++ b/controller/breaker_probe_test.go
+@@ -0,0 +1,88 @@
++package controller
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/common"
++	"github.com/QuantumNous/new-api/model"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestBreakerProbeRequiresTwoSuccessesAndRecordsProbeOnly(t *testing.T) {
++	var requests atomic.Int64
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		requests.Add(1)
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{"id":"chatcmpl-probe","object":"chat.completion","created":1,"model":"g2-failover-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
++	}))
++	t.Cleanup(upstream.Close)
++
++	db := setupRelayMultiKeyDatabase(t)
++	require.NoError(t, apigxmodel.Migrate(db))
++	require.NoError(t, db.Model(&model.User{}).Where("id = ?", 1).Update("role", common.RoleRootUser).Error)
++
++	base := relayMultiKeyChannel(88_101, "breaker-probe", upstream.URL, "probe-key", []string{"probe-stable"})
++	base.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, []int{0})
++	base.Status = common.ChannelStatusAutoDisabled
++	require.NoError(t, db.Create(base).Error)
++	ability := relayMultiKeyAbility(base.Id)
++	ability.Enabled = false
++	require.NoError(t, db.Create(ability).Error)
++	model.InitChannelCache()
++
++	group := &apigxmodel.ShareGroup{OwnerUserID: 1, Name: "probe", PublicID: "probe-controller-group"}
++	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
++	shareChannel := &apigxmodel.Channel{
++		OwnerUserID: 1, ShareGroupID: group.ID, Name: "probe", PublicID: "probe-controller-channel",
++		BaseChannelID: int64(base.Id),
++	}
++	require.NoError(t, apigxmodel.CreateChannel(db, shareChannel))
++	canonical := &apigxmodel.CanonicalModel{
++		APIModelID: "g2-failover-model", ModalityType: apigxmodel.ModalityChat, Status: 1,
++	}
++	require.NoError(t, db.Create(canonical).Error)
++	offering := &apigxmodel.ModelOffering{
++		ChannelID: shareChannel.ID, CanonicalModelID: canonical.ID, UpstreamModelID: "g2-failover-model",
++	}
++	require.NoError(t, apigxmodel.CreateModelOffering(db, 1, offering))
++
++	now := common.GetTimestamp()
++	require.NoError(t, apigxmodel.OpenBreakerProbe(db, offering.ID, int64(base.Id), now, 60))
++	require.NoError(t, db.Model(&apigxmodel.BreakerProbeState{}).
++		Where("offering_id = ?", offering.ID).Update("next_probe_at", now).Error)
++
++	first, err := runBreakerProbeTask(context.Background())
++	require.NoError(t, err)
++	assert.Equal(t, 1, first.Succeeded)
++	assert.Zero(t, first.Recovered)
++	assert.EqualValues(t, 1, requests.Load())
++	stored, err := model.GetChannelById(base.Id, true)
++	require.NoError(t, err)
++	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
++
++	require.NoError(t, db.Model(&apigxmodel.BreakerProbeState{}).
++		Where("offering_id = ?", offering.ID).Update("next_probe_at", common.GetTimestamp()).Error)
++	second, err := runBreakerProbeTask(context.Background())
++	require.NoError(t, err)
++	assert.Equal(t, 1, second.Succeeded)
++	assert.Equal(t, 1, second.Recovered)
++	assert.EqualValues(t, 2, requests.Load())
++
++	require.NoError(t, db.Where("offering_id = ?", offering.ID).First(&apigxmodel.BreakerProbeState{}).Error)
++	stored, err = model.GetChannelById(base.Id, true)
++	require.NoError(t, err)
++	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
++	assert.False(t, stored.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
++
++	var bucket apigxmodel.QualityBucket
++	require.NoError(t, db.Where("offering_id = ?", offering.ID).First(&bucket).Error)
++	assert.EqualValues(t, 2, bucket.ProbeCount)
++	assert.Zero(t, bucket.NaturalRequestCount)
++	assert.Zero(t, bucket.CompleteSuccessCount)
++}
+diff --git a/controller/channel-test.go b/controller/channel-test.go
+index 1248853..8d0d20a 100644
+--- a/controller/channel-test.go
++++ b/controller/channel-test.go
+@@ -36,9 +36,15 @@ import (
+ )
+ 
+ type testResult struct {
+-	context     *gin.Context
+-	localErr    error
+-	newAPIError *types.NewAPIError
++	context        *gin.Context
++	localErr       error
++	newAPIError    *types.NewAPIError
++	upstreamStatus int
++}
++
++type channelTestOptions struct {
++	requirePricing   bool
++	recordConsumeLog bool
+ }
+ 
+ func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
+@@ -70,6 +76,12 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
+ }
+ 
+ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
++	return testChannelWithOptions(ctx, channel, testUserID, testModel, endpointType, isStream, channelTestOptions{
++		requirePricing: true, recordConsumeLog: true,
++	})
++}
++
++func testChannelWithOptions(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, options channelTestOptions) testResult {
+ 	if ctx == nil {
+ 		ctx = context.Background()
+ 	}
+@@ -294,12 +306,15 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
+ 	//logInfo.ApiKey = ""
+ 	common.SysLog(fmt.Sprintf("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
+ 
+-	priceData, err := helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
+-	if err != nil {
+-		return testResult{
+-			context:     c,
+-			localErr:    err,
+-			newAPIError: types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest)),
++	priceData := hosttypes.PriceData{}
++	if options.requirePricing {
++		priceData, err = helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
++		if err != nil {
++			return testResult{
++				context:     c,
++				localErr:    err,
++				newAPIError: types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest)),
++			}
+ 		}
+ 	}
+ 
+@@ -457,9 +472,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
+ 				err,
+ 			))
+ 			return testResult{
+-				context:     c,
+-				localErr:    err,
+-				newAPIError: types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError),
++				context:        c,
++				localErr:       err,
++				newAPIError:    types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError),
++				upstreamStatus: httpResp.StatusCode,
+ 			}
+ 		}
+ 	}
+@@ -497,24 +513,26 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
+ 	}
+ 	info.SetEstimatePromptTokens(usage.PromptTokens)
+ 
+-	quota, tieredResult := settleTestQuota(info, priceData, usage)
+ 	tok := time.Now()
+ 	milliseconds := tok.Sub(tik).Milliseconds()
+-	consumedTime := float64(milliseconds) / 1000.0
+-	other := buildTestLogOther(c, info, priceData, usage, tieredResult)
+-	model.RecordConsumeLog(c, testUserID, model.RecordConsumeLogParams{
+-		ChannelId:        channel.Id,
+-		PromptTokens:     usage.PromptTokens,
+-		CompletionTokens: usage.CompletionTokens,
+-		ModelName:        info.OriginModelName,
+-		TokenName:        "模型测试",
+-		Quota:            quota,
+-		Content:          "模型测试",
+-		UseTimeSeconds:   int(consumedTime),
+-		IsStream:         info.IsStream,
+-		Group:            info.UsingGroup,
+-		Other:            other,
+-	})
++	if options.recordConsumeLog {
++		quota, tieredResult := settleTestQuota(info, priceData, usage)
++		consumedTime := float64(milliseconds) / 1000.0
++		other := buildTestLogOther(c, info, priceData, usage, tieredResult)
++		model.RecordConsumeLog(c, testUserID, model.RecordConsumeLogParams{
++			ChannelId:        channel.Id,
++			PromptTokens:     usage.PromptTokens,
++			CompletionTokens: usage.CompletionTokens,
++			ModelName:        info.OriginModelName,
++			TokenName:        "模型测试",
++			Quota:            quota,
++			Content:          "模型测试",
++			UseTimeSeconds:   int(consumedTime),
++			IsStream:         info.IsStream,
++			Group:            info.UsingGroup,
++			Other:            other,
++		})
++	}
+ 	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+ 	return testResult{
+ 		context:     c,
+diff --git a/controller/relay_multi_key_failover_test.go b/controller/relay_multi_key_failover_test.go
+index 8596f37..024a22a 100644
+--- a/controller/relay_multi_key_failover_test.go
++++ b/controller/relay_multi_key_failover_test.go
+@@ -3,6 +3,7 @@ package controller
+ import (
+ 	"net/http"
+ 	"net/http/httptest"
++	"strconv"
+ 	"strings"
+ 	"testing"
+ 
+@@ -93,6 +94,87 @@ func TestRelayRetriesAnotherKeyAfterUnauthorizedWithNoGlobalRetries(t *testing.T
+ 	assert.Equal(t, []string{"key-a", "key-b"}, usedKeys)
+ }
+ 
++func TestRelayStopsAfterSixKeysWhenGlobalRetryIsDisabled(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	usedKeys := make([]string, 0, service.MaxMultiKeyAttemptsPerRequest)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		usedKeys = append(usedKeys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusTooManyRequests)
++		_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limited"}}`))
++	}))
++	t.Cleanup(upstream.Close)
++
++	database := setupRelayMultiKeyDatabase(t)
++	common.RetryTimes = 0
++	keys := make([]string, service.MaxMultiKeyAttemptsPerRequest+2)
++	stableIDs := make([]string, len(keys))
++	for index := range keys {
++		keys[index] = "primary-key-" + strconv.Itoa(index)
++		stableIDs[index] = "primary-stable-" + strconv.Itoa(index)
++	}
++	channel := relayMultiKeyChannel(7251, "six-key-limit", upstream.URL, strings.Join(keys, "\n"), stableIDs)
++	require.NoError(t, database.Create(channel).Error)
++	require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
++	model.InitChannelCache()
++
++	recorder := httptest.NewRecorder()
++	c := newRelayMultiKeyContext(t, recorder, channel, nil)
++	Relay(c, types.RelayFormatOpenAI)
++
++	assert.Equal(t, http.StatusTooManyRequests, recorder.Code, recorder.Body.String())
++	assert.Len(t, usedKeys, service.MaxMultiKeyAttemptsPerRequest)
++	assert.Equal(t, len(usedKeys), distinctStringCount(usedKeys))
++	assert.Subset(t, keys, usedKeys)
++}
++
++func TestRelayGlobalRetryOneAllowsExactlyOneMoreSixKeyChannel(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	usedKeys := make([]string, 0, service.MaxMultiKeyAttemptsPerRequest*2)
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		usedKeys = append(usedKeys, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusTooManyRequests)
++		_, _ = w.Write([]byte(`{"error":{"message":"rate limited","type":"rate_limit_error","code":"rate_limited"}}`))
++	}))
++	t.Cleanup(upstream.Close)
++
++	database := setupRelayMultiKeyDatabase(t)
++	common.RetryTimes = 1
++	firstKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest)
++	firstStableIDs := make([]string, len(firstKeys))
++	secondKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest+2)
++	secondStableIDs := make([]string, len(secondKeys))
++	for index := range firstKeys {
++		firstKeys[index] = "first-key-" + strconv.Itoa(index)
++		firstStableIDs[index] = "first-stable-" + strconv.Itoa(index)
++	}
++	for index := range secondKeys {
++		secondKeys[index] = "second-key-" + strconv.Itoa(index)
++		secondStableIDs[index] = "second-stable-" + strconv.Itoa(index)
++	}
++	first := relayMultiKeyChannel(7261, "first-six-key-channel", upstream.URL, strings.Join(firstKeys, "\n"), firstStableIDs)
++	second := relayMultiKeyChannel(7262, "second-six-key-channel", upstream.URL, strings.Join(secondKeys, "\n"), secondStableIDs)
++	for _, channel := range []*model.Channel{first, second} {
++		require.NoError(t, database.Create(channel).Error)
++		require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
++	}
++	model.InitChannelCache()
++
++	recorder := httptest.NewRecorder()
++	c := newRelayMultiKeyContext(t, recorder, first, []int{first.Id, second.Id})
++	Relay(c, types.RelayFormatOpenAI)
++
++	assert.Equal(t, http.StatusTooManyRequests, recorder.Code, recorder.Body.String())
++	require.Len(t, usedKeys, service.MaxMultiKeyAttemptsPerRequest*2)
++	firstAttempts := usedKeys[:service.MaxMultiKeyAttemptsPerRequest]
++	secondAttempts := usedKeys[service.MaxMultiKeyAttemptsPerRequest:]
++	assert.Equal(t, len(firstAttempts), distinctStringCount(firstAttempts))
++	assert.Equal(t, len(secondAttempts), distinctStringCount(secondAttempts))
++	assert.Subset(t, firstKeys, firstAttempts)
++	assert.Subset(t, secondKeys, secondAttempts)
++}
++
+ func TestRelayDoesNotRotateKeyAfterBadRequest(t *testing.T) {
+ 	gin.SetMode(gin.TestMode)
+ 	usedKeys := make([]string, 0, 1)
+@@ -249,3 +331,11 @@ func relayMultiKeyAbility(channelID int) *model.Ability {
+ 		Enabled: true, Priority: &priority, Weight: 10,
+ 	}
+ }
++
++func distinctStringCount(values []string) int {
++	distinct := make(map[string]struct{}, len(values))
++	for _, value := range values {
++		distinct[value] = struct{}{}
++	}
++	return len(distinct)
++}
+diff --git a/controller/relay_task_plugin_test.go b/controller/relay_task_plugin_test.go
+index 2c06dde..dfa069b 100644
+--- a/controller/relay_task_plugin_test.go
++++ b/controller/relay_task_plugin_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"os"
++	"strconv"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -595,6 +596,68 @@ func TestTaskSubmissionFailsOverToNextKeyWithZeroGlobalRetries(t *testing.T) {
+ 	assert.Equal(t, []string{"reserve", "insert", "settle"}, events)
+ }
+ 
++func TestTaskSubmissionGlobalRetryOneAllowsExactlyOneMoreSixKeyChannel(t *testing.T) {
++	database := setupRelayMultiKeyDatabase(t)
++	common.RetryTimes = 1
++	firstKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest)
++	firstStableIDs := make([]string, len(firstKeys))
++	secondKeys := make([]string, service.MaxMultiKeyAttemptsPerRequest+2)
++	secondStableIDs := make([]string, len(secondKeys))
++	for index := range firstKeys {
++		firstKeys[index] = "task-first-key-" + strconv.Itoa(index)
++		firstStableIDs[index] = "task-first-stable-" + strconv.Itoa(index)
++	}
++	for index := range secondKeys {
++		secondKeys[index] = "task-second-key-" + strconv.Itoa(index)
++		secondStableIDs[index] = "task-second-stable-" + strconv.Itoa(index)
++	}
++	first := relayMultiKeyChannel(7271, "task-first-channel", "http://task.invalid", strings.Join(firstKeys, "\n"), firstStableIDs)
++	second := relayMultiKeyChannel(7272, "task-second-channel", "http://task.invalid", strings.Join(secondKeys, "\n"), secondStableIDs)
++	first.Type = constant.ChannelTypeTaskPlugin
++	second.Type = constant.ChannelTypeTaskPlugin
++	for _, channel := range []*model.Channel{first, second} {
++		require.NoError(t, database.Create(channel).Error)
++		require.NoError(t, database.Create(relayMultiKeyAbility(channel.Id)).Error)
++	}
++	model.InitChannelCache()
++
++	recorder := httptest.NewRecorder()
++	c := newRelayMultiKeyContext(t, recorder, first, []int{first.Id, second.Id})
++	c.Request = httptest.NewRequest(http.MethodPost, "/plugin/submit", strings.NewReader(`{}`))
++	info := taskSubmissionRelayInfo(nil)
++	info.OriginModelName = "g2-failover-model"
++	info.TokenGroup = "default"
++	info.ChannelMeta = &relaycommon.ChannelMeta{
++		ChannelId: first.Id, ChannelType: constant.ChannelTypeTaskPlugin, ChannelIsMultiKey: true,
++	}
++	info.LockedChannel = nil
++
++	usedKeys := make([]string, 0, service.MaxMultiKeyAttemptsPerRequest*2)
++	outcome, taskErr := executeTaskSubmissionWith(c, info, func(c *gin.Context, _ *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
++		usedKeys = append(usedKeys, common.GetContextKeyString(c, constant.ContextKeyChannelKey))
++		return nil, &dto.TaskError{
++			Code: "rate_limited", Message: "rate limited", StatusCode: http.StatusTooManyRequests,
++			Error: errors.New("rate limited"),
++		}
++	})
++
++	require.Nil(t, outcome)
++	require.NotNil(t, taskErr)
++	assert.Equal(t, http.StatusTooManyRequests, taskErr.StatusCode)
++	require.Len(t, usedKeys, service.MaxMultiKeyAttemptsPerRequest*2)
++	firstAttempts := usedKeys[:service.MaxMultiKeyAttemptsPerRequest]
++	secondAttempts := usedKeys[service.MaxMultiKeyAttemptsPerRequest:]
++	assert.Equal(t, len(firstAttempts), distinctStringCount(firstAttempts))
++	assert.Equal(t, len(secondAttempts), distinctStringCount(secondAttempts))
++	if strings.HasPrefix(firstAttempts[0], "task-first-key-") {
++		assert.Subset(t, firstKeys, firstAttempts)
++		assert.Subset(t, secondKeys, secondAttempts)
++	} else {
++		assert.Subset(t, secondKeys, firstAttempts)
++		assert.Subset(t, firstKeys, secondAttempts)
++	}
++}
++
+ func TestExecuteTaskSubmissionRefundsWhenFinalReserveFails(t *testing.T) {
+ 	events := []string{}
+ 	setupTaskSubmissionDatabase(t, true, &events)
+diff --git a/controller/system_task_handlers.go b/controller/system_task_handlers.go
+index c7ec0b4..394aa94 100644
+--- a/controller/system_task_handlers.go
++++ b/controller/system_task_handlers.go
+@@ -3,14 +3,19 @@ package controller
+ import (
+ 	"context"
+ 	"fmt"
++	"net/http"
++	"strings"
+ 	"time"
+ 
++	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/qualityhook"
+ 	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/model"
+ 	"github.com/QuantumNous/new-api/service"
+ 	"github.com/QuantumNous/new-api/setting/operation_setting"
++	"gorm.io/gorm"
+ )
+ 
+ // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
+@@ -23,6 +28,7 @@ func RegisterScheduledSystemTasks() {
+ 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
+ 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
+ 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
++	service.RegisterSystemTaskHandler(breakerProbeHandler{})
+ }
+ 
+ // channelTestHandler runs the scheduled "test all channels" job. Enablement and
+@@ -156,6 +162,202 @@ func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, run
+ 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+ }
+ 
++type breakerProbeHandler struct{}
++
++func (breakerProbeHandler) Type() string { return model.SystemTaskTypeBreakerProbe }
++
++func (breakerProbeHandler) Enabled() bool {
++	db := apigxmodel.DefaultDB()
++	return relayhook.BreakerEnabled() && apigxmodel.HasDueBreakerProbes(db, common.GetTimestamp())
++}
++
++func (breakerProbeHandler) Interval() time.Duration { return 15 * time.Second }
++
++func (breakerProbeHandler) NewPayload() any { return nil }
++
++type breakerProbeSummary struct {
++	Due         int `json:"due"`
++	Probed      int `json:"probed"`
++	Succeeded   int `json:"succeeded"`
++	Failed      int `json:"failed"`
++	AuthBlocked int `json:"auth_blocked"`
++	Unsupported int `json:"unsupported"`
++	Recovered   int `json:"recovered"`
++}
++
++func (breakerProbeHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
++	summary, err := runBreakerProbeTask(ctx)
++	if err != nil {
++		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
++		return
++	}
++	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
++}
++
++func runBreakerProbeTask(ctx context.Context) (breakerProbeSummary, error) {
++	db := apigxmodel.DefaultDB()
++	if db == nil {
++		return breakerProbeSummary{}, fmt.Errorf("APIGX database is not initialized")
++	}
++	now := common.GetTimestamp()
++	states, err := apigxmodel.ListDueBreakerProbes(db, now, 50)
++	if err != nil {
++		return breakerProbeSummary{}, err
++	}
++	summary := breakerProbeSummary{Due: len(states)}
++	if len(states) == 0 {
++		return summary, nil
++	}
++	testUserID, err := resolveChannelTestUserID(nil)
++	if err != nil {
++		return summary, err
++	}
++
++	for i := range states {
++		if ctx != nil && ctx.Err() != nil {
++			return summary, ctx.Err()
++		}
++		state := states[i]
++		if state.State == apigxmodel.BreakerProbeStateRecovering {
++			if err := restoreAndFinalizeBreakerProbe(db, &state, now); err != nil {
++				_ = apigxmodel.DeferBreakerRecovery(db, state.ID, now, "restore_failed")
++				summary.Failed++
++				continue
++			}
++			summary.Recovered++
++			continue
++		}
++
++		var offering apigxmodel.ModelOffering
++		if err := db.Where("id = ? AND alive_flag = ?", state.OfferingID, apigxmodel.AliveFlagAlive).First(&offering).Error; err != nil {
++			_, _ = apigxmodel.RecordBreakerProbeResult(db, state.ID, now, false, false, "offering_missing")
++			summary.Failed++
++			continue
++		}
++		endpointType, supported, resolveErr := breakerProbeEndpoint(db, offering.ID)
++		if resolveErr != nil {
++			_, _ = apigxmodel.RecordBreakerProbeResult(db, state.ID, now, false, false, "probe_protocol_error")
++			summary.Failed++
++			continue
++		}
++		if !supported {
++			released, releaseErr := apigxmodel.ReleaseUnprobeableBreaker(db, state.ID, now)
++			if releaseErr != nil {
++				summary.Failed++
++				continue
++			}
++			summary.Unsupported++
++			if released {
++				if err := db.Where("id = ?", state.ID).First(&state).Error; err != nil {
++					return summary, err
++				}
++				if err := restoreAndFinalizeBreakerProbe(db, &state, now); err != nil {
++					_ = apigxmodel.DeferBreakerRecovery(db, state.ID, now, "restore_failed")
++					summary.Failed++
++					continue
++				}
++				summary.Recovered++
++			}
++			continue
++		}
++		channel, err := model.GetChannelById(int(state.BaseChannelID), true)
++		if err != nil || channel == nil {
++			_, _ = apigxmodel.RecordBreakerProbeResult(db, state.ID, now, false, false, "channel_missing")
++			summary.Failed++
++			continue
++		}
++		probeChannel := relayhook.PrepareBreakerProbeChannel(channel)
++		result := testChannelWithOptions(ctx, probeChannel, testUserID, offering.UpstreamModelID, endpointType, false,
++			channelTestOptions{requirePricing: false, recordConsumeLog: false})
++		summary.Probed++
++
++		outcome := qualityhook.ClassifyOutcome(result.newAPIError, result.upstreamStatus)
++		if recordErr := apigxmodel.RecordQualitySample(db, apigxmodel.QualitySample{
++			OfferingID: offering.ID, Outcome: outcome, IsProbe: true,
++		}); recordErr != nil {
++			common.SysError("apigx breaker probe: record probe sample failed: " + recordErr.Error())
++		}
++		success := result.localErr == nil && result.newAPIError == nil
++		authFailure := result.upstreamStatus == http.StatusUnauthorized || result.upstreamStatus == http.StatusForbidden
++		errorCode := breakerProbeErrorCode(result)
++		ready, recordErr := apigxmodel.RecordBreakerProbeResult(db, state.ID, now, success, authFailure, errorCode)
++		if recordErr != nil {
++			return summary, recordErr
++		}
++		if authFailure {
++			summary.AuthBlocked++
++			continue
++		}
++		if !success {
++			summary.Failed++
++			continue
++		}
++		summary.Succeeded++
++		if ready {
++			if err := db.Where("id = ?", state.ID).First(&state).Error; err != nil {
++				return summary, err
++			}
++			if err := restoreAndFinalizeBreakerProbe(db, &state, now); err != nil {
++				_ = apigxmodel.DeferBreakerRecovery(db, state.ID, now, "restore_failed")
++				summary.Failed++
++				continue
++			}
++			summary.Recovered++
++		}
++	}
++	return summary, nil
++}
++
++func breakerProbeEndpoint(db *gorm.DB, offeringID int64) (string, bool, error) {
++	modality, err := apigxmodel.BreakerProbeModality(db, offeringID)
++	if err != nil {
++		return "", false, err
++	}
++	switch modality {
++	case apigxmodel.ModalityChat:
++		return "", true, nil
++	case apigxmodel.ModalityEmbedding:
++		return string(constant.EndpointTypeEmbeddings), true, nil
++	case apigxmodel.ModalityImageGeneration:
++		return string(constant.EndpointTypeImageGeneration), true, nil
++	case apigxmodel.ModalityRerank:
++		return string(constant.EndpointTypeJinaRerank), true, nil
++	default:
++		return "", false, nil
++	}
++}
++
++func restoreAndFinalizeBreakerProbe(db *gorm.DB, state *apigxmodel.BreakerProbeState, now int64) error {
++	if state == nil {
++		return fmt.Errorf("breaker probe state is required")
++	}
++	if err := relayhook.RestoreBreakerChannel(db, *state); err != nil {
++		return err
++	}
++	return apigxmodel.FinalizeBreakerRecovery(db, state.ID, now)
++}
++
++func breakerProbeErrorCode(result testResult) string {
++	if result.upstreamStatus > 0 {
++		return fmt.Sprintf("http_%d", result.upstreamStatus)
++	}
++	if result.newAPIError != nil {
++		code := string(result.newAPIError.GetErrorCode())
++		if len(code) > 64 {
++			code = code[:64]
++		}
++		return code
++	}
++	if result.localErr != nil {
++		code := strings.TrimSpace(result.localErr.Error())
++		if len(code) > 64 {
++			code = code[:64]
++		}
++		return code
++	}
++	return ""
++}
++
+ func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {
+ 	errorMessage := ""
+ 	if runErr != nil {
+diff --git a/model/system_task.go b/model/system_task.go
+index ffbe2dc..359d731 100644
+--- a/model/system_task.go
++++ b/model/system_task.go
+@@ -21,6 +21,7 @@ const (
+ 	SystemTaskTypeModelUpdate    = "model_update"
+ 	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
+ 	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
++	SystemTaskTypeBreakerProbe   = "apigx_breaker_probe"
+ )
+ 
+ var ErrSystemTaskLockLost = errors.New("system task lock lost")
+diff --git a/service/multi_key_failover.go b/service/multi_key_failover.go
+index 84c8acc..bef39cf 100644
+--- a/service/multi_key_failover.go
++++ b/service/multi_key_failover.go
+@@ -7,7 +7,11 @@ import (
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+-const MaxMultiKeyAttemptsPerRequest = 10
++// MaxMultiKeyAttemptsPerRequest is the total number of different credentials
++// one request may try inside a channel: the initial key plus five failovers.
++// These attempts do not consume New API's global RetryTimes; after the sixth
++// key fails, the relay returns to the native cross-channel retry path.
++const MaxMultiKeyAttemptsPerRequest = 6
+ 
+ const multiKeyAttemptsContextKey = "apigx_multi_key_attempts"
+ 
+diff --git a/web/src/features/share/__tests__/channel-recipes.test.tsx b/web/src/features/share/__tests__/channel-recipes.test.tsx
+index faf6a49..84668d2 100644
+--- a/web/src/features/share/__tests__/channel-recipes.test.tsx
++++ b/web/src/features/share/__tests__/channel-recipes.test.tsx
+@@ -143,7 +143,10 @@ it('loads recipes from the server and submits only the selected stable recipe id
+     screen.getByLabelText('Upstream address'),
+     'https://gateway.example/v1'
+   )
+-  await user.type(screen.getByLabelText('Your upstream key'), 'sk-community')
++  await user.type(
++    screen.getByLabelText('Your upstream keys'),
++    'sk-community{enter}sk-community-backup'
++  )
+   await user.click(screen.getByRole('button', { name: 'Create' }))
+ 
+   await waitFor(() =>
+@@ -152,7 +155,7 @@ it('loads recipes from the server and submits only the selected stable recipe id
+       name: 'Community New API',
+       recipe_id: 'new-api',
+       base_url: 'https://gateway.example/v1',
+-      upstream_key: 'sk-community',
++      upstream_keys: ['sk-community', 'sk-community-backup'],
+       key_pool_mode: 1,
+     })
+   )
+@@ -188,7 +191,7 @@ it('explains the async lifecycle and provider credential format for video recipe
+   ).toBeVisible()
+   expect(
+     screen.getByText(
+-      'For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.'
++      'For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.'
+     )
+   ).toBeVisible()
+ })
+diff --git a/web/src/features/share/__tests__/credential-lines.test.ts b/web/src/features/share/__tests__/credential-lines.test.ts
+new file mode 100644
+index 0000000..e399a98
+--- /dev/null
++++ b/web/src/features/share/__tests__/credential-lines.test.ts
+@@ -0,0 +1,57 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { describe, expect, it } from 'vitest'
++
++import {
++  isAccessSecretPairOrRelayKey,
++  MAX_UPSTREAM_KEYS_PER_BATCH,
++  parseCredentialLines,
++} from '../lib/credential-lines'
++
++describe('credential line parsing', () => {
++  it('trims blank lines and duplicates without splitting paired credentials', () => {
++    expect(
++      parseCredentialLines(
++        ' sk-a \r\n\r\naccess-key|secret-key\nsk-a\n access-key|secret-key '
++      )
++    ).toEqual({
++      keys: ['sk-a', 'access-key|secret-key'],
++      duplicateCount: 2,
++      nonEmptyCount: 4,
++      exceedsLimit: false,
++    })
++  })
++
++  it('counts submitted non-empty rows against the server batch limit', () => {
++    const parsed = parseCredentialLines(
++      Array.from(
++        { length: MAX_UPSTREAM_KEYS_PER_BATCH + 1 },
++        (_, index) => `sk-${index}`
++      ).join('\n')
++    )
++    expect(parsed.exceedsLimit).toBe(true)
++  })
++
++  it('validates direct credential pairs as one line', () => {
++    expect(isAccessSecretPairOrRelayKey('access|secret')).toBe(true)
++    expect(isAccessSecretPairOrRelayKey('sk-relay')).toBe(true)
++    expect(isAccessSecretPairOrRelayKey('access')).toBe(false)
++    expect(isAccessSecretPairOrRelayKey('access|secret|region')).toBe(false)
++  })
++})
+diff --git a/web/src/features/share/__tests__/key-pool-card.test.tsx b/web/src/features/share/__tests__/key-pool-card.test.tsx
+new file mode 100644
+index 0000000..34778b1
+--- /dev/null
++++ b/web/src/features/share/__tests__/key-pool-card.test.tsx
+@@ -0,0 +1,75 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { render, screen, waitFor } from '@testing-library/react'
++import userEvent from '@testing-library/user-event'
++import i18next from 'i18next'
++import { afterEach, beforeAll, expect, it, vi } from 'vitest'
++
++import { api } from '@/lib/api'
++
++import { KeyPoolCard } from '../components/key-pool-card'
++
++beforeAll(() => {
++  i18next.addResources('en', 'translation', {
++    'share.keyPool': 'Key pool',
++    'share.keyPool.description': 'Manage credentials.',
++    'share.keyPool.failoverDescription': 'Fail over to the next key.',
++    'share.keyPool.empty': 'No upstream key yet',
++    'share.key.batchAdd': 'Batch add keys',
++    'share.key.batchAddDescription': 'One credential per line.',
++    'share.key.credentials': 'Credentials',
++    'share.key.batchLineHint': 'Duplicate lines are ignored.',
++    'share.key.weight': 'Weight',
++    'share.key.savedApplyHint': 'Saved.',
++  })
++})
++
++afterEach(() => {
++  vi.restoreAllMocks()
++})
++
++it('adds multiple keys in one request and keeps paired credentials intact', async () => {
++  const post = vi.spyOn(api, 'post').mockResolvedValue({
++    data: { success: true, data: { created: 2 } },
++  })
++  const client = new QueryClient({
++    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
++  })
++  const user = userEvent.setup()
++  render(
++    <QueryClientProvider client={client}>
++      <KeyPoolCard channelId={42} keys={[]} />
++    </QueryClientProvider>
++  )
++
++  await user.click(screen.getByRole('button', { name: 'Batch add keys' }))
++  await user.type(
++    screen.getByLabelText('Credentials'),
++    'sk-primary{enter}access-key|secret-key{enter}sk-primary'
++  )
++  await user.click(screen.getByRole('button', { name: 'Save' }))
++
++  await waitFor(() =>
++    expect(post).toHaveBeenCalledWith('/api/apigx/channels/42/keys/batch', {
++      keys: ['sk-primary', 'access-key|secret-key'],
++      weight: 1,
++    })
++  )
++})
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index 8b19755..ca9c8cb 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -55,7 +55,7 @@ export async function createShareChannel(input: {
+   name: string
+   recipe_id: string
+   base_url: string
+-  upstream_key: string
++  upstream_keys: string[]
+   key_pool_mode?: number
+ }): Promise<{ success: boolean; data?: { id: number; public_id: string } }> {
+   const res = await api.post('/api/apigx/channels', input)
+@@ -90,6 +90,17 @@ export async function createUpstreamKey(
+   return res.data
+ }
+ 
++export async function createUpstreamKeysBatch(
++  channelId: number,
++  payload: { keys: string[]; weight: number }
++): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.post(
++    `/api/apigx/channels/${channelId}/keys/batch`,
++    payload
++  )
++  return res.data
++}
++
+ export async function rotateUpstreamKey(
+   keyId: number,
+   key: string
+diff --git a/web/src/features/share/components/channel-create-dialog.tsx b/web/src/features/share/components/channel-create-dialog.tsx
+index 7c5d078..a7af685 100644
+--- a/web/src/features/share/components/channel-create-dialog.tsx
++++ b/web/src/features/share/components/channel-create-dialog.tsx
+@@ -32,6 +32,7 @@ import { Button } from '@/components/ui/button'
+ import {
+   Field,
+   FieldDescription,
++  FieldError,
+   FieldGroup,
+   FieldLabel,
+ } from '@/components/ui/field'
+@@ -44,9 +45,15 @@ import {
+   SelectTrigger,
+   SelectValue,
+ } from '@/components/ui/select'
++import { Textarea } from '@/components/ui/textarea'
+ import { handleServerError } from '@/lib/handle-server-error'
+ 
+ import { createShareChannel, getChannelRecipes } from '../api'
++import {
++  isAccessSecretPairOrRelayKey,
++  MAX_UPSTREAM_KEYS_PER_BATCH,
++  parseCredentialLines,
++} from '../lib/credential-lines'
+ import type { ChannelRecipe, ShareGroup } from '../types'
+ 
+ const emptyRecipes: ChannelRecipe[] = []
+@@ -83,7 +90,7 @@ export function ChannelCreateDialog(props: {
+   const [name, setName] = useState('')
+   const [recipeId, setRecipeId] = useState('')
+   const [baseUrl, setBaseUrl] = useState('')
+-  const [upstreamKey, setUpstreamKey] = useState('')
++  const [upstreamKeys, setUpstreamKeys] = useState('')
+   const [keyPoolMode, setKeyPoolMode] = useState('0')
+ 
+   const recipesQuery = useQuery({
+@@ -93,6 +100,10 @@ export function ChannelCreateDialog(props: {
+   })
+   const recipes = recipesQuery.data?.data?.items ?? emptyRecipes
+   const selectedRecipe = recipes.find((recipe) => recipe.id === recipeId)
++  const parsedKeys = parseCredentialLines(upstreamKeys)
++  const hasInvalidCredential =
++    selectedRecipe?.credential_format === 'access_secret_pair_or_relay_key' &&
++    parsedKeys.keys.some((key) => !isAccessSecretPairOrRelayKey(key))
+ 
+   useEffect(() => {
+     if (!props.open || recipes.length === 0 || selectedRecipe != null) return
+@@ -123,14 +134,14 @@ export function ChannelCreateDialog(props: {
+         name: name.trim(),
+         recipe_id: recipeId,
+         base_url: baseUrl.trim(),
+-        upstream_key: upstreamKey.trim(),
++        upstream_keys: parsedKeys.keys,
+         key_pool_mode: Number(keyPoolMode),
+       }),
+     onSuccess: (res) => {
+       setName('')
+       setRecipeId('')
+       setBaseUrl('')
+-      setUpstreamKey('')
++      setUpstreamKeys('')
+       setKeyPoolMode('0')
+       props.onOpenChange(false)
+       props.onSaved(res.data?.id)
+@@ -145,7 +156,9 @@ export function ChannelCreateDialog(props: {
+     groupId === '' ||
+     name.trim() === '' ||
+     (selectedRecipe?.requires_base_url === true && baseUrl.trim() === '') ||
+-    upstreamKey.trim() === ''
++    parsedKeys.keys.length === 0 ||
++    parsedKeys.exceedsLimit ||
++    hasInvalidCredential
+ 
+   return (
+     <Dialog
+@@ -322,27 +335,58 @@ export function ChannelCreateDialog(props: {
+           />
+         </Field>
+         <Field>
+-          <FieldLabel htmlFor='share-channel-upstream-key'>
+-            {t('Your upstream key')}
++          <FieldLabel htmlFor='share-channel-upstream-keys'>
++            {t('Your upstream keys')}
+           </FieldLabel>
+-          <Input
+-            id='share-channel-upstream-key'
+-            type='password'
++          <Textarea
++            id='share-channel-upstream-keys'
+             autoComplete='off'
+-            value={upstreamKey}
+-            onChange={(event) => setUpstreamKey(event.target.value)}
++            rows={5}
++            placeholder={'sk-...\nsk-...'}
++            value={upstreamKeys}
++            onChange={(event) => setUpstreamKeys(event.target.value)}
+           />
+           <FieldDescription>
+-            {t('It is stored encrypted and never shown again.')}
++            {t(
++              'Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.',
++              {
++                count: MAX_UPSTREAM_KEYS_PER_BATCH,
++              }
++            )}{' '}
++            {t('They are stored encrypted and never shown again.')}
+           </FieldDescription>
++          {parsedKeys.duplicateCount > 0 ? (
++            <FieldDescription>
++              {t('{{count}} duplicate credential lines will be ignored.', {
++                count: parsedKeys.duplicateCount,
++              })}
++            </FieldDescription>
++          ) : null}
++          {parsedKeys.exceedsLimit ? (
++            <FieldError>
++              {t(
++                'A batch can contain at most {{count}} non-empty credential lines.',
++                {
++                  count: MAX_UPSTREAM_KEYS_PER_BATCH,
++                }
++              )}
++            </FieldError>
++          ) : null}
+           {selectedRecipe?.credential_format ===
+           'access_secret_pair_or_relay_key' ? (
+             <FieldDescription>
+               {t(
+-                'For a direct provider account, enter accessKey|secretKey. Relay keys beginning with sk- are also accepted.'
++                'For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.'
+               )}
+             </FieldDescription>
+           ) : null}
++          {hasInvalidCredential ? (
++            <FieldError>
++              {t(
++                'Each credential must be accessKey|secretKey or a relay key beginning with sk-.'
++              )}
++            </FieldError>
++          ) : null}
+         </Field>
+       </FieldGroup>
+     </Dialog>
+diff --git a/web/src/features/share/components/key-pool-card.tsx b/web/src/features/share/components/key-pool-card.tsx
+index 540e572..525841d 100644
+--- a/web/src/features/share/components/key-pool-card.tsx
++++ b/web/src/features/share/components/key-pool-card.tsx
+@@ -35,16 +35,21 @@ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+ import { Input } from '@/components/ui/input'
+ import { Label } from '@/components/ui/label'
++import { Textarea } from '@/components/ui/textarea'
+ import { handleServerError } from '@/lib/handle-server-error'
+ 
+ import {
+   applyChannelKeyPool,
+-  createUpstreamKey,
++  createUpstreamKeysBatch,
+   deleteUpstreamKey,
+   rotateUpstreamKey,
+   updateUpstreamKeyStatus,
+   updateUpstreamKeyWeight,
+ } from '../api'
++import {
++  MAX_UPSTREAM_KEYS_PER_BATCH,
++  parseCredentialLines,
++} from '../lib/credential-lines'
+ import { parseKeyWeight } from '../lib/key-weight'
+ import {
+   isUpstreamKeyEnabled,
+@@ -62,7 +67,6 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+   const [editor, setEditor] = useState<KeyEditor>(null)
+   const [deleting, setDeleting] = useState<UpstreamKey | null>(null)
+   const [poolChanged, setPoolChanged] = useState(false)
+-  const [name, setName] = useState('')
+   const [secret, setSecret] = useState('')
+   const [weight, setWeight] = useState('1')
+ 
+@@ -79,14 +83,12 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+ 
+   const createMutation = useMutation({
+     mutationFn: () =>
+-      createUpstreamKey(props.channelId, {
+-        name: name.trim(),
+-        key: secret.trim(),
++      createUpstreamKeysBatch(props.channelId, {
++        keys: parseCredentialLines(secret).keys,
+         weight: parseKeyWeight(weight) ?? 0,
+       }),
+     onSuccess: () => {
+       setAddOpen(false)
+-      setName('')
+       setSecret('')
+       setWeight('1')
+       setPoolChanged(true)
+@@ -229,6 +231,7 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+   ]
+ 
+   const validWeight = parseKeyWeight(weight) !== null
++  const parsedSecrets = parseCredentialLines(secret)
+ 
+   return (
+     <Card id='key-pool'>
+@@ -248,7 +251,7 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+         <div className='flex flex-wrap gap-2'>
+           <Button variant='outline' size='sm' onClick={() => setAddOpen(true)}>
+             <Plus />
+-            {t('share.key.add')}
++            {t('share.key.batchAdd')}
+           </Button>
+           <Button
+             size='sm'
+@@ -285,8 +288,10 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+       <Dialog
+         open={addOpen}
+         onOpenChange={setAddOpen}
+-        title={t('share.key.add')}
+-        description={t('share.key.addDescription')}
++        title={t('share.key.batchAdd')}
++        description={t('share.key.batchAddDescription', {
++          count: MAX_UPSTREAM_KEYS_PER_BATCH,
++        })}
+         footer={
+           <>
+             <Button variant='outline' onClick={() => setAddOpen(false)}>
+@@ -294,7 +299,10 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+             </Button>
+             <Button
+               disabled={
+-                secret.trim() === '' || !validWeight || createMutation.isPending
++                parsedSecrets.keys.length === 0 ||
++                parsedSecrets.exceedsLimit ||
++                !validWeight ||
++                createMutation.isPending
+               }
+               onClick={() => createMutation.mutate()}
+             >
+@@ -305,22 +313,37 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+       >
+         <div className='space-y-4'>
+           <div className='space-y-1.5'>
+-            <Label htmlFor='apigx-key-name'>{t('share.key.name')}</Label>
+-            <Input
+-              id='apigx-key-name'
+-              value={name}
+-              onChange={(event) => setName(event.target.value)}
+-            />
+-          </div>
+-          <div className='space-y-1.5'>
+-            <Label htmlFor='apigx-key-secret'>{t('share.key.secret')}</Label>
+-            <Input
+-              id='apigx-key-secret'
+-              type='password'
++            <Label htmlFor='apigx-key-secrets'>
++              {t('share.key.credentials')}
++            </Label>
++            <Textarea
++              id='apigx-key-secrets'
+               autoComplete='off'
++              rows={6}
++              placeholder={'sk-...\nsk-...'}
+               value={secret}
+               onChange={(event) => setSecret(event.target.value)}
+             />
++            <p className='text-muted-foreground text-xs'>
++              {t('share.key.batchLineHint')}
++            </p>
++            {parsedSecrets.duplicateCount > 0 ? (
++              <p className='text-muted-foreground text-xs'>
++                {t('{{count}} duplicate credential lines will be ignored.', {
++                  count: parsedSecrets.duplicateCount,
++                })}
++              </p>
++            ) : null}
++            {parsedSecrets.exceedsLimit ? (
++              <p className='text-destructive text-xs'>
++                {t(
++                  'A batch can contain at most {{count}} non-empty credential lines.',
++                  {
++                    count: MAX_UPSTREAM_KEYS_PER_BATCH,
++                  }
++                )}
++              </p>
++            ) : null}
+           </div>
+           <div className='space-y-1.5'>
+             <Label htmlFor='apigx-key-weight'>{t('share.key.weight')}</Label>
+diff --git a/web/src/features/share/lib/credential-lines.ts b/web/src/features/share/lib/credential-lines.ts
+new file mode 100644
+index 0000000..d7f7382
+--- /dev/null
++++ b/web/src/features/share/lib/credential-lines.ts
+@@ -0,0 +1,62 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++export const MAX_UPSTREAM_KEYS_PER_BATCH = 100
++
++export type CredentialLines = {
++  keys: string[]
++  duplicateCount: number
++  nonEmptyCount: number
++  exceedsLimit: boolean
++}
++
++export function parseCredentialLines(value: string): CredentialLines {
++  const keys: string[] = []
++  const seen = new Set<string>()
++  let duplicateCount = 0
++  let nonEmptyCount = 0
++  for (const line of value.split(/\r?\n/)) {
++    const key = line.trim()
++    if (key === '') continue
++    nonEmptyCount += 1
++    if (seen.has(key)) {
++      duplicateCount += 1
++      continue
++    }
++    seen.add(key)
++    keys.push(key)
++  }
++  return {
++    keys,
++    duplicateCount,
++    nonEmptyCount,
++    exceedsLimit: nonEmptyCount > MAX_UPSTREAM_KEYS_PER_BATCH,
++  }
++}
++
++export function isAccessSecretPairOrRelayKey(value: string): boolean {
++  if (value.startsWith('sk-')) return true
++  const separator = value.indexOf('|')
++  return (
++    separator > 0 &&
++    separator === value.lastIndexOf('|') &&
++    value.slice(0, separator).trim() !== '' &&
++    value.slice(separator + 1).trim() !== ''
++  )
++}
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index 0b1070f..27159e0 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6748,6 +6748,13 @@
+     "No channel recipes are available": "No channel recipes are available",
+     "Upstream address": "Upstream address",
+     "Your upstream key": "Your upstream key",
++    "Your upstream keys": "Your upstream keys",
++    "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.": "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.",
++    "They are stored encrypted and never shown again.": "They are stored encrypted and never shown again.",
++    "{{count}} duplicate credential lines will be ignored.": "{{count}} duplicate credential lines will be ignored.",
++    "A batch can contain at most {{count}} non-empty credential lines.": "A batch can contain at most {{count}} non-empty credential lines.",
++    "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.": "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.",
++    "Each credential must be accessKey|secretKey or a relay key beginning with sk-.": "Each credential must be accessKey|secretKey or a relay key beginning with sk-.",
+     "It is stored encrypted and never shown again.": "It is stored encrypted and never shown again.",
+     "Select a share group": "Select a share group",
+     "Delete share group": "Delete share group",
+@@ -6831,6 +6838,10 @@
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+     "share.keyPool.pendingDescription": "Apply the key pool to use the latest keys and weights.",
+     "share.key.add": "Add key",
++    "share.key.batchAdd": "Batch add keys",
++    "share.key.batchAddDescription": "Enter one credential per line, up to {{count}} at a time. The entire batch is saved together.",
++    "share.key.credentials": "Credentials",
++    "share.key.batchLineHint": "Blank lines and duplicate credentials are ignored. accessKey|secretKey stays on one line.",
+     "share.key.addDescription": "Add another credential to this channel. The secret is encrypted and cannot be viewed again.",
+     "share.key.unnamed": "Unnamed key",
+     "share.key.editWeight": "Edit weight",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 6f8fbf3..3f28118 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6748,6 +6748,13 @@
+     "No channel recipes are available": "Aucune configuration de canal n’est disponible",
+     "Upstream address": "Adresse de l'amont",
+     "Your upstream key": "Votre clé amont",
++    "Your upstream keys": "Vos clés amont",
++    "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.": "Saisissez un identifiant par ligne, jusqu’à {{count}} ; les doublons sont ignorés.",
++    "They are stored encrypted and never shown again.": "Ils sont chiffrés et ne seront plus affichés.",
++    "{{count}} duplicate credential lines will be ignored.": "{{count}} lignes d’identifiants en double seront ignorées.",
++    "A batch can contain at most {{count}} non-empty credential lines.": "Un lot peut contenir au plus {{count}} lignes d’identifiants non vides.",
++    "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.": "Pour un compte fournisseur direct, saisissez une paire accessKey|secretKey par ligne. Les clés relais commençant par sk- sont aussi acceptées.",
++    "Each credential must be accessKey|secretKey or a relay key beginning with sk-.": "Chaque identifiant doit être au format accessKey|secretKey ou être une clé relais commençant par sk-.",
+     "It is stored encrypted and never shown again.": "Elle est stockée chiffrée et ne sera plus affichée.",
+     "Select a share group": "Choisir un groupe de partage",
+     "Delete share group": "Supprimer le groupe de partage",
+@@ -6831,6 +6838,10 @@
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+     "share.keyPool.pendingDescription": "Apply the key pool to use the latest keys and weights.",
+     "share.key.add": "Add key",
++    "share.key.batchAdd": "Ajouter des clés par lot",
++    "share.key.batchAddDescription": "Saisissez un identifiant par ligne, jusqu’à {{count}} à la fois. Le lot entier est enregistré ensemble.",
++    "share.key.credentials": "Identifiants",
++    "share.key.batchLineHint": "Les lignes vides et les doublons sont ignorés. accessKey|secretKey reste sur une seule ligne.",
+     "share.key.addDescription": "Add another credential to this channel. The secret is encrypted and cannot be viewed again.",
+     "share.key.unnamed": "Unnamed key",
+     "share.key.editWeight": "Edit weight",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index 1074870..a0e6664 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6748,6 +6748,13 @@
+     "No channel recipes are available": "利用可能なチャンネル設定がありません",
+     "Upstream address": "上流アドレス",
+     "Your upstream key": "上流キー",
++    "Your upstream keys": "上流キー",
++    "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.": "1 行に 1 つの認証情報を入力してください。一度に最大 {{count}} 件で、重複行は無視されます。",
++    "They are stored encrypted and never shown again.": "暗号化して保存され、再表示されません。",
++    "{{count}} duplicate credential lines will be ignored.": "重複する認証情報 {{count}} 行は無視されます。",
++    "A batch can contain at most {{count}} non-empty credential lines.": "1 回の追加は空でない認証情報を最大 {{count}} 行まで含められます。",
++    "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.": "プロバイダーへ直接接続する場合は、1 行に 1 組の accessKey|secretKey を入力してください。sk- で始まる中継キーも使用できます。",
++    "Each credential must be accessKey|secretKey or a relay key beginning with sk-.": "各認証情報は accessKey|secretKey 形式、または sk- で始まる中継キーである必要があります。",
+     "It is stored encrypted and never shown again.": "暗号化して保存され、再表示されません。",
+     "Select a share group": "共有グループを選択",
+     "Delete share group": "共有グループを削除",
+@@ -6831,6 +6838,10 @@
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+     "share.keyPool.pendingDescription": "Apply the key pool to use the latest keys and weights.",
+     "share.key.add": "Add key",
++    "share.key.batchAdd": "キーを一括追加",
++    "share.key.batchAddDescription": "1 行に 1 つの認証情報を入力してください。一度に最大 {{count}} 件で、すべてまとめて保存されます。",
++    "share.key.credentials": "認証情報",
++    "share.key.batchLineHint": "空行と重複は無視されます。accessKey|secretKey は同じ行に入力してください。",
+     "share.key.addDescription": "Add another credential to this channel. The secret is encrypted and cannot be viewed again.",
+     "share.key.unnamed": "Unnamed key",
+     "share.key.editWeight": "Edit weight",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 69dea0b..a6d4e47 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6748,6 +6748,13 @@
+     "No channel recipes are available": "Нет доступных конфигураций каналов",
+     "Upstream address": "Адрес вышестоящего сервиса",
+     "Your upstream key": "Ваш ключ вышестоящего сервиса",
++    "Your upstream keys": "Ваши ключи вышестоящего сервиса",
++    "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.": "Введите по одному ключу в строке, не более {{count}}; дубликаты будут пропущены.",
++    "They are stored encrypted and never shown again.": "Они хранятся в зашифрованном виде и больше не показываются.",
++    "{{count}} duplicate credential lines will be ignored.": "Повторяющиеся строки ключей ({{count}}) будут пропущены.",
++    "A batch can contain at most {{count}} non-empty credential lines.": "Пакет может содержать не более {{count}} непустых строк ключей.",
++    "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.": "Для прямого подключения вводите одну пару accessKey|secretKey в строке. Также принимаются ретрансляционные ключи с префиксом sk-.",
++    "Each credential must be accessKey|secretKey or a relay key beginning with sk-.": "Каждая строка должна содержать accessKey|secretKey или ретрансляционный ключ с префиксом sk-.",
+     "It is stored encrypted and never shown again.": "Хранится в зашифрованном виде и больше не отображается.",
+     "Select a share group": "Выберите группу общих ресурсов",
+     "Delete share group": "Удалить группу общих ресурсов",
+@@ -6831,6 +6838,10 @@
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+     "share.keyPool.pendingDescription": "Apply the key pool to use the latest keys and weights.",
+     "share.key.add": "Add key",
++    "share.key.batchAdd": "Добавить ключи пакетом",
++    "share.key.batchAddDescription": "Введите по одному ключу в строке, не более {{count}} за раз. Весь пакет сохраняется атомарно.",
++    "share.key.credentials": "Ключи",
++    "share.key.batchLineHint": "Пустые строки и дубликаты пропускаются. accessKey|secretKey должен находиться в одной строке.",
+     "share.key.addDescription": "Add another credential to this channel. The secret is encrypted and cannot be viewed again.",
+     "share.key.unnamed": "Unnamed key",
+     "share.key.editWeight": "Edit weight",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 8c57eee..426ad38 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6748,6 +6748,13 @@
+     "No channel recipes are available": "Không có cấu hình kênh nào khả dụng",
+     "Upstream address": "Địa chỉ thượng nguồn",
+     "Your upstream key": "Khóa thượng nguồn của bạn",
++    "Your upstream keys": "Các khóa thượng nguồn của bạn",
++    "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.": "Nhập một thông tin xác thực trên mỗi dòng, tối đa {{count}}; các dòng trùng lặp sẽ bị bỏ qua.",
++    "They are stored encrypted and never shown again.": "Chúng được lưu ở dạng mã hóa và sẽ không hiển thị lại.",
++    "{{count}} duplicate credential lines will be ignored.": "{{count}} dòng thông tin xác thực trùng lặp sẽ bị bỏ qua.",
++    "A batch can contain at most {{count}} non-empty credential lines.": "Mỗi lô có thể chứa tối đa {{count}} dòng thông tin xác thực không trống.",
++    "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.": "Với tài khoản nhà cung cấp trực tiếp, nhập một cặp accessKey|secretKey trên mỗi dòng. Khóa chuyển tiếp bắt đầu bằng sk- cũng được chấp nhận.",
++    "Each credential must be accessKey|secretKey or a relay key beginning with sk-.": "Mỗi thông tin xác thực phải là accessKey|secretKey hoặc khóa chuyển tiếp bắt đầu bằng sk-.",
+     "It is stored encrypted and never shown again.": "Được lưu mã hóa và không hiển thị lại.",
+     "Select a share group": "Chọn nhóm chia sẻ",
+     "Delete share group": "Xóa nhóm chia sẻ",
+@@ -6831,6 +6838,10 @@
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+     "share.keyPool.pendingDescription": "Apply the key pool to use the latest keys and weights.",
+     "share.key.add": "Add key",
++    "share.key.batchAdd": "Thêm khóa hàng loạt",
++    "share.key.batchAddDescription": "Nhập một thông tin xác thực trên mỗi dòng, tối đa {{count}} mỗi lần. Toàn bộ lô được lưu cùng nhau.",
++    "share.key.credentials": "Thông tin xác thực",
++    "share.key.batchLineHint": "Dòng trống và thông tin trùng lặp sẽ bị bỏ qua. accessKey|secretKey phải nằm trên cùng một dòng.",
+     "share.key.addDescription": "Add another credential to this channel. The secret is encrypted and cannot be viewed again.",
+     "share.key.unnamed": "Unnamed key",
+     "share.key.editWeight": "Edit weight",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 3384311..59b475f 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6748,6 +6748,13 @@
+     "No channel recipes are available": "目前沒有可用的渠道配方",
+     "Upstream address": "上游位址",
+     "Your upstream key": "你的上游金鑰",
++    "Your upstream keys": "你的上游金鑰",
++    "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.": "每行輸入一份憑證，單次最多 {{count}} 份；重複行會被忽略。",
++    "They are stored encrypted and never shown again.": "憑證將加密儲存，之後不再顯示。",
++    "{{count}} duplicate credential lines will be ignored.": "將忽略 {{count}} 行重複憑證。",
++    "A batch can contain at most {{count}} non-empty credential lines.": "每批最多包含 {{count}} 行非空憑證。",
++    "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.": "直連官方帳號時，每行填寫一組 accessKey|secretKey；也可填寫以 sk- 開頭的中轉 Key。",
++    "Each credential must be accessKey|secretKey or a relay key beginning with sk-.": "每份憑證必須是 accessKey|secretKey，或以 sk- 開頭的中轉 Key。",
+     "It is stored encrypted and never shown again.": "將以密文儲存，之後不再顯示。",
+     "Select a share group": "選擇分享分組",
+     "Delete share group": "刪除分享分組",
+@@ -6831,6 +6838,10 @@
+     "share.keyPool.pendingTitle": "Changes are not active yet",
+     "share.keyPool.pendingDescription": "Apply the key pool to use the latest keys and weights.",
+     "share.key.add": "Add key",
++    "share.key.batchAdd": "批次新增 Key",
++    "share.key.batchAddDescription": "每行輸入一份憑證，單次最多 {{count}} 份；整批會一起儲存。",
++    "share.key.credentials": "憑證清單",
++    "share.key.batchLineHint": "空行和重複憑證會被忽略；accessKey|secretKey 必須完整放在同一行。",
+     "share.key.addDescription": "Add another credential to this channel. The secret is encrypted and cannot be viewed again.",
+     "share.key.unnamed": "Unnamed key",
+     "share.key.editWeight": "Edit weight",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 5a0990e..f50053f 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6748,6 +6748,13 @@
+     "No channel recipes are available": "当前没有可用的渠道配方",
+     "Upstream address": "上游地址",
+     "Your upstream key": "你的上游 Key",
++    "Your upstream keys": "你的上游 Key",
++    "Enter one credential per line. Up to {{count}} credentials; duplicate lines are ignored.": "每行输入一份凭据，单次最多 {{count}} 份；重复行会被忽略。",
++    "They are stored encrypted and never shown again.": "凭据将加密保存，之后不再显示。",
++    "{{count}} duplicate credential lines will be ignored.": "将忽略 {{count}} 行重复凭据。",
++    "A batch can contain at most {{count}} non-empty credential lines.": "每批最多包含 {{count}} 行非空凭据。",
++    "For a direct provider account, enter one accessKey|secretKey pair per line. Relay keys beginning with sk- are also accepted.": "直连官方账号时，每行填写一组 accessKey|secretKey；也可填写以 sk- 开头的中转 Key。",
++    "Each credential must be accessKey|secretKey or a relay key beginning with sk-.": "每份凭据必须是 accessKey|secretKey，或以 sk- 开头的中转 Key。",
+     "It is stored encrypted and never shown again.": "将以密文存储，之后不再显示。",
+     "Select a share group": "选择分享分组",
+     "Delete share group": "删除分享分组",
+@@ -6831,6 +6838,10 @@
+     "share.keyPool.pendingTitle": "更改尚未生效",
+     "share.keyPool.pendingDescription": "请应用 Key 池以启用最新的 Key 和权重。",
+     "share.key.add": "添加 Key",
++    "share.key.batchAdd": "批量添加 Key",
++    "share.key.batchAddDescription": "每行输入一份凭据，单次最多 {{count}} 份；整批会一起保存。",
++    "share.key.credentials": "凭据列表",
++    "share.key.batchLineHint": "空行和重复凭据会被忽略；accessKey|secretKey 必须完整放在同一行。",
+     "share.key.addDescription": "向渠道添加另一份凭据。密钥加密保存，之后无法再次查看。",
+     "share.key.unnamed": "未命名 Key",
+     "share.key.editWeight": "编辑权重",
+-- 
+2.53.0.windows.1
+

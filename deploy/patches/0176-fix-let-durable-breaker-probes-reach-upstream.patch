@@ -1,0 +1,199 @@
+From faa03102e33da23b071a0b97967dbf18c53dfaa8 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Mon, 21 Sep 2026 16:12:49 +0800
+Subject: [PATCH] fix: let durable breaker probes reach upstream
+
+---
+ apigx/relayhook/breaker_guard.go      | 50 ++++++++++++++++++++++++++-
+ apigx/relayhook/breaker_guard_test.go | 20 +++++++++++
+ controller/breaker_probe_test.go      |  4 +++
+ controller/channel-test.go            |  5 +++
+ controller/system_task_handlers.go    |  2 +-
+ 5 files changed, 79 insertions(+), 2 deletions(-)
+
+diff --git a/apigx/relayhook/breaker_guard.go b/apigx/relayhook/breaker_guard.go
+index 404e012..9453a52 100644
+--- a/apigx/relayhook/breaker_guard.go
++++ b/apigx/relayhook/breaker_guard.go
+@@ -2,7 +2,9 @@ package relayhook
+ 
+ import (
+ 	"errors"
++	"maps"
+ 	"net/http"
++	"slices"
+ 	"sync"
+ 	"time"
+ 
+@@ -83,6 +85,18 @@ var (
+ 	breakerCache = map[int64]cachedBreaker{}
+ )
+ 
++const breakerProbeContextKey = "apigx_breaker_probe"
++
++// MarkBreakerProbe marks an internally-created channel test as the active
++// recovery probe. The probe still passes ACL, Key selection, capacity and the
++// real relay path; it bypasses only the breaker that deliberately blocks user
++// traffic from reaching this source.
++func MarkBreakerProbe(c *gin.Context) {
++	if c != nil {
++		c.Set(breakerProbeContextKey, true)
++	}
++}
++
+ // InvalidateBreakerCache 清空熔断判定缓存（运维/测试用）。
+ func InvalidateBreakerCache() {
+ 	breakerCacheMu.Lock()
+@@ -97,6 +111,9 @@ func CheckBreakerAllows(c *gin.Context, channelID int, modelName string) *types.
+ 	if !breakerEnabled() || c == nil || channelID <= 0 || modelName == "" {
+ 		return nil
+ 	}
++	if c.GetBool(breakerProbeContextKey) {
++		return nil
++	}
+ 	db := channelpool.CurrentDB()
+ 	if db == nil {
+ 		return nil
+@@ -285,11 +302,42 @@ func PrepareBreakerProbeChannel(channel *basemodel.Channel) *basemodel.Channel {
+ 		return nil
+ 	}
+ 	probe := *channel
+-	probe.ChannelInfo = channel.ChannelInfo
++	probe.ChannelInfo = cloneBreakerProbeChannelInfo(channel.ChannelInfo)
+ 	probe.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, nil)
+ 	return &probe
+ }
+ 
++func cloneBreakerProbeChannelInfo(source basemodel.ChannelInfo) basemodel.ChannelInfo {
++	cloned := source
++	cloned.MultiKeyStableIDs = slices.Clone(source.MultiKeyStableIDs)
++	cloned.MultiKeyWeights = slices.Clone(source.MultiKeyWeights)
++	cloned.MultiKeyStatusList = maps.Clone(source.MultiKeyStatusList)
++	cloned.MultiKeyDisabledReason = maps.Clone(source.MultiKeyDisabledReason)
++	cloned.MultiKeyDisabledTime = maps.Clone(source.MultiKeyDisabledTime)
++	cloned.MultiKeyStatusByStableID = maps.Clone(source.MultiKeyStatusByStableID)
++	cloned.MultiKeyDisabledReasonByStableID = maps.Clone(source.MultiKeyDisabledReasonByStableID)
++	cloned.MultiKeyDisabledTimeByStableID = maps.Clone(source.MultiKeyDisabledTimeByStableID)
++	cloned.MultiKeyStatusSources = cloneBreakerProbeStatusSources(source.MultiKeyStatusSources)
++	cloned.MultiKeyStatusSourcesByStableID = cloneBreakerProbeStableStatusSources(source.MultiKeyStatusSourcesByStableID)
++	return cloned
++}
++
++func cloneBreakerProbeStatusSources(source map[int]map[string]int) map[int]map[string]int {
++	cloned := maps.Clone(source)
++	for index, statuses := range cloned {
++		cloned[index] = maps.Clone(statuses)
++	}
++	return cloned
++}
++
++func cloneBreakerProbeStableStatusSources(source map[string]map[string]int) map[string]map[string]int {
++	cloned := maps.Clone(source)
++	for stableID, statuses := range cloned {
++		cloned[stableID] = maps.Clone(statuses)
++	}
++	return cloned
++}
++
+ // RestoreBreakerChannel removes only APIGX's breaker mark and returns the
+ // channel to the native selector after all offering-level breaker states on the
+ // channel are ready. Authentication and capacity marks are preserved.
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+index cf8391a..6091cec 100644
+--- a/apigx/relayhook/breaker_guard_test.go
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -497,6 +497,26 @@ func TestSyncBreakerMarksDisablesNonMultiKeyChannel(t *testing.T) {
+ 	assert.EqualValues(t, 1, count)
+ }
+ 
++func TestPrepareBreakerProbeChannelRemovesOnlyBreakerMarkFromCopy(t *testing.T) {
++	channel := &basemodel.Channel{
++		Id: 701, Key: "sk-probe", Status: common.ChannelStatusAutoDisabled,
++		ChannelInfo: basemodel.ChannelInfo{
++			IsMultiKey: true, MultiKeySize: 1,
++			MultiKeyStableIDs: []string{"stable-probe"},
++			MultiKeyWeights:   []int64{1},
++			MultiKeyMode:      constant.MultiKeyModePolling,
++		},
++	}
++	channel.ChannelInfo.ReplaceMultiKeyStatusMarks(apigxmodel.StatusBreakerOpen, []int{0})
++
++	probe := PrepareBreakerProbeChannel(channel)
++	require.NotNil(t, probe)
++	assert.False(t, probe.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen))
++	assert.Equal(t, common.ChannelStatusEnabled, probe.ChannelInfo.MultiKeyStatusAt(0))
++	assert.True(t, channel.ChannelInfo.HasMultiKeyStatusMark(apigxmodel.StatusBreakerOpen),
++		"preparing a probe must not mutate the cached source channel")
++}
++
+ // 📌 冷却期（`breakerCooldown`）**由端到端验收覆盖**，不在这里写单测。
+ // 原因如实记录：本包的两个 fixture 对 `channel_info` 里 map 字段的**回读**行为不一致——
+ // 同一个动作在既有用例里能读回标记、在新用例里读不回（本文件上方已记录过该 fixture 限制）。
+diff --git a/controller/breaker_probe_test.go b/controller/breaker_probe_test.go
+index 9aa28c6..43935a4 100644
+--- a/controller/breaker_probe_test.go
++++ b/controller/breaker_probe_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"testing"
+ 
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/model"
+ 	"github.com/stretchr/testify/assert"
+@@ -15,6 +16,9 @@ import (
+ )
+ 
+ func TestBreakerProbeRequiresTwoSuccessesAndRecordsProbeOnly(t *testing.T) {
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	relayhook.InvalidateBreakerCache()
++	t.Cleanup(relayhook.InvalidateBreakerCache)
+ 	var requests atomic.Int64
+ 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+ 		requests.Add(1)
+diff --git a/controller/channel-test.go b/controller/channel-test.go
+index 8d0d20a..1db9482 100644
+--- a/controller/channel-test.go
++++ b/controller/channel-test.go
+@@ -14,6 +14,7 @@ import (
+ 	"sync"
+ 	"time"
+ 
++	"github.com/QuantumNous/new-api/apigx/relayhook"
+ 	"github.com/QuantumNous/new-api/common"
+ 	"github.com/QuantumNous/new-api/constant"
+ 	"github.com/QuantumNous/new-api/middleware"
+@@ -45,6 +46,7 @@ type testResult struct {
+ type channelTestOptions struct {
+ 	requirePricing   bool
+ 	recordConsumeLog bool
++	breakerProbe     bool
+ }
+ 
+ func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
+@@ -104,6 +106,9 @@ func testChannelWithOptions(ctx context.Context, channel *model.Channel, testUse
+ 	}
+ 	w := httptest.NewRecorder()
+ 	c, _ := gin.CreateTestContext(w)
++	if options.breakerProbe {
++		relayhook.MarkBreakerProbe(c)
++	}
+ 
+ 	testModel = strings.TrimSpace(testModel)
+ 	if testModel == "" {
+diff --git a/controller/system_task_handlers.go b/controller/system_task_handlers.go
+index 394aa94..9d211bd 100644
+--- a/controller/system_task_handlers.go
++++ b/controller/system_task_handlers.go
+@@ -268,7 +268,7 @@ func runBreakerProbeTask(ctx context.Context) (breakerProbeSummary, error) {
+ 		}
+ 		probeChannel := relayhook.PrepareBreakerProbeChannel(channel)
+ 		result := testChannelWithOptions(ctx, probeChannel, testUserID, offering.UpstreamModelID, endpointType, false,
+-			channelTestOptions{requirePricing: false, recordConsumeLog: false})
++			channelTestOptions{requirePricing: false, recordConsumeLog: false, breakerProbe: true})
+ 		summary.Probed++
+ 
+ 		outcome := qualityhook.ClassifyOutcome(result.newAPIError, result.upstreamStatus)
+-- 
+2.53.0.windows.1
+

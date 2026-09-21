@@ -1,0 +1,165 @@
+From 13fbe01090c6fbb2d22e5de9c64a26f0a4ff0a02 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Mon, 21 Sep 2026 15:24:51 +0800
+Subject: [PATCH] fix: persist breakers before route filtering
+
+---
+ apigx/relayhook/route_strategy.go      | 13 +++++++
+ apigx/relayhook/route_strategy_test.go | 24 +++++++++++++
+ apigx/routing/assemble.go              | 14 ++++++--
+ apigx/routing/decide_test.go           | 50 ++++++++++++++++++++++++++
+ 4 files changed, 98 insertions(+), 3 deletions(-)
+
+diff --git a/apigx/relayhook/route_strategy.go b/apigx/relayhook/route_strategy.go
+index 949f92a..32b50f0 100644
+--- a/apigx/relayhook/route_strategy.go
++++ b/apigx/relayhook/route_strategy.go
+@@ -100,6 +100,19 @@ func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing
+ 		if routing.EvaluateBreaker(candidates[i].Quality, now, routing.DefaultBreakerConfig()).State == routing.BreakerOpen {
+ 			candidates[i].Allowed = false
+ 			candidates[i].ExcludeReason = routing.ExcludeBreakerOpen
++			// The strategy filter runs before New API chooses a base channel. Once
++			// this quality verdict excludes the source, CheckBreakerAllows will no
++			// longer see that source and cannot establish durable recovery ownership.
++			// Persist and project the open breaker at the decision boundary instead.
++			if breakerEnabled() {
++				blocked, blockErr := apigxmodel.BreakerProbeBlocksTraffic(db, candidates[i].OfferingID)
++				if blockErr != nil || !blocked {
++					baseChannelID := baseChannelIDForShareChannel(db, candidates[i].ShareChannelID)
++					if baseChannelID > 0 {
++						syncBreakerMarks(db, baseChannelID, candidates[i].OfferingID, true)
++					}
++				}
++			}
+ 		}
+ 	}
+ 	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())
+diff --git a/apigx/relayhook/route_strategy_test.go b/apigx/relayhook/route_strategy_test.go
+index ed0a4bd..36d2455 100644
+--- a/apigx/relayhook/route_strategy_test.go
++++ b/apigx/relayhook/route_strategy_test.go
+@@ -71,3 +71,27 @@ func TestComputeEligibleBaseChannelsUsesAutoQualityRanking(t *testing.T) {
+ 	assert.Empty(t, computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyAuto, map[int64]struct{}{}),
+ 		"没有授权供给时必须保持空集合，不能回退到底座随机")
+ }
++
++func TestComputeEligibleBaseChannelsPersistsOpenBreakerBeforeNativeSelection(t *testing.T) {
++	env := newBreakerTestEnv(t)
++	t.Setenv("APIGX_BREAKER_ENABLED", "true")
++	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", env.offeringID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
++	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", env.shareChannel.ShareGroupID).
++		Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
++	env.recordFailures(t, 20)
++
++	allowed := map[int64]struct{}{env.offeringID: {}}
++	assert.Empty(t, computeEligibleBaseChannels(
++		env.db, "breaker-model", routing.StrategyAuto, allowed,
++	))
++
++	var state apigxmodel.BreakerProbeState
++	require.NoError(t, env.db.Where("offering_id = ?", env.offeringID).First(&state).Error)
++	assert.Equal(t, apigxmodel.BreakerProbeStateOpen, state.State)
++	assert.EqualValues(t, env.baseChannelID, state.BaseChannelID)
++
++	var base basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&base).Error)
++	assert.Equal(t, common.ChannelStatusAutoDisabled, base.Status)
++}
+diff --git a/apigx/routing/assemble.go b/apigx/routing/assemble.go
+index aaf200c..cb19b05 100644
+--- a/apigx/routing/assemble.go
++++ b/apigx/routing/assemble.go
+@@ -87,8 +87,15 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
+ 			fillPriceFromRule(&candidate, rule, items)
+ 		}
+ 
+-		// 质量：窗口内无样本时视图是"空的"（SampleCount=0 且 Insufficient）
+-		view, viewErr := apigxmodel.ResolveQualityView(db, offering.ID, opts.WindowKind, opts.Now)
++		// 质量：恢复后的候选只读取恢复基线之后的自然流量，避免旧失败样本
++		// 在主动探测已经确认恢复后立刻重新打开熔断。
++		baseline, baselineErr := apigxmodel.BreakerRecoveryBaseline(db, offering.ID)
++		if baselineErr != nil {
++			baseline = 0
++		}
++		view, viewErr := apigxmodel.ResolveQualityViewSince(
++			db, offering.ID, opts.WindowKind, opts.Now, baseline,
++		)
+ 		if viewErr == nil {
+ 			candidate.Quality = view
+ 			if throughput, known := view.OutputTokensPerSecond(); known {
+@@ -99,8 +106,9 @@ func AssembleCandidates(db *gorm.DB, ctrl *capacity.Controller, modelName string
+ 
+ 		// 熔断（T2.8）：失败率过高且冷却未过 → **从候选中摘除**（原因写清，便于解释）；
+ 		// 冷却已过则为半开（放行试探），不永久封禁。
++		blocked, blockErr := apigxmodel.BreakerProbeBlocksTraffic(db, offering.ID)
+ 		breaker := EvaluateBreaker(candidate.Quality, opts.Now, opts.Breaker)
+-		if breaker.State == BreakerOpen {
++		if (blockErr == nil && blocked) || breaker.State == BreakerOpen {
+ 			candidate.Allowed = false
+ 			candidate.ExcludeReason = ExcludeBreakerOpen
+ 			// 阶段 4「告警」：熔断打开时发一条**限频**运维告警（同一供给 10 分钟最多一次），
+diff --git a/apigx/routing/decide_test.go b/apigx/routing/decide_test.go
+index 942173f..5c6ed2c 100644
+--- a/apigx/routing/decide_test.go
++++ b/apigx/routing/decide_test.go
+@@ -401,6 +401,56 @@ func TestAssembleCandidatesCarriesSixHourTextThroughput(t *testing.T) {
+ 	assert.InDelta(t, 120, candidates[0].OutputTokensPerSecond, 0.001)
+ }
+ 
++func TestAssembleCandidatesKeepsProbeOpenAndIgnoresPreRecoveryFailuresAfterClose(t *testing.T) {
++	env := newRoutingTestEnv(t)
++	seeded := env.seedChannelWithOffering(t, 1, "gpt-breaker-recovery")
++	require.NoError(t, env.db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", seeded.OfferingID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
++	var channel apigxmodel.Channel
++	require.NoError(t, env.db.Where("id = ?", seeded.ShareChannelID).First(&channel).Error)
++	require.NoError(t, env.db.Model(&apigxmodel.ShareGroup{}).Where("id = ?", channel.ShareGroupID).
++		Update("publish_status", apigxmodel.ShareGroupPublishPublished).Error)
++
++	const openedAt int64 = 1_700_000_000
++	bucketTs := openedAt - openedAt%60
++	for range 20 {
++		require.NoError(t, apigxmodel.RecordQualitySample(env.db, apigxmodel.QualitySample{
++			OfferingID: seeded.OfferingID, BucketTs: bucketTs,
++			Outcome: apigxmodel.QualityOutcomeUpstream, LatencyMs: 100,
++		}))
++	}
++	require.NoError(t, apigxmodel.OpenBreakerProbe(
++		env.db, seeded.OfferingID, seeded.BaseChannelID, openedAt, 60,
++	))
++
++	candidates, _, err := AssembleCandidates(
++		env.db, nil, "gpt-breaker-recovery", AssembleOptions{Now: openedAt + 60},
++	)
++	require.NoError(t, err)
++	require.Len(t, candidates, 1)
++	assert.False(t, candidates[0].Allowed, "an active durable probe must keep user traffic blocked")
++	assert.Equal(t, ExcludeBreakerOpen, candidates[0].ExcludeReason)
++
++	var state apigxmodel.BreakerProbeState
++	require.NoError(t, env.db.Where("offering_id = ?", seeded.OfferingID).First(&state).Error)
++	ready, err := apigxmodel.RecordBreakerProbeResult(env.db, state.ID, openedAt+60, true, false, "")
++	require.NoError(t, err)
++	assert.False(t, ready)
++	ready, err = apigxmodel.RecordBreakerProbeResult(env.db, state.ID, openedAt+75, true, false, "")
++	require.NoError(t, err)
++	require.True(t, ready)
++	require.NoError(t, env.db.Where("id = ?", state.ID).First(&state).Error)
++	require.NoError(t, apigxmodel.FinalizeBreakerRecovery(env.db, state.ID, openedAt+76))
++
++	candidates, _, err = AssembleCandidates(
++		env.db, nil, "gpt-breaker-recovery", AssembleOptions{Now: state.RecoveryBaselineTs + 1},
++	)
++	require.NoError(t, err)
++	require.Len(t, candidates, 1)
++	assert.True(t, candidates[0].Allowed, "pre-recovery failures must not reopen a closed breaker")
++	assert.Zero(t, candidates[0].Quality.UpstreamFailures)
++}
++
+ // ---- fixture（投影测试需要真实库 + 我们的分享渠道） ----
+ 
+ type routingTestEnv struct {
+-- 
+2.53.0.windows.1
+

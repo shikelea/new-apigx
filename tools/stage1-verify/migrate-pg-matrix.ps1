@@ -22,6 +22,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ExpectedApigxTableCount = 29
 $psql = Join-Path $PgBin 'psql.exe'
 if (-not (Test-Path $psql)) { throw "找不到 psql：$psql" }
 
@@ -101,9 +102,9 @@ Write-Host "[apigx] 底座原生表仍有 $baseNative 张（升级不得删改�
 Write-Host ''
 Write-Host '=== 结果 ==='
 $ok = $true
-if ($freshApigx -ne 28) { Write-Warning "全新库只建出 $freshApigx 张 apigx_ 表（期望 28）"; $ok = $false }
-if ($baseApigxAfter -ne 28) { Write-Warning "升级库只建出 $baseApigxAfter 张 apigx_ 表（期望 28）"; $ok = $false }
+if ($freshApigx -ne $ExpectedApigxTableCount) { Write-Warning "全新库只建出 $freshApigx 张 apigx_ 表（期望 $ExpectedApigxTableCount）"; $ok = $false }
+if ($baseApigxAfter -ne $ExpectedApigxTableCount) { Write-Warning "升级库只建出 $baseApigxAfter 张 apigx_ 表（期望 $ExpectedApigxTableCount）"; $ok = $false }
 if ($baseNative -lt 30) { Write-Warning "底座原生表只剩 $baseNative 张，疑似被本次迁移影响"; $ok = $false }
-if ($ok) { Write-Host '  PostgreSQL 矩阵通过：全新库与升级库均建成 28 张表，且底座表未被影响' -ForegroundColor Green }
+if ($ok) { Write-Host "  PostgreSQL 矩阵通过：全新库与升级库均建成 $ExpectedApigxTableCount 张表，且底座表未被影响" -ForegroundColor Green }
 Write-Host ''
 Write-Host '注意：本脚本只覆盖 PostgreSQL；MySQL 必须另设 APIGX_TEST_MYSQL_DSN 运行对应子测试。' -ForegroundColor Yellow

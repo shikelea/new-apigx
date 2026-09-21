@@ -1,0 +1,93 @@
+From 9c9554e0a71453abe2cdafbcab3b6585f297b263 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Mon, 21 Sep 2026 14:57:52 +0800
+Subject: [PATCH] fix: resolve confirmed aliases for breaker probes
+
+---
+ apigx/model/repo_breaker_probe.go      | 38 ++++++++++++++++++++------
+ apigx/model/repo_breaker_probe_test.go | 17 ++++++++++++
+ 2 files changed, 46 insertions(+), 9 deletions(-)
+
+diff --git a/apigx/model/repo_breaker_probe.go b/apigx/model/repo_breaker_probe.go
+index 1e1fb23..9dc68b3 100644
+--- a/apigx/model/repo_breaker_probe.go
++++ b/apigx/model/repo_breaker_probe.go
+@@ -28,18 +28,38 @@ func BreakerProbeModality(db *gorm.DB, offeringID int64) (int, error) {
+ 	if db == nil || offeringID <= 0 {
+ 		return 0, fmt.Errorf("%w: breaker probe offering is required", ErrInvalidArgument)
+ 	}
+-	var row struct {
+-		ModalityType int
+-	}
+-	err := db.Table((ModelOffering{}).TableName()+" AS offering").
+-		Select("canonical.modality_type AS modality_type").
+-		Joins("JOIN "+(CanonicalModel{}).TableName()+" AS canonical ON canonical.id = offering.canonical_model_id").
+-		Where("offering.id = ? AND offering.alive_flag = ?", offeringID, AliveFlagAlive).
+-		Take(&row).Error
++	var offering ModelOffering
++	err := db.Select("canonical_model_id", "upstream_model_id").
++		Where("id = ? AND alive_flag = ?", offeringID, AliveFlagAlive).
++		Take(&offering).Error
+ 	if errors.Is(err, gorm.ErrRecordNotFound) {
+ 		return 0, nil
+ 	}
+-	return row.ModalityType, err
++	if err != nil {
++		return 0, err
++	}
++	if offering.CanonicalModelID > 0 {
++		var canonical CanonicalModel
++		if err := db.Select("modality_type").Where("id = ?", offering.CanonicalModelID).
++			Take(&canonical).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return 0, nil
++			}
++			return 0, err
++		}
++		return canonical.ModalityType, nil
++	}
++
++	// The normal administrator workflow confirms a catalog alias after the
++	// offering already exists. Older offerings therefore legitimately have no
++	// denormalized canonical_model_id even though their alias is confirmed.
++	// Resolve that confirmed identity here instead of treating every UI-created
++	// offering as an unknown protocol that can never enter durable recovery.
++	canonical, ok, err := ResolveCanonicalModel(db, offering.UpstreamModelID)
++	if err != nil || !ok {
++		return 0, err
++	}
++	return canonical.ModalityType, nil
+ }
+ 
+ // BreakerProbeSupportsModality reports whether the existing channel-test path
+diff --git a/apigx/model/repo_breaker_probe_test.go b/apigx/model/repo_breaker_probe_test.go
+index 71b50ca..9ddf6e1 100644
+--- a/apigx/model/repo_breaker_probe_test.go
++++ b/apigx/model/repo_breaker_probe_test.go
+@@ -93,6 +93,23 @@ func TestBreakerProbeModalityRequiresConfirmedCatalogIdentity(t *testing.T) {
+ 	supported, err = CanActivelyProbeOffering(db, offering.ID)
+ 	require.NoError(t, err)
+ 	assert.False(t, supported)
++
++	// This is the real UI workflow: the offering already exists, then an
++	// administrator confirms its catalog alias. Durable probing must use that
++	// confirmed identity even though the historical offering row still has a
++	// zero denormalized canonical_model_id.
++	var alias ModelAlias
++	require.NoError(t, db.Where("normalized_model_id = ?", NormalizeModelIDForAlias(offering.UpstreamModelID)).
++		First(&alias).Error)
++	chatCanonical := &CanonicalModel{APIModelID: "vendor-chat", ModalityType: ModalityChat, Status: 1}
++	require.NoError(t, db.Create(chatCanonical).Error)
++	require.NoError(t, ConfirmAliasCandidate(db, alias.ID, chatCanonical.ID, owner))
++	modality, err = BreakerProbeModality(db, offering.ID)
++	require.NoError(t, err)
++	assert.Equal(t, ModalityChat, modality)
++	supported, err = CanActivelyProbeOffering(db, offering.ID)
++	require.NoError(t, err)
++	assert.True(t, supported)
+ }
+ 
+ func TestResolveQualityViewSinceExcludesPreRecoveryFailures(t *testing.T) {
+-- 
+2.53.0.windows.1
+

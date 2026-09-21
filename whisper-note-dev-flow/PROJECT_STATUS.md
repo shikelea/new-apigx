@@ -4,17 +4,37 @@
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
 ## 当前阶段
-**隔离测试服部署和核心路由验收已完成，可以接入宝塔反向代理开展联网测试；生产上线仍需真实第三方、多实例、持续压测和正式安全验收。**
+**批量 Key、有限故障切换与持久熔断恢复已在隔离测试服完成黑盒验收，可以接入宝塔反向代理开展真实第三方测试；生产上线仍需多实例、持续压测和正式安全验收。**
 
-当前 inner commit `bf36a3a` 已部署到“主”服务器 `/pan/apigx-test`，应用、独立 MySQL、独立 Redis、可控上游和验收文件均位于 `/pan`，没有复用现有 New API 实例。远端已证明渠道内等权轮询、401/429 换 Key、质量策略、容量满载改道和重启持久化；应用只监听 `127.0.0.1:13000`，可由宝塔反向代理进入测试。
+当前 inner commit `faa0310` 已部署到“主”服务器 `/pan/apigx-test`，应用、独立 MySQL、独立 Redis、可控上游和验收文件均位于 `/pan`，没有复用现有 New API 实例。远端已证明单渠道最多 6 把不同 Key、`RetryTimes=1` 时最多切换 1 条授权渠道、429 不跨请求冷却，以及 open → auth_blocked → 换 Key → 两次成功 → closed 的持久恢复；应用只监听 `127.0.0.1:13000`，可由宝塔反向代理进入测试。
 
 ## 当前任务
-[已完成] “主”服务器隔离测试部署与智能路由 / 多 Key 验收。
-- 远端根目录固定为 `/pan/apigx-test`，MySQL、Redis、日志、验收文件、配置和备份目录均在 `/pan`。
-- 多 Key 等权轮询 8/8 成功且 4:4；429、401 均先在同渠道切换到未尝试 Key 后成功。
-- 默认自动、可靠性、延迟、吞吐均选择质量更优来源；优质来源并发满载时改道，释放后立即恢复。
-- MySQL 与 Redis 重启后数据保持，应用、MySQL、Redis、stub 均 healthy；回环端口为 `127.0.0.1:13000`。
-- 下一步由用户在宝塔反向代理到该回环端口，再做真实域名与第三方供应商测试。
+[已完成] 批量 Key、有限故障切换与熔断自动恢复。
+- 创建渠道兼容旧单 Key与最多 100 行批量 Key；已有渠道支持整批原子添加。
+- 同一请求在单渠道最多尝试 6 把不同 Key；耗尽后复用 New API 全局 `RetryTimes`，测试服值为 1。
+- 401/403 进入凭据阻塞，只有轮换 Key 才重新探测；第一次成功继续阻止用户流量，第二次成功恢复渠道。
+- 主动探测只累计 `probe_count`，不写消费日志；恢复后忽略恢复前失败桶，防止立即重新熔断。
+- 远端版本 `v0.0.0-apigx.faa0310`，四容器 healthy，29 张领域表，回环端口 `127.0.0.1:13000`。
+
+### [041] 2026-09-21 批量 Key、有限故障切换与熔断自动恢复
+
+**做了什么**：补齐创建前/创建后的批量 Key 管理，把渠道内 Key 尝试上限与 New API 全局跨渠道重试预算衔接，并用持久状态机、后台最小探测、凭据阻塞和恢复质量基线完成无人流量时的自动恢复。
+
+**涉及模块**：分享渠道与 Key 池、同步/异步重试、持久熔断探测、智能路由预过滤、质量桶、System Task、隔离测试服、补丁交付
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `new-api/apigx/api/share.go`、`web/src/features/share/**` | 批量 Key | 创建兼容单 Key/多 Key，已有渠道整批事务添加；前端统一多行输入、去空去重和数量提示 |
+| `new-api/service/multi_key_failover.go`、`controller/relay.go` | 故障切换 | 单渠道初次加 5 次换 Key，不消耗全局预算；池耗尽后复用 `RetryTimes` 跨授权渠道；429 不跨请求冷却 |
+| `new-api/apigx/model/repo_breaker_probe.go`、`controller/system_task_handlers.go` | 熔断恢复 | 持久 open/recovering/auth_blocked/closed 状态、租约、防重复探测、连续两次成功恢复和失败退避 |
+| `new-api/apigx/{relayhook/route_strategy.go,routing/assemble.go}` | 路由与质量 | 候选预过滤时建立持久状态；活动探测状态优先；恢复后从新质量基线计算 |
+| `new-api/apigx/relayhook/breaker_guard.go`、`controller/channel-test.go` | 主动探测 | 内部探测只绕过自身熔断守卫，保留 ACL、Key、容量和真实 Relay；深拷贝渠道状态避免污染缓存 |
+| `tools/stage2-verify/{bounded-failover-breaker,stub-profile}.mjs`、`deploy/test-server/README.md` | 远端验收 | 固化 6+6 Key、429 无冷却、重启持久化、401 阻塞、两次成功恢复与计量隔离步骤 |
+
+**验证**：定向回归与 `go test ./... -count=1 -timeout=10m -p 1` ✅；SQLite/MySQL/PostgreSQL 29 表迁移、前端 160 文件 1782 项、typecheck/lint/format/build、桌面/移动批量流程此前通过 ✅；远端 `faa0310` 从零创建熔断行且渠道自动禁用，重启后状态保留，401 后 `state=3` 且 20 秒不再探测，轮换 Key 后第一次成功 `state=1/consecutive_success=1` 且用户只走健康来源，第二次成功 `state=4` 并恢复渠道；`probe_count 0→1→2→3`，坏渠道消费日志保持 5；最终 6+6 共 12 把不同 Key、HTTP 429、跨渠道一次、429 Key 后续仍入选；176 个补丁重建 tree `97ebe71b1b2572956b9d897813ddf2915f2e4522` 与 fork HEAD 一致。
+
+**剩余风险**：证据来自单机、单应用进程和可控上游；尚未覆盖真实第三方错误格式、生产多实例竞争、持续故障压测、域名/TLS/CDN/反代链路和正式安全验收，因此当前可用于测试环境，不作为生产上线结论。
 
 ### [040] 2026-09-21 隔离测试服部署与核心路由验收
 
