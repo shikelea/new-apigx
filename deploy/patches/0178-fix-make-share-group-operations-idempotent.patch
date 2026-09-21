@@ -1,0 +1,59 @@
+From c0c2c8434e2ff4f6986f4c6bafb4f07ae9b7a57b Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Mon, 21 Sep 2026 21:25:39 +0800
+Subject: [PATCH] fix: make share group operations idempotent
+
+---
+ apigx/api/share_test.go   |  4 ++++
+ apigx/model/repo_share.go | 13 +++++++++++--
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 9af3bf4..4ae34f5 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -830,6 +830,10 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
+ 				env := configureTestEnv(t, tx, true)
+ 				const owner int64 = 9_830_001
+ 				groupID := env.createGroup(t, owner, "三库生命周期组")
++				rec, _ := env.doWithRole(t, http.MethodPost,
++					"/api/share-groups/"+strconv.FormatInt(groupID, 10)+"/publish-status",
++					owner, `{"status":2}`, common.RoleAdminUser)
++				require.Equal(t, http.StatusOK, rec.Code, "重复恢复已发布分组必须保持幂等：%s", rec.Body.String())
+ 				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+ 					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success","key_pool_mode":1}`
+ 				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
+diff --git a/apigx/model/repo_share.go b/apigx/model/repo_share.go
+index ec39da9..f488768 100644
+--- a/apigx/model/repo_share.go
++++ b/apigx/model/repo_share.go
+@@ -135,7 +135,8 @@ const (
+ 	ShareGroupPublishRetired int = 4
+ )
+ 
+-// SetShareGroupPublishStatus 设置分组的发布状态（平台审核动作）。
++// SetShareGroupPublishStatus 设置分组的运营状态。重复设置同一状态按成功处理，
++// 这样恢复/暂停操作在 MySQL 等“未改变值时 RowsAffected=0”的数据库上仍保持幂等。
+ //
+ // 只改状态一个字段：不触碰分组名、可见性、成员等其他信息，避免审核动作顺带改写分享者的内容。
+ func SetShareGroupPublishStatus(db *gorm.DB, groupID int64, status int) error {
+@@ -149,7 +150,15 @@ func SetShareGroupPublishStatus(db *gorm.DB, groupID int64, status int) error {
+ 		return res.Error
+ 	}
+ 	if res.RowsAffected == 0 {
+-		return ErrNotFound
++		var count int64
++		if err := db.Model(&ShareGroup{}).
++			Where("id = ? AND deleted_at IS NULL AND publish_status = ?", groupID, status).
++			Count(&count).Error; err != nil {
++			return err
++		}
++		if count == 0 {
++			return ErrNotFound
++		}
+ 	}
+ 	return nil
+ }
+-- 
+2.53.0.windows.1
+

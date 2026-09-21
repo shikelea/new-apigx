@@ -13,12 +13,12 @@
 ## 当前统计
 
 - 基线提交：`69a50029819a26c53e6babd276d49cfe2f8880ad`
-- 当前 fork 提交：`faa03102e33da23b071a0b97967dbf18c53dfaa8`
-- 相对基线提交数：**176** 个
-- 变化文件：**331** 个（新增 **180**，修改上游已有文件 **151**）
-- 行数变化：新增 **48,095** 行，删除 **2,393** 行
+- 当前 fork 提交：`c0c2c8434e2ff4f6986f4c6bafb4f07ae9b7a57b`
+- 相对基线提交数：**178** 个
+- 变化文件：**342** 个（新增 **185**，修改上游已有文件 **157**）
+- 行数变化：新增 **49,485** 行，删除 **2,416** 行
 - 未跟踪文件：**0** 个
-- 核对时间：2026-09-21（`git diff --name-status/--shortstat`；远端熔断恢复验收修复后收口）
+- 核对时间：2026-09-21（`git diff --name-status/--numstat`；资源发布、模型同步与供给删除闭环收口）
 
 > 2026-09-18 接手审查纠正：本节此前仍写“修改上游文件 0 个”，那只是阶段 0 早期快照，已经与当前 fork 不符。完整风险与整改顺序见 `docs/TAKEOVER_AUDIT.md`。
 
@@ -53,6 +53,8 @@
 | D-049 | `new-api/apigx/model/{repo_breaker_probe.go,repo_breaker_probe_test.go}` | 已确认目录映射的熔断探测协议解析 | Offering 的冗余 `canonical_model_id` 为空时，主动探测从管理员已确认的模型别名解析标准模型及能力类型；候选或已拒绝映射仍保持未知，不能触发主动探测 | 远端真实 UI 顺序是先创建 Offering、再由管理员确认模型身份；确认动作写目录映射但不回填历史 Offering，原实现因此把正常 UI 创建的对话模型误判为未知协议，无法落持久探测状态 | **低到中**：只改变熔断后台探测的能力解析回退；已补真实 UI 顺序回归、Go 全仓和测试服状态机验收 | 2026-09-21 | 已实施；只接受已确认映射，不根据供应商模型名猜测能力；远端完成 401 阻塞、换 Key 与两次成功恢复 |
 | D-050 | `new-api/apigx/{relayhook/route_strategy.go,routing/assemble.go}` 及既有测试 | 路由预过滤时持久化熔断与恢复质量基线 | 智能路由在底座选中渠道前因质量熔断排除来源时，同步建立持久探测状态并自动禁用底座渠道；活动探测状态优先于滚动质量窗口；恢复后只读取 `recovery_baseline_ts` 之后的自然流量，避免恢复前失败样本立即重新打开熔断 | 策略路由会在后置熔断守卫前排除坏来源，原持久化入口永远无法执行；即使探测恢复，旧失败桶仍会立即重开熔断 | **中**：改变智能路由候选过滤与质量装配；定向回归、Go 全仓及远端从零建夹具均通过，远端持久行 `state=1` 且底座渠道自动禁用 | 2026-09-21 | 已实施；用户流量在 open/recovering/auth-blocked 全程被挡，closed 后使用新基线 |
 | D-051 | `new-api/apigx/relayhook/breaker_guard.go`、`new-api/controller/{channel-test.go,system_task_handlers.go,breaker_probe_test.go}` | 主动探测只绕过自身熔断守卫 | System Task 创建的内部探测用 Gin 上下文显式标记，只跳过阻止用户流量的熔断守卫；ACL、Key 选择、容量和真实 Relay 继续执行；探测渠道深拷贝多 Key 状态后只移除 breaker 来源，避免改写缓存对象 | 远端黑盒发现探测已解除 Key 标记，却又被持久 open 状态的正常请求守卫拦成 `channel:no_available_key`，因此无法真正访问 401/200 上游；浅拷贝还会修改源渠道的 map | **中**：新增严格内部上下文分支；定向用例在 `APIGX_BREAKER_ENABLED=true` 下验证两次真实请求，全仓通过；远端 401→auth_blocked、换 Key、1 次成功仍阻流、2 次成功恢复全部通过 | 2026-09-21 | 已实施；3 次探测仅使 probe_count 0→1→2→3，坏渠道消费日志保持 5 条 |
+| D-052 | `new-api/apigx/{api,model}/**`、`new-api/controller/{channel,relay}.go`、`new-api/service/log_info_generate.go`、`new-api/web/src/features/{share,system-settings,usage-logs}/**`、七种语言文件 | 资源发布、影子渠道恢复、邀请码管理与重试轨迹 | 分享分组创建即生效并迁移历史准备态，管理员只审核模型供给；通用渠道删除保护 APIGX 影子渠道，误删后用加密 Key/配方事务重建并在并发 CAS 竞争后复用胜者；供给删除同步移除底座模型、能力和熔断状态；身份验证设置增加管理员注册邀请码生成/列表/撤销；日志同时记录渠道与从 1 开始的 Key 序号，旧重复链路压缩显示；底座分组入口标记为高级兼容设置 | 用户遇到供给已审核但广场不可见、同步模型 500/无限加载、供给不能删除、开启邀请码注册却无发码入口，以及 `32 → 32 → 31` 无法分辨同渠道换 Key；同时明确分组无需审核、底座用户分组不应承担 APIGX 分享权限 | **中**：涉及分享资源生命周期、底座渠道管理与 Relay 日志；受影响 Go 三包、真实 MySQL 生命周期及 6 请求并发恢复、前端 162 文件 1785 项、typecheck/定向 lint/生产构建和本地浏览器流程通过；测试服完成邀请码生成/脱敏/撤销、历史影子渠道恢复、分组免审、供给发布与删除、6+6 Key 轨迹验收 | 2026-09-21 | 已实施；邀请码明文只在创建响应显示一次，列表只返回前缀；供给删除后广场详情 404、路由 503，历史用量快照保留；分组 ACL 仍由平台 Key 资源范围与分享授权控制 |
+| D-053 | `new-api/apigx/model/repo_share.go`、`new-api/apigx/api/share_test.go` | 分组运营状态幂等 | 重复把分组设置为当前已发布或已暂停状态时，若数据库报告 0 affected rows，则复查资源和当前状态；资源存在且状态一致即返回成功，不存在仍返回 404 | 分组改为创建即生效后，旧验收脚本和兼容客户端仍可能重复发送“发布”操作；MySQL 对未改变值的 UPDATE 返回 0，原逻辑误报资源不存在 | **低**：只修正重复同值更新的返回语义；SQLite、PostgreSQL 18.4、MySQL 真实生命周期矩阵及受影响 Go 包通过 | 2026-09-21 | 已实施；暂停/恢复的实际状态切换和管理员权限不变 |
 | D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
 | D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
 | D-009 | `new-api/middleware/distributor.go` | 必须修改 | 在 `SetupContextForSelectedChannel` 之后、`c.Next()` 之前插入容量钩子：`relayhook.Acquire` 取租约、`defer lease.Release()` 在下游全部结束后释放；满载 429、账本不可用 503。另加 1 行 import | T1.7 第二部分；计划书 §9.2（共享容量控制必须贯穿请求生命周期） | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。改动本身是「新增一个可开关的调用」，默认关闭时行为不变 | 2026-09-16 | 已实施（默认关闭，`APIGX_CAPACITY_ENABLED`） |
@@ -76,7 +78,7 @@
 | D-010 | `new-api/apigx/relayhook/{capacity_hook,capacity_hook_test}.go` | 新增 | 容量接线：`Acquire`/`Lease.Release`/长流续租协程/错误码映射（429+Retry-After、503）；为渠道+平台 Key+用户三维度做同一次原子预留 | T1.7 | 低（新包；不反向依赖 middleware，避免循环） | 2026-09-16 | 已实施 |
 | D-008 | `new-api/apigx/capacity/{capacity,capacity_test}.go` | 新增 | 共享容量账本：Lua 原子预留/幂等归还/租约续租与过期回收；维度 key 覆盖用户·平台 Key·渠道·供给·上游 Key·上游账户池 | T1.7；计划书 §9.2（底座没有渠道/Key 级并发上限，阶段 0 已实测确认） | 无（上游不存在同名路径） | 2026-09-16 | 已实施（核心账本） |
 | D-007 | `new-api/service/apigx_usage_only.go`、`apigx_usage_only_test.go` | 新增（同包） | 模式开关（`APIGX_USAGE_ONLY`）、`UsageOnlyFunding`、`newUsageOnlySession` 及其单测 | T1.6 | 低（新文件；与底座 `funding_source.go` 同包，便于实现 FundingSource 接口而不产生循环依赖） | 2026-09-16 | 已实施 |
-| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0176-fix-let-durable-breaker-probes-reach-upstream.patch`；fork 分支 `apigx`，HEAD `faa0310` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-21 | 176 个补丁从锁定基线重放成功，tree `97ebe71b1b2572956b9d897813ddf2915f2e4522` 与 fork HEAD 一致 |
+| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0178-fix-make-share-group-operations-idempotent.patch`；fork 分支 `apigx`，HEAD `c0c2c84` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-21 | 178 个补丁从锁定基线重放成功，tree `bcf97120ab2c4d8ea69c2e4c165825b7263c7c83` 与 fork HEAD 一致 |
 
 ## 二、新增文件（不修改上游）
 
