@@ -1,5 +1,26 @@
 # 任务清单
 
+## [已完成] 测试服部署与智能路由 / 多 Key 轮询验收（2026-09-21）
+
+**本轮目标**：通过 Xterminal MCP 在“主”服务器部署当前 APIGX fork，建立可由宝塔反向代理的隔离测试环境，并验证智能路由、渠道内多 Key 轮询与故障切换。
+**验收标准**：① 远端所有应用、配置、数据库、Redis、日志、构建与备份文件均位于 `/pan/apigx-test`；② 使用当前 inner commit 构建 APIGX 镜像，MySQL/Redis 数据持久化且不直接暴露公网；③ 应用仅监听回环地址，`/api/status` 健康；④ 以可控上游验证质量/容量自动路由、正常轮询以及 401/429 后同渠道换 Key；⑤ 给出宝塔反代目标、初始访问方式和可复现部署记录。
+
+**预计涉及模块**：
+| 模块 | 文件 / 位置 | 类型 | 说明 |
+|---|---|---|---|
+| 测试部署编排 | `/pan/apigx-test/**` | 新建 | 当前 APIGX 源码、Docker Compose、环境密钥、MySQL、Redis、日志与备份 |
+| 部署基线 | `deploy/**`、`.env.example` | 评估/必要时修改 | 固化测试服配置与升级方式，敏感值不入库 |
+| 路由验收 | 既有验收脚本与远端可控上游 | 执行 | 验证自动路由、多 Key 轮询及故障切换 |
+| 流程台账 | `whisper-note-dev-flow/**` | 修改 | 记录部署证据、限制与下一步 |
+
+**任务清单**：
+- [x] 通过 Xterminal MCP 只读盘点“主”服务器、宝塔 Docker/MySQL、端口和 `/pan` 空间 → Debian 12、Docker 29.7.2、Compose 5.4.0；Docker Root 为 `/pan/docker-data/docker`
+- [x] 确定 MySQL / PostgreSQL 方案并生成隔离测试部署配置 → 采用独立 MySQL 8.2 / InnoDB / utf8mb4 与独立 Redis；`deploy/test-server/**`
+- [x] 上传当前 APIGX 产物，在 `/pan/apigx-test` 构建并启动应用、数据库与 Redis → inner `bf36a3a`，版本 `v0.0.0-apigx.bf36a3a`；四个服务均 healthy
+- [x] 完成健康检查、数据库持久化和宝塔回环反代目标确认 → MySQL 行数重启前后 7/7、Redis AOF 探针保持；仅监听 `127.0.0.1:13000`
+- [x] 执行智能路由、多 Key 轮询与 401/429 故障切换验收 → 轮询 8/8、Key 分布 4:4；429/401 均同渠道第二 Key 成功；自动/可靠性/延迟/吞吐均选优，A 满载改走 B、释放即恢复 A
+- [x] 更新状态台账并提交可复现的非敏感部署文件 → `deploy/test-server/**`、`tools/stage2-verify/**`、`tools/stub-upstream/server.mjs`、流程台账；敏感凭据仅保存在远端 `/pan/apigx-test/verify/credentials.env`
+
 ## [已完成] G5 补丁：数据看板共享用量本地化（2026-09-20）
 
 **本轮目标**：修复数据看板“Shared resource usage”在中文界面回显英文的问题，并核对共享用量区域是否使用同一翻译键。

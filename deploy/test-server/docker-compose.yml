@@ -1,0 +1,139 @@
+name: apigx-test
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+      args:
+        APIGX_RUNTIME_IMAGE: ${APIGX_RUNTIME_IMAGE}
+    image: apigx:test
+    container_name: apigx-test-app
+    restart: unless-stopped
+    command: ["--log-dir", "/app/logs"]
+    ports:
+      - "127.0.0.1:${APIGX_HTTP_PORT:-13000}:3000"
+    volumes:
+      - /pan/apigx-test/data:/data
+      - /pan/apigx-test/logs:/app/logs
+    environment:
+      TZ: Asia/Shanghai
+      NODE_TYPE: master
+      NODE_NAME: apigx-test-1
+      SQL_DSN: "apigx:${MYSQL_APP_PASSWORD}@tcp(mysql:3306)/apigx?charset=utf8mb4&parseTime=true&loc=Local&interpolateParams=true"
+      REDIS_CONN_STRING: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      SESSION_SECRET: ${SESSION_SECRET}
+      CRYPTO_SECRET: ${CRYPTO_SECRET}
+      APIGX_SECRET_KEY: ${APIGX_SECRET_KEY}
+      APIGX_SHARED_MODE: "true"
+      APIGX_USAGE_ONLY: "true"
+      APIGX_SOURCE_GUARD_ENABLED: "true"
+      APIGX_CAPACITY_ENABLED: "true"
+      APIGX_KEY_STATS_ENABLED: "true"
+      APIGX_QUALITY_STATS_ENABLED: "true"
+      APIGX_BREAKER_ENABLED: "true"
+      APIGX_ROUTE_STRATEGY_ENABLED: "true"
+      APIGX_TPM_ADJUST_ENABLED: "true"
+      BATCH_UPDATE_ENABLED: "true"
+      ERROR_LOG_ENABLED: "true"
+      MEMORY_CACHE_ENABLED: "true"
+      CHANNEL_UPDATE_FREQUENCY: "30"
+      SYNC_FREQUENCY: "60"
+      SQL_MAX_IDLE_CONNS: "20"
+      SQL_MAX_OPEN_CONNS: "100"
+      SQL_MAX_LIFETIME: "60"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/status | grep -q '\"success\":true'"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+    networks:
+      - apigx
+
+  mysql:
+    image: ${MYSQL_IMAGE}
+    container_name: apigx-test-mysql
+    restart: unless-stopped
+    command:
+      - --default-storage-engine=InnoDB
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: apigx
+      MYSQL_USER: apigx
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD}
+    volumes:
+      - /pan/apigx-test/mysql/data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 45s
+    networks:
+      - apigx
+
+  redis:
+    image: ${REDIS_IMAGE}
+    container_name: apigx-test-redis
+    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    volumes:
+      - /pan/apigx-test/redis/data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping 2>/dev/null | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      TZ: Asia/Shanghai
+    networks:
+      - apigx
+
+  stub:
+    image: ${BUN_IMAGE}
+    container_name: apigx-test-stub
+    restart: unless-stopped
+    command: ["bun", "/work/stub-upstream.mjs", "--host", "0.0.0.0", "--port", "8100"]
+    volumes:
+      - /pan/apigx-test/verify/stub-upstream.mjs:/work/stub-upstream.mjs:ro
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8100/_control/state').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - apigx
+
+  verify:
+    profiles: ["verify"]
+    image: ${BUN_IMAGE}
+    container_name: apigx-test-verify
+    working_dir: /work
+    entrypoint: ["bun"]
+    command: ["--version"]
+    env_file:
+      - /pan/apigx-test/verify/credentials.env
+    volumes:
+      - /pan/apigx-test/verify:/work
+    depends_on:
+      app:
+        condition: service_healthy
+      stub:
+        condition: service_healthy
+    networks:
+      - apigx
+
+networks:
+  apigx:
+    name: apigx-test
+    driver: bridge

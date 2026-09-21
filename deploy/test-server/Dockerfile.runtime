@@ -1,0 +1,7 @@
+ARG APIGX_RUNTIME_IMAGE=calciumion/new-api@sha256:be4b1f3fb48687cab0e0ff921a1e4c69ae3738c0907ce05646ddc6da02cb35a5
+FROM ${APIGX_RUNTIME_IMAGE}
+
+COPY --chmod=0755 apigx-linux-amd64 /new-api
+
+LABEL org.opencontainers.image.title="APIGX" \
+      org.opencontainers.image.description="APIGX shared AI API gateway test runtime"

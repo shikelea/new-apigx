@@ -46,6 +46,7 @@ const state = {
     ttftMs: 0,         // 流式首字节延迟
     chunkDelayMs: 0,   // 流式每个分片间隔
     status: 0,         // 非 0 时直接返回该 HTTP 状态码（用于注入 5xx / 401 / 429）
+    statusPlan: [],    // 按请求依次消费状态码；0 表示本次正常，用于验证失败后换 Key
     statusBody: null,  // 自定义错误体
     hang: false,       // 挂起不返回（用于超时与租约测试）
     usage: { prompt_tokens: 12, completion_tokens: 34, total_tokens: 46 },
@@ -133,6 +134,7 @@ async function handleControl(req, res, url, bodyText) {
     try { patch = JSON.parse(bodyText || '{}'); } catch { sendJson(res, 400, { ok: false, error: 'invalid json' }); return true; }
     state.profile = { ...state.profile, ...patch };
     if (patch.usage) state.profile.usage = patch.usage;
+    if (Array.isArray(patch.statusPlan)) state.profile.statusPlan = patch.statusPlan.slice();
     sendJson(res, 200, { ok: true, profile: state.profile });
     return true;
   }
@@ -163,9 +165,11 @@ async function applyFaults(res) {
     await sleep(3600_000);
     return true;
   }
-  if (p.status && p.status >= 400) {
-    sendJson(res, p.status, p.statusBody || {
-      error: { message: `stub injected status ${p.status}`, type: 'stub_error', code: `stub_${p.status}` },
+  const plannedStatus = Array.isArray(p.statusPlan) && p.statusPlan.length > 0 ? Number(p.statusPlan.shift()) : 0;
+  const status = plannedStatus || p.status;
+  if (status && status >= 400) {
+    sendJson(res, status, p.statusBody || {
+      error: { message: `stub injected status ${status}`, type: 'stub_error', code: `stub_${status}` },
     });
     return true;
   }

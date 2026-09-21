@@ -14,9 +14,12 @@ const argv = process.argv.slice(2);
 const argOf = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const BASE = argOf('--base', 'http://127.0.0.1:3000');
 const STUB = argOf('--stub', 'http://127.0.0.1:8100');
+const UPSTREAM = argOf('--upstream', STUB);
 const PHASE = argOf('--phase', 'setup');
 const ROUNDS = Number(argOf('--rounds', '16'));
 const SELF_TEST_FAILURE = argv.includes('--self-test-failure');
+const ROOT_USER = process.env.APIGX_VERIFY_ROOT_USER || argOf('--user', 'apigxroot');
+const ROOT_PASSWORD = process.env.APIGX_VERIFY_ROOT_PASSWORD || argOf('--password', '');
 
 async function call(url, { method = 'GET', body, auth } = {}) {
   const h = { accept: 'application/json' };
@@ -46,8 +49,9 @@ const STATE_DIR = path.join(process.cwd(), '.toolchain', '_state');
 const SESSION_FILE = path.join(STATE_DIR, 'sessions.json');
 const KW_FILE = path.join(STATE_DIR, 'key-weight-dist.json');
 const sessions = (() => { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch { return {}; } })();
-function saveSessions() { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions, null, 2)); }
-function saveKw(data) { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(KW_FILE, JSON.stringify(data, null, 2)); }
+function ensureStateDir() { fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(STATE_DIR, 0o700); }
+function saveSessions() { ensureStateDir(); fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions, null, 2), { mode: 0o600 }); fs.chmodSync(SESSION_FILE, 0o600); }
+function saveKw(data) { ensureStateDir(); fs.writeFileSync(KW_FILE, JSON.stringify(data, null, 2), { mode: 0o600 }); fs.chmodSync(KW_FILE, 0o600); }
 function loadKw() { return JSON.parse(fs.readFileSync(KW_FILE, 'utf8')); }
 
 async function login(user, password) {
@@ -64,9 +68,22 @@ async function login(user, password) {
 }
 
 async function platformKey(root) {
-  const tokens = await call(`${BASE}/api/token/`, { auth: root });
-  const items0 = tokens.json?.data?.items ?? [];
-  const vt = (Array.isArray(items0) ? items0 : []).find((t) => t?.name === 'apigx-stage0-verify') ?? (Array.isArray(items0) ? items0 : [])[0];
+  let tokens = await call(`${BASE}/api/token/`, { auth: root });
+  let items0 = tokens.json?.data?.items ?? [];
+  let vt = (Array.isArray(items0) ? items0 : []).find((t) => t?.name === 'apigx-deploy-verify') ?? (Array.isArray(items0) ? items0 : [])[0];
+  if (!vt) {
+    const created = await call(`${BASE}/api/token/`, {
+      method: 'POST', auth: root,
+      body: { name: 'apigx-deploy-verify', remain_quota: 0, unlimited_quota: true, expired_time: -1, model_limits_enabled: false, group: 'default' },
+    });
+    if (created.status !== 200 || created.json?.success !== true) {
+      throw new Error(`创建验收平台 Key 失败：HTTP ${created.status} ${created.text.slice(0, 180)}`);
+    }
+    tokens = await call(`${BASE}/api/token/`, { auth: root });
+    items0 = tokens.json?.data?.items ?? [];
+    vt = (Array.isArray(items0) ? items0 : []).find((t) => t?.name === 'apigx-deploy-verify');
+  }
+  if (!vt?.id) throw new Error('找不到验收平台 Key');
   const keyRes = await call(`${BASE}/api/token/${vt.id}/key`, { method: 'POST', auth: root });
   return keyRes.json?.data?.key;
 }
@@ -76,7 +93,8 @@ async function main() {
     fail('受控失败自测：验证脚本必须返回退出码 1');
     return;
   }
-  const root = await login('apigxroot', 'ApigxDev#2026');
+  if (!ROOT_PASSWORD) throw new Error('请通过 APIGX_VERIFY_ROOT_PASSWORD 或 --password 提供验收管理员密码');
+  const root = await login(ROOT_USER, ROOT_PASSWORD);
 
   if (PHASE === 'setup') {
     const stamp = Date.now().toString().slice(-6);
@@ -84,7 +102,7 @@ async function main() {
     const channelName = 'KW底座-' + stamp;
     await call(`${BASE}/api/channel/`, {
       method: 'POST', auth: root,
-      body: { mode: 'single', channel: { name: channelName, type: 1, key: 'sk-kw-ignored-' + stamp, base_url: 'http://127.0.0.1:8100', models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
+      body: { mode: 'single', channel: { name: channelName, type: 1, key: 'sk-kw-ignored-' + stamp, base_url: UPSTREAM, models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
     });
     let base = null;
     for (let i = 0; i < 10 && !base; i++) {
@@ -114,7 +132,7 @@ async function main() {
     expectOK(groupPublished, '发布分享分组');
     const ch = await call(`${BASE}/api/apigx/channels`, {
       method: 'POST', auth: root,
-      body: { share_group_id: group.id, base_channel_id: base.id, name: 'KW渠道-' + stamp, protocol: 'openai', base_url: 'http://127.0.0.1:8100', key_pool_mode: 0 },
+      body: { share_group_id: group.id, base_channel_id: base.id, name: 'KW渠道-' + stamp, protocol: 'openai', base_url: UPSTREAM, key_pool_mode: 0 },
     });
     const channelId = expectOK(ch, '创建分享渠道').id;
 

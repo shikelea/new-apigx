@@ -16,9 +16,12 @@ const argv = process.argv.slice(2);
 const argOf = (n, d) => { const i = argv.indexOf(n); return i >= 0 && argv[i + 1] ? argv[i + 1] : d; };
 const BASE = argOf('--base', 'http://127.0.0.1:3000');
 const STUB = argOf('--stub', 'http://127.0.0.1:8100');
+const UPSTREAM = argOf('--upstream', STUB);
 const PHASE = argOf('--phase', 'setup');
 const ROUNDS = Number(argOf('--rounds', '10'));
 const SELF_TEST_FAILURE = argv.includes('--self-test-failure');
+const ROOT_USER = process.env.APIGX_VERIFY_ROOT_USER || argOf('--user', 'apigxroot');
+const ROOT_PASSWORD = process.env.APIGX_VERIFY_ROOT_PASSWORD || argOf('--password', '');
 
 async function call(url, { method = 'GET', body, auth } = {}) {
   const h = { accept: 'application/json' };
@@ -48,10 +51,30 @@ const path = await import('node:path');
 const STATE_DIR = path.join(process.cwd(), '.toolchain', '_state');
 const SESSION_FILE = path.join(STATE_DIR, 'sessions.json');
 const OUT_FILE = path.join(STATE_DIR, 'route-strategy.json');
+const QUALITY_SQL_FILE = path.join(STATE_DIR, 'route-strategy-quality.sql');
 const sessions = (() => { try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')); } catch { return {}; } })();
-function saveSessions() { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions, null, 2)); }
-function saveOut(d) { fs.mkdirSync(STATE_DIR, { recursive: true }); fs.writeFileSync(OUT_FILE, JSON.stringify(d, null, 2)); }
+function ensureStateDir() { fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(STATE_DIR, 0o700); }
+function saveSessions() { ensureStateDir(); fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions, null, 2), { mode: 0o600 }); fs.chmodSync(SESSION_FILE, 0o600); }
+function saveOut(d) { ensureStateDir(); fs.writeFileSync(OUT_FILE, JSON.stringify(d, null, 2), { mode: 0o600 }); fs.chmodSync(OUT_FILE, 0o600); }
 function loadOut() { return JSON.parse(fs.readFileSync(OUT_FILE, 'utf8')); }
+function saveQualitySQL(aOfferingId, bOfferingId) {
+  const sql = `SET @ts = UNIX_TIMESTAMP() - MOD(UNIX_TIMESTAMP(), 60);
+DELETE FROM apigx_quality_buckets WHERE offering_id IN (${aOfferingId}, ${bOfferingId});
+INSERT INTO apigx_quality_buckets
+(bucket_key_hash, offering_id, capability, deploy_point, spec_bucket, window_kind, bucket_ts, aggregator_version,
+ natural_request_count, probe_count, complete_success_count, timeout_count, upstream_failure_count,
+ cancelled_count, platform_reject_count, latency_ms_sum, latency_ms_p50, ttft_ms_sum, ttft_ms_p50,
+ output_tokens_sum, generation_ms_sum, sample_ok_count, reliability_lower_bound_ppm, updated_at)
+VALUES
+(SHA2(CONCAT('deploy-route-${aOfferingId}-', @ts), 256), ${aOfferingId}, 1, '', '', 0, @ts, 1,
+ 100, 0, 100, 0, 0, 0, 0, 10000, 100, 5000, 50, 20000, 1000, 100, 0, @ts),
+(SHA2(CONCAT('deploy-route-${bOfferingId}-', @ts), 256), ${bOfferingId}, 1, '', '', 0, @ts, 1,
+ 100, 0, 95, 0, 5, 0, 0, 100000, 1000, 50000, 500, 1000, 1000, 100, 0, @ts);
+`;
+  ensureStateDir();
+  fs.writeFileSync(QUALITY_SQL_FILE, sql, { mode: 0o600 });
+  fs.chmodSync(QUALITY_SQL_FILE, 0o600);
+}
 
 async function login(user, password) {
   const cached = sessions[user];
@@ -67,9 +90,40 @@ async function login(user, password) {
 }
 
 async function platformToken(root) {
-  const tokens = await call(`${BASE}/api/token/`, { auth: root });
-  const items0 = tokens.json?.data?.items ?? [];
-  return (Array.isArray(items0) ? items0 : []).find((t) => t?.name === 'apigx-stage0-verify') ?? (Array.isArray(items0) ? items0 : [])[0];
+  let tokens = await call(`${BASE}/api/token/`, { auth: root });
+  let items0 = tokens.json?.data?.items ?? [];
+  let token = (Array.isArray(items0) ? items0 : []).find((t) => t?.name === 'apigx-deploy-verify') ?? (Array.isArray(items0) ? items0 : [])[0];
+  if (!token) {
+    const created = await call(`${BASE}/api/token/`, {
+      method: 'POST', auth: root,
+      body: { name: 'apigx-deploy-verify', remain_quota: 0, unlimited_quota: true, expired_time: -1, model_limits_enabled: false, group: 'default' },
+    });
+    expectOK(created, '创建验收平台 Key');
+    tokens = await call(`${BASE}/api/token/`, { auth: root });
+    items0 = tokens.json?.data?.items ?? [];
+    token = (Array.isArray(items0) ? items0 : []).find((t) => t?.name === 'apigx-deploy-verify');
+  }
+  return token;
+}
+
+async function ensureModelPricing(auth, model) {
+  const snapshot = expectOK(
+    await call(`${BASE}/api/option/model_pricing?model=${encodeURIComponent(model)}`, { auth }),
+    `读取 ${model} 的全局价格`,
+  );
+  const entry = snapshot?.entries?.find((item) => item?.model_name === model);
+  if (!entry?.version) throw new Error(`全局价格快照缺少模型 ${model}`);
+  if (entry.effective?.ModelRatio !== undefined || entry.effective?.ModelPrice !== undefined) return;
+  expectOK(await call(`${BASE}/api/option/model_pricing`, {
+    method: 'PATCH', auth,
+    body: {
+      changes: [{
+        model_name: model,
+        expected_version: entry.version,
+        pricing: { ModelRatio: 1, CompletionRatio: 2 },
+      }],
+    },
+  }), `配置 ${model} 的全局价格`);
 }
 
 function fingerprint(key) {
@@ -82,7 +136,8 @@ async function main() {
     fail('受控失败自测：验证脚本必须返回退出码 1');
     return;
   }
-  const root = await login('apigxroot', 'ApigxDev#2026');
+  if (!ROOT_PASSWORD) throw new Error('请通过 APIGX_VERIFY_ROOT_PASSWORD 或 --password 提供验收管理员密码');
+  const root = await login(ROOT_USER, ROOT_PASSWORD);
 
   if (PHASE === 'setup') {
     const stamp = Date.now().toString().slice(-6);
@@ -91,7 +146,7 @@ async function main() {
       const name = 'STRAT-' + tag + '-' + stamp;
       const created = await call(`${BASE}/api/channel/`, {
         method: 'POST', auth: root,
-        body: { mode: 'single', channel: { name, type: 1, key: 'sk-' + tag + '-' + stamp, base_url: 'http://127.0.0.1:8100', models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
+        body: { mode: 'single', channel: { name, type: 1, key: 'sk-' + tag + '-' + stamp, base_url: UPSTREAM, models: MODEL, groups: ['default'], status: 1, priority: 0, weight: 1 } },
       });
       expectOK(created, `创建底座渠道 ${tag}`);
       for (let i = 0; i < 10; i++) {
@@ -125,7 +180,7 @@ async function main() {
       const upstreamKey = 'sk-' + tag + '-up-' + stamp;
       const ch = await call(`${BASE}/api/apigx/channels`, {
         method: 'POST', auth: root,
-        body: { share_group_id: group.id, base_channel_id: baseChannel.id, name: 'STRAT渠道-' + tag + '-' + stamp, protocol: 'openai', base_url: 'http://127.0.0.1:8100' },
+        body: { share_group_id: group.id, base_channel_id: baseChannel.id, name: 'STRAT渠道-' + tag + '-' + stamp, protocol: 'openai', base_url: UPSTREAM },
       });
       const channelId = expectOK(ch, `创建分享渠道 ${tag}`).id;
       const key = await call(`${BASE}/api/apigx/channels/${channelId}/keys`, {
@@ -153,11 +208,13 @@ async function main() {
     };
     const a = await seed('good');
     const b = await seed('meh');
+    await ensureModelPricing(root, MODEL);
     const vt = await platformToken(root);
     if (!vt?.id) throw new Error('找不到用于验收的平台 Key');
     saveOut({ model: MODEL, stamp, tokenId: vt.id, a, b });
+    saveQualitySQL(a.offeringId, b.offeringId);
     info(`已建立两条供给：model=${MODEL}（A=good offering=${a.offeringId}，B=meh offering=${b.offeringId}）`);
-    info('下一步：psql 给 A 灌更好的质量样本，然后执行 --phase measure');
+    info(`下一步：把 ${QUALITY_SQL_FILE} 导入 APIGX MySQL，然后执行 --phase measure`);
     return;
   }
 
