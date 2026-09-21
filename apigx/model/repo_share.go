@@ -135,7 +135,8 @@ const (
 	ShareGroupPublishRetired int = 4
 )
 
-// SetShareGroupPublishStatus 设置分组的发布状态（平台审核动作）。
+// SetShareGroupPublishStatus 设置分组的运营状态。重复设置同一状态按成功处理，
+// 这样恢复/暂停操作在 MySQL 等“未改变值时 RowsAffected=0”的数据库上仍保持幂等。
 //
 // 只改状态一个字段：不触碰分组名、可见性、成员等其他信息，避免审核动作顺带改写分享者的内容。
 func SetShareGroupPublishStatus(db *gorm.DB, groupID int64, status int) error {
@@ -149,7 +150,15 @@ func SetShareGroupPublishStatus(db *gorm.DB, groupID int64, status int) error {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return ErrNotFound
+		var count int64
+		if err := db.Model(&ShareGroup{}).
+			Where("id = ? AND deleted_at IS NULL AND publish_status = ?", groupID, status).
+			Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrNotFound
+		}
 	}
 	return nil
 }

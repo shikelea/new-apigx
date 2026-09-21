@@ -830,6 +830,10 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 				env := configureTestEnv(t, tx, true)
 				const owner int64 = 9_830_001
 				groupID := env.createGroup(t, owner, "三库生命周期组")
+				rec, _ := env.doWithRole(t, http.MethodPost,
+					"/api/share-groups/"+strconv.FormatInt(groupID, 10)+"/publish-status",
+					owner, `{"status":2}`, common.RoleAdminUser)
+				require.Equal(t, http.StatusOK, rec.Code, "重复恢复已发布分组必须保持幂等：%s", rec.Body.String())
 				createBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
 					`,"name":"三库自建线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"sk-matrix-success","key_pool_mode":1}`
 				rec, body := env.doWithRole(t, http.MethodPost, "/api/channels", owner, createBody, common.RoleCommonUser)
