@@ -19,8 +19,8 @@ type KeyOutcome struct {
 	// AuthFailed 表示上游明确拒绝了这份凭据（401/403 之类）：
 	// 计划书 §9.2 要求做 **Key 级故障隔离**，此时把该 Key 标为失效而不是停整个渠道。
 	AuthFailed bool
-	// CooldownSeconds > 0 时把该 Key 置入冷却（例如上游限流）。
-	// Key 级限流只让这一把冷却；确认是账户级/渠道级故障才应作用于共享范围。
+	// CooldownSeconds > 0 时把该 Key 置入临时冷却（例如 408、5xx 或网络错误）。
+	// 429 只在当前请求内换 Key，不写跨请求冷却；确认是账户级/渠道级故障才应作用于共享范围。
 	CooldownSeconds int64
 }
 
@@ -74,6 +74,7 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
 
 	now := common.GetTimestamp()
 	updates := map[string]any{"updated_at": now}
+	cooldownUntil := int64(0)
 	if outcome.Success {
 		updates["last_ok_at"] = now
 	} else {
@@ -84,7 +85,8 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
 		updates["status"] = apigxmodel.UpstreamKeyStatusInvalid
 	}
 	if outcome.CooldownSeconds > 0 {
-		updates["cooldown_until"] = now + outcome.CooldownSeconds
+		cooldownUntil = now + outcome.CooldownSeconds
+		updates["cooldown_until"] = cooldownUntil
 	}
 
 	if err := db.Model(&apigxmodel.UpstreamKey{}).
@@ -104,6 +106,12 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
 		if keyValue, ok := projection.IndexToKeyValue[keyIndex]; ok {
 			basemodel.UpdateChannelStatus(baseChannelID, keyValue, common.ChannelStatusAutoDisabled,
 				truncateErrorCode(outcome.ErrorCode))
+		}
+	}
+	if cooldownUntil > 0 {
+		keyValue, ok := projection.IndexToKeyValue[keyIndex]
+		if !ok || !basemodel.UpdateChannelKeyCooldown(baseChannelID, keyValue, cooldownUntil) {
+			return fmt.Errorf("channelpool: cannot persist base cooldown for channel %d key index %d", baseChannelID, keyIndex)
 		}
 	}
 	return nil

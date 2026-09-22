@@ -2,6 +2,7 @@ package channelpool
 
 import (
 	"fmt"
+	"net/http"
 	"sync/atomic"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
@@ -16,6 +17,11 @@ import (
 // **默认关闭**：它挂在每一次失败处理上（`service.ProcessChannelError`），属于热路径；
 // 在真实流量下验证过之前，不应改变既有行为。
 var keyStatsEnabled atomic.Bool
+
+// retryableKeyCooldownSeconds is deliberately short: it prevents an unhealthy
+// credential from being selected by immediately following requests while
+// still allowing automatic recovery without a probe or manual pool apply.
+const retryableKeyCooldownSeconds int64 = 60
 
 func init() {
 	keyStatsEnabled.Store(common.GetEnvOrDefaultBool("APIGX_KEY_STATS_ENABLED", false))
@@ -56,10 +62,27 @@ func RecordFailureFromContext(c *gin.Context, channelID int, statusCode int, err
 		// 401/403 表示上游明确拒绝了这份凭据 → Key 级故障隔离（计划书 §9.2）
 		AuthFailed: statusCode == 401 || statusCode == 403,
 	}
+	if shouldCooldownRetryableKey(statusCode) {
+		outcome.CooldownSeconds = retryableKeyCooldownSeconds
+	}
 	if err := RecordKeyOutcome(db, channelID, keyIndex, outcome); err != nil {
 		// 统计失败只记日志，绝不影响请求结果
 		common.SysError("channelpool: record key failure failed: " + err.Error())
 	}
+}
+
+// shouldCooldownRetryableKey mirrors the transport-level retry boundary that
+// can be determined from an HTTP status alone. 429 is intentionally excluded:
+// it changes keys only inside the current request and remains eligible for the
+// next request. Client/business errors also do not punish a healthy key.
+func shouldCooldownRetryableKey(statusCode int) bool {
+	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return false
+	}
+	if statusCode < 100 || statusCode > 599 {
+		return true
+	}
+	return statusCode == http.StatusRequestTimeout || statusCode >= http.StatusInternalServerError
 }
 
 // formatOutcomeCode 生成脱敏的失败标签，例如 `429_upstream_rate_limited`。

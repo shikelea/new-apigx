@@ -137,6 +137,38 @@ func TestGetNextEnabledKeyExcludingNeverRepeatsFailedKey(t *testing.T) {
 	}
 }
 
+func TestMultiKeyCooldownSkipsThenAutomaticallyExpires(t *testing.T) {
+	setupChannelStatusTest(t)
+
+	channel := Channel{
+		Name:   "temporary-key-cooldown",
+		Key:    "key-a\nkey-b",
+		Status: common.ChannelStatusEnabled,
+		ChannelInfo: ChannelInfo{
+			IsMultiKey:        true,
+			MultiKeySize:      2,
+			MultiKeyMode:      constant.MultiKeyModePolling,
+			MultiKeyStableIDs: []string{"stable-a", "stable-b"},
+		},
+	}
+	referenceTime := int64(10_000)
+	channel.ChannelInfo.SetMultiKeyCooldownUntilAt(0, referenceTime+60)
+	require.NoError(t, DB.Create(&channel).Error)
+
+	var reloaded Channel
+	require.NoError(t, DB.First(&reloaded, channel.Id).Error)
+	assert.False(t, reloaded.ChannelInfo.MultiKeySelectableAt(0, referenceTime))
+	assert.True(t, reloaded.ChannelInfo.MultiKeySelectableAt(1, referenceTime))
+	assert.True(t, reloaded.ChannelInfo.MultiKeySelectableAt(0, referenceTime+60),
+		"deadline expiry must restore selection without rewriting the pool")
+
+	// Stable identity remains authoritative after a key reorder.
+	reloaded.Key = "key-b\nkey-a"
+	reloaded.ChannelInfo.MultiKeyStableIDs = []string{"stable-b", "stable-a"}
+	assert.True(t, reloaded.ChannelInfo.MultiKeySelectableAt(0, referenceTime))
+	assert.False(t, reloaded.ChannelInfo.MultiKeySelectableAt(1, referenceTime))
+}
+
 func TestMultiKeyExclusionFollowsStableIdentityAfterReorder(t *testing.T) {
 	setupChannelStatusTest(t)
 

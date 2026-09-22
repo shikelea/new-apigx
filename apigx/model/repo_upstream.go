@@ -36,11 +36,10 @@ const (
 	CircuitStateHalfOpen int = 2
 )
 
-// IsUpstreamKeyUsable 报告某把 Key 在给定时刻是否可用于新请求。
-//
-// 三条判据都必须成立：启用、未到期、不在冷却期。**任一条不成立都不是「不可用」的近似**，
-// 而是确定的「跳过该 Key」（计划书 §9.2：Key 满载、到期、失效或冷却时跳过）。
-func IsUpstreamKeyUsable(key *UpstreamKey, now int64) bool {
+// IsUpstreamKeyProjectable reports whether a credential belongs in the base
+// multi-key projection. Cooling keys stay projected so the runtime can skip
+// them until their persisted deadline and restore them automatically.
+func IsUpstreamKeyProjectable(key *UpstreamKey, now int64) bool {
 	if key == nil {
 		return false
 	}
@@ -48,6 +47,17 @@ func IsUpstreamKeyUsable(key *UpstreamKey, now int64) bool {
 		return false
 	}
 	if key.ExpiresAt > 0 && key.ExpiresAt <= now {
+		return false
+	}
+	return true
+}
+
+// IsUpstreamKeyUsable 报告某把 Key 在给定时刻是否可用于新请求。
+//
+// 三条判据都必须成立：启用、未到期、不在冷却期。**任一条不成立都不是「不可用」的近似**，
+// 而是确定的「跳过该 Key」（计划书 §9.2：Key 满载、到期、失效或冷却时跳过）。
+func IsUpstreamKeyUsable(key *UpstreamKey, now int64) bool {
+	if !IsUpstreamKeyProjectable(key, now) {
 		return false
 	}
 	if key.CooldownUntil > 0 && key.CooldownUntil > now {

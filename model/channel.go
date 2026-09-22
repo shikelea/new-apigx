@@ -62,13 +62,17 @@ type Channel struct {
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
 
 type ChannelInfo struct {
-	IsMultiKey             bool                  `json:"is_multi_key"`                        // 是否多Key模式
-	MultiKeySize           int                   `json:"multi_key_size"`                      // 多Key模式下的Key数量
-	MultiKeyStatusList     map[int]int           `json:"multi_key_status_list"`               // key状态列表，key index -> status
-	MultiKeyDisabledReason map[int]string        `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
-	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
-	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
-	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	IsMultiKey             bool           `json:"is_multi_key"`                        // 是否多Key模式
+	MultiKeySize           int            `json:"multi_key_size"`                      // 多Key模式下的Key数量
+	MultiKeyStatusList     map[int]int    `json:"multi_key_status_list"`               // key状态列表，key index -> status
+	MultiKeyDisabledReason map[int]string `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
+	MultiKeyDisabledTime   map[int]int64  `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
+	// MultiKeyCooldownUntil is independent from persistent health marks. A key
+	// is skipped while the deadline is in the future and becomes selectable
+	// again automatically when the deadline passes.
+	MultiKeyCooldownUntil map[int]int64         `json:"multi_key_cooldown_until,omitempty"`
+	MultiKeyPollingIndex  int                   `json:"multi_key_polling_index"` // 多Key模式下轮询的key索引
+	MultiKeyMode          constant.MultiKeyMode `json:"multi_key_mode"`
 	// MultiKeyStableIDs 与真实 Key 列表一一对齐。APIGX 用它让健康、容量和统计锚定稳定身份，
 	// 避免增删、重排或权重变化后把按位置保存的状态套到另一把 Key 上。
 	MultiKeyStableIDs []string `json:"multi_key_stable_ids,omitempty"`
@@ -79,6 +83,7 @@ type ChannelInfo struct {
 	MultiKeyStatusByStableID         map[string]int    `json:"multi_key_status_by_stable_id,omitempty"`
 	MultiKeyDisabledReasonByStableID map[string]string `json:"multi_key_disabled_reason_by_stable_id,omitempty"`
 	MultiKeyDisabledTimeByStableID   map[string]int64  `json:"multi_key_disabled_time_by_stable_id,omitempty"`
+	MultiKeyCooldownUntilByStableID  map[string]int64  `json:"multi_key_cooldown_until_by_stable_id,omitempty"`
 	// 状态来源表让底座健康、容量和熔断分别持有自己的标记。MultiKeyStatusList 与
 	// MultiKeyStatusByStableID 只是给既有接口读取的合并镜像，恢复一个来源不会误删另一个来源。
 	MultiKeyStatusSources           map[int]map[string]int    `json:"multi_key_status_sources,omitempty"`
@@ -138,6 +143,51 @@ func (c *ChannelInfo) MultiKeyStatusAt(index int) int {
 		}
 	}
 	return common.ChannelStatusEnabled
+}
+
+// MultiKeyCooldownUntilAt returns the persisted cooldown deadline for one
+// credential. Stable identity takes precedence so reordering keys cannot move
+// a cooldown to a different credential.
+func (c *ChannelInfo) MultiKeyCooldownUntilAt(index int) int64 {
+	if c == nil || index < 0 {
+		return 0
+	}
+	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+		return c.MultiKeyCooldownUntilByStableID[stableID]
+	}
+	return c.MultiKeyCooldownUntil[index]
+}
+
+// MultiKeySelectableAt combines persistent health and temporary cooldown.
+// Expired deadlines require no background job or manual pool re-application.
+func (c *ChannelInfo) MultiKeySelectableAt(index int, now int64) bool {
+	return c != nil && c.MultiKeyStatusAt(index) == common.ChannelStatusEnabled &&
+		c.MultiKeyCooldownUntilAt(index) <= now
+}
+
+// SetMultiKeyCooldownUntilAt updates both the stable-ID authority and the
+// positional compatibility mirror. A non-future deadline clears the cooldown.
+func (c *ChannelInfo) SetMultiKeyCooldownUntilAt(index int, until int64) {
+	if c == nil || index < 0 {
+		return
+	}
+	if until <= 0 {
+		delete(c.MultiKeyCooldownUntil, index)
+		if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+			delete(c.MultiKeyCooldownUntilByStableID, stableID)
+		}
+		return
+	}
+	if c.MultiKeyCooldownUntil == nil {
+		c.MultiKeyCooldownUntil = make(map[int]int64)
+	}
+	c.MultiKeyCooldownUntil[index] = until
+	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
+		if c.MultiKeyCooldownUntilByStableID == nil {
+			c.MultiKeyCooldownUntilByStableID = make(map[string]int64)
+		}
+		c.MultiKeyCooldownUntilByStableID[stableID] = until
+	}
 }
 
 func multiKeyStatusMarkSource(markValue int) string {
@@ -530,7 +580,7 @@ func (channel *Channel) GetNextEnabledKeyExcluding(excluded MultiKeyExclusions) 
 	// Collect indexes of enabled keys
 	enabledIdx := make([]int, 0, len(keys))
 	for i := range keys {
-		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled &&
+		if channel.ChannelInfo.MultiKeySelectableAt(i, common.GetTimestamp()) &&
 			!excluded.contains(&channel.ChannelInfo, i) {
 			enabledIdx = append(enabledIdx, i)
 		}
@@ -607,7 +657,7 @@ func (channel *Channel) HasEnabledKeyExcluding(excluded MultiKeyExclusions) bool
 		return false
 	}
 	for index := range channel.GetKeys() {
-		if channel.ChannelInfo.MultiKeyStatusAt(index) == common.ChannelStatusEnabled &&
+		if channel.ChannelInfo.MultiKeySelectableAt(index, common.GetTimestamp()) &&
 			!excluded.contains(&channel.ChannelInfo, index) {
 			return true
 		}
@@ -919,6 +969,7 @@ func (channel *Channel) Update() error {
 			channel.ChannelInfo.MultiKeyStatusByStableID = nil
 			channel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
 			channel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
+			channel.ChannelInfo.MultiKeyCooldownUntilByStableID = nil
 			channel.ChannelInfo.MultiKeyStatusSources = nil
 			channel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
 		}
@@ -934,6 +985,13 @@ func (channel *Channel) Update() error {
 			for idx := range channel.ChannelInfo.MultiKeyStatusSources {
 				if idx >= channel.ChannelInfo.MultiKeySize {
 					delete(channel.ChannelInfo.MultiKeyStatusSources, idx)
+				}
+			}
+		}
+		if channel.ChannelInfo.MultiKeyCooldownUntil != nil {
+			for idx := range channel.ChannelInfo.MultiKeyCooldownUntil {
+				if idx >= channel.ChannelInfo.MultiKeySize {
+					delete(channel.ChannelInfo.MultiKeyCooldownUntil, idx)
 				}
 			}
 		}
@@ -1137,6 +1195,45 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 			common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
 			return false
 		}
+	}
+	return true
+}
+
+// UpdateChannelKeyCooldown persists a temporary per-key cooldown without
+// changing the key's health status or disabling the whole channel. Selection
+// reads the deadline directly, so expiry restores traffic automatically.
+func UpdateChannelKeyCooldown(channelId int, usingKey string, until int64) bool {
+	if channelId <= 0 || usingKey == "" {
+		return false
+	}
+	if common.MemoryCacheEnabled {
+		channelStatusLock.Lock()
+		defer channelStatusLock.Unlock()
+	}
+
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	channel, err := CacheGetChannel(channelId)
+	if err != nil || channel == nil || !channel.ChannelInfo.IsMultiKey {
+		return false
+	}
+	keyIndex := -1
+	for index, key := range channel.GetKeys() {
+		if key == usingKey {
+			keyIndex = index
+			break
+		}
+	}
+	if keyIndex < 0 {
+		return false
+	}
+	channel.ChannelInfo.SetMultiKeyCooldownUntilAt(keyIndex, until)
+	if err := DB.Model(&Channel{}).Where("id = ?", channelId).
+		Update("channel_info", channel.ChannelInfo).Error; err != nil {
+		common.SysLog(fmt.Sprintf("failed to update multi-key cooldown: channel_id=%d, error=%v", channelId, err))
+		return false
 	}
 	return true
 }

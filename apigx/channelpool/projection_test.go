@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,8 +112,12 @@ func TestBaseChannelRetirementOnConfiguredDialects(t *testing.T) {
 				base := &basemodel.Channel{
 					Id: 9_820_001, Name: "b3-lifecycle", Key: "sk-one\nsk-two", Models: "model-a",
 					Group: "default", Status: common.ChannelStatusEnabled,
-					ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
+					ChannelInfo: basemodel.ChannelInfo{
+						IsMultiKey: true, MultiKeySize: 2,
+						MultiKeyStableIDs: []string{"stable-one", "stable-two"},
+					},
 				}
+				base.ChannelInfo.SetMultiKeyCooldownUntilAt(0, 10_060)
 				require.NoError(t, tx.Create(base).Error)
 				require.NoError(t, tx.Create(&basemodel.Ability{
 					Group: "default", Model: "model-a", ChannelId: base.Id, Enabled: true,
@@ -124,6 +129,9 @@ func TestBaseChannelRetirementOnConfiguredDialects(t *testing.T) {
 				var quiesced basemodel.Channel
 				require.NoError(t, tx.Where("id = ?", base.Id).First(&quiesced).Error)
 				assert.Equal(t, common.ChannelStatusManuallyDisabled, quiesced.Status)
+				assert.EqualValues(t, 10_060, quiesced.ChannelInfo.MultiKeyCooldownUntilAt(0))
+				assert.False(t, quiesced.ChannelInfo.MultiKeySelectableAt(0, 10_000))
+				assert.True(t, quiesced.ChannelInfo.MultiKeySelectableAt(0, 10_060))
 				var ability basemodel.Ability
 				require.NoError(t, tx.Where("channel_id = ?", base.Id).First(&ability).Error)
 				assert.False(t, ability.Enabled)
@@ -228,14 +236,15 @@ func mustStable(t *testing.T, p *Projection, index int) string {
 	return stable
 }
 
-// 只投影可用 Key：分享者显式停用 / 已到期 / 冷却中的凭据不应继续发往上游。
-func TestProjectKeyPoolSkipsUnusableKeys(t *testing.T) {
+// 停用、鉴权失效或到期的凭据不应投影；冷却凭据必须保留并携带截止时间，
+// 这样重启后仍会先跳过并在到期时自动恢复。
+func TestProjectKeyPoolSkipsInactiveKeysAndPersistsCooldown(t *testing.T) {
 	db := setupProjectionEnv(t)
 	const owner int64 = 9002
 	const baseChannelID int64 = 4243
 	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
 
-	secrets := []string{"sk-live-aaaaaaaa", "sk-disabled-bbbb", "sk-expired-cccccc"}
+	secrets := []string{"sk-live-aaaaaaaa", "sk-disabled-bbbb", "sk-expired-cccccc", "sk-cooling-dddddd"}
 	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, nil)
 
 	now := common.GetTimestamp()
@@ -245,17 +254,25 @@ func TestProjectKeyPoolSkipsUnusableKeys(t *testing.T) {
 	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
 		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-c").
 		Update("expires_at", now-1).Error)
+	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
+		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-d").
+		Update("cooldown_until", now+60).Error)
 
 	projection, err := ProjectKeyPool(db, shareChannel.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 1, projection.KeyCount)
+	assert.Equal(t, 2, projection.KeyCount)
 
 	var loaded basemodel.Channel
 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
 	keys := loaded.GetKeys()
-	require.Len(t, keys, 1)
+	require.Len(t, keys, 2)
 	assert.Equal(t, "sk-live-aaaaaaaa", keys[0])
-	assert.Equal(t, 1, loaded.ChannelInfo.MultiKeySize)
+	assert.Equal(t, "sk-cooling-dddddd", keys[1])
+	assert.Equal(t, 2, loaded.ChannelInfo.MultiKeySize)
+	assert.Equal(t, now+60, loaded.ChannelInfo.MultiKeyCooldownUntilAt(1))
+	assert.False(t, loaded.ChannelInfo.MultiKeySelectableAt(1, now))
+	assert.True(t, loaded.ChannelInfo.MultiKeySelectableAt(1, now+60),
+		"cooldown expiry must restore the projected key without another apply")
 }
 
 // 重投影必须清空按索引存放的旧状态：Key 顺序变了，旧状态会套到别的凭据上。
@@ -405,6 +422,24 @@ func TestRecordKeyOutcomeSetsCooldown(t *testing.T) {
 	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
 	assert.Greater(t, key.CooldownUntil, now+60, "冷却应延伸到未来")
 	assert.False(t, apigxmodel.IsUpstreamKeyUsable(&key, now), "冷却期内该 Key 不可用")
+
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+	assert.Equal(t, key.CooldownUntil, base.ChannelInfo.MultiKeyCooldownUntilAt(0),
+		"领域冷却必须同步到底座运行时投影")
+	_, _, selectionErr := base.GetNextEnabledKey()
+	require.NotNil(t, selectionErr, "冷却中的 Key 不得被后续请求选中")
+	assert.Equal(t, common.ChannelStatusEnabled, base.Status, "临时 Key 冷却不应停掉整个渠道")
+
+	base.ChannelInfo.SetMultiKeyCooldownUntilAt(0, now-1)
+	require.NoError(t, db.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
+		Update("channel_info", base.ChannelInfo).Error)
+	var restarted basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&restarted).Error)
+	selected, index, selectionErr := restarted.GetNextEnabledKey()
+	require.Nil(t, selectionErr)
+	assert.Equal(t, "sk-cool-aaaaaaaa", selected)
+	assert.Zero(t, index, "过期冷却在重启加载后也应自动恢复")
 }
 
 // 非我们的渠道（管理员自建）没有可记对象：静默跳过，不报错、不误写。
@@ -518,6 +553,7 @@ func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
 	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
 	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status, "业务错误不得使凭据失效")
 	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
+	assert.Zero(t, key.CooldownUntil, "request errors must not cool a healthy credential")
 }
 
 func TestRecordFailureFromContextDoesNotCooldownRateLimitedKey(t *testing.T) {
@@ -546,6 +582,68 @@ func TestRecordFailureFromContextDoesNotCooldownRateLimitedKey(t *testing.T) {
 	assert.True(t, apigxmodel.IsUpstreamKeyUsable(&key, common.GetTimestamp()),
 		"the next request may select the same credential again")
 	assert.Equal(t, "429_rate_limited", key.LastErrorCode)
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+	assert.Zero(t, base.ChannelInfo.MultiKeyCooldownUntilAt(0),
+		"429 must not leak a cooldown into the base runtime")
+	selected, _, selectionErr := base.GetNextEnabledKey()
+	require.Nil(t, selectionErr)
+	assert.Equal(t, "sk-rate-limit-aaaaaa", selected,
+		"the same credential remains eligible for the next request")
+}
+
+func TestRetryableFailureCooldownClassification(t *testing.T) {
+	for _, test := range []struct {
+		statusCode int
+		want       bool
+	}{
+		{statusCode: 0, want: true},
+		{statusCode: http.StatusRequestTimeout, want: true},
+		{statusCode: http.StatusInternalServerError, want: true},
+		{statusCode: http.StatusServiceUnavailable, want: true},
+		{statusCode: http.StatusTooManyRequests, want: false},
+		{statusCode: http.StatusUnauthorized, want: false},
+		{statusCode: http.StatusForbidden, want: false},
+		{statusCode: http.StatusBadRequest, want: false},
+		{statusCode: http.StatusNotFound, want: false},
+	} {
+		t.Run(strconv.Itoa(test.statusCode), func(t *testing.T) {
+			assert.Equal(t, test.want, shouldCooldownRetryableKey(test.statusCode))
+		})
+	}
+}
+
+func TestRecordFailureFromContextCooldownsRetryableUpstreamFailure(t *testing.T) {
+	db := setupProjectionEnv(t)
+	const owner int64 = 9205
+	const baseChannelID int64 = 6266
+	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
+		[]string{"sk-retryable-aaaaaa", "sk-healthy-bbbbbbbb"}, nil)
+	_, err := ProjectKeyPool(db, shareChannel.ID)
+	require.NoError(t, err)
+
+	previous := dbProvider
+	SetDBProvider(func() *gorm.DB { return db })
+	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
+	SetKeyStatsEnabled(true)
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
+	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
+	RecordFailureFromContext(ctx, int(baseChannelID), http.StatusServiceUnavailable, "upstream_unavailable")
+
+	var failed apigxmodel.UpstreamKey
+	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&failed).Error)
+	assert.Greater(t, failed.CooldownUntil, common.GetTimestamp())
+
+	var base basemodel.Channel
+	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
+	assert.Equal(t, failed.CooldownUntil, base.ChannelInfo.MultiKeyCooldownUntilAt(0))
+	selected, index, selectionErr := base.GetNextEnabledKey()
+	require.Nil(t, selectionErr)
+	assert.Equal(t, "sk-healthy-bbbbbbbb", selected)
+	assert.Equal(t, 1, index, "the next request must skip the cooled credential")
 }
 
 // **最关键的一条**：失效必须同时落到底座，否则底座会继续使用已失效的凭据。

@@ -60,6 +60,14 @@ import type { UpstreamKey } from '../types'
 
 type KeyEditor = { mode: 'rotate' | 'weight'; key: UpstreamKey } | null
 
+function formatCooldownTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(new Date(timestamp * 1000))
+}
+
 export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -177,14 +185,24 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
     {
       id: 'status',
       header: t('share.key.status'),
-      cell: (row) => (
-        <div className='flex flex-wrap gap-1.5'>
-          <Badge variant={row.usable ? 'default' : 'outline'}>
-            {t(keyStatusLabelKey(row.status))}
-          </Badge>
-          <Badge variant='outline'>v{row.credential_version}</Badge>
-        </div>
-      ),
+      cell: (row) => {
+        const cooling = row.cooldown_until > Math.floor(Date.now() / 1000)
+        return (
+          <div className='flex flex-wrap gap-1.5'>
+            <Badge variant={row.usable ? 'default' : 'outline'}>
+              {t(keyStatusLabelKey(row.status))}
+            </Badge>
+            {cooling ? (
+              <Badge variant='outline'>
+                {t('share.key.coolingUntil', {
+                  time: formatCooldownTime(row.cooldown_until),
+                })}
+              </Badge>
+            ) : null}
+            <Badge variant='outline'>v{row.credential_version}</Badge>
+          </div>
+        )
+      },
     },
     {
       id: 'actions',

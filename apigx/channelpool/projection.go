@@ -240,8 +240,9 @@ type Projection struct {
 // 顺序**必须确定**：按 (weight DESC, id ASC) 排列（与 `ListUpstreamKeysByChannel` 一致），
 // 这样索引到 StableKeyID 的映射在池未变化时可以稳定重算。
 //
-// 只投影**当前可用**的 Key（启用 + 未到期 + 不在冷却）：分享者显式停用或已失效的凭据
-// 不应继续被发往上游。运行期故障（上游拒绝）仍由底座按索引隔离。
+// 只投影**可运行**的 Key（启用 + 未到期）。冷却中的 Key 仍留在投影中，并把截止时间
+// 写入底座 ChannelInfo：运行时会暂时跳过，到期后自动恢复，无需再次应用 Key 池。
+// 分享者显式停用、鉴权失效或已到期的凭据不会进入投影。
 func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
 	built, err := buildPool(db, shareChannelID)
 	if err != nil {
@@ -343,6 +344,7 @@ type builtPool struct {
 	secrets      []string
 	stableIDs    []string
 	weights      []int64
+	cooldowns    []int64
 }
 
 func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
@@ -357,10 +359,18 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 		return nil, fmt.Errorf("channelpool: share channel %d has no base channel", shareChannelID)
 	}
 
-	keys, err := apigxmodel.AvailableUpstreamKeys(db, shareChannel.OwnerUserID, shareChannelID, common.GetTimestamp())
+	keys, err := apigxmodel.ListUpstreamKeysByChannel(db, shareChannel.OwnerUserID, shareChannelID)
 	if err != nil {
 		return nil, err
 	}
+	now := common.GetTimestamp()
+	projectable := make([]apigxmodel.UpstreamKey, 0, len(keys))
+	for i := range keys {
+		if apigxmodel.IsUpstreamKeyProjectable(&keys[i], now) {
+			projectable = append(projectable, keys[i])
+		}
+	}
+	keys = projectable
 	if len(keys) == 0 {
 		return nil, ErrNoUsableKey
 	}
@@ -373,6 +383,7 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 	// `GetNextEnabledKey` 直接执行加权轮询/随机；不再复制明文 Key 来表达份额。
 	stableIDs := make([]string, 0, len(keys))
 	weights := make([]int64, 0, len(keys))
+	cooldowns := make([]int64, 0, len(keys))
 	for i := range keys {
 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
 		if err != nil {
@@ -387,6 +398,7 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 		secrets = append(secrets, plain)
 		stableIDs = append(stableIDs, keys[i].StableKeyID)
 		weights = append(weights, effectiveWeight(keys[i].Weight))
+		cooldowns = append(cooldowns, keys[i].CooldownUntil)
 	}
 	if len(secrets) == 0 {
 		return nil, ErrNoUsableKey
@@ -398,6 +410,7 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
 		secrets:      secrets,
 		stableIDs:    stableIDs,
 		weights:      weights,
+		cooldowns:    cooldowns,
 	}, nil
 }
 
@@ -421,9 +434,16 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
 	baseChannel.ChannelInfo.MultiKeyStatusByStableID = nil
 	baseChannel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
 	baseChannel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
+	baseChannel.ChannelInfo.MultiKeyCooldownUntil = nil
+	baseChannel.ChannelInfo.MultiKeyCooldownUntilByStableID = nil
 	baseChannel.ChannelInfo.MultiKeyStatusSources = nil
 	baseChannel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
+	for index, until := range built.cooldowns {
+		if until > common.GetTimestamp() {
+			baseChannel.ChannelInfo.SetMultiKeyCooldownUntilAt(index, until)
+		}
+	}
 
 	// 池子重新有可用凭据时，把**因全池失效而被自动停用**的渠道恢复过来。
 	//

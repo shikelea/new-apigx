@@ -31,6 +31,7 @@ beforeAll(() => {
     'share.keyPool': 'Key pool',
     'share.keyPool.description': 'Manage credentials.',
     'share.keyPool.failoverDescription': 'Fail over to the next key.',
+    'share.key.coolingUntil': 'Cooling until {{time}}',
     'share.keyPool.empty': 'No upstream key yet',
     'share.key.batchAdd': 'Batch add keys',
     'share.key.batchAddDescription': 'One credential per line.',
@@ -39,6 +40,35 @@ beforeAll(() => {
     'share.key.weight': 'Weight',
     'share.key.savedApplyHint': 'Saved.',
   })
+})
+
+it('shows the temporary cooldown deadline for a key', () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <KeyPoolCard
+        channelId={42}
+        keys={[
+          {
+            id: 1,
+            stable_key_id: 'stable-a',
+            name: 'primary',
+            status: 1,
+            weight: 1,
+            cooldown_until: 4_102_444_800,
+            expires_at: 0,
+            credential_version: 1,
+            usable: false,
+            masked: 'sk-••••aaaa',
+          },
+        ]}
+      />
+    </QueryClientProvider>
+  )
+
+  expect(screen.getByText(/Cooling until/)).toBeInTheDocument()
 })
 
 afterEach(() => {
