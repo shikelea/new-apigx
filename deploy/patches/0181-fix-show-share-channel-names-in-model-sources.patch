@@ -1,0 +1,237 @@
+From 594c5c3f9608dda4156d643b0078249d23500169 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Tue, 22 Sep 2026 17:09:48 +0800
+Subject: [PATCH 181/181] fix: show share channel names in model sources
+
+---
+ apigx/api/share.go                            |  1 +
+ apigx/api/share_test.go                       |  2 +
+ apigx/model/repo_plaza.go                     |  6 +-
+ apigx/model/repo_plaza_identity_test.go       |  1 +
+ web/src/features/plaza/types.ts               |  3 +-
+ .../__tests__/model-details-sources.test.tsx  | 77 +++++++++++++++++++
+ .../components/model-details-sources.tsx      |  8 +-
+ 7 files changed, 93 insertions(+), 5 deletions(-)
+ create mode 100644 web/src/features/pricing/__tests__/model-details-sources.test.tsx
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 9b404c0..6520448 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -2344,6 +2344,7 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
+ 		"group_name":                  item.GroupName,
+ 		"model":                       item.UpstreamModelID,
+ 		"channel_public_id":           item.ChannelPublicID,
++		"channel_name":                item.ChannelName,
+ 		"owner_user_id":               item.OwnerUserID,
+ 		"owner_display_name":          item.OwnerDisplayName,
+ 		"access_kind":                 item.AccessKind,
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index d222aa0..31ddff2 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -1821,6 +1821,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 	assert.Equal(t, "m-plaza", item["model"])
+ 	assert.Equal(t, apigxmodel.PlazaAccessKindPublic, item["access_kind"])
+ 	assert.NotEmpty(t, item["channel_public_id"], "广场必须给出对外可辨识的来源标识")
++	assert.Equal(t, "主线路", item["channel_name"], "来源必须展示分享渠道名称，不能拿分组名冒充")
+ 
+ 	// **只启用已完成能力**：只声明了流式的供给，能力里就只有流式；
+ 	// vision/tools 属"声明了但平台尚不具备"，单独列出而不是混进 capabilities
+@@ -1838,6 +1839,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 	require.Equal(t, http.StatusOK, rec.Code)
+ 	detail, _ := body["data"].(map[string]any)
+ 	assert.Equal(t, "m-plaza", detail["model"])
++	assert.Equal(t, "主线路", detail["channel_name"])
+ 
+ 	// 私有分组：发布后只在所有者自己的“私有资源”范围出现
+ 	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: apigxmodel.ShareGroupPublishPublished}
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index cbf93e5..be89a3b 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -59,6 +59,7 @@ type PlazaItem struct {
+ 	OfferingPublicID string
+ 	UpstreamModelID  string
+ 	ChannelPublicID  string
++	ChannelName      string
+ 	OwnerUserID      int64
+ 	OwnerDisplayName string
+ 	// AccessKind 把资源稳定归入公开、自己的私有、别人分享给我三类。
+@@ -204,6 +205,7 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
+ 		PublicID            string
+ 		UpstreamModelID     string
+ 		ChannelPublicID     string
++		ChannelName         string
+ 		OwnerUserID         int64
+ 		GroupVisibility     int
+ 		Capabilities        string
+@@ -213,7 +215,7 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
+ 	}
+ 	var rows []row
+ 	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
+-		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
++		"c.public_id AS channel_public_id, c.name AS channel_name, c.owner_user_id AS owner_user_id, " +
+ 		"g.public_id AS group_public_id, g.name AS group_name, g.description AS group_description, g.default_visibility AS group_visibility, " +
+ 		"o.capabilities AS capabilities, o.updated_at AS updated_at, cm.api_model_id AS canonical_api_model_id, " +
+ 		"cm.description AS model_description").
+@@ -248,6 +250,7 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
+ 			CanonicalAPIModelID:      r.CanonicalAPIModelID,
+ 			ModelDescription:         r.ModelDescription,
+ 			ChannelPublicID:          r.ChannelPublicID,
++			ChannelName:              r.ChannelName,
+ 			GroupPublicID:            r.GroupPublicID,
+ 			GroupName:                r.GroupName,
+ 			GroupDescription:         r.GroupDescription,
+@@ -331,6 +334,7 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
+ 		CanonicalAPIModelID:      canonicalAPIModelID,
+ 		ModelDescription:         modelDescription,
+ 		ChannelPublicID:          channel.PublicID,
++		ChannelName:              channel.Name,
+ 		OwnerUserID:              channel.OwnerUserID,
+ 		AccessKind:               plazaAccessKind(viewerUserID, channel.OwnerUserID, group.DefaultVisibility),
+ 		GroupPublicID:            group.PublicID,
+diff --git a/apigx/model/repo_plaza_identity_test.go b/apigx/model/repo_plaza_identity_test.go
+index 47288b8..3cc5006 100644
+--- a/apigx/model/repo_plaza_identity_test.go
++++ b/apigx/model/repo_plaza_identity_test.go
+@@ -33,6 +33,7 @@ func TestPlazaKeepsOneSourcePerChannelAndCanonicalModel(t *testing.T) {
+ 	require.Len(t, items, 1)
+ 	assert.Equal(t, first.ID, items[0].OfferingID)
+ 	assert.Equal(t, canonical.APIModelID, items[0].CanonicalAPIModelID)
++	assert.Equal(t, channel.Name, items[0].ChannelName)
+ 
+ 	require.NoError(t, DeleteModelOffering(db, owner, first.ID))
+ 	items, total, err = ListPlazaItems(db, owner, 20, 0)
+diff --git a/web/src/features/plaza/types.ts b/web/src/features/plaza/types.ts
+index 9f403c6..49ee1ff 100644
+--- a/web/src/features/plaza/types.ts
++++ b/web/src/features/plaza/types.ts
+@@ -35,8 +35,9 @@ export interface PlazaOfferingItem {
+   group_name?: string
+   /** 分组介绍（不可信文本，按纯文本渲染） */
+   group_description?: string
+-  /** 分享渠道对外 ID */
++  /** 分享渠道对外 ID 与显示名称 */
+   channel_public_id: string
++  channel_name?: string
+   /** 分享者用户 ID */
+   owner_user_id: number
+   /** 分享者公开显示名 */
+diff --git a/web/src/features/pricing/__tests__/model-details-sources.test.tsx b/web/src/features/pricing/__tests__/model-details-sources.test.tsx
+new file mode 100644
+index 0000000..54da1e7
+--- /dev/null
++++ b/web/src/features/pricing/__tests__/model-details-sources.test.tsx
+@@ -0,0 +1,77 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
++import { render, screen } from '@testing-library/react'
++import { describe, expect, it, vi } from 'vitest'
++
++import { ModelDetailsSources } from '../components/model-details-sources'
++
++const useApigxModelSources = vi.hoisted(() => vi.fn())
++
++vi.mock('../hooks/use-apigx-model-sources', () => ({
++  useApigxModelSources,
++}))
++
++vi.mock('@/features/keys/api', () => ({
++  getApiKeys: vi.fn().mockResolvedValue({ data: { items: [] } }),
++  getPlatformKeyPreferences: vi.fn(),
++  setPlatformKeyPreferences: vi.fn(),
++}))
++
++vi.mock('@/features/plaza/api', () => ({
++  getRouteExplain: vi.fn().mockResolvedValue({ data: { candidates: [] } }),
++}))
++
++describe('model details source identity', () => {
++  it('uses the channel name as the source title and places the sharer below it', async () => {
++    useApigxModelSources.mockReturnValue({
++      items: [
++        {
++          offering_public_id: 'offering-1',
++          model: 'shared-model',
++          group_name: '公益分组',
++          channel_public_id: 'channel-1',
++          channel_name: '公益线路',
++          owner_user_id: 1,
++          owner_display_name: '冰祈',
++          access_kind: 'public',
++          updated_at: 1,
++          insufficient: true,
++        },
++      ],
++    })
++    const queryClient = new QueryClient({
++      defaultOptions: { queries: { retry: false } },
++    })
++
++    render(
++      <QueryClientProvider client={queryClient}>
++        <ModelDetailsSources modelName='shared-model' />
++      </QueryClientProvider>
++    )
++
++    const channelName = await screen.findByText('公益线路')
++    const sharer = screen.getByText('identity.sharer: 冰祈')
++    expect(
++      channelName.compareDocumentPosition(sharer) &
++        Node.DOCUMENT_POSITION_FOLLOWING
++    ).toBeTruthy()
++    expect(screen.queryByText(/公益分组/)).not.toBeInTheDocument()
++  })
++})
+diff --git a/web/src/features/pricing/components/model-details-sources.tsx b/web/src/features/pricing/components/model-details-sources.tsx
+index 3edfe73..e7ea0b4 100644
+--- a/web/src/features/pricing/components/model-details-sources.tsx
++++ b/web/src/features/pricing/components/model-details-sources.tsx
+@@ -264,6 +264,8 @@ function SourceCard(props: {
+   const sourceName =
+     props.source.owner_display_name ||
+     t('Provider {{id}}', { id: props.source.owner_user_id })
++  const channelName =
++    props.source.channel_name?.trim() || props.source.channel_public_id
+   return (
+     <label
+       className={`cursor-pointer rounded-xl border p-4 transition-colors ${
+@@ -273,14 +275,14 @@ function SourceCard(props: {
+       <div className='flex items-start gap-3'>
+         <RadioGroupItem
+           value={props.source.offering_public_id}
+-          aria-label={sourceName}
++          aria-label={channelName}
+         />
+         <div className='min-w-0 flex-1 space-y-3'>
+           <div className='flex flex-wrap items-start justify-between gap-2'>
+             <div>
+-              <div className='font-medium'>{sourceName}</div>
++              <div className='font-medium'>{channelName}</div>
+               <span className='text-muted-foreground text-xs'>
+-                {t('Share name')}: {props.source.group_name || '—'}
++                {t('identity.sharer')}: {sourceName}
+               </span>
+             </div>
+             {props.explanation?.selected ? (
+-- 
+2.53.0.windows.1
+
