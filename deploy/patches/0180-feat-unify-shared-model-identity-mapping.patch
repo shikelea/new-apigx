@@ -1,0 +1,4325 @@
+From ba64967b93deb306a6929bb2f5b096ba271d0b53 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Tue, 22 Sep 2026 13:58:51 +0800
+Subject: [PATCH 180/180] feat: unify shared model identity mapping
+
+---
+ apigx/api/share.go                            | 417 +++++++++++-----
+ apigx/api/share_test.go                       | 282 ++++++++---
+ apigx/model/migrate_matrix_test.go            |   1 +
+ apigx/model/repo_breaker_probe_test.go        |  10 +-
+ apigx/model/repo_catalog.go                   | 467 ++++++++++++++++--
+ apigx/model/repo_catalog_test.go              | 115 +++++
+ apigx/model/repo_offering.go                  | 161 ++++--
+ apigx/model/repo_plaza.go                     |  66 +--
+ apigx/model/repo_plaza_identity_test.go       |  43 ++
+ apigx/model/repo_test.go                      |  16 +
+ apigx/qualityhook/quality.go                  |   3 +
+ apigx/qualityhook/quality_test.go             |   2 +
+ apigx/relayhook/breaker_guard_test.go         |   5 +
+ apigx/route/route.go                          |  10 +
+ service/billing_session_quality_test.go       |  17 +-
+ .../__tests__/responsive-operations.test.tsx  |  18 +-
+ web/src/features/apigx-platform/api.ts        |   6 +
+ .../components/alias-candidates-card.tsx      | 215 ++++----
+ .../components/alias-confirm-dialog.tsx       | 198 ++++++--
+ web/src/features/apigx-platform/index.tsx     |  38 +-
+ web/src/features/apigx-platform/types.ts      |  22 +
+ web/src/features/models/index.tsx             |  12 +-
+ web/src/features/models/section-registry.tsx  |   5 +
+ web/src/features/models/types.ts              |   6 +-
+ .../pricing/__tests__/apigx-sources.test.ts   |  83 +++-
+ .../components/model-details-sources.tsx      |   9 +-
+ web/src/features/pricing/lib/apigx-sources.ts |  65 ++-
+ web/src/features/share/api.ts                 |  21 +-
+ .../share/components/channel-detail.tsx       |  92 +++-
+ .../share/components/model-mapping-dialog.tsx | 156 ++++++
+ web/src/features/share/types.ts               |  16 +
+ web/src/i18n/locales/en.json                  |  53 +-
+ web/src/i18n/locales/fr.json                  |  53 +-
+ web/src/i18n/locales/ja.json                  |  53 +-
+ web/src/i18n/locales/ru.json                  |  53 +-
+ web/src/i18n/locales/vi.json                  |  53 +-
+ web/src/i18n/locales/zh-TW.json               |  53 +-
+ web/src/i18n/locales/zh.json                  |  53 +-
+ 38 files changed, 2467 insertions(+), 481 deletions(-)
+ create mode 100644 apigx/model/repo_plaza_identity_test.go
+ create mode 100644 web/src/features/share/components/model-mapping-dialog.tsx
+
+diff --git a/apigx/api/share.go b/apigx/api/share.go
+index 7c3fa0e..9b404c0 100644
+--- a/apigx/api/share.go
++++ b/apigx/api/share.go
+@@ -81,6 +81,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	offerings := r.Group("/offerings")
+ 	{
+ 		offerings.PATCH("/:id/capabilities", h.updateOfferingCapabilities)
++		offerings.PUT("/:id/model-mapping", h.setOfferingModelMapping)
+ 		offerings.PUT("/:id/manual-price", h.setOfferingManualPrice)
+ 		offerings.POST("/:id/submit", h.submitOffering)
+ 		offerings.POST("/:id/publish", h.publishOffering)
+@@ -133,6 +134,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
+ 	// 全部是**平台侧**动作（确认映射会影响对外标准 ID 与价格匹配，不能由分享者自行决定）。
+ 	catalog := r.Group("/model-catalog")
+ 	{
++		catalog.GET("/models", h.listCanonicalModels)
+ 		catalog.GET("/candidates", h.listAliasCandidates)
+ 		catalog.POST("/candidates/:id/confirm", h.confirmAliasCandidate)
+ 		catalog.POST("/candidates/:id/reject", h.rejectAliasCandidate)
+@@ -1488,9 +1490,6 @@ func (h *handler) createOffering(c *gin.Context) {
+ 		ChannelID:       channelID,
+ 		UpstreamModelID: strings.TrimSpace(req.UpstreamModelID),
+ 	}
+-	if req.CanonicalModelID != nil {
+-		offering.CanonicalModelID = *req.CanonicalModelID
+-	}
+ 	if req.Capabilities != nil {
+ 		encoded, encErr := common.Marshal(*req.Capabilities)
+ 		if encErr != nil {
+@@ -1499,7 +1498,17 @@ func (h *handler) createOffering(c *gin.Context) {
+ 		}
+ 		offering.Capabilities = string(encoded)
+ 	}
+-	if err := apigxmodel.CreateModelOffering(h.db, owner, offering); err != nil {
++	err := h.db.Transaction(func(tx *gorm.DB) error {
++		if err := apigxmodel.CreateModelOffering(tx, owner, offering); err != nil {
++			return err
++		}
++		if req.CanonicalModelID != nil {
++			_, err := apigxmodel.SetOfferingAliasProposal(tx, owner, offering.ID, *req.CanonicalModelID)
++			return err
++		}
++		return nil
++	})
++	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
+@@ -1531,12 +1540,48 @@ func (h *handler) listOfferings(c *gin.Context) {
+ 			"upstream_model_id": item.UpstreamModelID,
+ 			"status":            item.Status, "revision": item.Revision,
+ 			"capabilities": item.CapabilityOf(), "price_rule_id": item.PriceRuleID,
+-			"price_configured": h.offeringHasAcceptedPrice(item.ID),
++			"price_configured":   h.offeringHasAcceptedPrice(item.ID),
++			"canonical_model_id": item.CanonicalModelID,
+ 		})
++		proposal, exists, proposalErr := apigxmodel.GetOfferingAliasProposal(h.db, item.ID)
++		if item.CanonicalModelID > 0 {
++			items[len(items)-1]["mapping_state"] = apigxmodel.AliasConfirmApproved
++			items[len(items)-1]["suggested_canonical_model_id"] = item.CanonicalModelID
++		} else if proposalErr == nil && exists {
++			items[len(items)-1]["mapping_state"] = proposal.ConfirmationState
++			items[len(items)-1]["suggested_canonical_model_id"] = proposal.TargetCanonicalModelID
++		} else {
++			items[len(items)-1]["mapping_state"] = apigxmodel.AliasConfirmPending
++		}
+ 	}
+ 	ok(c, gin.H{"items": items})
+ }
+ 
++func (h *handler) setOfferingModelMapping(c *gin.Context) {
++	owner, valid := h.ownerID(c)
++	if !valid {
++		return
++	}
++	id, valid := paramID(c, "id")
++	if !valid {
++		return
++	}
++	var req struct {
++		TargetCanonicalModelID int64 `json:"target_canonical_model_id"`
++	}
++	if err := c.ShouldBindJSON(&req); err != nil || req.TargetCanonicalModelID < 0 {
++		fail(c, http.StatusBadRequest, "invalid_body", "target_canonical_model_id must be zero or a positive number")
++		return
++	}
++	proposal, err := apigxmodel.SetOfferingAliasProposal(h.db, owner, id, req.TargetCanonicalModelID)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	ok(c, gin.H{"id": id, "mapping_state": proposal.ConfirmationState,
++		"suggested_canonical_model_id": proposal.TargetCanonicalModelID})
++}
++
+ type updateCapabilitiesRequest struct {
+ 	Capabilities *apigxmodel.Capability `json:"capabilities"`
+ }
+@@ -1839,7 +1884,9 @@ func (h *handler) listOfferingsForReview(c *gin.Context) {
+ 			"share_group_name": item.ShareGroupName, "group_visibility": item.GroupVisibility,
+ 			"channel_id": item.ChannelID, "channel_public_id": item.ChannelPublicID, "channel_name": item.ChannelName,
+ 			"upstream_model_id": item.UpstreamModelID, "capabilities": caps,
+-			"status": item.Status, "revision": item.Revision,
++			"canonical_model_id": item.CanonicalModelID, "canonical_api_model_id": item.CanonicalAPIModelID,
++			"mapping_confirmed": item.CanonicalModelID > 0,
++			"status":            item.Status, "revision": item.Revision,
+ 			"price_configured": h.offeringHasAcceptedPrice(item.OfferingID),
+ 			"created_at":       item.CreatedAt, "updated_at": item.UpdatedAt,
+ 		})
+@@ -1868,6 +1915,16 @@ func (h *handler) publishOffering(c *gin.Context) {
+ 			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
+ 		return
+ 	}
++	var identity apigxmodel.ModelOffering
++	if err := h.db.Select("id", "canonical_model_id").Where("id = ?", id).First(&identity).Error; err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	if identity.CanonicalModelID <= 0 {
++		fail(c, http.StatusBadRequest, "model_identity_not_confirmed",
++			"该模型的标准身份尚未确认；请先在模型管理中确认映射，再发布资源")
++		return
++	}
+ 	var reviewed *apigxmodel.OfferingReviewResult
+ 	err := h.db.Transaction(func(tx *gorm.DB) error {
+ 		var reviewErr error
+@@ -2131,38 +2188,17 @@ func (h *handler) loadOrRepairBaseChannel(shareChannel *apigxmodel.Channel) (*ba
+ 		}
+ 
+ 		var published []apigxmodel.ModelOffering
+-		if txErr := tx.Where("channel_id = ? AND status = ?", current.ID, apigxmodel.OfferingStatusPublished).
++		if txErr := tx.Where("channel_id = ? AND status = ? AND alive_flag = ?", current.ID,
++			apigxmodel.OfferingStatusPublished, apigxmodel.AliveFlagAlive).
+ 			Order("id ASC").Find(&published).Error; txErr != nil {
+ 			return txErr
+ 		}
+-		modelIDs := make([]string, 0, len(published))
+ 		offeringIDs := make([]int64, 0, len(published))
+-		seen := make(map[string]struct{}, len(published))
+ 		for i := range published {
+ 			offeringIDs = append(offeringIDs, published[i].ID)
+-			modelID := strings.TrimSpace(published[i].UpstreamModelID)
+-			if modelID == "" {
+-				continue
+-			}
+-			if _, exists := seen[modelID]; exists {
+-				continue
+-			}
+-			seen[modelID] = struct{}{}
+-			modelIDs = append(modelIDs, modelID)
+-		}
+-		if len(modelIDs) > 0 {
+-			joined := strings.Join(modelIDs, ",")
+-			if txErr := tx.Model(&basemodel.Channel{}).Where("id = ?", repairedBaseID).
+-				Update("models", joined).Error; txErr != nil {
+-				return txErr
+-			}
+-			var repaired basemodel.Channel
+-			if txErr := tx.Where("id = ?", repairedBaseID).First(&repaired).Error; txErr != nil {
+-				return txErr
+-			}
+-			if txErr := repaired.AddAbilities(tx); txErr != nil {
+-				return txErr
+-			}
++		}
++		if txErr := syncBaseChannelModelProjection(tx, current.ID); txErr != nil {
++			return txErr
+ 		}
+ 		if len(offeringIDs) > 0 {
+ 			return tx.Model(&apigxmodel.BreakerProbeState{}).
+@@ -2314,6 +2350,9 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
+ 		"capabilities":                item.Capabilities,
+ 		"updated_at":                  item.UpdatedAt,
+ 	}
++	if item.CanonicalAPIModelID != "" {
++		out["model"] = item.CanonicalAPIModelID
++	}
+ 	if item.OutputTokensPerSecond > 0 {
+ 		out["output_tokens_per_second"] = item.OutputTokensPerSecond
+ 	}
+@@ -2843,11 +2882,11 @@ func (h *handler) listAliasCandidates(c *gin.Context) {
+ 	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
+ 		return
+ 	}
+-	state := 0
++	state := -1
+ 	if raw := c.Query("state"); raw != "" {
+ 		parsed, err := strconv.Atoi(raw)
+-		if err != nil || parsed < 0 || parsed > 2 {
+-			fail(c, http.StatusBadRequest, "invalid_query", "state must be 0..2")
++		if err != nil || parsed < -1 || parsed > 2 {
++			fail(c, http.StatusBadRequest, "invalid_query", "state must be -1..2")
+ 			return
+ 		}
+ 		state = parsed
+@@ -2874,27 +2913,46 @@ func (h *handler) listAliasCandidates(c *gin.Context) {
+ 			"id": row.ID, "external_model_id": row.ExternalModelID, "normalized_model_id": row.NormalizedModelID,
+ 			"scope_type": row.ScopeType, "scope_id": row.ScopeID, "source": row.Source, "source_ref": row.SourceRef,
+ 			"confirmation_state": row.ConfirmationState, "target_canonical_model_id": row.TargetCanonicalID,
++			"target_api_model_id": row.TargetAPIModelID,
++			"offering_id":         row.OfferingID, "offering_public_id": row.OfferingPublicID,
++			"offering_status": row.OfferingStatus, "owner_user_id": row.OwnerUserID,
++			"share_group_name": row.ShareGroupName, "channel_name": row.ChannelName,
+ 		})
+ 	}
+ 	ok(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
+ }
+ 
++func (h *handler) listCanonicalModels(c *gin.Context) {
++	if _, valid := h.ownerID(c); !valid {
++		return
++	}
++	models, err := apigxmodel.ListCanonicalModelOptions(h.db, 1000)
++	if err != nil {
++		failFromRepo(c, err)
++		return
++	}
++	items := make([]gin.H, 0, len(models))
++	for _, model := range models {
++		items = append(items, gin.H{"id": model.ID, "api_model_id": model.APIModelID,
++			"description": model.Description, "modality_type": model.ModalityType})
++	}
++	ok(c, gin.H{"items": items})
++}
++
+ // resolveConfirmTarget 从请求里取"确认到哪个标准模型"：既支持给现成的 ID，也支持给对外标准 ID
+ // （后者不存在时**顺手创建** —— 否则管理员要先绕去别处建模型，这一步就会被跳过，候选永远堆着）。
+-func (h *handler) resolveConfirmTarget(c *gin.Context, apiModelID string, canonicalID int64, description string, modalityType int) (int64, bool) {
++func resolveConfirmTarget(db *gorm.DB, apiModelID string, canonicalID int64, description string, modalityType int) (int64, error) {
+ 	if canonicalID > 0 {
+-		return canonicalID, true
++		return canonicalID, nil
+ 	}
+ 	if strings.TrimSpace(apiModelID) == "" {
+-		fail(c, http.StatusBadRequest, "invalid_body", "api_model_id or target_canonical_model_id is required")
+-		return 0, false
++		return 0, fmt.Errorf("%w: api_model_id or target_canonical_model_id is required", apigxmodel.ErrInvalidArgument)
+ 	}
+-	model, err := apigxmodel.EnsureCanonicalModel(h.db, apiModelID, description, modalityType)
++	model, err := apigxmodel.EnsureCanonicalModel(db, apiModelID, description, modalityType)
+ 	if err != nil {
+-		failFromRepo(c, err)
+-		return 0, false
++		return 0, err
+ 	}
+-	return model.ID, true
++	return model.ID, nil
+ }
+ 
+ // confirmAliasCandidate 确认一个候选（平台侧）。
+@@ -2917,15 +2975,35 @@ func (h *handler) confirmAliasCandidate(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+ 		return
+ 	}
+-	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
+-	if !okTarget {
+-		return
+-	}
+-	if err := apigxmodel.ConfirmAliasCandidate(h.db, id, target, owner); err != nil {
++	var target int64
++	var result *apigxmodel.AliasConfirmationResult
++	err := h.db.Transaction(func(tx *gorm.DB) error {
++		var targetErr error
++		target, targetErr = resolveConfirmTarget(tx, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
++		if targetErr != nil {
++			return targetErr
++		}
++		result, targetErr = apigxmodel.ConfirmAliasCandidate(tx, id, target, owner)
++		if targetErr != nil {
++			return targetErr
++		}
++		for _, channelID := range result.AffectedChannelIDs {
++			if targetErr = syncBaseChannelModelProjection(tx, channelID); targetErr != nil {
++				return targetErr
++			}
++		}
++		return nil
++	})
++	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
+-	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": target})
++	if len(result.AffectedChannelIDs) > 0 && basemodel.DB != nil {
++		basemodel.InitChannelCache()
++	}
++	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmApproved,
++		"target_canonical_model_id": target, "migrated_offerings": result.MigratedOfferings,
++		"affected_channels": len(result.AffectedChannelIDs)})
+ }
+ 
+ // rejectAliasCandidate 拒绝一个候选（平台侧）。
+@@ -2966,16 +3044,34 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
+ 		fail(c, http.StatusBadRequest, "invalid_body", "normalized_model_id is required")
+ 		return
+ 	}
+-	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
+-	if !okTarget {
+-		return
+-	}
+-	affected, err := apigxmodel.BulkConfirmAliases(h.db, req.NormalizedModelID, target, owner)
++	var target int64
++	var result *apigxmodel.AliasConfirmationResult
++	err := h.db.Transaction(func(tx *gorm.DB) error {
++		var targetErr error
++		target, targetErr = resolveConfirmTarget(tx, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
++		if targetErr != nil {
++			return targetErr
++		}
++		result, targetErr = apigxmodel.BulkConfirmAliases(tx, req.NormalizedModelID, target, owner)
++		if targetErr != nil {
++			return targetErr
++		}
++		for _, channelID := range result.AffectedChannelIDs {
++			if targetErr = syncBaseChannelModelProjection(tx, channelID); targetErr != nil {
++				return targetErr
++			}
++		}
++		return nil
++	})
+ 	if err != nil {
+ 		failFromRepo(c, err)
+ 		return
+ 	}
+-	ok(c, gin.H{"confirmed": affected, "target_canonical_model_id": target})
++	if len(result.AffectedChannelIDs) > 0 && basemodel.DB != nil {
++		basemodel.InitChannelCache()
++	}
++	ok(c, gin.H{"confirmed": result.MigratedOfferings, "target_canonical_model_id": target,
++		"affected_channels": len(result.AffectedChannelIDs)})
+ }
+ 
+ // provisionBaseChannelForShareChannel 为"分享者自建渠道"代建一条**底座渠道**并绑定。
+@@ -3264,14 +3360,9 @@ func parseOwnerUsageInt(c *gin.Context, name string, fallback int) (int, bool) {
+ 	return parsed, true
+ }
+ 
+-// syncBaseChannelServesModel 让"绑定到该供给所属分享渠道"的底座渠道真正能服务该模型。
+-//
+-// 背景（实测发现的产品缺陷）：U-1 的「分享者自建渠道」由平台**直接插入**底座 channels 行，
+-// 因此**绕过了底座的建能力步骤**（底座在建/改渠道后会调用 Channel.AddAbilities）。
+-// 结果：这类渠道 models 为空、abilities 为 0，底座分配器对该模型永远返回 model_not_found。
+-//
+-// 修法（与底座自己的姿势一致）：把该模型并入底座渠道的 models，然后重建能力。
+-// 只动 models 与能力，不触碰上游地址与凭据。
++// syncBaseChannelServesModel rebuilds the complete APIGX model projection for
++// the offering's share channel. The public model list uses confirmed standard
++// IDs while model_mapping translates each standard ID to the upstream ID.
+ func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
+ 	if db == nil {
+ 		return errors.New("apigx api: nil db")
+@@ -3280,42 +3371,7 @@ func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
+ 	if err := db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
+ 		return err
+ 	}
+-	var shareChannel apigxmodel.Channel
+-	if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
+-		return err
+-	}
+-	if shareChannel.BaseChannelID <= 0 || offering.UpstreamModelID == "" {
+-		return nil
+-	}
+-
+-	var base basemodel.Channel
+-	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
+-		return err
+-	}
+-
+-	models := strings.Split(base.Models, ",")
+-	exists := false
+-	for _, m := range models {
+-		if strings.TrimSpace(m) == offering.UpstreamModelID {
+-			exists = true
+-			break
+-		}
+-	}
+-	if !exists {
+-		merged := append(models, offering.UpstreamModelID)
+-		joined := strings.Join(merged, ",")
+-		if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
+-			Update("models", joined).Error; err != nil {
+-			return err
+-		}
+-		base.Models = joined
+-	}
+-
+-	// 重建能力（底座建渠道后的同一姿势）
+-	if err := base.AddAbilities(db); err != nil {
+-		return err
+-	}
+-	return nil
++	return syncBaseChannelModelProjection(db, offering.ChannelID)
+ }
+ 
+ // syncBaseChannelStopsModel removes a deleted offering from the backing New API
+@@ -3323,22 +3379,23 @@ func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
+ // while new requests lose both the APIGX candidate and the base ability in the
+ // same transaction as the soft delete.
+ func syncBaseChannelStopsModel(db *gorm.DB, offering *apigxmodel.ModelOffering) error {
+-	if db == nil || offering == nil || offering.ChannelID <= 0 || offering.UpstreamModelID == "" {
++	if db == nil || offering == nil || offering.ChannelID <= 0 {
+ 		return nil
+ 	}
+-	var remaining int64
+-	if err := db.Model(&apigxmodel.ModelOffering{}).
+-		Where("channel_id = ? AND upstream_model_id = ? AND status = ? AND alive_flag = ?",
+-			offering.ChannelID, offering.UpstreamModelID, apigxmodel.OfferingStatusPublished, apigxmodel.AliveFlagAlive).
+-		Count(&remaining).Error; err != nil {
+-		return err
+-	}
+-	if remaining > 0 {
++	return syncBaseChannelModelProjection(db, offering.ChannelID)
++}
++
++// syncBaseChannelModelProjection is the single writer for the model-facing
++// portion of a backing New API channel. Managed channels are rebuilt in full.
++// Administrator-owned bound channels retain models and mappings that do not
++// belong to any APIGX offering on this share channel.
++func syncBaseChannelModelProjection(db *gorm.DB, shareChannelID int64) error {
++	if db == nil || shareChannelID <= 0 {
+ 		return nil
+ 	}
+-
+ 	var shareChannel apigxmodel.Channel
+-	if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
++	if err := db.Where("id = ? AND alive_flag = ?", shareChannelID, apigxmodel.AliveFlagAlive).
++		First(&shareChannel).Error; err != nil {
+ 		if errors.Is(err, gorm.ErrRecordNotFound) {
+ 			return nil
+ 		}
+@@ -3354,17 +3411,141 @@ func syncBaseChannelStopsModel(db *gorm.DB, offering *apigxmodel.ModelOffering)
+ 		}
+ 		return err
+ 	}
+-	kept := make([]string, 0)
+-	for _, modelID := range strings.Split(base.Models, ",") {
+-		modelID = strings.TrimSpace(modelID)
+-		if modelID != "" && modelID != offering.UpstreamModelID {
+-			kept = append(kept, modelID)
++
++	var allOfferings []apigxmodel.ModelOffering
++	if err := db.Unscoped().Where("channel_id = ?", shareChannel.ID).Order("id ASC").Find(&allOfferings).Error; err != nil {
++		return err
++	}
++	canonicalIDs := make([]int64, 0, len(allOfferings))
++	canonicalSeen := make(map[int64]struct{}, len(allOfferings))
++	for i := range allOfferings {
++		if allOfferings[i].CanonicalModelID <= 0 {
++			continue
++		}
++		if _, exists := canonicalSeen[allOfferings[i].CanonicalModelID]; exists {
++			continue
++		}
++		canonicalSeen[allOfferings[i].CanonicalModelID] = struct{}{}
++		canonicalIDs = append(canonicalIDs, allOfferings[i].CanonicalModelID)
++	}
++	canonicalByID := make(map[int64]apigxmodel.CanonicalModel, len(canonicalIDs))
++	if len(canonicalIDs) > 0 {
++		var canonicals []apigxmodel.CanonicalModel
++		if err := db.Where("id IN ?", canonicalIDs).Find(&canonicals).Error; err != nil {
++			return err
++		}
++		for i := range canonicals {
++			canonicalByID[canonicals[i].ID] = canonicals[i]
++		}
++	}
++
++	knownModelIDs := make(map[string]struct{}, len(allOfferings)*2)
++	for i := range allOfferings {
++		if upstream := strings.TrimSpace(allOfferings[i].UpstreamModelID); upstream != "" {
++			knownModelIDs[upstream] = struct{}{}
++		}
++		if canonical := canonicalByID[allOfferings[i].CanonicalModelID]; strings.TrimSpace(canonical.APIModelID) != "" {
++			knownModelIDs[strings.TrimSpace(canonical.APIModelID)] = struct{}{}
++		}
++	}
++
++	managed := base.Tag != nil && *base.Tag == channelpool.ManagedBaseChannelTag
++	if !managed {
++		managed = base.Name == "APIGX-"+strings.TrimSpace(shareChannel.Name) && base.Group == "default"
++	}
++	models := make([]string, 0)
++	modelSeen := make(map[string]struct{})
++	modelMapping := make(map[string]string)
++	if !managed {
++		for _, modelID := range strings.Split(base.Models, ",") {
++			modelID = strings.TrimSpace(modelID)
++			if modelID == "" {
++				continue
++			}
++			if _, ours := knownModelIDs[modelID]; ours {
++				continue
++			}
++			if _, duplicate := modelSeen[modelID]; duplicate {
++				continue
++			}
++			modelSeen[modelID] = struct{}{}
++			models = append(models, modelID)
++		}
++		rawMapping := strings.TrimSpace(base.GetModelMapping())
++		if rawMapping != "" && rawMapping != "{}" {
++			if err := common.UnmarshalJsonStr(rawMapping, &modelMapping); err != nil {
++				return fmt.Errorf("apigx api: invalid backing channel model mapping: %w", err)
++			}
++		}
++		for source, target := range modelMapping {
++			_, sourceOwned := knownModelIDs[strings.TrimSpace(source)]
++			_, targetOwned := knownModelIDs[strings.TrimSpace(target)]
++			if sourceOwned || targetOwned {
++				delete(modelMapping, source)
++			}
++		}
++	}
++
++	// Lowest offering ID is the stable representative if one channel published
++	// multiple upstream aliases for the same standard model.
++	for i := range allOfferings {
++		offering := &allOfferings[i]
++		if offering.AliveFlag != apigxmodel.AliveFlagAlive || offering.Status != apigxmodel.OfferingStatusPublished ||
++			!offering.DeletedAt.Time.IsZero() {
++			continue
+ 		}
++		upstreamID := strings.TrimSpace(offering.UpstreamModelID)
++		publicID := upstreamID
++		if canonical := canonicalByID[offering.CanonicalModelID]; canonical.Status == 1 && strings.TrimSpace(canonical.APIModelID) != "" {
++			publicID = strings.TrimSpace(canonical.APIModelID)
++		}
++		if publicID == "" {
++			continue
++		}
++		if _, duplicate := modelSeen[publicID]; duplicate {
++			continue
++		}
++		modelSeen[publicID] = struct{}{}
++		models = append(models, publicID)
++		if upstreamID != "" && upstreamID != publicID {
++			modelMapping[publicID] = upstreamID
++		}
++	}
++
++	encoded, err := common.Marshal(modelMapping)
++	if err != nil {
++		return err
+ 	}
++	mappingJSON := string(encoded)
++	base.Models = strings.Join(models, ",")
++	base.ModelMapping = &mappingJSON
+ 	if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
+-		Update("models", strings.Join(kept, ",")).Error; err != nil {
++		Updates(map[string]any{"models": base.Models, "model_mapping": mappingJSON}).Error; err != nil {
+ 		return err
+ 	}
+-	return db.Where("channel_id = ? AND model = ?", base.Id, offering.UpstreamModelID).
+-		Delete(&basemodel.Ability{}).Error
++	return base.UpdateAbilities(db)
++}
++
++// ReconcileBaseChannelModelProjections upgrades historical backing channels
++// after offering identities have been backfilled. It is safe to run at every
++// startup and does not touch credentials, addresses or administrator-owned
++// models outside the APIGX projection.
++func ReconcileBaseChannelModelProjections(db *gorm.DB) (int, error) {
++	if db == nil {
++		return 0, errors.New("apigx api: nil db")
++	}
++	var channels []apigxmodel.Channel
++	if err := db.Where("alive_flag = ? AND base_channel_id > 0", apigxmodel.AliveFlagAlive).
++		Order("id ASC").Find(&channels).Error; err != nil {
++		return 0, err
++	}
++	for i := range channels {
++		if err := syncBaseChannelModelProjection(db, channels[i].ID); err != nil {
++			return i, err
++		}
++	}
++	if len(channels) > 0 && basemodel.DB != nil {
++		basemodel.InitChannelCache()
++	}
++	return len(channels), nil
+ }
+diff --git a/apigx/api/share_test.go b/apigx/api/share_test.go
+index 28e15b7..d222aa0 100644
+--- a/apigx/api/share_test.go
++++ b/apigx/api/share_test.go
+@@ -785,7 +785,7 @@ func TestDeleteShareGroupCascadesManagedChannels(t *testing.T) {
+ 	require.Condition(t, func() bool {
+ 		for _, raw := range items {
+ 			item, _ := raw.(map[string]any)
+-			if item["model"] == publishedModel {
++			if item["model"] == "canonical-"+publishedModel {
+ 				return true
+ 			}
+ 		}
+@@ -875,6 +875,7 @@ func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, re
+ 	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", reviewer,
+ 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	canonical := confirmTestOfferingIdentity(t, env.db, offeringID, reviewer, "canonical-"+modelID)
+ 
+ 	callbackName := "b3:fail_ability_projection:" + env.db.Dialector.Name()
+ 	require.NoError(t, env.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+@@ -898,10 +899,10 @@ func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, re
+ 	require.NoError(t, err)
+ 	var base basemodel.Channel
+ 	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
+-	assert.NotContains(t, base.Models, modelID)
++	assert.NotContains(t, base.Models, canonical.APIModelID)
+ 	var abilityCount int64
+ 	require.NoError(t, env.db.Model(&basemodel.Ability{}).
+-		Where("channel_id = ? AND model = ?", shareChannel.BaseChannelID, modelID).Count(&abilityCount).Error)
++		Where("channel_id = ? AND model = ?", shareChannel.BaseChannelID, canonical.APIModelID).Count(&abilityCount).Error)
+ 	assert.Zero(t, abilityCount)
+ 
+ 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish",
+@@ -910,12 +911,106 @@ func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, re
+ 	require.NoError(t, env.db.Where("id = ?", offeringID).First(&offering).Error)
+ 	assert.Equal(t, apigxmodel.OfferingStatusPublished, offering.Status)
+ 	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
+-	assert.Contains(t, base.Models, modelID)
++	assert.Contains(t, base.Models, canonical.APIModelID)
++	var mapping map[string]string
++	require.NotNil(t, base.ModelMapping)
++	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
++	assert.Equal(t, modelID, mapping[canonical.APIModelID])
+ 	require.NoError(t, env.db.Model(&basemodel.Ability{}).
+-		Where("channel_id = ? AND model = ? AND enabled = ?", shareChannel.BaseChannelID, modelID, true).Count(&abilityCount).Error)
++		Where("channel_id = ? AND model = ? AND enabled = ?", shareChannel.BaseChannelID, canonical.APIModelID, true).Count(&abilityCount).Error)
+ 	assert.EqualValues(t, 1, abilityCount)
+ }
+ 
++func TestBaseChannelProjectionUsesOneStableAliasPerCanonicalModel(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 9820001
++	groupID := env.createGroup(t, owner, "标准模型投影组")
++	baseID := nextBaseChannelID()
++	managedTag := channelpool.ManagedBaseChannelTag
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseID), Name: "APIGX-标准模型投影", Group: "default", Key: "fixture-key",
++		Status: common.ChannelStatusEnabled, Tag: &managedTag,
++	}).Error)
++	channelID := env.createChannel(t, owner, groupID, baseID)
++	canonical, err := apigxmodel.EnsureCanonicalModel(env.db, "standard-shared-model", "", apigxmodel.ModalityChat)
++	require.NoError(t, err)
++
++	publishAlias := func(upstream string) *apigxmodel.ModelOffering {
++		offering := &apigxmodel.ModelOffering{ChannelID: channelID, UpstreamModelID: upstream}
++		require.NoError(t, apigxmodel.CreateModelOffering(env.db, owner, offering))
++		require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offering.ID))
++		proposal, exists, proposalErr := apigxmodel.GetOfferingAliasProposal(env.db, offering.ID)
++		require.NoError(t, proposalErr)
++		require.True(t, exists)
++		_, confirmErr := apigxmodel.ConfirmAliasCandidate(env.db, proposal.ID, canonical.ID, owner)
++		require.NoError(t, confirmErr)
++		require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offering.ID))
++		return offering
++	}
++
++	first := publishAlias("vendor-model-a")
++	second := publishAlias("vendor-model-b")
++	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
++
++	var base basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
++	assert.Equal(t, "standard-shared-model", base.Models)
++	var mapping map[string]string
++	require.NotNil(t, base.ModelMapping)
++	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
++	assert.Equal(t, first.UpstreamModelID, mapping[canonical.APIModelID], "最低供给 ID 是稳定代表")
++	var abilityCount int64
++	require.NoError(t, env.db.Model(&basemodel.Ability{}).
++		Where("channel_id = ? AND model = ? AND enabled = ?", baseID, canonical.APIModelID, true).
++		Count(&abilityCount).Error)
++	assert.EqualValues(t, 1, abilityCount)
++
++	// 删除稳定代表后，同渠道的下一个别名自动接管真实上游映射。
++	require.NoError(t, apigxmodel.DeleteModelOffering(env.db, owner, first.ID))
++	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
++	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
++	require.NotNil(t, base.ModelMapping)
++	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
++	assert.Equal(t, second.UpstreamModelID, mapping[canonical.APIModelID])
++}
++
++func TestBoundBaseChannelProjectionPreservesAdministratorModels(t *testing.T) {
++	env := newTestEnv(t, true)
++	const owner int64 = 9820002
++	groupID := env.createGroup(t, owner, "绑定渠道投影组")
++	baseID := nextBaseChannelID()
++	adminMapping := `{"admin-public":"admin-upstream"}`
++	require.NoError(t, env.db.Create(&basemodel.Channel{
++		Id: int(baseID), Name: "管理员原有渠道", Group: "default", Key: "fixture-key",
++		Status: common.ChannelStatusEnabled, Models: "admin-native", ModelMapping: &adminMapping,
++	}).Error)
++	channelID := env.createChannel(t, owner, groupID, baseID)
++	offering := &apigxmodel.ModelOffering{ChannelID: channelID, UpstreamModelID: "vendor-upstream"}
++	require.NoError(t, apigxmodel.CreateModelOffering(env.db, owner, offering))
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offering.ID))
++	canonical := confirmTestOfferingIdentity(t, env.db, offering.ID, owner, "shared-public")
++	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offering.ID))
++	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
++
++	var base basemodel.Channel
++	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
++	assert.ElementsMatch(t, []string{"admin-native", canonical.APIModelID}, strings.Split(base.Models, ","))
++	var mapping map[string]string
++	require.NotNil(t, base.ModelMapping)
++	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
++	assert.Equal(t, "admin-upstream", mapping["admin-public"])
++	assert.Equal(t, offering.UpstreamModelID, mapping[canonical.APIModelID])
++
++	require.NoError(t, apigxmodel.DeleteModelOffering(env.db, owner, offering.ID))
++	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
++	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
++	assert.Equal(t, "admin-native", base.Models)
++	require.NotNil(t, base.ModelMapping)
++	mapping = nil
++	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
++	assert.Equal(t, map[string]string{"admin-public": "admin-upstream"}, mapping)
++}
++
+ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
+ 	tests := []struct {
+ 		name string
+@@ -1433,6 +1528,7 @@ func TestPlatformKeyPreferencesAPI(t *testing.T) {
+ 	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "public-pin-model"}
+ 	require.NoError(t, apigxmodel.CreateModelOffering(env.db, other, offering))
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, other, offering.ID))
++	confirmTestOfferingIdentity(t, env.db, offering.ID, other, offering.UpstreamModelID)
+ 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, other, offering.ID))
+ 	rec, body = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner,
+ 		`{"scope_mode":2,"pinned_offering_public_id":"`+offering.PublicID+`","allow_fallback":true}`)
+@@ -1513,6 +1609,7 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
+ 	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+ 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, "配置价格应当成功")
++	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "gpt-x")
+ 
+ 	rec, _ = env.doWithRole(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "", common.RoleCommonUser)
+ 	assert.Equal(t, http.StatusForbidden, rec.Code, "普通用户不得自行发布")
+@@ -1604,6 +1701,7 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
+ 	rec, _ := env.do(t, http.MethodPut, "/api/price-rules", reviewer,
+ 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(publishID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	confirmTestOfferingIdentity(t, env.db, publishID, reviewer, "review-publish")
+ 
+ 	// 普通用户不能读取平台待审核队列；管理员能看到其他 owner 的资源。
+ 	rec, _ = env.doWithRole(t, http.MethodGet, "/api/reviews/offerings", owner, "", common.RoleCommonUser)
+@@ -1618,6 +1716,7 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
+ 	assert.Equal(t, "共享者甲", first["owner_display_name"])
+ 	assert.Equal(t, "review-publish", first["upstream_model_id"])
+ 	assert.Equal(t, true, first["price_configured"])
++	assert.Equal(t, true, first["mapping_confirmed"])
+ 	assert.NotContains(t, rec.Body.String(), plainSecret)
+ 
+ 	// 分享者即使知道 ID，也不能用普通用户角色自行通过审核。
+@@ -1709,6 +1808,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+ 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, "配置价格应当成功")
++	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "m-plaza")
+ 
+ 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+@@ -1747,6 +1847,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
+ 	require.Equal(t, http.StatusOK, rec.Code)
+ 	privateOfferingID := int64(body["data"].(map[string]any)["id"].(float64))
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, privateOfferingID))
++	confirmTestOfferingIdentity(t, env.db, privateOfferingID, owner, "m-private")
+ 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, privateOfferingID))
+ 
+ 	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+@@ -1824,6 +1925,7 @@ func TestRouteExplainEndpoint(t *testing.T) {
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	publishedID := int64(body["data"].(map[string]any)["id"].(float64))
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, publishedID))
++	confirmTestOfferingIdentity(t, env.db, publishedID, owner, "explain-x")
+ 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, publishedID))
+ 
+ 	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+@@ -1892,6 +1994,7 @@ func TestRouteApplyEndpoint(t *testing.T) {
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "apply-x")
+ 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+ 
+ 	// ① 普通用户不得应用（跨分享者的排序是平台侧动作）
+@@ -2300,6 +2403,7 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
+ 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "quality-model")
+ 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+ 
+ 	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+@@ -2339,8 +2443,8 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
+ 	assert.InDelta(t, 120, detail["output_tokens_per_second"], 0.001)
+ }
+ 
+-// 对外标准模型 ID 与介绍：**只有映射已确认时**广场才显示（§8.2）。未确认时显示上游名，
+-// 绝不把"候选"当结论 —— 否则客户端会按一个没人确认过的标准 ID 去调用。
++// 对外标准模型 ID 与介绍只能来自已确认的供给身份。未确认前禁止发布，
++// 因此广场不会暴露临时上游名，也不会让客户端调用尚未确认的身份。
+ func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const owner int64 = 9401
+@@ -2351,94 +2455,125 @@ func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
+ 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座目录", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+ 	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
+ 
+-	// 建供给会自动登记"候选"别名（见 repo_offering.go）
++	// 同步/新建只产生草稿，草稿不得进入管理员身份确认队列。
+ 	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+ 		`{"upstream_model_id":"upstream-name-x"}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
++	rec, body = env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	assert.Empty(t, body["data"].(map[string]any)["items"])
++
+ 	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+ 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+-	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+ 
+-	// 候选阶段：标准 ID 与介绍必须为空
+-	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	// 提交后才出现待确认身份；没确认前发布必须失败，广场也保持不可见。
++	rec, body = env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	candidates, _ := body["data"].(map[string]any)["items"].([]any)
++	require.Len(t, candidates, 1)
++	candidateID := int64(candidates[0].(map[string]any)["id"].(float64))
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
++	assert.Equal(t, http.StatusBadRequest, rec.Code)
++	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	items, _ := body["data"].(map[string]any)["items"].([]any)
+-	require.NotEmpty(t, items)
+-	first, _ := items[0].(map[string]any)
+-	assert.Equal(t, "", first["canonical_model_id"], "未确认的映射不得对外给出标准模型 ID")
+-	assert.Equal(t, "", first["model_description"])
++	assert.Empty(t, items)
+ 
+-	// 确认映射后：标准 ID 与介绍出现
+-	canonical := apigxmodel.CanonicalModel{APIModelID: "standard-model-1", Description: "这是标准模型的介绍", ModalityType: 1, Status: 1}
+-	require.NoError(t, env.db.Create(&canonical).Error)
+-	require.NoError(t, env.db.Model(&apigxmodel.ModelAlias{}).
+-		Where("normalized_model_id = ?", "upstream-name-x").
+-		Updates(map[string]any{"relation": apigxmodel.AliasRelationConfirmed,
+-			"confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": canonical.ID}).Error)
++	// 管理员确认映射并发布后，广场才出现标准 ID 与介绍。
++	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateID, 10)+"/confirm", owner,
++		`{"api_model_id":"standard-model-1","description":"这是标准模型的介绍","modality_type":1}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 
+-	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	items, _ = body["data"].(map[string]any)["items"].([]any)
+-	first, _ = items[0].(map[string]any)
++	require.Len(t, items, 1)
++	first, _ := items[0].(map[string]any)
+ 	assert.Equal(t, "standard-model-1", first["canonical_model_id"])
+ 	assert.Equal(t, "这是标准模型的介绍", first["model_description"])
+ }
+ 
+-// 别名确认工作流：计划书 §4「批量匹配、人工覆盖」。重点是**单向推进**与"确认后才对外生效"。
++// 身份确认工作流：草稿不入队，送审后按供给显示；同一归一化身份一次确认并迁移，
++// 已确认映射可修改，拒绝后供给回到分享者可编辑状态并可重新送审。
+ func TestAliasConfirmationWorkflow(t *testing.T) {
+ 	env := newTestEnv(t, true)
+ 	const owner int64 = 9501
+-
+-	// 造三条候选：两条同名（大小写/空白不同）、一条不同名
+-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "Vendor-Model-A"))
+-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "  vendor-model-a "))
+-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "vendor-model-b"))
++	groupID := env.createGroup(t, owner, "身份审核组")
++	createDraft := func(model string) int64 {
++		channelID := env.createChannel(t, owner, groupID, nextBaseChannelID())
++		rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
++			`{"upstream_model_id":"`+model+`"}`)
++		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++		return int64(body["data"].(map[string]any)["id"].(float64))
++	}
++	a1 := createDraft("Vendor-Model-A")
++	a2 := createDraft("vendor-model-a")
++	b := createDraft("vendor-model-b")
+ 
+ 	rec, body := env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	assert.Empty(t, body["data"].(map[string]any)["items"], "草稿不得进入身份确认")
++	for _, offeringID := range []int64{a1, a2, b} {
++		require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	}
++	rec, body = env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ 	items, _ := body["data"].(map[string]any)["items"].([]any)
+-	// 登记了三个**名字**，但其中两个归一化后同名 => 只会有 2 条候选（幂等生效）
+-	require.Len(t, items, 2, "同名候选应被归一化去重")
+-	// 按**身份**取行，不按下标 —— 列表按 id 倒序，用下标会取错（我踩过）
+-	var candidateA, candidateB apigxmodel.ModelAlias
+-	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-a").First(&candidateA).Error)
+-	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-b").First(&candidateB).Error)
+-	id := candidateA.ID
+-
+-	// 确认：**顺手创建标准模型**
+-	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
++	require.Len(t, items, 3, "每个已送审供给都应有可追溯的身份行")
++
++	proposalA, exists, err := apigxmodel.GetOfferingAliasProposal(env.db, a1)
++	require.NoError(t, err)
++	require.True(t, exists)
++	proposalB, exists, err := apigxmodel.GetOfferingAliasProposal(env.db, b)
++	require.NoError(t, err)
++	require.True(t, exists)
++
++	// 确认任一 A 供给时，归一化同名的两条供给一起迁移。
++	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(proposalA.ID, 10)+"/confirm", owner,
+ 		`{"api_model_id":"vendor-model-a","description":"介绍A","modality_type":1}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	assert.EqualValues(t, 2, body["data"].(map[string]any)["migrated_offerings"])
++	var offerings []apigxmodel.ModelOffering
++	require.NoError(t, env.db.Where("id IN ?", []int64{a1, a2}).Order("id ASC").Find(&offerings).Error)
++	require.Len(t, offerings, 2)
++	assert.Positive(t, offerings[0].CanonicalModelID)
++	assert.Equal(t, offerings[0].CanonicalModelID, offerings[1].CanonicalModelID)
+ 
+-	// 重复确认必须 404（单向：已经确认过的不再改动）
+-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
+-		`{"api_model_id":"vendor-model-a"}`)
+-	assert.Equal(t, http.StatusNotFound, rec.Code, "重复确认应被拒（单向推进）")
+-
+-	// 已确认的不能再被拒绝
+-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/reject", owner, "")
+-	assert.Equal(t, http.StatusNotFound, rec.Code, "已确认的候选不得被拒绝")
++	// 已确认映射可在模型管理中改正，两条供给必须再次一起迁移。
++	previousTarget := offerings[0].CanonicalModelID
++	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(proposalA.ID, 10)+"/confirm", owner,
++		`{"api_model_id":"vendor-model-a-v2","description":"修正后介绍","modality_type":1}`)
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	require.NoError(t, env.db.Where("id IN ?", []int64{a1, a2}).Order("id ASC").Find(&offerings).Error)
++	assert.NotEqual(t, previousTarget, offerings[0].CanonicalModelID)
++	assert.Equal(t, offerings[0].CanonicalModelID, offerings[1].CanonicalModelID)
+ 
+-	// 另一条候选：拒绝后不能再确认
+-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/reject", owner, "")
+-	assert.Equal(t, http.StatusOK, rec.Code)
+-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/confirm", owner,
+-		`{"api_model_id":"vendor-model-b"}`)
+-	assert.Equal(t, http.StatusNotFound, rec.Code, "已拒绝的候选不得再被确认")
++	// 拒绝 B 身份后供给回到 rejected，分享者可修改并重新送审。
++	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(proposalB.ID, 10)+"/reject", owner, "")
++	require.Equal(t, http.StatusOK, rec.Code)
++	var rejected apigxmodel.ModelOffering
++	require.NoError(t, env.db.Where("id = ?", b).First(&rejected).Error)
++	assert.Equal(t, apigxmodel.OfferingStatusRejected, rejected.Status)
++	assert.Zero(t, rejected.CanonicalModelID)
++	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, b))
++	reopened, exists, err := apigxmodel.GetOfferingAliasProposal(env.db, b)
++	require.NoError(t, err)
++	require.True(t, exists)
++	assert.Equal(t, apigxmodel.AliasConfirmPending, reopened.ConfirmationState)
+ 
+-	// 批量匹配：把所有**归一化后同名**的待确认候选一次确认（此处同名两条已被归一化为一条，故为 0 或 1）
+-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "bulk-name-x"))
++	// 批量确认复用同一条领域链路，并产生可解析的平台结论。
+ 	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/bulk-confirm", owner,
+-		`{"normalized_model_id":"bulk-name-x","api_model_id":"bulk-name-x"}`)
++		`{"normalized_model_id":"vendor-model-b","api_model_id":"standard-model-b","modality_type":1}`)
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+-	affected := body["data"].(map[string]any)["confirmed"].(float64)
+-	assert.EqualValues(t, 1, affected, "批量匹配应确认同名候选")
+-
+-	// 批量确认后，解析就通了（只认已确认）
+-	canonical, okModel, err := apigxmodel.ResolveCanonicalModel(env.db, "BULK-NAME-X")
++	assert.EqualValues(t, 1, body["data"].(map[string]any)["confirmed"])
++	canonical, okModel, err := apigxmodel.ResolveCanonicalModel(env.db, "VENDOR-MODEL-B")
+ 	require.NoError(t, err)
+ 	require.True(t, okModel)
+-	assert.Equal(t, "bulk-name-x", canonical.APIModelID)
++	assert.Equal(t, "standard-model-b", canonical.APIModelID)
+ }
+ 
+ // 授权必须**真正生效**：受限（非公开）分组对"受邀者"可见，对陌生人**不可见**。
+@@ -2466,6 +2601,7 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
+ 	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
+ 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
+ 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
++	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "limited-model")
+ 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
+ 
+ 	// ① 未授权时：陌生人看不到（列表空），详情 404
+@@ -2727,7 +2863,24 @@ func TestSuspendedGroupStopsServing(t *testing.T) {
+ 	assert.Empty(t, after, "分组暂停后不应再有候选（新请求及时停止）")
+ }
+ 
+-// publishTestOffering 造一条"平台已审核通过"的供给（新建→提交→发布）。
++func confirmTestOfferingIdentity(
++	t *testing.T,
++	db *gorm.DB,
++	offeringID, reviewer int64,
++	apiModelID string,
++) *apigxmodel.CanonicalModel {
++	t.Helper()
++	proposal, exists, err := apigxmodel.GetOfferingAliasProposal(db, offeringID)
++	require.NoError(t, err)
++	require.True(t, exists, "submitted offering should create an identity proposal")
++	canonical, err := apigxmodel.EnsureCanonicalModel(db, apiModelID, "", apigxmodel.ModalityChat)
++	require.NoError(t, err)
++	_, err = apigxmodel.ConfirmAliasCandidate(db, proposal.ID, canonical.ID, reviewer)
++	require.NoError(t, err)
++	return &canonical
++}
++
++// publishTestOffering 造一条"平台已审核通过"的供给（新建→定价→提交→确认身份→发布）。
+ func publishTestOffering(t *testing.T, env *testEnv, owner, channelID int64, model string) {
+ 	t.Helper()
+ 	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+@@ -2743,6 +2896,7 @@ func publishTestOffering(t *testing.T, env *testEnv, owner, channelID int64, mod
+ 
+ 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(int64(id), 10)+"/submit", owner, "")
+ 	require.Equal(t, http.StatusOK, rec.Code)
++	confirmTestOfferingIdentity(t, env.db, int64(id), owner, model)
+ 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(int64(id), 10)+"/publish", owner, "")
+ 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+ }
+diff --git a/apigx/model/migrate_matrix_test.go b/apigx/model/migrate_matrix_test.go
+index 03df5ff..57519d0 100644
+--- a/apigx/model/migrate_matrix_test.go
++++ b/apigx/model/migrate_matrix_test.go
+@@ -118,6 +118,7 @@ func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
+ 		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-matrix-model"}
+ 		require.NoError(t, CreateModelOffering(tx, owner, offering))
+ 		require.NoError(t, SubmitModelOffering(tx, owner, offering.ID))
++		confirmOfferingIdentityForTest(t, tx, offering.ID, reviewer)
+ 
+ 		items, total, listErr := ListOfferingsForReview(tx, OfferingStatusPending, int(pendingBefore), 20)
+ 		require.NoError(t, listErr)
+diff --git a/apigx/model/repo_breaker_probe_test.go b/apigx/model/repo_breaker_probe_test.go
+index 9ddf6e1..6128ab2 100644
+--- a/apigx/model/repo_breaker_probe_test.go
++++ b/apigx/model/repo_breaker_probe_test.go
+@@ -94,16 +94,16 @@ func TestBreakerProbeModalityRequiresConfirmedCatalogIdentity(t *testing.T) {
+ 	require.NoError(t, err)
+ 	assert.False(t, supported)
+ 
+-	// This is the real UI workflow: the offering already exists, then an
+-	// administrator confirms its catalog alias. Durable probing must use that
+-	// confirmed identity even though the historical offering row still has a
+-	// zero denormalized canonical_model_id.
++	// This is the real UI workflow: only a submitted offering enters identity
++	// review, then the administrator confirms its mapping.
++	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
+ 	var alias ModelAlias
+ 	require.NoError(t, db.Where("normalized_model_id = ?", NormalizeModelIDForAlias(offering.UpstreamModelID)).
+ 		First(&alias).Error)
+ 	chatCanonical := &CanonicalModel{APIModelID: "vendor-chat", ModalityType: ModalityChat, Status: 1}
+ 	require.NoError(t, db.Create(chatCanonical).Error)
+-	require.NoError(t, ConfirmAliasCandidate(db, alias.ID, chatCanonical.ID, owner))
++	_, err = ConfirmAliasCandidate(db, alias.ID, chatCanonical.ID, owner)
++	require.NoError(t, err)
+ 	modality, err = BreakerProbeModality(db, offering.ID)
+ 	require.NoError(t, err)
+ 	assert.Equal(t, ModalityChat, modality)
+diff --git a/apigx/model/repo_catalog.go b/apigx/model/repo_catalog.go
+index adcfbde..06afa72 100644
+--- a/apigx/model/repo_catalog.go
++++ b/apigx/model/repo_catalog.go
+@@ -24,6 +24,7 @@ import (
+ 	"encoding/hex"
+ 	"errors"
+ 	"fmt"
++	"sort"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -57,6 +58,10 @@ const (
+ 	AliasConfirmRejected = 2 // 已拒绝
+ 
+ 	AliasScopePlatform = 0 // 平台全局
++	AliasScopeOffering = 3 // 单条供给
++
++	AliasSourceUpstream         = 0 // 上游目录
++	AliasSourceSharerSuggestion = 2 // 分享者建议
+ )
+ 
+ // NormalizeModelIDForAlias 归一化模型名用于匹配。
+@@ -100,7 +105,7 @@ func RecordAliasCandidate(db *gorm.DB, scopeType int, scopeID int64, source int,
+ 	row := ModelAlias{
+ 		ScopeType:         scopeType,
+ 		ScopeID:           scopeID,
+-		Source:            0, // 上游目录
++		Source:            source,
+ 		ExternalModelID:   externalModelID,
+ 		NormalizedModelID: normalized,
+ 		AliasKeyHash:      hash,
+@@ -225,6 +230,64 @@ func ResolveCanonicalModels(db *gorm.DB, externalModelIDs []string) (map[string]
+ 	return out, nil
+ }
+ 
++// ReconcileOfferingCanonicalModels backfills the denormalized identity on
++// offerings created by older releases. Only administrator-approved platform
++// aliases are used; pending and rejected candidates remain unresolved.
++func ReconcileOfferingCanonicalModels(db *gorm.DB) (int64, error) {
++	if db == nil {
++		return 0, errors.New("apigxmodel: nil db")
++	}
++	var offerings []ModelOffering
++	if err := db.Where("canonical_model_id = 0 AND alive_flag = ?", AliveFlagAlive).Find(&offerings).Error; err != nil {
++		return 0, err
++	}
++	var updated int64
++	for i := range offerings {
++		canonical, ok, err := ResolveCanonicalModel(db, offerings[i].UpstreamModelID)
++		if err != nil {
++			return updated, err
++		}
++		if !ok {
++			if offerings[i].Status == OfferingStatusPending || offerings[i].Status == OfferingStatusPublished {
++				_, exists, proposalErr := GetOfferingAliasProposal(db, offerings[i].ID)
++				if proposalErr != nil {
++					return updated, proposalErr
++				}
++				if !exists {
++					_, proposalErr = upsertOfferingAliasProposal(db, &offerings[i], 0)
++				}
++				if proposalErr != nil {
++					return updated, proposalErr
++				}
++			}
++			continue
++		}
++		if offerings[i].Status == OfferingStatusPending || offerings[i].Status == OfferingStatusPublished {
++			proposal, exists, proposalErr := GetOfferingAliasProposal(db, offerings[i].ID)
++			if proposalErr != nil {
++				return updated, proposalErr
++			}
++			if !exists {
++				proposal, proposalErr = upsertOfferingAliasProposal(db, &offerings[i], canonical.ID)
++			}
++			if proposalErr != nil {
++				return updated, proposalErr
++			}
++			if err := approveOfferingAliasProposal(db, proposal.ID, canonical.ID, 0); err != nil {
++				return updated, err
++			}
++		}
++		res := db.Model(&ModelOffering{}).
++			Where("id = ? AND canonical_model_id = 0 AND alive_flag = ?", offerings[i].ID, AliveFlagAlive).
++			Updates(map[string]any{"canonical_model_id": canonical.ID, "updated_at": common.GetTimestamp()})
++		if res.Error != nil {
++			return updated, res.Error
++		}
++		updated += res.RowsAffected
++	}
++	return updated, nil
++}
++
+ // AliasCandidateView 是候选列表对外的一行（含来源与建议目标）。
+ type AliasCandidateView struct {
+ 	ID                int64
+@@ -236,6 +299,13 @@ type AliasCandidateView struct {
+ 	SourceRef         string
+ 	ConfirmationState int
+ 	TargetCanonicalID int64
++	TargetAPIModelID  string
++	OfferingID        int64
++	OfferingPublicID  string
++	OfferingStatus    int
++	OwnerUserID       int64
++	ShareGroupName    string
++	ChannelName       string
+ }
+ 
+ // ListAliasCandidates 列出候选（默认只看待确认的），按 ID 倒序。
+@@ -251,13 +321,40 @@ func ListAliasCandidates(db *gorm.DB, state int, limit, offset int) ([]AliasCand
+ 	if offset < 0 {
+ 		offset = 0
+ 	}
+-	query := db.Model(&ModelAlias{}).Where("confirmation_state = ? AND deleted_at IS NULL", state)
++	aliasTable := ModelAlias{}.TableName()
++	offeringTable := ModelOffering{}.TableName()
++	channelTable := Channel{}.TableName()
++	groupTable := ShareGroup{}.TableName()
++	canonicalTable := CanonicalModel{}.TableName()
++	query := db.Table(aliasTable+" AS a").
++		Joins("JOIN "+offeringTable+" AS o ON o.id = a.scope_id AND o.deleted_at IS NULL AND o.alive_flag = ?", AliveFlagAlive).
++		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
++		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
++		Joins("LEFT JOIN "+canonicalTable+" AS cm ON cm.id = a.target_canonical_model_id").
++		Where("a.scope_type = ? AND a.source = ? AND a.deleted_at IS NULL", AliasScopeOffering, AliasSourceSharerSuggestion).
++		Where("o.status IN ?", []int{OfferingStatusPending, OfferingStatusPublished})
++	if state >= 0 {
++		query = query.Where("a.confirmation_state = ?", state)
++	}
+ 	var total int64
+ 	if err := query.Count(&total).Error; err != nil {
+ 		return nil, 0, err
+ 	}
+-	var rows []ModelAlias
+-	if err := query.Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
++	type row struct {
++		ModelAlias
++		TargetAPIModelID string
++		OfferingID       int64
++		OfferingPublicID string
++		OfferingStatus   int
++		OwnerUserID      int64
++		ShareGroupName   string
++		ChannelName      string
++	}
++	var rows []row
++	if err := query.Select("a.*, cm.api_model_id AS target_api_model_id, o.id AS offering_id, " +
++		"o.public_id AS offering_public_id, o.status AS offering_status, c.owner_user_id AS owner_user_id, " +
++		"g.name AS share_group_name, c.name AS channel_name").
++		Order("a.updated_at DESC, a.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error; err != nil {
+ 		return nil, 0, err
+ 	}
+ 	out := make([]AliasCandidateView, 0, len(rows))
+@@ -266,11 +363,122 @@ func ListAliasCandidates(db *gorm.DB, state int, limit, offset int) ([]AliasCand
+ 			ID: row.ID, ExternalModelID: row.ExternalModelID, NormalizedModelID: row.NormalizedModelID,
+ 			ScopeType: row.ScopeType, ScopeID: row.ScopeID, Source: row.Source, SourceRef: row.SourceRef,
+ 			ConfirmationState: row.ConfirmationState, TargetCanonicalID: row.TargetCanonicalModelID,
++			TargetAPIModelID: row.TargetAPIModelID, OfferingID: row.OfferingID,
++			OfferingPublicID: row.OfferingPublicID, OfferingStatus: row.OfferingStatus,
++			OwnerUserID: row.OwnerUserID, ShareGroupName: row.ShareGroupName, ChannelName: row.ChannelName,
+ 		})
+ 	}
+ 	return out, total, nil
+ }
+ 
++type CanonicalModelOption struct {
++	ID           int64
++	APIModelID   string
++	Description  string
++	ModalityType int
++}
++
++func ListCanonicalModelOptions(db *gorm.DB, limit int) ([]CanonicalModelOption, error) {
++	if db == nil {
++		return nil, errors.New("apigxmodel: nil db")
++	}
++	if limit <= 0 || limit > 1000 {
++		limit = 500
++	}
++	var models []CanonicalModel
++	if err := db.Where("status = ?", 1).Order("api_model_id ASC").Limit(limit).Find(&models).Error; err != nil {
++		return nil, err
++	}
++	out := make([]CanonicalModelOption, 0, len(models))
++	for _, model := range models {
++		out = append(out, CanonicalModelOption{ID: model.ID, APIModelID: model.APIModelID,
++			Description: model.Description, ModalityType: model.ModalityType})
++	}
++	return out, nil
++}
++
++func GetOfferingAliasProposal(db *gorm.DB, offeringID int64) (*ModelAlias, bool, error) {
++	if db == nil || offeringID <= 0 {
++		return nil, false, nil
++	}
++	var alias ModelAlias
++	err := db.Where("scope_type = ? AND scope_id = ? AND source = ? AND deleted_at IS NULL",
++		AliasScopeOffering, offeringID, AliasSourceSharerSuggestion).First(&alias).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return nil, false, nil
++	}
++	if err != nil {
++		return nil, false, err
++	}
++	return &alias, true, nil
++}
++
++func upsertOfferingAliasProposal(db *gorm.DB, offering *ModelOffering, targetCanonicalID int64) (*ModelAlias, error) {
++	if db == nil || offering == nil || offering.ID <= 0 {
++		return nil, fmt.Errorf("%w: offering is required", ErrInvalidArgument)
++	}
++	if targetCanonicalID > 0 {
++		var count int64
++		if err := db.Model(&CanonicalModel{}).Where("id = ? AND status = ?", targetCanonicalID, 1).Count(&count).Error; err != nil {
++			return nil, err
++		}
++		if count != 1 {
++			return nil, fmt.Errorf("%w: canonical model is not active", ErrInvalidArgument)
++		}
++	}
++	normalized := NormalizeModelIDForAlias(offering.UpstreamModelID)
++	hash := aliasKeyHash(AliasScopeOffering, offering.ID, AliasSourceSharerSuggestion, normalized)
++	now := common.GetTimestamp()
++	var alias ModelAlias
++	err := db.Where("alias_key_hash = ? AND deleted_at IS NULL", hash).First(&alias).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		alias = ModelAlias{ScopeType: AliasScopeOffering, ScopeID: offering.ID,
++			Source: AliasSourceSharerSuggestion, ExternalModelID: offering.UpstreamModelID,
++			NormalizedModelID: normalized, AliasKeyHash: hash, TargetCanonicalModelID: targetCanonicalID,
++			Relation: AliasRelationCandidate, ConfirmationState: AliasConfirmPending,
++			CreatedAt: now, UpdatedAt: now}
++		if err := db.Create(&alias).Error; err != nil {
++			return nil, err
++		}
++		return &alias, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	if err := db.Model(&ModelAlias{}).Where("id = ?", alias.ID).Updates(map[string]any{
++		"target_canonical_model_id": targetCanonicalID, "relation": AliasRelationCandidate,
++		"confirmation_state": AliasConfirmPending, "confirmed_by_user_id": 0, "confirmed_at": 0,
++		"updated_at": now,
++	}).Error; err != nil {
++		return nil, err
++	}
++	alias.TargetCanonicalModelID = targetCanonicalID
++	alias.ConfirmationState = AliasConfirmPending
++	return &alias, nil
++}
++
++func SetOfferingAliasProposal(db *gorm.DB, ownerUserID, offeringID, targetCanonicalID int64) (*ModelAlias, error) {
++	if db == nil {
++		return nil, errors.New("apigxmodel: nil db")
++	}
++	offering, err := GetModelOffering(db, ownerUserID, offeringID)
++	if err != nil {
++		return nil, err
++	}
++	if offering.Status != OfferingStatusDraft && offering.Status != OfferingStatusRejected {
++		return nil, fmt.Errorf("%w: mapping can only be proposed for draft or rejected offerings", ErrInvalidArgument)
++	}
++	return upsertOfferingAliasProposal(db, offering, targetCanonicalID)
++}
++
++func approveOfferingAliasProposal(db *gorm.DB, aliasID, targetCanonicalID, confirmedByUserID int64) error {
++	return db.Model(&ModelAlias{}).Where("id = ? AND deleted_at IS NULL", aliasID).Updates(map[string]any{
++		"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
++		"target_canonical_model_id": targetCanonicalID, "confirmed_by_user_id": confirmedByUserID,
++		"confirmed_at": common.GetTimestamp(), "updated_at": common.GetTimestamp(),
++	}).Error
++}
++
+ // EnsureCanonicalModel 按对外标准 ID 找标准模型；不存在则创建（草稿→生效由调用方决定）。
+ //
+ // 存在的意义：管理员确认候选时，往往**还没有**标准模型行 —— 要求他先去别处建一个再回来确认，
+@@ -311,32 +519,149 @@ func EnsureCanonicalModel(db *gorm.DB, apiModelID, description string, modalityT
+ 	return created, nil
+ }
+ 
+-// ConfirmAliasCandidate 确认一个候选（**只从"待确认"推进**）。
+-//
+-// 已确认/已拒绝的行不动：确认是**单向**的，重复提交不会改变结论，
+-// 也不会把别人已经拒绝过的候选又悄悄确认回来。
+-func ConfirmAliasCandidate(db *gorm.DB, id, targetCanonicalID, confirmedByUserID int64) error {
++type AliasConfirmationResult struct {
++	AliasID            int64
++	TargetCanonicalID  int64
++	MigratedOfferings  int64
++	PreviousTargets    []int64
++	AffectedChannelIDs []int64
++}
++
++// ConfirmAliasCandidate confirms or edits one submitted offering mapping.
++// The platform alias and all live offerings with the same normalized upstream
++// identity move in one transaction, so editing a mapping cannot create a new
++// catalog identity while leaving existing sources under the old one.
++func ConfirmAliasCandidate(db *gorm.DB, id, targetCanonicalID, confirmedByUserID int64) (*AliasConfirmationResult, error) {
+ 	if db == nil {
+-		return errors.New("apigxmodel: nil db")
++		return nil, errors.New("apigxmodel: nil db")
+ 	}
+-	if targetCanonicalID <= 0 {
+-		return fmt.Errorf("%w: target canonical model is required", ErrInvalidArgument)
++	if id <= 0 || targetCanonicalID <= 0 || confirmedByUserID <= 0 {
++		return nil, fmt.Errorf("%w: alias, target canonical model and reviewer are required", ErrInvalidArgument)
+ 	}
+-	res := db.Model(&ModelAlias{}).
+-		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
+-		Updates(map[string]any{
+-			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
+-			"target_canonical_model_id": targetCanonicalID,
+-			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": common.GetTimestamp(),
+-			"updated_at": common.GetTimestamp(),
++	result := &AliasConfirmationResult{AliasID: id, TargetCanonicalID: targetCanonicalID}
++	err := db.Transaction(func(tx *gorm.DB) error {
++		var target CanonicalModel
++		if err := tx.Where("id = ? AND status = ?", targetCanonicalID, 1).First(&target).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return fmt.Errorf("%w: canonical model is not active", ErrInvalidArgument)
++			}
++			return err
++		}
++		var selected ModelAlias
++		if err := tx.Where("id = ? AND deleted_at IS NULL", id).First(&selected).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNotFound
++			}
++			return err
++		}
++		if selected.ScopeType != AliasScopeOffering || selected.Source != AliasSourceSharerSuggestion {
++			return fmt.Errorf("%w: only submitted offering mappings can be confirmed", ErrInvalidArgument)
++		}
++		var selectedOffering ModelOffering
++		if err := tx.Where("id = ? AND alive_flag = ? AND status IN ?", selected.ScopeID, AliveFlagAlive,
++			[]int{OfferingStatusPending, OfferingStatusPublished}).First(&selectedOffering).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return fmt.Errorf("%w: model mapping is not submitted for review", ErrInvalidArgument)
++			}
++			return err
++		}
++
++		var offerings []ModelOffering
++		if err := tx.Where("alive_flag = ?", AliveFlagAlive).Find(&offerings).Error; err != nil {
++			return err
++		}
++		offeringIDs := make([]int64, 0)
++		previousSet := map[int64]struct{}{}
++		channelSet := map[int64]struct{}{}
++		for _, offering := range offerings {
++			if NormalizeModelIDForAlias(offering.UpstreamModelID) != selected.NormalizedModelID {
++				continue
++			}
++			offeringIDs = append(offeringIDs, offering.ID)
++			channelSet[offering.ChannelID] = struct{}{}
++			if offering.CanonicalModelID > 0 && offering.CanonicalModelID != targetCanonicalID {
++				previousSet[offering.CanonicalModelID] = struct{}{}
++			}
++		}
++		for channelID := range channelSet {
++			result.AffectedChannelIDs = append(result.AffectedChannelIDs, channelID)
++		}
++		sort.Slice(result.AffectedChannelIDs, func(i, j int) bool {
++			return result.AffectedChannelIDs[i] < result.AffectedChannelIDs[j]
+ 		})
+-	if res.Error != nil {
+-		return res.Error
+-	}
+-	if res.RowsAffected == 0 {
+-		return ErrNotFound
++		if len(offeringIDs) > 0 {
++			updated := tx.Model(&ModelOffering{}).Where("id IN ? AND alive_flag = ?", offeringIDs, AliveFlagAlive).
++				Updates(map[string]any{"canonical_model_id": targetCanonicalID, "updated_at": common.GetTimestamp()})
++			if updated.Error != nil {
++				return updated.Error
++			}
++			result.MigratedOfferings = updated.RowsAffected
++		}
++
++		// One normalized external identity has one platform conclusion. Update all
++		// submitted candidates so stale duplicate review rows disappear.
++		now := common.GetTimestamp()
++		if err := tx.Model(&ModelAlias{}).
++			Where("normalized_model_id = ? AND scope_type = ? AND source = ? AND deleted_at IS NULL",
++				selected.NormalizedModelID, AliasScopeOffering, AliasSourceSharerSuggestion).
++			Updates(map[string]any{"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
++				"target_canonical_model_id": targetCanonicalID, "confirmed_by_user_id": confirmedByUserID,
++				"confirmed_at": now, "updated_at": now}).Error; err != nil {
++			return err
++		}
++
++		globalHash := aliasKeyHash(AliasScopePlatform, 0, AliasSourceUpstream, selected.NormalizedModelID)
++		var global ModelAlias
++		globalErr := tx.Where("alias_key_hash = ? AND deleted_at IS NULL", globalHash).First(&global).Error
++		if errors.Is(globalErr, gorm.ErrRecordNotFound) {
++			global = ModelAlias{ScopeType: AliasScopePlatform, Source: AliasSourceUpstream,
++				ExternalModelID: selected.ExternalModelID, NormalizedModelID: selected.NormalizedModelID,
++				AliasKeyHash: globalHash, TargetCanonicalModelID: targetCanonicalID,
++				Relation: AliasRelationConfirmed, ConfirmationState: AliasConfirmApproved,
++				ConfirmedByUserID: confirmedByUserID, ConfirmedAt: now, CreatedAt: now, UpdatedAt: now}
++			if err := tx.Create(&global).Error; err != nil {
++				return err
++			}
++		} else if globalErr != nil {
++			return globalErr
++		} else {
++			if global.TargetCanonicalModelID > 0 && global.TargetCanonicalModelID != targetCanonicalID {
++				previousSet[global.TargetCanonicalModelID] = struct{}{}
++			}
++			if err := tx.Model(&ModelAlias{}).Where("id = ?", global.ID).Updates(map[string]any{
++				"target_canonical_model_id": targetCanonicalID, "relation": AliasRelationConfirmed,
++				"confirmation_state": AliasConfirmApproved, "confirmed_by_user_id": confirmedByUserID,
++				"confirmed_at": now, "updated_at": now,
++			}).Error; err != nil {
++				return err
++			}
++		}
++
++		for previousID := range previousSet {
++			var offeringRefs, aliasRefs int64
++			if err := tx.Model(&ModelOffering{}).Where("canonical_model_id = ? AND alive_flag = ?", previousID, AliveFlagAlive).Count(&offeringRefs).Error; err != nil {
++				return err
++			}
++			if err := tx.Model(&ModelAlias{}).Where("target_canonical_model_id = ? AND confirmation_state = ? AND deleted_at IS NULL", previousID, AliasConfirmApproved).Count(&aliasRefs).Error; err != nil {
++				return err
++			}
++			if offeringRefs == 0 && aliasRefs == 0 {
++				if err := tx.Model(&CanonicalModel{}).Where("id = ? AND status = ?", previousID, 1).
++					Updates(map[string]any{"status": 3, "merged_into_id": targetCanonicalID, "updated_at": now}).Error; err != nil {
++					return err
++				}
++				result.PreviousTargets = append(result.PreviousTargets, previousID)
++			}
++		}
++		sort.Slice(result.PreviousTargets, func(i, j int) bool {
++			return result.PreviousTargets[i] < result.PreviousTargets[j]
++		})
++		return nil
++	})
++	if err != nil {
++		return nil, err
+ 	}
+-	return nil
++	return result, nil
+ }
+ 
+ // RejectAliasCandidate 拒绝一个候选（同样只从"待确认"推进）。
+@@ -344,43 +669,79 @@ func RejectAliasCandidate(db *gorm.DB, id, confirmedByUserID int64) error {
+ 	if db == nil {
+ 		return errors.New("apigxmodel: nil db")
+ 	}
+-	res := db.Model(&ModelAlias{}).
+-		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
+-		Updates(map[string]any{
+-			"confirmation_state": AliasConfirmRejected, "relation": AliasRelationCandidate,
+-			"confirmed_by_user_id": confirmedByUserID, "confirmed_at": common.GetTimestamp(),
+-			"updated_at": common.GetTimestamp(),
+-		})
+-	if res.Error != nil {
+-		return res.Error
+-	}
+-	if res.RowsAffected == 0 {
+-		return ErrNotFound
+-	}
+-	return nil
++	return db.Transaction(func(tx *gorm.DB) error {
++		var alias ModelAlias
++		if err := tx.Where("id = ? AND scope_type = ? AND source = ? AND confirmation_state = ? AND deleted_at IS NULL",
++			id, AliasScopeOffering, AliasSourceSharerSuggestion, AliasConfirmPending).First(&alias).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNotFound
++			}
++			return err
++		}
++		var offering ModelOffering
++		if err := tx.Where("id = ? AND alive_flag = ? AND status = ?", alias.ScopeID, AliveFlagAlive,
++			OfferingStatusPending).First(&offering).Error; err != nil {
++			if errors.Is(err, gorm.ErrRecordNotFound) {
++				return ErrNotFound
++			}
++			return err
++		}
++		now := common.GetTimestamp()
++		res := tx.Model(&ModelAlias{}).Where("id = ? AND confirmation_state = ?", alias.ID, AliasConfirmPending).
++			Updates(map[string]any{
++				"confirmation_state": AliasConfirmRejected, "relation": AliasRelationCandidate,
++				"confirmed_by_user_id": confirmedByUserID, "confirmed_at": now, "updated_at": now,
++			})
++		if res.Error != nil {
++			return res.Error
++		}
++		if res.RowsAffected == 0 {
++			return ErrNotFound
++		}
++		// Identity rejection returns the submitted offering to the sharer. They
++		// can then choose another existing model or resubmit it as a new model.
++		offeringUpdate := tx.Model(&ModelOffering{}).
++			Where("id = ? AND alive_flag = ? AND status = ?", offering.ID, AliveFlagAlive, OfferingStatusPending).
++			Updates(map[string]any{
++				"status": OfferingStatusRejected, "canonical_model_id": 0, "updated_at": now,
++			})
++		if offeringUpdate.Error != nil {
++			return offeringUpdate.Error
++		}
++		if offeringUpdate.RowsAffected != 1 {
++			return fmt.Errorf("%w: offering state changed", ErrInvalidArgument)
++		}
++		return nil
++	})
+ }
+ 
+ // BulkConfirmAliases 把**归一化后同名**的待确认候选一次性确认到同一个标准模型（§4「批量匹配」）。
+ //
+ // 返回确认的行数。只动待确认的行 —— 已确认/已拒绝的保持不变。
+-func BulkConfirmAliases(db *gorm.DB, normalizedModelID string, targetCanonicalID, confirmedByUserID int64) (int64, error) {
++func BulkConfirmAliases(db *gorm.DB, normalizedModelID string, targetCanonicalID, confirmedByUserID int64) (*AliasConfirmationResult, error) {
+ 	if db == nil {
+-		return 0, errors.New("apigxmodel: nil db")
++		return nil, errors.New("apigxmodel: nil db")
+ 	}
+ 	normalized := NormalizeModelIDForAlias(normalizedModelID)
+ 	if normalized == "" || targetCanonicalID <= 0 {
+-		return 0, fmt.Errorf("%w: normalized model id and target are required", ErrInvalidArgument)
++		return nil, fmt.Errorf("%w: normalized model id and target are required", ErrInvalidArgument)
++	}
++	var candidate ModelAlias
++	offeringTable := ModelOffering{}.TableName()
++	if err := db.Table(ModelAlias{}.TableName()+" AS a").Select("a.*").
++		Joins("JOIN "+offeringTable+" AS o ON o.id = a.scope_id AND o.deleted_at IS NULL AND o.alive_flag = ?", AliveFlagAlive).
++		Where("a.normalized_model_id = ? AND a.scope_type = ? AND a.source = ? AND a.deleted_at IS NULL",
++			normalized, AliasScopeOffering, AliasSourceSharerSuggestion).
++		Where("o.status IN ?", []int{OfferingStatusPending, OfferingStatusPublished}).
++		Order("a.id ASC").First(&candidate).Error; err != nil {
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			return nil, ErrNotFound
++		}
++		return nil, err
+ 	}
+-	now := common.GetTimestamp()
+-	res := db.Model(&ModelAlias{}).
+-		Where("normalized_model_id = ? AND confirmation_state = ? AND deleted_at IS NULL", normalized, AliasConfirmPending).
+-		Updates(map[string]any{
+-			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
+-			"target_canonical_model_id": targetCanonicalID,
+-			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": now, "updated_at": now,
+-		})
+-	if res.Error != nil {
+-		return 0, res.Error
++	result, err := ConfirmAliasCandidate(db, candidate.ID, targetCanonicalID, confirmedByUserID)
++	if err != nil {
++		return nil, err
+ 	}
+-	return res.RowsAffected, nil
++	return result, nil
+ }
+diff --git a/apigx/model/repo_catalog_test.go b/apigx/model/repo_catalog_test.go
+index 1591266..e5bf68e 100644
+--- a/apigx/model/repo_catalog_test.go
++++ b/apigx/model/repo_catalog_test.go
+@@ -24,6 +24,7 @@ import (
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
++	"gorm.io/gorm"
+ )
+ 
+ // 模型目录：候选登记 + 解析。
+@@ -85,3 +86,117 @@ func TestResolveCanonicalModelMissReturnsFalse(t *testing.T) {
+ 	require.NoError(t, err)
+ 	assert.False(t, ok)
+ }
++
++func createIdentityTestOffering(
++	t *testing.T,
++	db *gorm.DB,
++	owner, baseChannelID int64,
++	name, upstreamModelID string,
++) *ModelOffering {
++	t.Helper()
++	group := &ShareGroup{OwnerUserID: owner, Name: name, DefaultVisibility: ShareGroupVisibilityPublic}
++	require.NoError(t, CreateShareGroup(db, group))
++	channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: name, BaseChannelID: baseChannelID}
++	require.NoError(t, CreateChannel(db, channel))
++	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: upstreamModelID}
++	require.NoError(t, CreateModelOffering(db, owner, offering))
++	return offering
++}
++
++func TestOfferingIdentityAppearsOnlyAfterSubmission(t *testing.T) {
++	db := newRepoDB(t)
++	const owner, reviewer int64 = 8101, 8199
++	offering := createIdentityTestOffering(t, db, owner, 81_001, "identity-submit", "Vendor-Model-X")
++
++	var count int64
++	require.NoError(t, db.Model(&ModelAlias{}).Count(&count).Error)
++	assert.Zero(t, count, "draft imports must not enter model identity review")
++
++	target := &CanonicalModel{APIModelID: "standard-model-x", ModalityType: ModalityChat, Status: 1}
++	require.NoError(t, db.Create(target).Error)
++	proposal, err := SetOfferingAliasProposal(db, owner, offering.ID, target.ID)
++	require.NoError(t, err)
++	assert.Equal(t, AliasConfirmPending, proposal.ConfirmationState)
++	_, err = SetOfferingAliasProposal(db, owner+1, offering.ID, target.ID)
++	assert.ErrorIs(t, err, ErrNotFound)
++
++	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
++	items, total, err := ListAliasCandidates(db, AliasConfirmPending, 20, 0)
++	require.NoError(t, err)
++	require.EqualValues(t, 1, total)
++	require.Len(t, items, 1)
++	assert.Equal(t, offering.ID, items[0].OfferingID)
++	assert.Equal(t, target.ID, items[0].TargetCanonicalID)
++
++	result, err := ConfirmAliasCandidate(db, items[0].ID, target.ID, reviewer)
++	require.NoError(t, err)
++	assert.EqualValues(t, 1, result.MigratedOfferings)
++	var stored ModelOffering
++	require.NoError(t, db.First(&stored, offering.ID).Error)
++	assert.Equal(t, target.ID, stored.CanonicalModelID)
++}
++
++func TestRejectedIdentityReturnsOfferingForRevision(t *testing.T) {
++	db := newRepoDB(t)
++	const owner, reviewer int64 = 8201, 8299
++	offering := createIdentityTestOffering(t, db, owner, 82_001, "identity-reject", "vendor-rejected")
++	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
++	proposal, exists, err := GetOfferingAliasProposal(db, offering.ID)
++	require.NoError(t, err)
++	require.True(t, exists)
++	require.NoError(t, RejectAliasCandidate(db, proposal.ID, reviewer))
++
++	var stored ModelOffering
++	require.NoError(t, db.First(&stored, offering.ID).Error)
++	assert.Equal(t, OfferingStatusRejected, stored.Status)
++	assert.Zero(t, stored.CanonicalModelID)
++
++	target := &CanonicalModel{APIModelID: "revised-standard", ModalityType: ModalityChat, Status: 1}
++	require.NoError(t, db.Create(target).Error)
++	_, err = SetOfferingAliasProposal(db, owner, offering.ID, target.ID)
++	require.NoError(t, err)
++	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
++	proposal, exists, err = GetOfferingAliasProposal(db, offering.ID)
++	require.NoError(t, err)
++	require.True(t, exists)
++	assert.Equal(t, AliasConfirmPending, proposal.ConfirmationState)
++	assert.Equal(t, target.ID, proposal.TargetCanonicalModelID)
++}
++
++func TestEditingConfirmedIdentityMigratesExistingOfferings(t *testing.T) {
++	db := newRepoDB(t)
++	const reviewer int64 = 8399
++	first := createIdentityTestOffering(t, db, 8301, 83_001, "identity-first", "Vendor-Same")
++	second := createIdentityTestOffering(t, db, 8302, 83_002, "identity-second", " vendor-same ")
++	require.NoError(t, SubmitModelOffering(db, 8301, first.ID))
++	require.NoError(t, SubmitModelOffering(db, 8302, second.ID))
++	firstProposal, _, err := GetOfferingAliasProposal(db, first.ID)
++	require.NoError(t, err)
++	secondProposal, _, err := GetOfferingAliasProposal(db, second.ID)
++	require.NoError(t, err)
++
++	original := &CanonicalModel{APIModelID: "standard-original", ModalityType: ModalityChat, Status: 1}
++	replacement := &CanonicalModel{APIModelID: "standard-replacement", ModalityType: ModalityChat, Status: 1}
++	require.NoError(t, db.Create(original).Error)
++	require.NoError(t, db.Create(replacement).Error)
++	result, err := ConfirmAliasCandidate(db, firstProposal.ID, original.ID, reviewer)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2, result.MigratedOfferings)
++
++	result, err = ConfirmAliasCandidate(db, secondProposal.ID, replacement.ID, reviewer)
++	require.NoError(t, err)
++	assert.EqualValues(t, 2, result.MigratedOfferings)
++	for _, id := range []int64{first.ID, second.ID} {
++		var offering ModelOffering
++		require.NoError(t, db.First(&offering, id).Error)
++		assert.Equal(t, replacement.ID, offering.CanonicalModelID)
++	}
++	var old CanonicalModel
++	require.NoError(t, db.First(&old, original.ID).Error)
++	assert.Equal(t, 3, old.Status)
++	assert.Equal(t, replacement.ID, old.MergedIntoID)
++	resolved, ok, err := ResolveCanonicalModel(db, "VENDOR-SAME")
++	require.NoError(t, err)
++	require.True(t, ok)
++	assert.Equal(t, replacement.ID, resolved.ID)
++}
+diff --git a/apigx/model/repo_offering.go b/apigx/model/repo_offering.go
+index 20748df..bb247b5 100644
+--- a/apigx/model/repo_offering.go
++++ b/apigx/model/repo_offering.go
+@@ -64,22 +64,24 @@ type OfferingReviewResult struct {
+ // OfferingReviewItem 是管理员待审核队列所需的最小跨 owner 投影。
+ // 不包含上游地址、Key、账户池或任何凭据材料。
+ type OfferingReviewItem struct {
+-	OfferingID         int64
+-	OfferingPublicID   string
+-	OwnerUserID        int64
+-	ShareGroupID       int64
+-	ShareGroupPublicID string
+-	ShareGroupName     string
+-	GroupVisibility    int
+-	ChannelID          int64
+-	ChannelPublicID    string
+-	ChannelName        string
+-	UpstreamModelID    string
+-	Capabilities       string
+-	Status             int
+-	Revision           int64
+-	CreatedAt          int64
+-	UpdatedAt          int64
++	OfferingID          int64
++	OfferingPublicID    string
++	OwnerUserID         int64
++	ShareGroupID        int64
++	ShareGroupPublicID  string
++	ShareGroupName      string
++	GroupVisibility     int
++	ChannelID           int64
++	ChannelPublicID     string
++	ChannelName         string
++	UpstreamModelID     string
++	CanonicalModelID    int64
++	CanonicalAPIModelID string
++	Capabilities        string
++	Status              int
++	Revision            int64
++	CreatedAt           int64
++	UpdatedAt           int64
+ }
+ 
+ // OfferingKeyHashFor 计算供给的业务键哈希（渠道 + 上游模型名）。
+@@ -123,12 +125,6 @@ func CreateModelOffering(db *gorm.DB, ownerUserID int64, offering *ModelOffering
+ 	if err := db.Create(offering).Error; err != nil {
+ 		return err
+ 	}
+-	// 顺手把上游模型名登记为**候选**别名（幂等；候选不会当结论用，见 repo_catalog.go）。
+-	// 放在仓储层是为了让所有调用方（含"一键导入"的批量路径）都覆盖到；
+-	// 失败**不影响供给创建**（目录是辅助能力，不该挡住主流程），因此只记录不返回错误。
+-	if err := RecordAliasCandidate(db, AliasScopePlatform, 0, 0, offering.UpstreamModelID); err != nil {
+-		common.SysError("apigx: record alias candidate failed: " + err.Error())
+-	}
+ 	return nil
+ }
+ 
+@@ -181,7 +177,69 @@ func UpdateModelOfferingCapabilities(db *gorm.DB, ownerUserID, id int64, caps Ca
+ // 状态机刻意做窄：**已发布的供给不能靠提交动作改状态**（改价/改能力应当走修订流程），
+ // 否则一次误点就会让已对外可见的供给退回待审核、对使用者表现为"模型突然消失"。
+ func SubmitModelOffering(db *gorm.DB, ownerUserID, id int64) error {
+-	return transitionOffering(db, ownerUserID, id, []int{OfferingStatusDraft, OfferingStatusRejected}, OfferingStatusPending)
++	if db == nil {
++		return errors.New("apigxmodel: nil db")
++	}
++	return db.Transaction(func(tx *gorm.DB) error {
++		offering, err := GetModelOffering(tx, ownerUserID, id)
++		if err != nil {
++			return err
++		}
++		if offering.Status != OfferingStatusDraft && offering.Status != OfferingStatusRejected {
++			return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, OfferingStatusPending)
++		}
++
++		// A previously confirmed platform mapping is reusable. A sharer may have
++		// proposed a different target, in which case an administrator must resolve
++		// the conflict instead of silently overwriting that proposal.
++		proposal, hasProposal, err := GetOfferingAliasProposal(tx, offering.ID)
++		if err != nil {
++			return err
++		}
++		canonical, resolved, err := ResolveCanonicalModel(tx, offering.UpstreamModelID)
++		if err != nil {
++			return err
++		}
++		if resolved && (!hasProposal || proposal.TargetCanonicalModelID == 0 || proposal.TargetCanonicalModelID == canonical.ID) {
++			offering.CanonicalModelID = canonical.ID
++			if !hasProposal {
++				proposal, err = upsertOfferingAliasProposal(tx, offering, canonical.ID)
++				if err != nil {
++					return err
++				}
++			}
++			if err := approveOfferingAliasProposal(tx, proposal.ID, canonical.ID, 0); err != nil {
++				return err
++			}
++		} else {
++			targetCanonicalID := int64(0)
++			if hasProposal {
++				targetCanonicalID = proposal.TargetCanonicalModelID
++			}
++			// Resubmitting a rejected identity must reopen its proposal. Keeping the
++			// rejected alias unchanged would leave the offering pending forever while
++			// it remains absent from the administrator's pending identity queue.
++			if _, err := upsertOfferingAliasProposal(tx, offering, targetCanonicalID); err != nil {
++				return err
++			}
++			offering.CanonicalModelID = 0
++		}
++
++		updated := tx.Model(&ModelOffering{}).
++			Where("id = ? AND alive_flag = ? AND status IN ?", offering.ID, AliveFlagAlive,
++				[]int{OfferingStatusDraft, OfferingStatusRejected}).
++			Updates(map[string]any{
++				"status": OfferingStatusPending, "canonical_model_id": offering.CanonicalModelID,
++				"updated_at": common.GetTimestamp(),
++			})
++		if updated.Error != nil {
++			return updated.Error
++		}
++		if updated.RowsAffected != 1 {
++			return fmt.Errorf("%w: offering state changed", ErrInvalidArgument)
++		}
++		return nil
++	})
+ }
+ 
+ // PublishModelOffering 平台审核通过（待审核 → 已发布）。
+@@ -213,9 +271,11 @@ func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingR
+ 	offeringTable := ModelOffering{}.TableName()
+ 	channelTable := Channel{}.TableName()
+ 	groupTable := ShareGroup{}.TableName()
++	canonicalTable := CanonicalModel{}.TableName()
+ 	base := db.Table(offeringTable+" AS o").
+ 		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
+ 		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
++		Joins("LEFT JOIN "+canonicalTable+" AS cm ON cm.id = o.canonical_model_id").
+ 		Where("o.deleted_at IS NULL AND o.alive_flag = ?", AliveFlagAlive)
+ 	if status != -1 {
+ 		base = base.Where("o.status = ?", status)
+@@ -230,7 +290,8 @@ func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingR
+ 		"c.owner_user_id AS owner_user_id, g.id AS share_group_id, g.public_id AS share_group_public_id, " +
+ 		"g.name AS share_group_name, g.default_visibility AS group_visibility, " +
+ 		"c.id AS channel_id, c.public_id AS channel_public_id, c.name AS channel_name, " +
+-		"o.upstream_model_id AS upstream_model_id, o.capabilities AS capabilities, " +
++		"o.upstream_model_id AS upstream_model_id, o.canonical_model_id AS canonical_model_id, " +
++		"cm.api_model_id AS canonical_api_model_id, o.capabilities AS capabilities, " +
+ 		"o.status AS status, o.revision AS revision, o.created_at AS created_at, o.updated_at AS updated_at").
+ 		Order("o.updated_at ASC, o.id ASC").Offset(offset).Limit(limit).Scan(&items).Error
+ 	return items, total, err
+@@ -275,6 +336,9 @@ func ReviewModelOffering(db *gorm.DB, id int64, toStatus int, review OfferingRev
+ 		if offering.Status != OfferingStatusPending {
+ 			return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, toStatus)
+ 		}
++		if toStatus == OfferingStatusPublished && offering.CanonicalModelID <= 0 {
++			return fmt.Errorf("%w: model identity must be confirmed before publishing", ErrInvalidArgument)
++		}
+ 
+ 		now := common.GetTimestamp()
+ 		updates := map[string]any{"status": toStatus, "updated_at": now}
+@@ -398,6 +462,9 @@ func transitionOffering(db *gorm.DB, ownerUserID, id int64, from []int, to int)
+ 	if !allowed {
+ 		return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, to)
+ 	}
++	if to == OfferingStatusPublished && offering.CanonicalModelID <= 0 {
++		return fmt.Errorf("%w: model identity must be confirmed before publishing", ErrInvalidArgument)
++	}
+ 	now := common.GetTimestamp()
+ 	updates := map[string]any{"status": to, "updated_at": now}
+ 	if to == OfferingStatusPublished {
+@@ -491,8 +558,18 @@ func FindOfferingByUpstreamModel(db *gorm.DB, channelID int64, upstreamModelID s
+ 		return 0, false, nil
+ 	}
+ 	var offering ModelOffering
+-	err := db.Where("channel_id = ? AND upstream_model_id = ? AND alive_flag = ?",
+-		channelID, upstreamModelID, AliveFlagAlive).First(&offering).Error
++	err := db.Where("channel_id = ? AND upstream_model_id = ? AND status = ? AND alive_flag = ?",
++		channelID, upstreamModelID, OfferingStatusPublished, AliveFlagAlive).Order("id ASC").First(&offering).Error
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		var canonical CanonicalModel
++		canonicalErr := db.Where("api_model_id = ? AND status = ?", upstreamModelID, 1).First(&canonical).Error
++		if canonicalErr == nil {
++			err = db.Where("channel_id = ? AND canonical_model_id = ? AND status = ? AND alive_flag = ?",
++				channelID, canonical.ID, OfferingStatusPublished, AliveFlagAlive).Order("id ASC").First(&offering).Error
++		} else if !errors.Is(canonicalErr, gorm.ErrRecordNotFound) {
++			return 0, false, canonicalErr
++		}
++	}
+ 	if errors.Is(err, gorm.ErrRecordNotFound) {
+ 		return 0, false, nil
+ 	}
+@@ -519,8 +596,36 @@ func ListPublishedOfferingsByModel(db *gorm.DB, upstreamModelID string) ([]Model
+ 	groupPublished := "channel_id IN (SELECT id FROM " + channelTable +
+ 		" WHERE share_group_id IN (SELECT id FROM " + groupTable +
+ 		" WHERE publish_status = ? AND deleted_at IS NULL) AND deleted_at IS NULL)"
+-	err := db.Where("upstream_model_id = ? AND status = ?", upstreamModelID, OfferingStatusPublished).
++	var canonical CanonicalModel
++	canonicalErr := db.Where("api_model_id = ? AND status = ?", upstreamModelID, 1).First(&canonical).Error
++	query := db.Where("status = ?", OfferingStatusPublished)
++	if canonicalErr == nil {
++		query = query.Where("upstream_model_id = ? OR canonical_model_id = ?", upstreamModelID, canonical.ID)
++	} else if errors.Is(canonicalErr, gorm.ErrRecordNotFound) {
++		query = query.Where("upstream_model_id = ?", upstreamModelID)
++	} else {
++		return nil, canonicalErr
++	}
++	err := query.
+ 		Where(groupPublished, ShareGroupPublishPublished).
+ 		Order("id ASC").Find(&offerings).Error
+-	return offerings, err
++	if err != nil {
++		return nil, err
++	}
++	if canonicalErr != nil {
++		return offerings, nil
++	}
++	// A backing channel can contain multiple upstream aliases that were mapped
++	// to one public model. It is still one selectable source, so keep one stable
++	// representative per share channel for routing and explanations.
++	unique := make([]ModelOffering, 0, len(offerings))
++	seenChannels := make(map[int64]struct{}, len(offerings))
++	for i := range offerings {
++		if _, duplicate := seenChannels[offerings[i].ChannelID]; duplicate {
++			continue
++		}
++		seenChannels[offerings[i].ChannelID] = struct{}{}
++		unique = append(unique, offerings[i])
++	}
++	return unique, nil
+ }
+diff --git a/apigx/model/repo_plaza.go b/apigx/model/repo_plaza.go
+index 4eea6da..cbf93e5 100644
+--- a/apigx/model/repo_plaza.go
++++ b/apigx/model/repo_plaza.go
+@@ -175,11 +175,18 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
+ 	offeringTable := ModelOffering{}.TableName()
+ 	channelTable := Channel{}.TableName()
+ 	groupTable := ShareGroup{}.TableName()
++	canonicalTable := CanonicalModel{}.TableName()
+ 
+ 	query := db.Table(offeringTable+" AS o").
+-		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL").
+-		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL").
+-		Where("o.deleted_at IS NULL AND o.status = ?", OfferingStatusPublished)
++		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
++		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
++		Joins("LEFT JOIN "+canonicalTable+" AS cm ON cm.id = o.canonical_model_id").
++		Where("o.deleted_at IS NULL AND o.alive_flag = ? AND o.status = ? AND o.canonical_model_id > 0",
++			AliveFlagAlive, OfferingStatusPublished).
++		Where("o.id = (SELECT MIN(o2.id) FROM "+offeringTable+" AS o2 WHERE "+
++			"o2.channel_id = o.channel_id AND o2.canonical_model_id = o.canonical_model_id "+
++			"AND o2.status = ? AND o2.alive_flag = ? AND o2.deleted_at IS NULL)",
++			OfferingStatusPublished, AliveFlagAlive)
+ 
+ 	visibility, visibilityArgs := plazaVisibilityPredicate(viewerUserID)
+ 	query = query.Where(visibility, visibilityArgs...)
+@@ -190,39 +197,31 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
+ 	}
+ 
+ 	type row struct {
+-		ID               int64
+-		GroupPublicID    string
+-		GroupName        string
+-		GroupDescription string
+-		PublicID         string
+-		UpstreamModelID  string
+-		ChannelPublicID  string
+-		OwnerUserID      int64
+-		GroupVisibility  int
+-		Capabilities     string
+-		UpdatedAt        int64
++		ID                  int64
++		GroupPublicID       string
++		GroupName           string
++		GroupDescription    string
++		PublicID            string
++		UpstreamModelID     string
++		ChannelPublicID     string
++		OwnerUserID         int64
++		GroupVisibility     int
++		Capabilities        string
++		UpdatedAt           int64
++		CanonicalAPIModelID string
++		ModelDescription    string
+ 	}
+ 	var rows []row
+ 	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
+ 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
+ 		"g.public_id AS group_public_id, g.name AS group_name, g.description AS group_description, g.default_visibility AS group_visibility, " +
+-		"o.capabilities AS capabilities, o.updated_at AS updated_at").
++		"o.capabilities AS capabilities, o.updated_at AS updated_at, cm.api_model_id AS canonical_api_model_id, " +
++		"cm.description AS model_description").
+ 		Order("o.updated_at DESC, o.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error
+ 	if err != nil {
+ 		return nil, 0, err
+ 	}
+ 
+-	// 一次性解析本页涉及的所有上游模型名（避免逐个查库）
+-	upstreamIDs := make([]string, 0, len(rows))
+-	for _, r := range rows {
+-		upstreamIDs = append(upstreamIDs, r.UpstreamModelID)
+-	}
+-	canonicalByUpstream, resolveErr := ResolveCanonicalModels(db, upstreamIDs)
+-	if resolveErr != nil {
+-		// 目录是辅助能力：解析失败不该让广场整体 500，退化为"只显示上游名"
+-		canonicalByUpstream = map[string]CanonicalModel{}
+-	}
+-
+ 	items := make([]PlazaItem, 0, len(rows))
+ 	for _, r := range rows {
+ 		declared := Capability{}
+@@ -246,8 +245,8 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
+ 			Insufficient:             quality.Insufficient,
+ 			Stale:                    quality.Stale,
+ 			UpstreamModelID:          r.UpstreamModelID,
+-			CanonicalAPIModelID:      canonicalByUpstream[r.UpstreamModelID].APIModelID,
+-			ModelDescription:         canonicalByUpstream[r.UpstreamModelID].Description,
++			CanonicalAPIModelID:      r.CanonicalAPIModelID,
++			ModelDescription:         r.ModelDescription,
+ 			ChannelPublicID:          r.ChannelPublicID,
+ 			GroupPublicID:            r.GroupPublicID,
+ 			GroupName:                r.GroupName,
+@@ -310,6 +309,15 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
+ 		quality = QualityView{Insufficient: true}
+ 	}
+ 	throughput, _ := quality.OutputTokensPerSecond()
++	canonicalAPIModelID := ""
++	modelDescription := ""
++	if offering.CanonicalModelID > 0 {
++		var canonical CanonicalModel
++		if err := db.Where("id = ?", offering.CanonicalModelID).First(&canonical).Error; err == nil {
++			canonicalAPIModelID = canonical.APIModelID
++			modelDescription = canonical.Description
++		}
++	}
+ 	return &PlazaItem{
+ 		OfferingID:               offering.ID,
+ 		OfferingPublicID:         offering.PublicID,
+@@ -320,6 +328,8 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
+ 		Insufficient:             quality.Insufficient,
+ 		Stale:                    quality.Stale,
+ 		UpstreamModelID:          offering.UpstreamModelID,
++		CanonicalAPIModelID:      canonicalAPIModelID,
++		ModelDescription:         modelDescription,
+ 		ChannelPublicID:          channel.PublicID,
+ 		OwnerUserID:              channel.OwnerUserID,
+ 		AccessKind:               plazaAccessKind(viewerUserID, channel.OwnerUserID, group.DefaultVisibility),
+diff --git a/apigx/model/repo_plaza_identity_test.go b/apigx/model/repo_plaza_identity_test.go
+new file mode 100644
+index 0000000..47288b8
+--- /dev/null
++++ b/apigx/model/repo_plaza_identity_test.go
+@@ -0,0 +1,43 @@
++package apigxmodel
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestPlazaKeepsOneSourcePerChannelAndCanonicalModel(t *testing.T) {
++	db := newRepoDB(t)
++	const owner int64 = 8401
++	group := &ShareGroup{
++		OwnerUserID: owner, Name: "plaza-dedupe",
++		DefaultVisibility: ShareGroupVisibilityPublic, PublishStatus: ShareGroupPublishPublished,
++	}
++	require.NoError(t, CreateShareGroup(db, group))
++	channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "plaza-dedupe", BaseChannelID: 84_001}
++	require.NoError(t, CreateChannel(db, channel))
++	canonical := &CanonicalModel{APIModelID: "standard-dedupe", ModalityType: ModalityChat, Status: 1}
++	require.NoError(t, db.Create(canonical).Error)
++
++	first := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "vendor-a"}
++	second := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "vendor-b"}
++	require.NoError(t, CreateModelOffering(db, owner, first))
++	require.NoError(t, CreateModelOffering(db, owner, second))
++	require.NoError(t, db.Model(&ModelOffering{}).Where("id IN ?", []int64{first.ID, second.ID}).
++		Updates(map[string]any{"canonical_model_id": canonical.ID, "status": OfferingStatusPublished}).Error)
++
++	items, total, err := ListPlazaItems(db, owner, 20, 0)
++	require.NoError(t, err)
++	require.EqualValues(t, 1, total)
++	require.Len(t, items, 1)
++	assert.Equal(t, first.ID, items[0].OfferingID)
++	assert.Equal(t, canonical.APIModelID, items[0].CanonicalAPIModelID)
++
++	require.NoError(t, DeleteModelOffering(db, owner, first.ID))
++	items, total, err = ListPlazaItems(db, owner, 20, 0)
++	require.NoError(t, err)
++	require.EqualValues(t, 1, total)
++	require.Len(t, items, 1)
++	assert.Equal(t, second.ID, items[0].OfferingID)
++}
+diff --git a/apigx/model/repo_test.go b/apigx/model/repo_test.go
+index 8611eb7..38cc0ef 100644
+--- a/apigx/model/repo_test.go
++++ b/apigx/model/repo_test.go
+@@ -476,6 +476,20 @@ func TestAPIKeyPreferencesUpsertAndValidation(t *testing.T) {
+ 
+ // ---- 模型供给与发布流程（T1.8） ----
+ 
++func confirmOfferingIdentityForTest(t *testing.T, db *gorm.DB, offeringID, reviewer int64) *CanonicalModel {
++	t.Helper()
++	proposal, exists, err := GetOfferingAliasProposal(db, offeringID)
++	require.NoError(t, err)
++	require.True(t, exists)
++	canonical := &CanonicalModel{
++		APIModelID: fmt.Sprintf("canonical-%d", offeringID), ModalityType: ModalityChat, Status: 1,
++	}
++	require.NoError(t, db.Create(canonical).Error)
++	_, err = ConfirmAliasCandidate(db, proposal.ID, canonical.ID, reviewer)
++	require.NoError(t, err)
++	return canonical
++}
++
+ func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
+ 	db := newRepoDB(t)
+ 	const owner, other int64 = 13001, 13002
+@@ -506,6 +520,7 @@ func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
+ 	// 待审核不能被重复提交
+ 	assert.ErrorIs(t, SubmitModelOffering(db, owner, offering.ID), ErrInvalidArgument)
+ 
++	confirmOfferingIdentityForTest(t, db, offering.ID, owner)
+ 	require.NoError(t, PublishModelOffering(db, owner, offering.ID))
+ 	got, err = GetModelOffering(db, owner, offering.ID)
+ 	require.NoError(t, err)
+@@ -544,6 +559,7 @@ func TestReviewerScopedOfferingReviewIsCrossOwnerAtomicAndAudited(t *testing.T)
+ 	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-model"}
+ 	require.NoError(t, CreateModelOffering(db, owner, offering))
+ 	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
++	confirmOfferingIdentityForTest(t, db, offering.ID, reviewer)
+ 
+ 	items, total, err := ListOfferingsForReview(db, OfferingStatusPending, 0, 20)
+ 	require.NoError(t, err)
+diff --git a/apigx/qualityhook/quality.go b/apigx/qualityhook/quality.go
+index cdf9695..f25edd8 100644
+--- a/apigx/qualityhook/quality.go
++++ b/apigx/qualityhook/quality.go
+@@ -79,6 +79,9 @@ func RecordFromRelay(relayInfo *relaycommon.RelayInfo, apiErr *types.NewAPIError
+ 		return
+ 	}
+ 	modelName := relayInfo.GetOriginModelName()
++	if relayInfo.ChannelMeta != nil && relayInfo.UpstreamModelName != "" {
++		modelName = relayInfo.UpstreamModelName
++	}
+ 	offeringID, found, err := apigxmodel.FindOfferingByUpstreamModel(db, shareChannelID, modelName)
+ 	if err != nil {
+ 		common.SysError("apigx quality: lookup offering failed: " + err.Error())
+diff --git a/apigx/qualityhook/quality_test.go b/apigx/qualityhook/quality_test.go
+index a68f3c8..3c29605 100644
+--- a/apigx/qualityhook/quality_test.go
++++ b/apigx/qualityhook/quality_test.go
+@@ -84,6 +84,8 @@ func TestRecordFromRelayPersistsTextThroughput(t *testing.T) {
+ 	require.NoError(t, apigxmodel.CreateChannel(db, channel))
+ 	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "quality-model"}
+ 	require.NoError(t, apigxmodel.CreateModelOffering(db, 1001, offering))
++	require.NoError(t, db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", offering.ID).
++		Update("status", apigxmodel.OfferingStatusPublished).Error)
+ 
+ 	previousDB := channelpool.CurrentDB
+ 	channelpool.SetDBProvider(func() *gorm.DB { return db })
+diff --git a/apigx/relayhook/breaker_guard_test.go b/apigx/relayhook/breaker_guard_test.go
+index 6091cec..999e12f 100644
+--- a/apigx/relayhook/breaker_guard_test.go
++++ b/apigx/relayhook/breaker_guard_test.go
+@@ -80,6 +80,11 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
+ 		ChannelID: channel.ID, CanonicalModelID: canonical.ID, UpstreamModelID: "breaker-model",
+ 	}
+ 	require.NoError(t, apigxmodel.CreateModelOffering(db, owner, offering))
++	require.NoError(t, db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", offering.ID).
++		Updates(map[string]any{
++			"canonical_model_id": canonical.ID,
++			"status":             apigxmodel.OfferingStatusPublished,
++		}).Error)
+ 	env.offeringID = offering.ID
+ 	return env
+ }
+diff --git a/apigx/route/route.go b/apigx/route/route.go
+index 725f964..ddcffea 100644
+--- a/apigx/route/route.go
++++ b/apigx/route/route.go
+@@ -25,5 +25,15 @@ func Register(apiRouter *gin.RouterGroup) {
+ 	} else if cleaned > 0 {
+ 		common.SysLog("apigx: reconciled deleted share resources")
+ 	}
++	if migrated, err := apigxmodel.ReconcileOfferingCanonicalModels(apigxmodel.DefaultDB()); err != nil {
++		common.SysError("apigx: reconcile offering model identities failed: " + err.Error())
++	} else if migrated > 0 {
++		common.SysLog("apigx: reconciled offering model identities")
++	}
++	if projected, err := apigxapi.ReconcileBaseChannelModelProjections(apigxmodel.DefaultDB()); err != nil {
++		common.SysError("apigx: reconcile backing channel model projections failed: " + err.Error())
++	} else if projected > 0 {
++		common.SysLog("apigx: reconciled backing channel model projections")
++	}
+ 	apigxapi.Register(apiRouter.Group(BasePath), apigxmodel.DefaultDB())
+ }
+diff --git a/service/billing_session_quality_test.go b/service/billing_session_quality_test.go
+index ba392a9..bb04dc5 100644
+--- a/service/billing_session_quality_test.go
++++ b/service/billing_session_quality_test.go
+@@ -39,15 +39,28 @@ func TestBillingSessionRecordsQualityOnceAcrossSettlementRetry(t *testing.T) {
+ 	t.Cleanup(func() { _ = sqlDB.Close() })
+ 	require.NoError(t, apigxmodel.Migrate(db))
+ 
+-	group := &apigxmodel.ShareGroup{OwnerUserID: 1001, Name: "billing-quality", PublicID: "billing-quality-group"}
++	group := &apigxmodel.ShareGroup{
++		OwnerUserID: 1001, Name: "billing-quality", PublicID: "billing-quality-group",
++		DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic,
++		PublishStatus:     apigxmodel.ShareGroupPublishPublished,
++	}
+ 	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
+ 	channel := &apigxmodel.Channel{
+ 		OwnerUserID: 1001, ShareGroupID: group.ID, PublicID: "billing-quality-channel",
+ 		Name: "billing-quality", BaseChannelID: 7002,
+ 	}
+ 	require.NoError(t, apigxmodel.CreateChannel(db, channel))
+-	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "billing-quality-model"}
++	canonical, err := apigxmodel.EnsureCanonicalModel(db, "billing-quality-model", "", apigxmodel.ModalityChat)
++	require.NoError(t, err)
++	offering := &apigxmodel.ModelOffering{
++		ChannelID: channel.ID, UpstreamModelID: "billing-quality-model",
++		CanonicalModelID: canonical.ID,
++	}
+ 	require.NoError(t, apigxmodel.CreateModelOffering(db, 1001, offering))
++	require.NoError(t, db.Model(offering).Updates(map[string]any{
++		"canonical_model_id": canonical.ID,
++		"status":             apigxmodel.OfferingStatusPublished,
++	}).Error)
+ 
+ 	previousDB := channelpool.CurrentDB
+ 	channelpool.SetDBProvider(func() *gorm.DB { return db })
+diff --git a/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx b/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx
+index 399736a..f0373b0 100644
+--- a/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx
++++ b/web/src/features/apigx-platform/__tests__/responsive-operations.test.tsx
+@@ -37,6 +37,9 @@ const reviewOffering: ReviewOffering = {
+   channel_public_id: 'channel-demo',
+   channel_name: 'Primary route',
+   upstream_model_id: 'demo-chat-model',
++  canonical_model_id: 4,
++  canonical_api_model_id: 'demo-chat-model',
++  mapping_confirmed: true,
+   status: 1,
+   revision: 1,
+   price_configured: true,
+@@ -54,6 +57,12 @@ const aliasCandidate: AliasCandidate = {
+   source_ref: 'channel-demo',
+   confirmation_state: 0,
+   target_canonical_model_id: 0,
++  offering_id: 17,
++  offering_public_id: 'offering-demo',
++  offering_status: 1,
++  owner_user_id: 9,
++  share_group_name: 'Community pool',
++  channel_name: 'Primary route',
+ }
+ 
+ it('keeps every review action in the mobile card instead of the desktop table overflow', async () => {
+@@ -97,16 +106,13 @@ it('keeps every review action in the mobile card instead of the desktop table ov
+ it('keeps all model-catalog actions in the mobile candidate card', async () => {
+   const user = userEvent.setup()
+   const onConfirm = vi.fn()
+-  const onBulk = vi.fn()
+   const onReject = vi.fn()
+ 
+   render(
+     <AliasCandidateMobileCards
+       items={[aliasCandidate]}
+-      bulkPending={false}
+       rejectPending={false}
+       onConfirm={onConfirm}
+-      onBulk={onBulk}
+       onReject={onReject}
+     />
+   )
+@@ -117,14 +123,8 @@ it('keeps all model-catalog actions in the mobile candidate card', async () => {
+   await user.click(
+     within(region).getByRole('button', { name: 'Confirm model' })
+   )
+-  await user.click(
+-    within(region).getByRole('button', {
+-      name: 'Confirm all matching names',
+-    })
+-  )
+   await user.click(within(region).getByRole('button', { name: 'Reject' }))
+ 
+   expect(onConfirm).toHaveBeenCalledWith(aliasCandidate)
+-  expect(onBulk).toHaveBeenCalledWith('demo-chat-model')
+   expect(onReject).toHaveBeenCalledWith(23)
+ })
+diff --git a/web/src/features/apigx-platform/api.ts b/web/src/features/apigx-platform/api.ts
+index e75b7f3..0641e66 100644
+--- a/web/src/features/apigx-platform/api.ts
++++ b/web/src/features/apigx-platform/api.ts
+@@ -22,6 +22,7 @@ import type {
+   AliasCandidateListResponse,
+   ApplyRouteRankingPayload,
+   ConfirmAliasPayload,
++  CanonicalModelListResponse,
+   ManualPricePayload,
+   PriceRuleResponse,
+   ReviewOfferingListResponse,
+@@ -95,6 +96,11 @@ export async function getAliasCandidates(
+   return res.data
+ }
+ 
++export async function getCanonicalModels(): Promise<CanonicalModelListResponse> {
++  const res = await api.get('/api/apigx/model-catalog/models')
++  return res.data
++}
++
+ export async function confirmAliasCandidate(
+   candidateId: number,
+   payload: ConfirmAliasPayload
+diff --git a/web/src/features/apigx-platform/components/alias-candidates-card.tsx b/web/src/features/apigx-platform/components/alias-candidates-card.tsx
+index 2256681..80c0d56 100644
+--- a/web/src/features/apigx-platform/components/alias-candidates-card.tsx
++++ b/web/src/features/apigx-platform/components/alias-candidates-card.tsx
+@@ -20,6 +20,7 @@ For commercial licensing, please contact support@quantumnous.com
+ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+ import { useState } from 'react'
+ import { useTranslation } from 'react-i18next'
++import { toast } from 'sonner'
+ 
+ import {
+   StaticDataTable,
+@@ -28,21 +29,16 @@ import {
+ import { EmptyState } from '@/components/empty-state'
+ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
++import { handleServerError } from '@/lib/handle-server-error'
+ 
+-import {
+-  bulkConfirmAliases,
+-  getAliasCandidates,
+-  rejectAliasCandidate,
+-} from '../api'
++import { getAliasCandidates, rejectAliasCandidate } from '../api'
+ import type { AliasCandidate } from '../types'
+ import { AliasConfirmDialog } from './alias-confirm-dialog'
+ 
+ export function AliasCandidateMobileCards(props: {
+   items: AliasCandidate[]
+-  bulkPending: boolean
+   rejectPending: boolean
+   onConfirm: (candidate: AliasCandidate) => void
+-  onBulk: (normalizedModelID: string) => void
+   onReject: (id: number) => void
+ }) {
+   const { t } = useTranslation()
+@@ -54,42 +50,47 @@ export function AliasCandidateMobileCards(props: {
+     >
+       {props.items.map((row) => (
+         <div className='space-y-4 rounded-lg border p-4' key={row.id}>
+-          <div className='space-y-3'>
+-            <div>
+-              <p className='text-muted-foreground text-xs'>
+-                {t('Upstream model')}
+-              </p>
+-              <code className='mt-1 block text-xs font-semibold break-all'>
+-                {row.external_model_id}
+-              </code>
++          <div>
++            <code className='block text-xs font-semibold break-all'>
++              {row.external_model_id}
++            </code>
++            <p className='text-muted-foreground mt-1 text-xs break-words'>
++              {row.share_group_name || '—'} · {row.channel_name || '—'}
++            </p>
++          </div>
++          <div className='grid grid-cols-2 gap-2 text-xs'>
++            <div className='bg-muted/30 rounded-md border p-2'>
++              <span className='text-muted-foreground block'>
++                {t('identity.sharer')}
++              </span>
++              <span className='mt-1 block font-medium'>
++                {t('Provider {{id}}', { id: row.owner_user_id })}
++              </span>
+             </div>
+-            <div>
+-              <p className='text-muted-foreground text-xs'>
+-                {t('Suggested model name')}
+-              </p>
+-              <code className='mt-1 block text-xs break-all'>
+-                {row.normalized_model_id}
++            <div className='bg-muted/30 rounded-md border p-2'>
++              <span className='text-muted-foreground block'>
++                {t('identity.target')}
++              </span>
++              <code className='mt-1 block break-all'>
++                {row.target_api_model_id || t('identity.newModelPending')}
+               </code>
+             </div>
+           </div>
+-          <div className='grid gap-2'>
++          <div className='grid gap-2 sm:grid-cols-2'>
+             <Button variant='outline' onClick={() => props.onConfirm(row)}>
+-              {t('Confirm model')}
+-            </Button>
+-            <Button
+-              variant='outline'
+-              disabled={props.bulkPending}
+-              onClick={() => props.onBulk(row.normalized_model_id)}
+-            >
+-              {t('Confirm all matching names')}
+-            </Button>
+-            <Button
+-              variant='outline'
+-              disabled={props.rejectPending}
+-              onClick={() => props.onReject(row.id)}
+-            >
+-              {t('Reject')}
++              {row.confirmation_state === 1
++                ? t('identity.editMapping')
++                : t('Confirm model')}
+             </Button>
++            {row.confirmation_state === 0 ? (
++              <Button
++                variant='outline'
++                disabled={props.rejectPending}
++                onClick={() => props.onReject(row.id)}
++              >
++                {t('Reject')}
++              </Button>
++            ) : null}
+           </div>
+         </div>
+       ))}
+@@ -97,77 +98,89 @@ export function AliasCandidateMobileCards(props: {
+   )
+ }
+ 
+-/**
+- * 模型身份确认（§4「批量匹配、人工覆盖」）。
+- *
+- * 新抓取的上游模型需要管理员确认它对应的统一模型；确认后，模型广场才能
+- * 合并相同模型的分享来源。未经确认的名称只提供操作建议，不参与自动路由。
+- */
++/** Submitted share-model identities, managed alongside the system model list. */
+ export function AliasCandidatesCard() {
+   const { t } = useTranslation()
+   const queryClient = useQueryClient()
++  const [state, setState] = useState<0 | 1>(0)
+   const [editing, setEditing] = useState<AliasCandidate | null>(null)
+ 
+   const query = useQuery({
+-    queryKey: ['apigx-alias-candidates'],
+-    queryFn: () => getAliasCandidates(0),
++    queryKey: ['apigx-alias-candidates', state],
++    queryFn: () => getAliasCandidates(state, 1, 200),
+   })
+ 
+   const refresh = () => {
+     void queryClient.invalidateQueries({ queryKey: ['apigx-alias-candidates'] })
++    void queryClient.invalidateQueries({ queryKey: ['apigx-canonical-models'] })
++    void queryClient.invalidateQueries({
++      queryKey: ['apigx-channel-offerings'],
++    })
++    void queryClient.invalidateQueries({ queryKey: ['apigx-review-offerings'] })
++    void queryClient.invalidateQueries({ queryKey: ['apigx-plaza'] })
+   }
+ 
+   const reject = useMutation({
+     mutationFn: (id: number) => rejectAliasCandidate(id),
+-    onSuccess: refresh,
+-  })
+-
+-  const bulk = useMutation({
+-    mutationFn: (normalized: string) =>
+-      bulkConfirmAliases(normalized, {
+-        api_model_id: normalized,
+-        modality_type: 1,
+-      }),
+-    onSuccess: refresh,
++    onSuccess: () => {
++      toast.success(t('identity.rejected'))
++      refresh()
++    },
++    onError: (error) => handleServerError(error),
+   })
+ 
+   const items = query.data?.data?.items ?? []
+-
+   const columns: StaticDataTableColumn<AliasCandidate>[] = [
+     {
+-      id: 'external',
++      id: 'model',
+       header: t('Upstream model'),
+-      cell: (row) => row.external_model_id,
++      className: 'min-w-48',
++      cell: (row) => (
++        <div>
++          <code className='text-xs font-semibold break-all'>
++            {row.external_model_id}
++          </code>
++          <div className='text-muted-foreground mt-1 text-xs break-words'>
++            {row.share_group_name || '—'} · {row.channel_name || '—'}
++          </div>
++        </div>
++      ),
+     },
+     {
+-      id: 'normalized',
+-      header: t('Suggested model name'),
+-      cell: (row) => row.normalized_model_id,
++      id: 'owner',
++      header: t('identity.sharer'),
++      cell: (row) => t('Provider {{id}}', { id: row.owner_user_id }),
++    },
++    {
++      id: 'target',
++      header: t('identity.target'),
++      className: 'min-w-48',
++      cell: (row) => (
++        <code className='text-xs break-all'>
++          {row.target_api_model_id || t('identity.newModelPending')}
++        </code>
++      ),
+     },
+     {
+       id: 'actions',
+       header: '',
+       cell: (row) => (
+-        <div className='flex gap-2'>
++        <div className='flex flex-wrap justify-end gap-2'>
+           <Button size='sm' variant='outline' onClick={() => setEditing(row)}>
+-            {t('Confirm model')}
+-          </Button>
+-          <Button
+-            size='sm'
+-            variant='outline'
+-            disabled={bulk.isPending}
+-            onClick={() => bulk.mutate(row.normalized_model_id)}
+-          >
+-            {t('Confirm all matching names')}
+-          </Button>
+-          <Button
+-            size='sm'
+-            variant='outline'
+-            disabled={reject.isPending}
+-            onClick={() => reject.mutate(row.id)}
+-          >
+-            {t('Reject')}
++            {row.confirmation_state === 1
++              ? t('identity.editMapping')
++              : t('Confirm model')}
+           </Button>
++          {row.confirmation_state === 0 ? (
++            <Button
++              size='sm'
++              variant='outline'
++              disabled={reject.isPending}
++              onClick={() => reject.mutate(row.id)}
++            >
++              {t('Reject')}
++            </Button>
++          ) : null}
+         </div>
+       ),
+     },
+@@ -175,25 +188,47 @@ export function AliasCandidatesCard() {
+ 
+   return (
+     <Card>
+-      <CardHeader>
+-        <CardTitle>{t('Model identity review')}</CardTitle>
++      <CardHeader className='gap-4'>
++        <div className='flex flex-wrap items-start justify-between gap-3'>
++          <div>
++            <CardTitle>{t('Model identity review')}</CardTitle>
++            <p className='text-muted-foreground mt-1 max-w-3xl text-sm'>
++              {t('identity.description')}
++            </p>
++          </div>
++          <div className='flex rounded-lg border p-1'>
++            <Button
++              size='sm'
++              variant={state === 0 ? 'secondary' : 'ghost'}
++              onClick={() => setState(0)}
++            >
++              {t('identity.pending')}
++            </Button>
++            <Button
++              size='sm'
++              variant={state === 1 ? 'secondary' : 'ghost'}
++              onClick={() => setState(1)}
++            >
++              {t('identity.confirmed')}
++            </Button>
++          </div>
++        </div>
+       </CardHeader>
+-      <CardContent className='space-y-4'>
+-        <p className='text-muted-foreground text-xs'>
+-          {t(
+-            'Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.'
+-          )}
+-        </p>
++      <CardContent>
+         {items.length === 0 ? (
+-          <EmptyState title={t('No models awaiting confirmation')} />
++          <EmptyState
++            title={
++              state === 0
++                ? t('No models awaiting confirmation')
++                : t('identity.noConfirmed')
++            }
++          />
+         ) : (
+           <>
+             <AliasCandidateMobileCards
+               items={items}
+-              bulkPending={bulk.isPending}
+               rejectPending={reject.isPending}
+               onConfirm={setEditing}
+-              onBulk={(normalizedModelID) => bulk.mutate(normalizedModelID)}
+               onReject={(id) => reject.mutate(id)}
+             />
+             <div className='hidden md:block'>
+diff --git a/web/src/features/apigx-platform/components/alias-confirm-dialog.tsx b/web/src/features/apigx-platform/components/alias-confirm-dialog.tsx
+index 63e9400..8fee8ca 100644
+--- a/web/src/features/apigx-platform/components/alias-confirm-dialog.tsx
++++ b/web/src/features/apigx-platform/components/alias-confirm-dialog.tsx
+@@ -17,25 +17,35 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
+ For commercial licensing, please contact support@quantumnous.com
+ */
+ 
+-import { useMutation } from '@tanstack/react-query'
++import { useMutation, useQuery } from '@tanstack/react-query'
+ import { useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
++import { toast } from 'sonner'
+ 
+ import { Dialog } from '@/components/dialog'
+ import { Button } from '@/components/ui/button'
++import { Combobox } from '@/components/ui/combobox'
+ import { Input } from '@/components/ui/input'
+ import { Label } from '@/components/ui/label'
++import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+ import { Textarea } from '@/components/ui/textarea'
++import { handleServerError } from '@/lib/handle-server-error'
+ 
+-import { confirmAliasCandidate } from '../api'
++import { confirmAliasCandidate, getCanonicalModels } from '../api'
+ import type { AliasCandidate } from '../types'
+ 
+-/**
+- * 确认一个别名候选：把上游模型名指到某个标准模型。
+- *
+- * 对外标准 ID 由管理员填：**填一个还不存在的 ID 也可以** —— 后端会顺手创建标准模型，
+- * 否则"先去别处建模型再回来确认"这一步会被跳过，候选就永远堆着。
+- */
++type TargetMode = 'existing' | 'new'
++
++const MODALITIES = [
++  { value: 1, key: 'identity.modality.chat' },
++  { value: 2, key: 'identity.modality.embedding' },
++  { value: 3, key: 'identity.modality.image' },
++  { value: 4, key: 'identity.modality.audioRecognition' },
++  { value: 5, key: 'identity.modality.audioGeneration' },
++  { value: 6, key: 'identity.modality.rerank' },
++  { value: 7, key: 'identity.modality.video' },
++] as const
++
+ export function AliasConfirmDialog(props: {
+   candidate: AliasCandidate | null
+   open: boolean
+@@ -43,59 +53,185 @@ export function AliasConfirmDialog(props: {
+   onSaved: () => void
+ }) {
+   const { t } = useTranslation()
++  const [mode, setMode] = useState<TargetMode>('new')
++  const [targetID, setTargetID] = useState('')
+   const [apiModelID, setApiModelID] = useState('')
+   const [description, setDescription] = useState('')
++  const [modalityType, setModalityType] = useState(1)
++  const modelsQuery = useQuery({
++    queryKey: ['apigx-canonical-models'],
++    queryFn: getCanonicalModels,
++    enabled: props.open,
++  })
+ 
+   useEffect(() => {
+-    setApiModelID(props.candidate?.normalized_model_id ?? '')
++    const target = props.candidate?.target_canonical_model_id ?? 0
++    setMode(target > 0 ? 'existing' : 'new')
++    setTargetID(target > 0 ? String(target) : '')
++    setApiModelID(
++      props.candidate?.target_api_model_id ||
++        props.candidate?.normalized_model_id ||
++        ''
++    )
+     setDescription('')
++    setModalityType(1)
+   }, [props.candidate])
+ 
+   const save = useMutation({
+     mutationFn: () =>
+-      confirmAliasCandidate(props.candidate?.id ?? 0, {
+-        api_model_id: apiModelID.trim(),
+-        description: description.trim(),
+-        modality_type: 1,
+-      }),
++      confirmAliasCandidate(
++        props.candidate?.id ?? 0,
++        mode === 'existing'
++          ? { target_canonical_model_id: Number.parseInt(targetID, 10) }
++          : {
++              api_model_id: apiModelID.trim(),
++              description: description.trim(),
++              modality_type: modalityType,
++            }
++      ),
+     onSuccess: () => {
++      toast.success(t('identity.mappingSaved'))
+       props.onOpenChange(false)
+       props.onSaved()
+     },
++    onError: (error) => handleServerError(error),
+   })
+ 
+-  const invalid = apiModelID.trim() === ''
++  const options = (modelsQuery.data?.data?.items ?? []).map((model) => ({
++    value: String(model.id),
++    label: model.api_model_id,
++    description: model.description,
++  }))
++  const modalityOptions = MODALITIES.map((modality) => ({
++    value: String(modality.value),
++    label: t(modality.key),
++  }))
++  const invalid =
++    mode === 'existing'
++      ? !Number.isFinite(Number(targetID)) || Number(targetID) <= 0
++      : apiModelID.trim() === ''
+ 
+   return (
+     <Dialog
+       open={props.open}
+       onOpenChange={props.onOpenChange}
+-      title={t('Confirm model mapping')}
+-      contentClassName='sm:max-w-lg'
++      title={
++        props.candidate?.confirmation_state === 1
++          ? t('identity.editTitle')
++          : t('Confirm model mapping')
++      }
++      description={t('identity.dialogDescription')}
++      contentClassName='sm:max-w-xl'
+       footer={
+         <>
+           <Button variant='outline' onClick={() => props.onOpenChange(false)}>
+             {t('Cancel')}
+           </Button>
+-          <Button disabled={invalid || save.isPending} onClick={() => save.mutate()}>
+-            {t('Confirm')}
++          <Button
++            disabled={invalid || save.isPending}
++            onClick={() => save.mutate()}
++          >
++            {t('Save')}
+           </Button>
+         </>
+       }
+     >
+-      <div className='space-y-4'>
+-        <p className='text-muted-foreground text-xs'>
+-          {t('Upstream model')}: <span className='font-mono'>{props.candidate?.external_model_id ?? ''}</span>
+-        </p>
+-        <div className='space-y-2'>
+-          <Label>{t('Standard model ID')}</Label>
+-          <Input value={apiModelID} onChange={(event) => setApiModelID(event.target.value)} />
+-          <p className='text-muted-foreground text-xs'>{t('If it does not exist, it will be created.')}</p>
+-        </div>
+-        <div className='space-y-2'>
+-          <Label>{t('Description')}</Label>
+-          <Textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} />
++      <div className='space-y-5'>
++        <div className='bg-muted/30 grid gap-3 rounded-lg border p-3 text-sm sm:grid-cols-2'>
++          <div>
++            <div className='text-muted-foreground text-xs'>
++              {t('Upstream model')}
++            </div>
++            <code className='mt-1 block break-all'>
++              {props.candidate?.external_model_id ?? ''}
++            </code>
++          </div>
++          <div>
++            <div className='text-muted-foreground text-xs'>
++              {t('identity.source')}
++            </div>
++            <div className='mt-1 break-words'>
++              {props.candidate?.share_group_name || '—'} ·{' '}
++              {props.candidate?.channel_name || '—'}
++            </div>
++          </div>
+         </div>
++
++        <RadioGroup
++          value={mode}
++          onValueChange={(value) => setMode(value as TargetMode)}
++          className='grid gap-3'
++        >
++          <label className='hover:bg-muted/30 flex cursor-pointer gap-3 rounded-lg border p-4 transition-colors'>
++            <RadioGroupItem value='existing' />
++            <span>
++              <span className='block text-sm font-medium'>
++                {t('identity.existing')}
++              </span>
++              <span className='text-muted-foreground mt-1 block text-xs'>
++                {t('identity.existingDescription')}
++              </span>
++            </span>
++          </label>
++          {mode === 'existing' ? (
++            <div className='space-y-2 pl-8'>
++              <Label>{t('Standard model ID')}</Label>
++              <Combobox
++                options={options}
++                value={targetID}
++                onValueChange={(value) => setTargetID(value ?? '')}
++                placeholder={t('identity.selectExisting')}
++                searchPlaceholder={t('Search models')}
++                emptyText={t('identity.noModels')}
++              />
++            </div>
++          ) : null}
++
++          <label className='hover:bg-muted/30 flex cursor-pointer gap-3 rounded-lg border p-4 transition-colors'>
++            <RadioGroupItem value='new' />
++            <span>
++              <span className='block text-sm font-medium'>
++                {t('identity.new')}
++              </span>
++              <span className='text-muted-foreground mt-1 block text-xs'>
++                {t('identity.newDescription')}
++              </span>
++            </span>
++          </label>
++        </RadioGroup>
++
++        {mode === 'new' ? (
++          <div className='grid gap-4 pl-8'>
++            <div className='space-y-2'>
++              <Label>{t('Standard model ID')}</Label>
++              <Input
++                value={apiModelID}
++                onChange={(event) => setApiModelID(event.target.value)}
++              />
++            </div>
++            <div className='space-y-2'>
++              <Label>{t('Description')}</Label>
++              <Textarea
++                value={description}
++                onChange={(event) => setDescription(event.target.value)}
++                rows={3}
++              />
++            </div>
++            <div className='space-y-2'>
++              <Label>{t('identity.modality')}</Label>
++              <Combobox
++                options={modalityOptions}
++                value={String(modalityType)}
++                onValueChange={(value) =>
++                  setModalityType(Number.parseInt(value ?? '1', 10))
++                }
++                placeholder={t('identity.modality.select')}
++                searchPlaceholder={t('identity.modality.search')}
++                emptyText={t('identity.modality.empty')}
++              />
++            </div>
++          </div>
++        ) : null}
+       </div>
+     </Dialog>
+   )
+diff --git a/web/src/features/apigx-platform/index.tsx b/web/src/features/apigx-platform/index.tsx
+index 9de8f35..7ea8faf 100644
+--- a/web/src/features/apigx-platform/index.tsx
++++ b/web/src/features/apigx-platform/index.tsx
+@@ -55,7 +55,6 @@ import {
+   rejectOffering,
+   setManualPrice,
+ } from './api'
+-import { AliasCandidatesCard } from './components/alias-candidates-card'
+ import { canSubmitManualPrice, parseUsdPerMillion } from './lib/price'
+ import type { PriceDimension, ReviewOffering } from './types'
+ 
+@@ -109,7 +108,11 @@ export function ReviewOfferingMobileCards(props: {
+               {t('apigxPlatform.configurePrice')}
+             </Button>
+             <Button
+-              disabled={!row.price_configured || props.reviewPending}
++              disabled={
++                !row.price_configured ||
++                !row.mapping_confirmed ||
++                props.reviewPending
++              }
+               onClick={() => props.onPublish(row.id)}
+             >
+               {t('apigxPlatform.publish')}
+@@ -122,6 +125,11 @@ export function ReviewOfferingMobileCards(props: {
+               {t('apigxPlatform.reject')}
+             </Button>
+           </div>
++          {!row.mapping_confirmed ? (
++            <p className='text-muted-foreground text-xs'>
++              {t('identity.publishBlocked')}
++            </p>
++          ) : null}
+         </div>
+       ))}
+     </section>
+@@ -265,6 +273,24 @@ export function ApigxPlatform() {
+         row.owner_display_name ||
+         t('Provider {{id}}', { id: row.owner_user_id }),
+     },
++    {
++      id: 'identity',
++      header: t('Model identity review'),
++      cell: (row) => (
++        <div className='space-y-1'>
++          <Badge variant={row.mapping_confirmed ? 'default' : 'warning'}>
++            {row.mapping_confirmed
++              ? t('identity.confirmed')
++              : t('identity.pending')}
++          </Badge>
++          {row.canonical_api_model_id ? (
++            <code className='block text-xs break-all'>
++              {row.canonical_api_model_id}
++            </code>
++          ) : null}
++        </div>
++      ),
++    },
+     {
+       id: 'price',
+       header: t('apigxPlatform.review.price'),
+@@ -291,7 +317,11 @@ export function ApigxPlatform() {
+           </Button>
+           <Button
+             size='sm'
+-            disabled={!row.price_configured || reviewMutation.isPending}
++            disabled={
++              !row.price_configured ||
++              !row.mapping_confirmed ||
++              reviewMutation.isPending
++            }
+             onClick={() => reviewMutation.mutate({ id: row.id, publish: true })}
+           >
+             {t('apigxPlatform.publish')}
+@@ -530,8 +560,6 @@ export function ApigxPlatform() {
+           </div>
+         </CardContent>
+       </Card>
+-
+-      <AliasCandidatesCard />
+     </div>
+   )
+ }
+diff --git a/web/src/features/apigx-platform/types.ts b/web/src/features/apigx-platform/types.ts
+index c062bb1..e62775c 100644
+--- a/web/src/features/apigx-platform/types.ts
++++ b/web/src/features/apigx-platform/types.ts
+@@ -53,6 +53,9 @@ export interface ReviewOffering {
+   channel_public_id: string
+   channel_name: string
+   upstream_model_id: string
++  canonical_model_id?: number
++  canonical_api_model_id?: string
++  mapping_confirmed?: boolean
+   capabilities?: Record<string, boolean>
+   status: number
+   revision: number
+@@ -98,6 +101,25 @@ export interface AliasCandidate {
+   /** 0=待确认 / 1=已确认 / 2=已拒绝 */
+   confirmation_state: number
+   target_canonical_model_id: number
++  target_api_model_id?: string
++  offering_id: number
++  offering_public_id: string
++  offering_status: number
++  owner_user_id: number
++  share_group_name: string
++  channel_name: string
++}
++
++export interface CanonicalModelOption {
++  id: number
++  api_model_id: string
++  description: string
++  modality_type: number
++}
++
++export interface CanonicalModelListResponse {
++  success: boolean
++  data?: { items: CanonicalModelOption[] }
+ }
+ 
+ export interface AliasCandidateListResponse {
+diff --git a/web/src/features/models/index.tsx b/web/src/features/models/index.tsx
+index 6e06a44..5cdece8 100644
+--- a/web/src/features/models/index.tsx
++++ b/web/src/features/models/index.tsx
+@@ -19,12 +19,13 @@ For commercial licensing, please contact support@quantumnous.com
+ import { useQueryClient } from '@tanstack/react-query'
+ import { getRouteApi, useNavigate } from '@tanstack/react-router'
+ import { Plus } from 'lucide-react'
+-import { useCallback, useEffect, useState } from 'react'
++import { type ReactNode, useCallback, useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ 
+ import { SectionPageLayout } from '@/components/layout'
+ import { Button } from '@/components/ui/button'
+ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
++import { AliasCandidatesCard } from '@/features/apigx-platform/components/alias-candidates-card'
+ import { requireServerSuccess } from '@/lib/server-error-message'
+ 
+ import { listDeployments } from './api'
+@@ -59,6 +60,10 @@ const SECTION_META: Record<
+     titleKey: 'Deployments',
+     tabKey: 'Deployments',
+   },
++  identities: {
++    titleKey: 'Model identity review',
++    tabKey: 'Model identity review',
++  },
+ }
+ 
+ function ModelsContent() {
+@@ -92,7 +97,7 @@ function ModelsContent() {
+ 
+   const meta = SECTION_META[activeSection] ?? SECTION_META.metadata
+ 
+-  let actions = <ModelsPrimaryButtons />
++  let actions: ReactNode = <ModelsPrimaryButtons />
+   let content = <ModelsTable />
+   if (activeSection === 'vendors') {
+     actions = (
+@@ -116,6 +121,9 @@ function ModelsContent() {
+       </Button>
+     )
+     content = <DeploymentsSection />
++  } else if (activeSection === 'identities') {
++    actions = null
++    content = <AliasCandidatesCard />
+   }
+ 
+   return (
+diff --git a/web/src/features/models/section-registry.tsx b/web/src/features/models/section-registry.tsx
+index 180835a..080ff81 100644
+--- a/web/src/features/models/section-registry.tsx
++++ b/web/src/features/models/section-registry.tsx
+@@ -37,6 +37,11 @@ const MODELS_SECTIONS = [
+     titleKey: 'Deployments',
+     build: () => null, // Content is rendered directly in the page component
+   },
++  {
++    id: 'identities',
++    titleKey: 'Model identity review',
++    build: () => null,
++  },
+ ] as const
+ 
+ export type ModelsSectionId = (typeof MODELS_SECTIONS)[number]['id']
+diff --git a/web/src/features/models/types.ts b/web/src/features/models/types.ts
+index 12def44..1588fe6 100644
+--- a/web/src/features/models/types.ts
++++ b/web/src/features/models/types.ts
+@@ -349,7 +349,11 @@ export type SyncSource = 'official'
+ /**
+  * Model tab type
+  */
+-export type ModelTabCategory = 'metadata' | 'vendors' | 'deployments'
++export type ModelTabCategory =
++  | 'metadata'
++  | 'vendors'
++  | 'deployments'
++  | 'identities'
+ 
+ /**
+  * Deployment entity from API
+diff --git a/web/src/features/pricing/__tests__/apigx-sources.test.ts b/web/src/features/pricing/__tests__/apigx-sources.test.ts
+index 31f8f01..ee3d4c5 100644
+--- a/web/src/features/pricing/__tests__/apigx-sources.test.ts
++++ b/web/src/features/pricing/__tests__/apigx-sources.test.ts
+@@ -36,10 +36,30 @@ const item = (
+ describe('模型广场：分享来源聚合', () => {
+   it('同一模型的多个来源被汇总，分组按名称去重排序并带上对外 ID', () => {
+     const map = summarizeModelSources([
+-      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
+-      item({ model: 'm1', group_name: 'A组', group_public_id: 'ga' }),
+-      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
+-      item({ model: 'm2', group_name: 'A组', group_public_id: 'ga' }),
++      item({
++        model: 'm1',
++        channel_public_id: 'c1',
++        group_name: 'B组',
++        group_public_id: 'gb',
++      }),
++      item({
++        model: 'm1',
++        channel_public_id: 'c2',
++        group_name: 'A组',
++        group_public_id: 'ga',
++      }),
++      item({
++        model: 'm1',
++        channel_public_id: 'c3',
++        group_name: 'B组',
++        group_public_id: 'gb',
++      }),
++      item({
++        model: 'm2',
++        channel_public_id: 'c4',
++        group_name: 'A组',
++        group_public_id: 'ga',
++      }),
+     ])
+     expect(map.get('m1')?.sourceCount).toBe(3)
+     expect(map.get('m1')?.groups).toEqual([
+@@ -70,12 +90,54 @@ describe('模型广场：分享来源聚合', () => {
+ 
+   it('已确认的标准模型 ID 会被带出（§8.2 对外标准 ID）', () => {
+     const map = summarizeModelSources([
+-      item({ model: 'm1' }),
+-      item({ model: 'm1', canonical_model_id: 'standard-1' }),
++      item({ model: 'm1', channel_public_id: 'c1' }),
++      item({
++        model: 'm1',
++        channel_public_id: 'c2',
++        canonical_model_id: 'standard-1',
++      }),
+     ])
+     expect(map.get('m1')?.canonicalModelID).toBe('standard-1')
+   })
+ 
++  it('同一渠道映射到同一标准模型时只保留质量证据更完整的来源', () => {
++    const models = aggregateResourceModels(
++      [
++        item({
++          model: 'standard-m1',
++          access_kind: 'public',
++          channel_public_id: 'same-channel',
++          offering_public_id: 'older-alias',
++          sample_count: 0,
++          insufficient: true,
++          updated_at: 20,
++        }),
++        item({
++          model: 'standard-m1',
++          access_kind: 'public',
++          channel_public_id: 'same-channel',
++          offering_public_id: 'measured-alias',
++          sample_count: 12,
++          insufficient: false,
++          latency_ms_p50: 180,
++          output_tokens_per_second: 42,
++          reliability_lower_bound_ppm: 970_000,
++          updated_at: 10,
++        }),
++      ],
++      'public'
++    )
++
++    expect(models).toHaveLength(1)
++    expect(models[0]?.sources).toHaveLength(1)
++    expect(models[0]?.sources[0]?.offering_public_id).toBe('measured-alias')
++    expect(models[0]?.quality).toMatchObject({
++      lowestLatencyMsP50: 180,
++      highestOutputTokensPerSecond: 42,
++      bestReliabilityLowerBoundPpm: 970_000,
++    })
++  })
++
+   it('分享分组选项去重排序，空名不进入选项', () => {
+     const options = shareGroupOptions([
+       item({ model: 'm1', group_name: 'B组' }),
+@@ -88,15 +150,16 @@ describe('模型广场：分享来源聚合', () => {
+ 
+   it('按公开、私有、分享给我筛选，并按模型 ID 聚合来源', () => {
+     const items = [
+-      item({ model: 'm2', access_kind: 'public' }),
++      item({ model: 'm2', access_kind: 'public', channel_public_id: 'c2' }),
+       item({
+         model: 'm1',
+         access_kind: 'public',
++        channel_public_id: 'c1',
+         model_description: '公开模型',
+       }),
+-      item({ model: 'm1', access_kind: 'public' }),
+-      item({ model: 'm1', access_kind: 'private' }),
+-      item({ model: 'm3', access_kind: 'shared' }),
++      item({ model: 'm1', access_kind: 'public', channel_public_id: 'c3' }),
++      item({ model: 'm1', access_kind: 'private', channel_public_id: 'c4' }),
++      item({ model: 'm3', access_kind: 'shared', channel_public_id: 'c5' }),
+     ]
+ 
+     const publicModels = aggregateResourceModels(items, 'public')
+diff --git a/web/src/features/pricing/components/model-details-sources.tsx b/web/src/features/pricing/components/model-details-sources.tsx
+index 90ca568..3edfe73 100644
+--- a/web/src/features/pricing/components/model-details-sources.tsx
++++ b/web/src/features/pricing/components/model-details-sources.tsx
+@@ -51,6 +51,7 @@ import type {
+ import { handleServerError } from '@/lib/handle-server-error'
+ 
+ import { useApigxModelSources } from '../hooks/use-apigx-model-sources'
++import { dedupeModelSources } from '../lib/apigx-sources'
+ import { buildModelSourcePreferences } from '../lib/source-preferences'
+ 
+ const STRATEGIES = [
+@@ -73,9 +74,11 @@ export function ModelDetailsSources(props: { modelName: string }) {
+   const modelName = props.modelName
+   const sources = useMemo(
+     () =>
+-      items.filter(
+-        (item) =>
+-          item.model === modelName || item.canonical_model_id === modelName
++      dedupeModelSources(
++        items.filter(
++          (item) =>
++            item.model === modelName || item.canonical_model_id === modelName
++        )
+       ),
+     [items, modelName]
+   )
+diff --git a/web/src/features/pricing/lib/apigx-sources.ts b/web/src/features/pricing/lib/apigx-sources.ts
+index 2920487..8eab09e 100644
+--- a/web/src/features/pricing/lib/apigx-sources.ts
++++ b/web/src/features/pricing/lib/apigx-sources.ts
+@@ -65,6 +65,39 @@ export interface ResourceModelSummary {
+   quality: ResourceModelQualitySummary
+ }
+ 
++function sourceCompleteness(source: PlazaOfferingItem): number {
++  let score = Math.max(source.sample_count ?? 0, 0) * 10
++  if ((source.latency_ms_p50 ?? 0) > 0) score += 3
++  if ((source.output_tokens_per_second ?? 0) > 0) score += 3
++  if ((source.reliability_lower_bound_ppm ?? 0) > 0) score += 3
++  if (source.model_description) score += 1
++  return score
++}
++
++/**
++ * A share channel is one selectable source even when it imported multiple
++ * upstream aliases that now map to the same public model. Keep the row with
++ * the strongest observed evidence so deduplication never hides known quality.
++ */
++export function dedupeModelSources(
++  sources: PlazaOfferingItem[]
++): PlazaOfferingItem[] {
++  const byChannel = new Map<string, PlazaOfferingItem>()
++  for (const source of sources) {
++    const key = source.channel_public_id || source.offering_public_id
++    const current = byChannel.get(key)
++    if (
++      !current ||
++      sourceCompleteness(source) > sourceCompleteness(current) ||
++      (sourceCompleteness(source) === sourceCompleteness(current) &&
++        source.updated_at > current.updated_at)
++    ) {
++      byChannel.set(key, source)
++    }
++  }
++  return [...byChannel.values()]
++}
++
+ export function summarizeResourceQuality(
+   sources: PlazaOfferingItem[]
+ ): ResourceModelQualitySummary {
+@@ -148,19 +181,22 @@ export function aggregateResourceModels(
+   }
+ 
+   return [...byModel.entries()]
+-    .map(([modelID, sources]) => ({
+-      modelID,
+-      canonicalModelID: sources.find((source) => source.canonical_model_id)
+-        ?.canonical_model_id,
+-      description: sources.find((source) => source.model_description)
+-        ?.model_description,
+-      sources: [...sources].sort((left, right) => {
+-        const leftName = left.owner_display_name ?? left.group_name ?? ''
+-        const rightName = right.owner_display_name ?? right.group_name ?? ''
+-        return leftName.localeCompare(rightName)
+-      }),
+-      quality: summarizeResourceQuality(sources),
+-    }))
++    .map(([modelID, rawSources]) => {
++      const sources = dedupeModelSources(rawSources)
++      return {
++        modelID,
++        canonicalModelID: sources.find((source) => source.canonical_model_id)
++          ?.canonical_model_id,
++        description: sources.find((source) => source.model_description)
++          ?.model_description,
++        sources: [...sources].sort((left, right) => {
++          const leftName = left.owner_display_name ?? left.group_name ?? ''
++          const rightName = right.owner_display_name ?? right.group_name ?? ''
++          return leftName.localeCompare(rightName)
++        }),
++        quality: summarizeResourceQuality(sources),
++      }
++    })
+     .sort((left, right) => left.modelID.localeCompare(right.modelID))
+ }
+ 
+@@ -181,7 +217,8 @@ export function summarizeModelSources(
+   }
+ 
+   const out = new Map<string, ModelSourcesSummary>()
+-  for (const [model, list] of byModel) {
++  for (const [model, rawList] of byModel) {
++    const list = dedupeModelSources(rawList)
+     // 按分组名去重（同一分组的多条来源只出现一次），再按名称排序。
+     // 注意：即使拿不到对外 ID 也要**保留分组名** —— 否则筛选里会凭空少掉这个分组；
+     // 对外 ID 只用于生成"分享分组页"的链接（没有 ID 时就不渲染链接）。
+diff --git a/web/src/features/share/api.ts b/web/src/features/share/api.ts
+index ca9c8cb..767d650 100644
+--- a/web/src/features/share/api.ts
++++ b/web/src/features/share/api.ts
+@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
+ import { api } from '@/lib/api'
+ 
+ import type {
++  CanonicalModelListResponse,
+   BulkSubmitOfferingsResponse,
+   CapacityPolicyPayload,
+   ChannelDetailResponse,
+@@ -176,14 +177,32 @@ export async function setOfferingManualPrice(
+ /** 为**指定上游模型**建一条供给（草稿）—— 用于"勾选导入"，而不是一次性全量导入。 */
+ export async function createOffering(
+   channelId: number,
+-  upstreamModelID: string
++  upstreamModelID: string,
++  canonicalModelID?: number
+ ): Promise<{ success: boolean; data?: unknown }> {
+   const res = await api.post(`/api/apigx/channels/${channelId}/offerings`, {
+     upstream_model_id: upstreamModelID,
++    canonical_model_id: canonicalModelID,
+   })
+   return res.data
+ }
+ 
++export async function getCanonicalModels(): Promise<CanonicalModelListResponse> {
++  const res = await api.get('/api/apigx/model-catalog/models')
++  return res.data
++}
++
++export async function setOfferingModelMapping(
++  offeringId: number,
++  targetCanonicalModelID: number
++): Promise<{ success: boolean; data?: unknown }> {
++  const res = await api.put(
++    `/api/apigx/offerings/${offeringId}/model-mapping`,
++    { target_canonical_model_id: targetCanonicalModelID }
++  )
++  return res.data
++}
++
+ export async function fetchUpstreamModels(
+   channelId: number,
+   importAsDraft: boolean
+diff --git a/web/src/features/share/components/channel-detail.tsx b/web/src/features/share/components/channel-detail.tsx
+index a3dc46b..9a65b9a 100644
+--- a/web/src/features/share/components/channel-detail.tsx
++++ b/web/src/features/share/components/channel-detail.tsx
+@@ -22,6 +22,7 @@ import {
+   ArrowLeft,
+   CircleCheck,
+   CircleDashed,
++  GitMerge,
+   Send,
+   Trash2,
+ } from 'lucide-react'
+@@ -46,6 +47,7 @@ import { handleServerError } from '@/lib/handle-server-error'
+ 
+ import {
+   deleteOffering,
++  getCanonicalModels,
+   getChannel,
+   getChannelKeys,
+   getChannelOfferings,
+@@ -61,6 +63,7 @@ import { normalizeOfferingCapabilities } from '../lib/offering-capabilities'
+ import type { Offering } from '../types'
+ import { ChannelActions } from './channel-actions'
+ import { KeyPoolCard } from './key-pool-card'
++import { ModelMappingDialog } from './model-mapping-dialog'
+ import { PriceMatchCard } from './price-match-card'
+ 
+ export function ChannelDetailView(props: { channelId: number }) {
+@@ -69,6 +72,7 @@ export function ChannelDetailView(props: { channelId: number }) {
+   const [deletingOffering, setDeletingOffering] = useState<Offering | null>(
+     null
+   )
++  const [mappingOffering, setMappingOffering] = useState<Offering | null>(null)
+ 
+   const submitMutation = useMutation({
+     mutationFn: (offeringId: number) => submitOffering(offeringId),
+@@ -128,21 +132,32 @@ export function ChannelDetailView(props: { channelId: number }) {
+     queryKey: ['apigx-channel-offerings', props.channelId],
+     queryFn: () => getChannelOfferings(props.channelId),
+   })
++  const canonicalModelsQuery = useQuery({
++    queryKey: ['apigx-canonical-models'],
++    queryFn: getCanonicalModels,
++  })
+ 
+   if (
+     channelQuery.isPending ||
+     keysQuery.isPending ||
+-    offeringsQuery.isPending
++    offeringsQuery.isPending ||
++    canonicalModelsQuery.isPending
+   ) {
+     return <LoadingState />
+   }
+-  if (channelQuery.isError || keysQuery.isError || offeringsQuery.isError) {
++  if (
++    channelQuery.isError ||
++    keysQuery.isError ||
++    offeringsQuery.isError ||
++    canonicalModelsQuery.isError
++  ) {
+     return (
+       <ErrorState
+         onRetry={() => {
+           void channelQuery.refetch()
+           void keysQuery.refetch()
+           void offeringsQuery.refetch()
++          void canonicalModelsQuery.refetch()
+         }}
+       />
+     )
+@@ -151,6 +166,10 @@ export function ChannelDetailView(props: { channelId: number }) {
+   const channel = channelQuery.data?.data
+   const keys = keysQuery.data?.data?.items ?? []
+   const offerings = offeringsQuery.data?.data?.items ?? []
++  const canonicalModels = canonicalModelsQuery.data?.data?.items ?? []
++  const canonicalByID = new Map(
++    canonicalModels.map((model) => [model.id, model.api_model_id])
++  )
+   if (!channel) {
+     return <EmptyState title={t('share.detail.missing')} />
+   }
+@@ -181,6 +200,48 @@ export function ChannelDetailView(props: { channelId: number }) {
+         <code className='text-xs break-all'>{row.upstream_model_id}</code>
+       ),
+     },
++    {
++      id: 'mapping',
++      header: t('share.mapping.column'),
++      className: 'min-w-48',
++      cell: (row) => {
++        const confirmedName = canonicalByID.get(row.canonical_model_id)
++        const suggestedName = canonicalByID.get(
++          row.suggested_canonical_model_id
++        )
++        if (row.canonical_model_id > 0) {
++          return (
++            <div className='space-y-1'>
++              <Badge variant='default'>{t('share.mapping.confirmed')}</Badge>
++              <code className='block text-xs break-all'>
++                {confirmedName ?? `#${String(row.canonical_model_id)}`}
++              </code>
++            </div>
++          )
++        }
++        if (row.status === 1) {
++          return (
++            <div className='space-y-1'>
++              <Badge variant='outline'>{t('share.mapping.awaiting')}</Badge>
++              <span className='text-muted-foreground block text-xs break-all'>
++                {suggestedName ?? t('share.mapping.newStandard')}
++              </span>
++            </div>
++          )
++        }
++        if (row.mapping_state === 2) {
++          return <Badge variant='warning'>{t('share.mapping.rejected')}</Badge>
++        }
++        return (
++          <div className='space-y-1'>
++            <Badge variant='secondary'>{t('share.mapping.draft')}</Badge>
++            <span className='text-muted-foreground block text-xs break-all'>
++              {suggestedName ?? t('share.mapping.newStandard')}
++            </span>
++          </div>
++        )
++      },
++    },
+     {
+       id: 'status',
+       header: t('share.offering.status'),
+@@ -214,7 +275,17 @@ export function ChannelDetailView(props: { channelId: number }) {
+       id: 'actions',
+       header: '',
+       cell: (row) => (
+-        <div className='flex justify-end gap-1'>
++        <div className='flex flex-wrap justify-end gap-1'>
++          {row.status === 0 || row.status === 3 ? (
++            <Button
++              variant='ghost'
++              size='sm'
++              onClick={() => setMappingOffering(row)}
++            >
++              <GitMerge />
++              {t('share.mapping.action')}
++            </Button>
++          ) : null}
+           <SubmitOfferingButton
+             offering={row}
+             pending={submitMutation.isPending}
+@@ -358,6 +429,21 @@ export function ChannelDetailView(props: { channelId: number }) {
+ 
+           <PriceMatchCard channelId={props.channelId} offerings={offerings} />
+ 
++          <ModelMappingDialog
++            offering={mappingOffering}
++            models={canonicalModels}
++            open={mappingOffering !== null}
++            onOpenChange={(open) => {
++              if (!open) setMappingOffering(null)
++            }}
++            onSaved={() => {
++              setMappingOffering(null)
++              void queryClient.invalidateQueries({
++                queryKey: ['apigx-channel-offerings', props.channelId],
++              })
++            }}
++          />
++
+           <ConfirmDialog
+             open={deletingOffering !== null}
+             onOpenChange={(open) => {
+diff --git a/web/src/features/share/components/model-mapping-dialog.tsx b/web/src/features/share/components/model-mapping-dialog.tsx
+new file mode 100644
+index 0000000..7d90b2a
+--- /dev/null
++++ b/web/src/features/share/components/model-mapping-dialog.tsx
+@@ -0,0 +1,156 @@
++/*
++Copyright (C) 2023-2026 QuantumNous
++
++This program is free software: you can redistribute it and/or modify
++it under the terms of the GNU Affero General Public License as
++published by the Free Software Foundation, either version 3 of the
++License, or (at your option) any later version.
++
++This program is distributed in the hope that it will be useful,
++but WITHOUT ANY WARRANTY; without even the implied warranty of
++MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++GNU Affero General Public License for more details.
++
++You should have received a copy of the GNU Affero General Public License
++along with this program. If not, see <https://www.gnu.org/licenses/>.
++
++For commercial licensing, please contact support@quantumnous.com
++*/
++
++import { useMutation } from '@tanstack/react-query'
++import { useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++import { toast } from 'sonner'
++
++import { Dialog } from '@/components/dialog'
++import { Button } from '@/components/ui/button'
++import { Combobox } from '@/components/ui/combobox'
++import { Label } from '@/components/ui/label'
++import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
++import { handleServerError } from '@/lib/handle-server-error'
++
++import { setOfferingModelMapping } from '../api'
++import type { CanonicalModelOption, Offering } from '../types'
++
++type MappingMode = 'existing' | 'new'
++
++export function ModelMappingDialog(props: {
++  offering: Offering | null
++  models: CanonicalModelOption[]
++  open: boolean
++  onOpenChange: (open: boolean) => void
++  onSaved: () => void
++}) {
++  const { t } = useTranslation()
++  const [mode, setMode] = useState<MappingMode>('new')
++  const [targetID, setTargetID] = useState('')
++
++  useEffect(() => {
++    const suggested = props.offering?.suggested_canonical_model_id ?? 0
++    setMode(suggested > 0 ? 'existing' : 'new')
++    setTargetID(suggested > 0 ? String(suggested) : '')
++  }, [props.offering])
++
++  const save = useMutation({
++    mutationFn: () =>
++      setOfferingModelMapping(
++        props.offering?.id ?? 0,
++        mode === 'existing' ? Number.parseInt(targetID, 10) : 0
++      ),
++    onSuccess: () => {
++      toast.success(t('share.mapping.saved'))
++      props.onSaved()
++      props.onOpenChange(false)
++    },
++    onError: (error) => handleServerError(error),
++  })
++
++  const options = props.models.map((model) => ({
++    value: String(model.id),
++    label: model.api_model_id,
++    description: model.description,
++  }))
++  const invalid =
++    !props.offering ||
++    (mode === 'existing' &&
++      (!Number.isFinite(Number(targetID)) || Number(targetID) <= 0))
++
++  return (
++    <Dialog
++      open={props.open}
++      onOpenChange={props.onOpenChange}
++      title={t('share.mapping.title')}
++      description={t('share.mapping.description')}
++      contentClassName='sm:max-w-xl'
++      footer={
++        <>
++          <Button variant='outline' onClick={() => props.onOpenChange(false)}>
++            {t('Cancel')}
++          </Button>
++          <Button
++            disabled={invalid || save.isPending}
++            onClick={() => save.mutate()}
++          >
++            {t('Save')}
++          </Button>
++        </>
++      }
++    >
++      <div className='space-y-5'>
++        <div className='bg-muted/30 rounded-lg border p-3'>
++          <div className='text-muted-foreground text-xs'>
++            {t('share.mapping.upstream')}
++          </div>
++          <code className='mt-1 block text-sm font-semibold break-all'>
++            {props.offering?.upstream_model_id ?? ''}
++          </code>
++        </div>
++
++        <RadioGroup
++          value={mode}
++          onValueChange={(value) => setMode(value as MappingMode)}
++          className='grid gap-3'
++        >
++          <label className='hover:bg-muted/30 flex cursor-pointer gap-3 rounded-lg border p-4 transition-colors'>
++            <RadioGroupItem value='existing' />
++            <span className='min-w-0 flex-1'>
++              <span className='block text-sm font-medium'>
++                {t('share.mapping.existing')}
++              </span>
++              <span className='text-muted-foreground mt-1 block text-xs'>
++                {t('share.mapping.existingDescription')}
++              </span>
++            </span>
++          </label>
++          {mode === 'existing' ? (
++            <div className='space-y-2 pl-8'>
++              <Label>{t('share.mapping.standardModel')}</Label>
++              <Combobox
++                options={options}
++                value={targetID}
++                onValueChange={(value) => setTargetID(value ?? '')}
++                placeholder={t('share.mapping.selectModel')}
++                searchPlaceholder={t('Search models')}
++                emptyText={t('share.mapping.noModels')}
++              />
++            </div>
++          ) : null}
++
++          <label className='hover:bg-muted/30 flex cursor-pointer gap-3 rounded-lg border p-4 transition-colors'>
++            <RadioGroupItem value='new' />
++            <span className='min-w-0 flex-1'>
++              <span className='block text-sm font-medium'>
++                {t('share.mapping.new')}
++              </span>
++              <span className='text-muted-foreground mt-1 block text-xs'>
++                {t('share.mapping.newDescription', {
++                  model: props.offering?.upstream_model_id ?? '',
++                })}
++              </span>
++            </span>
++          </label>
++        </RadioGroup>
++      </div>
++    </Dialog>
++  )
++}
+diff --git a/web/src/features/share/types.ts b/web/src/features/share/types.ts
+index 5f339a0..605c491 100644
+--- a/web/src/features/share/types.ts
++++ b/web/src/features/share/types.ts
+@@ -118,6 +118,22 @@ export interface Offering {
+   capabilities?: OfferingCapabilities
+   price_rule_id: number
+   price_configured: boolean
++  canonical_model_id: number
++  suggested_canonical_model_id: number
++  /** 0=待确认 / 1=已确认 / 2=已拒绝 */
++  mapping_state: number
++}
++
++export interface CanonicalModelOption {
++  id: number
++  api_model_id: string
++  description: string
++  modality_type: number
++}
++
++export interface CanonicalModelListResponse {
++  success: boolean
++  data?: { items: CanonicalModelOption[] }
+ }
+ 
+ export interface OfferingCapabilities {
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index af451aa..ea14431 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -2523,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Related Projects",
+     "footer.defaultCopyright": "All rights reserved.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
++    "footer.newapi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "For private deployments, format: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.",
+@@ -7118,6 +7118,55 @@
+     "Generate registration invite": "Generate registration invite",
+     "No registration invite yet": "No registration invite yet",
+     "Revoke registration invite": "Revoke registration invite",
+-    "This code will stop accepting new registrations. Existing users are not affected.": "This code will stop accepting new registrations. Existing users are not affected."
++    "This code will stop accepting new registrations. Existing users are not affected.": "This code will stop accepting new registrations. Existing users are not affected.",
++    "share.mapping.saved": "Model mapping saved",
++    "share.mapping.title": "Set model mapping",
++    "share.mapping.description": "Choose which standard model this upstream model belongs to before submitting it for review.",
++    "share.mapping.upstream": "Upstream model",
++    "share.mapping.existing": "Map to an existing standard model",
++    "share.mapping.existingDescription": "Use one public model ID for equivalent upstream model names.",
++    "share.mapping.standardModel": "Standard model",
++    "share.mapping.selectModel": "Select a standard model",
++    "share.mapping.noModels": "No standard models available",
++    "share.mapping.new": "Submit as a new standard model",
++    "share.mapping.newDescription": "Use {{model}} as the proposed public model ID. An administrator will confirm it after submission.",
++    "share.mapping.column": "Model mapping",
++    "share.mapping.confirmed": "Confirmed",
++    "share.mapping.awaiting": "Awaiting confirmation",
++    "share.mapping.newStandard": "New standard model",
++    "share.mapping.rejected": "Needs revision",
++    "share.mapping.draft": "Draft",
++    "share.mapping.action": "Set mapping",
++    "identity.mappingSaved": "Model identity saved",
++    "identity.editTitle": "Edit model identity mapping",
++    "identity.dialogDescription": "Confirm the public model ID used for the plaza and API calls. Updating a confirmed mapping moves all live offerings with the same upstream identity.",
++    "identity.source": "Share source",
++    "identity.existing": "Map to an existing model",
++    "identity.existingDescription": "Choose an existing public model ID when these names represent the same model.",
++    "identity.selectExisting": "Select an existing model",
++    "identity.noModels": "No standard models available",
++    "identity.new": "Create a new standard model",
++    "identity.newDescription": "Create the public model ID, description, and capability for this upstream identity.",
++    "identity.rejected": "Model identity rejected",
++    "identity.sharer": "Sharer",
++    "identity.target": "Standard model",
++    "identity.newModelPending": "Propose a new standard model",
++    "identity.editMapping": "Edit mapping",
++    "identity.description": "Only submitted share models appear here. Confirming or correcting a mapping updates the model plaza and routing projection.",
++    "identity.pending": "Awaiting confirmation",
++    "identity.confirmed": "Confirmed",
++    "identity.noConfirmed": "No confirmed model mappings",
++    "identity.publishBlocked": "Confirm the model identity in Model management before publishing.",
++    "identity.modality": "Capability",
++    "identity.modality.chat": "Chat",
++    "identity.modality.embedding": "Embedding",
++    "identity.modality.image": "Image generation",
++    "identity.modality.audioRecognition": "Speech recognition",
++    "identity.modality.audioGeneration": "Speech generation",
++    "identity.modality.rerank": "Reranking",
++    "identity.modality.video": "Video generation",
++    "identity.modality.select": "Select a capability",
++    "identity.modality.search": "Search capabilities",
++    "identity.modality.empty": "No capabilities found"
+   }
+ }
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 779335a..9afa604 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -2523,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Projets liés",
+     "footer.defaultCopyright": "Tous droits réservés.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
++    "footer.newapi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Pour les canaux ajoutés après le 10 mai 2025, pas besoin de supprimer \".\" des noms de modèles lors du déploiement",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Pour les déploiements privés, format : https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Pour des raisons de sécurité, les jetons d'accès existants ne peuvent pas être réaffichés. Ne les régénérez que si vous en avez besoin d'un nouveau.",
+@@ -7118,6 +7118,55 @@
+     "Generate registration invite": "Générer une invitation d’inscription",
+     "No registration invite yet": "Aucune invitation d’inscription",
+     "Revoke registration invite": "Révoquer l’invitation d’inscription",
+-    "This code will stop accepting new registrations. Existing users are not affected.": "Ce code n’acceptera plus de nouvelles inscriptions. Les utilisateurs existants ne sont pas affectés."
++    "This code will stop accepting new registrations. Existing users are not affected.": "Ce code n’acceptera plus de nouvelles inscriptions. Les utilisateurs existants ne sont pas affectés.",
++    "share.mapping.saved": "Mappage du modèle enregistré",
++    "share.mapping.title": "Définir le mappage du modèle",
++    "share.mapping.description": "Choisissez le modèle standard associé à ce modèle amont avant de l’envoyer en validation.",
++    "share.mapping.upstream": "Modèle amont",
++    "share.mapping.existing": "Associer à un modèle standard existant",
++    "share.mapping.existingDescription": "Utilisez le même ID public pour les noms de modèles amont équivalents.",
++    "share.mapping.standardModel": "Modèle standard",
++    "share.mapping.selectModel": "Sélectionner un modèle standard",
++    "share.mapping.noModels": "Aucun modèle standard disponible",
++    "share.mapping.new": "Soumettre comme nouveau modèle standard",
++    "share.mapping.newDescription": "Proposez {{model}} comme ID public. Un administrateur le confirmera après l’envoi.",
++    "share.mapping.column": "Mappage du modèle",
++    "share.mapping.confirmed": "Confirmé",
++    "share.mapping.awaiting": "En attente de confirmation",
++    "share.mapping.newStandard": "Nouveau modèle standard",
++    "share.mapping.rejected": "À corriger",
++    "share.mapping.draft": "Brouillon",
++    "share.mapping.action": "Définir le mappage",
++    "identity.mappingSaved": "Identité du modèle enregistrée",
++    "identity.editTitle": "Modifier le mappage d’identité",
++    "identity.dialogDescription": "Confirmez l’ID public utilisé dans la place de marché et les appels API. La modification d’un mappage confirmé déplace toutes les offres actives ayant la même identité amont.",
++    "identity.source": "Source partagée",
++    "identity.existing": "Associer à un modèle existant",
++    "identity.existingDescription": "Choisissez un ID public existant lorsque ces noms désignent le même modèle.",
++    "identity.selectExisting": "Sélectionner un modèle existant",
++    "identity.noModels": "Aucun modèle standard disponible",
++    "identity.new": "Créer un nouveau modèle standard",
++    "identity.newDescription": "Créez l’ID public, la description et le type de capacité pour cette identité amont.",
++    "identity.rejected": "Identité du modèle rejetée",
++    "identity.sharer": "Partageur",
++    "identity.target": "Modèle standard",
++    "identity.newModelPending": "Proposer un nouveau modèle standard",
++    "identity.editMapping": "Modifier le mappage",
++    "identity.description": "Seuls les modèles partagés soumis apparaissent ici. Confirmer ou corriger un mappage met à jour la place de marché et le routage.",
++    "identity.pending": "En attente de confirmation",
++    "identity.confirmed": "Confirmé",
++    "identity.noConfirmed": "Aucun mappage confirmé",
++    "identity.publishBlocked": "Confirmez l’identité du modèle dans la gestion des modèles avant publication.",
++    "identity.modality": "Capacité",
++    "identity.modality.chat": "Conversation",
++    "identity.modality.embedding": "Vectorisation",
++    "identity.modality.image": "Génération d’images",
++    "identity.modality.audioRecognition": "Reconnaissance vocale",
++    "identity.modality.audioGeneration": "Génération vocale",
++    "identity.modality.rerank": "Reclassement",
++    "identity.modality.video": "Génération vidéo",
++    "identity.modality.select": "Sélectionner une capacité",
++    "identity.modality.search": "Rechercher une capacité",
++    "identity.modality.empty": "Aucune capacité trouvée"
+   }
+ }
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index c646fb6..d7c901e 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -2523,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "1つのAPI",
+     "footer.columns.related.title": "関連プロジェクト",
+     "footer.defaultCopyright": "すべての権利を留保します。",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
++    "footer.newapi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "2025 年 5 月 10 日以降に追加されたチャネルの場合、デプロイ時にモデル名から「.」を削除する必要はありません",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "プライベートデプロイメントの場合、形式: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "セキュリティ上、既存のアクセストークンは再表示できません。新しいトークンが必要な場合のみ再生成してください。",
+@@ -7118,6 +7118,55 @@
+     "Generate registration invite": "登録招待コードを作成",
+     "No registration invite yet": "登録招待コードはまだありません",
+     "Revoke registration invite": "登録招待コードを取り消す",
+-    "This code will stop accepting new registrations. Existing users are not affected.": "このコードによる新規登録を停止します。既存ユーザーには影響しません。"
++    "This code will stop accepting new registrations. Existing users are not affected.": "このコードによる新規登録を停止します。既存ユーザーには影響しません。",
++    "share.mapping.saved": "モデルマッピングを保存しました",
++    "share.mapping.title": "モデルマッピングを設定",
++    "share.mapping.description": "審査に出す前に、この上流モデルが属する標準モデルを選択します。",
++    "share.mapping.upstream": "上流モデル",
++    "share.mapping.existing": "既存の標準モデルにマッピング",
++    "share.mapping.existingDescription": "同等の上流モデル名には同じ公開モデル ID を使用します。",
++    "share.mapping.standardModel": "標準モデル",
++    "share.mapping.selectModel": "標準モデルを選択",
++    "share.mapping.noModels": "利用可能な標準モデルがありません",
++    "share.mapping.new": "新しい標準モデルとして申請",
++    "share.mapping.newDescription": "{{model}} を公開モデル ID として提案し、申請後に管理者が確認します。",
++    "share.mapping.column": "モデルマッピング",
++    "share.mapping.confirmed": "確認済み",
++    "share.mapping.awaiting": "確認待ち",
++    "share.mapping.newStandard": "新しい標準モデル",
++    "share.mapping.rejected": "修正が必要",
++    "share.mapping.draft": "下書き",
++    "share.mapping.action": "マッピングを設定",
++    "identity.mappingSaved": "モデル ID を保存しました",
++    "identity.editTitle": "モデル ID マッピングを編集",
++    "identity.dialogDescription": "モデル広場と API 呼び出しで使う公開モデル ID を確認します。確認済みのマッピングを変更すると、同じ上流 ID の有効な提供元も移行します。",
++    "identity.source": "共有元",
++    "identity.existing": "既存モデルにマッピング",
++    "identity.existingDescription": "同じモデルを表す名前には既存の公開モデル ID を選択します。",
++    "identity.selectExisting": "既存モデルを選択",
++    "identity.noModels": "標準モデルがありません",
++    "identity.new": "新しい標準モデルを作成",
++    "identity.newDescription": "この上流 ID の公開モデル ID、説明、機能種別を作成します。",
++    "identity.rejected": "モデル ID を却下しました",
++    "identity.sharer": "共有者",
++    "identity.target": "標準モデル",
++    "identity.newModelPending": "新しい標準モデルを提案",
++    "identity.editMapping": "マッピングを編集",
++    "identity.description": "申請済みの共有モデルだけを表示します。マッピングを確認または修正すると、モデル広場とルーティング投影が更新されます。",
++    "identity.pending": "確認待ち",
++    "identity.confirmed": "確認済み",
++    "identity.noConfirmed": "確認済みのモデルマッピングはありません",
++    "identity.publishBlocked": "公開前にモデル管理でモデル ID を確認してください。",
++    "identity.modality": "機能種別",
++    "identity.modality.chat": "チャット",
++    "identity.modality.embedding": "埋め込み",
++    "identity.modality.image": "画像生成",
++    "identity.modality.audioRecognition": "音声認識",
++    "identity.modality.audioGeneration": "音声生成",
++    "identity.modality.rerank": "リランキング",
++    "identity.modality.video": "動画生成",
++    "identity.modality.select": "機能種別を選択",
++    "identity.modality.search": "機能種別を検索",
++    "identity.modality.empty": "該当する機能種別がありません"
+   }
+ }
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index eaf3e9e..2282031 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -2523,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "Один API",
+     "footer.columns.related.title": "Связанные проекты",
+     "footer.defaultCopyright": "Все права защищены.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
++    "footer.newapi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Для каналов, добавленных после 10 мая 2025 г., не нужно удалять \".\" из имён моделей при развёртывании",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Для частных развертываний, формат: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "В целях безопасности существующие токены доступа нельзя просмотреть повторно. Создавайте новый токен только при необходимости.",
+@@ -7118,6 +7118,55 @@
+     "Generate registration invite": "Создать приглашение для регистрации",
+     "No registration invite yet": "Кодов приглашения пока нет",
+     "Revoke registration invite": "Отозвать приглашение для регистрации",
+-    "This code will stop accepting new registrations. Existing users are not affected.": "Этот код больше не позволит регистрироваться. Существующие пользователи не изменятся."
++    "This code will stop accepting new registrations. Existing users are not affected.": "Этот код больше не позволит регистрироваться. Существующие пользователи не изменятся.",
++    "share.mapping.saved": "Сопоставление модели сохранено",
++    "share.mapping.title": "Настроить сопоставление модели",
++    "share.mapping.description": "Перед отправкой на проверку выберите стандартную модель для этой вышестоящей модели.",
++    "share.mapping.upstream": "Вышестоящая модель",
++    "share.mapping.existing": "Сопоставить с существующей стандартной моделью",
++    "share.mapping.existingDescription": "Используйте один публичный ID для эквивалентных имён вышестоящих моделей.",
++    "share.mapping.standardModel": "Стандартная модель",
++    "share.mapping.selectModel": "Выбрать стандартную модель",
++    "share.mapping.noModels": "Нет доступных стандартных моделей",
++    "share.mapping.new": "Отправить как новую стандартную модель",
++    "share.mapping.newDescription": "Предложите {{model}} как публичный ID. Администратор подтвердит его после отправки.",
++    "share.mapping.column": "Сопоставление модели",
++    "share.mapping.confirmed": "Подтверждено",
++    "share.mapping.awaiting": "Ожидает подтверждения",
++    "share.mapping.newStandard": "Новая стандартная модель",
++    "share.mapping.rejected": "Требуется исправление",
++    "share.mapping.draft": "Черновик",
++    "share.mapping.action": "Настроить сопоставление",
++    "identity.mappingSaved": "Идентификатор модели сохранён",
++    "identity.editTitle": "Изменить сопоставление модели",
++    "identity.dialogDescription": "Подтвердите публичный ID для каталога и API. Изменение подтверждённого сопоставления переносит все активные предложения с той же вышестоящей идентичностью.",
++    "identity.source": "Источник",
++    "identity.existing": "Сопоставить с существующей моделью",
++    "identity.existingDescription": "Выберите существующий публичный ID, если названия обозначают одну модель.",
++    "identity.selectExisting": "Выбрать существующую модель",
++    "identity.noModels": "Нет стандартных моделей",
++    "identity.new": "Создать новую стандартную модель",
++    "identity.newDescription": "Создайте публичный ID, описание и тип возможности для этой вышестоящей идентичности.",
++    "identity.rejected": "Идентификатор модели отклонён",
++    "identity.sharer": "Владелец ресурса",
++    "identity.target": "Стандартная модель",
++    "identity.newModelPending": "Предложить новую стандартную модель",
++    "identity.editMapping": "Изменить сопоставление",
++    "identity.description": "Здесь показаны только отправленные модели. Подтверждение или исправление сопоставления обновляет каталог и маршрутизацию.",
++    "identity.pending": "Ожидает подтверждения",
++    "identity.confirmed": "Подтверждено",
++    "identity.noConfirmed": "Нет подтверждённых сопоставлений",
++    "identity.publishBlocked": "Перед публикацией подтвердите модель в разделе управления моделями.",
++    "identity.modality": "Возможность",
++    "identity.modality.chat": "Диалог",
++    "identity.modality.embedding": "Векторизация",
++    "identity.modality.image": "Генерация изображений",
++    "identity.modality.audioRecognition": "Распознавание речи",
++    "identity.modality.audioGeneration": "Синтез речи",
++    "identity.modality.rerank": "Переранжирование",
++    "identity.modality.video": "Генерация видео",
++    "identity.modality.select": "Выберите возможность",
++    "identity.modality.search": "Поиск возможностей",
++    "identity.modality.empty": "Возможности не найдены"
+   }
+ }
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index a853c93..5a61b8e 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -2523,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "Các Dự Án Liên Quan",
+     "footer.defaultCopyright": "Bản quyền được bảo lưu.",
+-    "footer.new\u0061pi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
++    "footer.newapi.projectAttributionSuffix": "Frontend design and development by New API contributors.",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "Đối với các kênh được thêm sau ngày 10 tháng 5 năm 2025, không cần loại bỏ \".\" khỏi tên mô hình trong quá trình triển khai",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "Đối với các triển khai riêng tư, định dạng: https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "Vì lý do bảo mật, không thể hiển thị lại token truy cập hiện có. Chỉ tạo lại khi bạn cần token mới.",
+@@ -7118,6 +7118,55 @@
+     "Generate registration invite": "Tạo mã mời đăng ký",
+     "No registration invite yet": "Chưa có mã mời đăng ký",
+     "Revoke registration invite": "Thu hồi mã mời đăng ký",
+-    "This code will stop accepting new registrations. Existing users are not affected.": "Mã này sẽ không còn chấp nhận đăng ký mới. Người dùng hiện có không bị ảnh hưởng."
++    "This code will stop accepting new registrations. Existing users are not affected.": "Mã này sẽ không còn chấp nhận đăng ký mới. Người dùng hiện có không bị ảnh hưởng.",
++    "share.mapping.saved": "Đã lưu ánh xạ mô hình",
++    "share.mapping.title": "Thiết lập ánh xạ mô hình",
++    "share.mapping.description": "Chọn mô hình chuẩn tương ứng với mô hình thượng nguồn này trước khi gửi duyệt.",
++    "share.mapping.upstream": "Mô hình thượng nguồn",
++    "share.mapping.existing": "Ánh xạ tới mô hình chuẩn hiện có",
++    "share.mapping.existingDescription": "Dùng cùng một ID công khai cho các tên mô hình thượng nguồn tương đương.",
++    "share.mapping.standardModel": "Mô hình chuẩn",
++    "share.mapping.selectModel": "Chọn mô hình chuẩn",
++    "share.mapping.noModels": "Không có mô hình chuẩn",
++    "share.mapping.new": "Gửi dưới dạng mô hình chuẩn mới",
++    "share.mapping.newDescription": "Đề xuất {{model}} làm ID công khai. Quản trị viên sẽ xác nhận sau khi gửi.",
++    "share.mapping.column": "Ánh xạ mô hình",
++    "share.mapping.confirmed": "Đã xác nhận",
++    "share.mapping.awaiting": "Chờ xác nhận",
++    "share.mapping.newStandard": "Mô hình chuẩn mới",
++    "share.mapping.rejected": "Cần chỉnh sửa",
++    "share.mapping.draft": "Bản nháp",
++    "share.mapping.action": "Thiết lập ánh xạ",
++    "identity.mappingSaved": "Đã lưu danh tính mô hình",
++    "identity.editTitle": "Chỉnh sửa ánh xạ danh tính",
++    "identity.dialogDescription": "Xác nhận ID công khai dùng trong quảng trường mô hình và API. Khi sửa ánh xạ đã xác nhận, mọi nguồn đang hoạt động có cùng danh tính thượng nguồn sẽ được chuyển cùng nhau.",
++    "identity.source": "Nguồn chia sẻ",
++    "identity.existing": "Ánh xạ tới mô hình hiện có",
++    "identity.existingDescription": "Chọn một ID công khai hiện có khi các tên này cùng chỉ một mô hình.",
++    "identity.selectExisting": "Chọn mô hình hiện có",
++    "identity.noModels": "Không có mô hình chuẩn",
++    "identity.new": "Tạo mô hình chuẩn mới",
++    "identity.newDescription": "Tạo ID công khai, mô tả và loại khả năng cho danh tính thượng nguồn này.",
++    "identity.rejected": "Đã từ chối danh tính mô hình",
++    "identity.sharer": "Người chia sẻ",
++    "identity.target": "Mô hình chuẩn",
++    "identity.newModelPending": "Đề xuất mô hình chuẩn mới",
++    "identity.editMapping": "Chỉnh sửa ánh xạ",
++    "identity.description": "Chỉ các mô hình đã gửi duyệt mới xuất hiện ở đây. Xác nhận hoặc sửa ánh xạ sẽ cập nhật quảng trường và định tuyến.",
++    "identity.pending": "Chờ xác nhận",
++    "identity.confirmed": "Đã xác nhận",
++    "identity.noConfirmed": "Chưa có ánh xạ đã xác nhận",
++    "identity.publishBlocked": "Hãy xác nhận danh tính trong Quản lý mô hình trước khi phát hành.",
++    "identity.modality": "Loại khả năng",
++    "identity.modality.chat": "Hội thoại",
++    "identity.modality.embedding": "Vector",
++    "identity.modality.image": "Tạo ảnh",
++    "identity.modality.audioRecognition": "Nhận dạng giọng nói",
++    "identity.modality.audioGeneration": "Tạo giọng nói",
++    "identity.modality.rerank": "Xếp hạng lại",
++    "identity.modality.video": "Tạo video",
++    "identity.modality.select": "Chọn loại khả năng",
++    "identity.modality.search": "Tìm loại khả năng",
++    "identity.modality.empty": "Không tìm thấy loại khả năng"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index b9cceaf..5d37ce3 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -2523,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相關項目",
+     "footer.defaultCopyright": "版權所有。",
+-    "footer.new\u0061pi.projectAttributionSuffix": "前端由 New API 專案貢獻者設計與開發。",
++    "footer.newapi.projectAttributionSuffix": "前端由 New API 專案貢獻者設計與開發。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "對於 2025 年 5 月 10 日之後新增的渠道，在部署時無需從模型名稱中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "對於私有部署，格式為：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "基於安全考量，現有存取令牌無法再次顯示。僅在需要新令牌時重新生成。",
+@@ -7118,6 +7118,55 @@
+     "Generate registration invite": "產生註冊邀請碼",
+     "No registration invite yet": "尚無註冊邀請碼",
+     "Revoke registration invite": "撤銷註冊邀請碼",
+-    "This code will stop accepting new registrations. Existing users are not affected.": "撤銷後此邀請碼不能再用於註冊，既有使用者不受影響。"
++    "This code will stop accepting new registrations. Existing users are not affected.": "撤銷後此邀請碼不能再用於註冊，既有使用者不受影響。",
++    "share.mapping.saved": "模型映射已儲存",
++    "share.mapping.title": "設定模型映射",
++    "share.mapping.description": "送審前選擇這個上游模型所屬的標準模型。",
++    "share.mapping.upstream": "上游模型",
++    "share.mapping.existing": "映射到既有標準模型",
++    "share.mapping.existingDescription": "等價的上游模型名稱統一使用同一個對外模型 ID。",
++    "share.mapping.standardModel": "標準模型",
++    "share.mapping.selectModel": "選擇標準模型",
++    "share.mapping.noModels": "暫無可用標準模型",
++    "share.mapping.new": "作為新標準模型提交",
++    "share.mapping.newDescription": "建議使用 {{model}} 作為對外模型 ID，送審後由管理員確認。",
++    "share.mapping.column": "模型映射",
++    "share.mapping.confirmed": "已確認",
++    "share.mapping.awaiting": "待確認",
++    "share.mapping.newStandard": "新標準模型",
++    "share.mapping.rejected": "需修改",
++    "share.mapping.draft": "草稿",
++    "share.mapping.action": "設定映射",
++    "identity.mappingSaved": "模型身分已儲存",
++    "identity.editTitle": "修改模型身分映射",
++    "identity.dialogDescription": "確認模型廣場和 API 呼叫使用的對外模型 ID。修改已確認映射時，相同上游身分的存活供給會一併遷移。",
++    "identity.source": "分享來源",
++    "identity.existing": "映射到既有模型",
++    "identity.existingDescription": "這些名稱代表同一模型時，選擇既有的對外模型 ID。",
++    "identity.selectExisting": "選擇既有模型",
++    "identity.noModels": "暫無標準模型",
++    "identity.new": "建立新標準模型",
++    "identity.newDescription": "為這個上游身分建立對外模型 ID、介紹和能力類型。",
++    "identity.rejected": "模型身分已駁回",
++    "identity.sharer": "分享者",
++    "identity.target": "標準模型",
++    "identity.newModelPending": "建議建立新標準模型",
++    "identity.editMapping": "修改映射",
++    "identity.description": "這裡只顯示已送審的分享模型。確認或修正映射後，模型廣場與路由投影會同步更新。",
++    "identity.pending": "待確認",
++    "identity.confirmed": "已確認",
++    "identity.noConfirmed": "暫無已確認的模型映射",
++    "identity.publishBlocked": "請先在模型管理中確認模型身分，再發布資源。",
++    "identity.modality": "能力類型",
++    "identity.modality.chat": "對話",
++    "identity.modality.embedding": "向量",
++    "identity.modality.image": "圖片生成",
++    "identity.modality.audioRecognition": "語音辨識",
++    "identity.modality.audioGeneration": "語音生成",
++    "identity.modality.rerank": "重排",
++    "identity.modality.video": "影片生成",
++    "identity.modality.select": "選擇能力類型",
++    "identity.modality.search": "搜尋能力類型",
++    "identity.modality.empty": "沒有符合的能力類型"
+   }
+ }
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index ffc7531..88691e7 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -2523,7 +2523,7 @@
+     "footer.columns.related.links.oneApi": "One API",
+     "footer.columns.related.title": "相关项目",
+     "footer.defaultCopyright": "版权所有。",
+-    "footer.new\u0061pi.projectAttributionSuffix": "前端由 New API 项目贡献者设计与开发。",
++    "footer.newapi.projectAttributionSuffix": "前端由 New API 项目贡献者设计与开发。",
+     "For channels added after May 10, 2025, no need to remove \".\" from model names during deployment": "对于 2025 年 5 月 10 日之后添加的渠道，在部署时无需从模型名称中移除 \".\"",
+     "For private deployments, format: https://fastgpt.run/api/openapi": "对于私有部署，格式为：https://fastgpt.run/api/openapi",
+     "For security, existing access tokens cannot be displayed. Regenerate only when you need a new token.": "出于安全考虑，现有访问令牌无法再次显示。仅在需要新令牌时重新生成。",
+@@ -7118,6 +7118,55 @@
+     "Generate registration invite": "生成注册邀请码",
+     "No registration invite yet": "还没有注册邀请码",
+     "Revoke registration invite": "撤销注册邀请码",
+-    "This code will stop accepting new registrations. Existing users are not affected.": "撤销后该邀请码不能再用于注册，已经注册的用户不受影响。"
++    "This code will stop accepting new registrations. Existing users are not affected.": "撤销后该邀请码不能再用于注册，已经注册的用户不受影响。",
++    "share.mapping.saved": "模型映射已保存",
++    "share.mapping.title": "设置模型映射",
++    "share.mapping.description": "送审前选择这个上游模型所属的标准模型。",
++    "share.mapping.upstream": "上游模型",
++    "share.mapping.existing": "映射到已有标准模型",
++    "share.mapping.existingDescription": "等价的上游模型名称统一使用同一个对外模型 ID。",
++    "share.mapping.standardModel": "标准模型",
++    "share.mapping.selectModel": "选择标准模型",
++    "share.mapping.noModels": "暂无可用标准模型",
++    "share.mapping.new": "作为新标准模型提交",
++    "share.mapping.newDescription": "建议使用 {{model}} 作为对外模型 ID，送审后由管理员确认。",
++    "share.mapping.column": "模型映射",
++    "share.mapping.confirmed": "已确认",
++    "share.mapping.awaiting": "待确认",
++    "share.mapping.newStandard": "新标准模型",
++    "share.mapping.rejected": "需修改",
++    "share.mapping.draft": "草稿",
++    "share.mapping.action": "设置映射",
++    "identity.mappingSaved": "模型身份已保存",
++    "identity.editTitle": "修改模型身份映射",
++    "identity.dialogDescription": "确认模型广场和 API 调用使用的对外模型 ID。修改已确认映射时，相同上游身份的存活供给会一起迁移。",
++    "identity.source": "分享来源",
++    "identity.existing": "映射到已有模型",
++    "identity.existingDescription": "这些名称代表同一模型时，选择已有的对外模型 ID。",
++    "identity.selectExisting": "选择已有模型",
++    "identity.noModels": "暂无标准模型",
++    "identity.new": "创建新标准模型",
++    "identity.newDescription": "为这个上游身份创建对外模型 ID、介绍和能力类型。",
++    "identity.rejected": "模型身份已驳回",
++    "identity.sharer": "分享者",
++    "identity.target": "标准模型",
++    "identity.newModelPending": "建议新建标准模型",
++    "identity.editMapping": "修改映射",
++    "identity.description": "这里只显示已送审的分享模型。确认或修正映射后，模型广场与路由投影会同步更新。",
++    "identity.pending": "待确认",
++    "identity.confirmed": "已确认",
++    "identity.noConfirmed": "暂无已确认的模型映射",
++    "identity.publishBlocked": "请先在模型管理中确认模型身份，再发布资源。",
++    "identity.modality": "能力类型",
++    "identity.modality.chat": "对话",
++    "identity.modality.embedding": "向量",
++    "identity.modality.image": "图片生成",
++    "identity.modality.audioRecognition": "语音识别",
++    "identity.modality.audioGeneration": "语音生成",
++    "identity.modality.rerank": "重排",
++    "identity.modality.video": "视频生成",
++    "identity.modality.select": "选择能力类型",
++    "identity.modality.search": "搜索能力类型",
++    "identity.modality.empty": "没有匹配的能力类型"
+   }
+ }
+-- 
+2.53.0.windows.1
+

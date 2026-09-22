@@ -13,12 +13,12 @@
 ## 当前统计
 
 - 基线提交：`69a50029819a26c53e6babd276d49cfe2f8880ad`
-- 当前 fork 提交：`8d768a10c3dd372e40ea998cf3786e5f25327d15`
-- 相对基线提交数：**179** 个
-- 变化文件：**342** 个（新增 **185**，修改上游已有文件 **157**）
-- 行数变化：新增 **49,777** 行，删除 **2,416** 行
+- 当前 fork 提交：`ba64967b93deb306a6929bb2f5b096ba271d0b53`
+- 相对基线提交数：**180** 个
+- 变化文件：**347** 个（新增 **187**，修改上游已有文件 **160**）
+- 行数变化：新增 **51,766** 行，删除 **2,419** 行
 - 未跟踪文件：**0** 个
-- 核对时间：2026-09-21（`git diff --name-status/--numstat`；分享删除链路和历史残留对账收口）
+- 核对时间：2026-09-22（`git diff --name-status/--numstat`；模型映射、身份确认与广场来源归并收口）
 
 > 2026-09-18 接手审查纠正：本节此前仍写“修改上游文件 0 个”，那只是阶段 0 早期快照，已经与当前 fork 不符。完整风险与整改顺序见 `docs/TAKEOVER_AUDIT.md`。
 
@@ -56,6 +56,7 @@
 | D-052 | `new-api/apigx/{api,model}/**`、`new-api/controller/{channel,relay}.go`、`new-api/service/log_info_generate.go`、`new-api/web/src/features/{share,system-settings,usage-logs}/**`、七种语言文件 | 资源发布、影子渠道恢复、邀请码管理与重试轨迹 | 分享分组创建即生效并迁移历史准备态，管理员只审核模型供给；通用渠道删除保护 APIGX 影子渠道，误删后用加密 Key/配方事务重建并在并发 CAS 竞争后复用胜者；供给删除同步移除底座模型、能力和熔断状态；身份验证设置增加管理员注册邀请码生成/列表/撤销；日志同时记录渠道与从 1 开始的 Key 序号，旧重复链路压缩显示；底座分组入口标记为高级兼容设置 | 用户遇到供给已审核但广场不可见、同步模型 500/无限加载、供给不能删除、开启邀请码注册却无发码入口，以及 `32 → 32 → 31` 无法分辨同渠道换 Key；同时明确分组无需审核、底座用户分组不应承担 APIGX 分享权限 | **中**：涉及分享资源生命周期、底座渠道管理与 Relay 日志；受影响 Go 三包、真实 MySQL 生命周期及 6 请求并发恢复、前端 162 文件 1785 项、typecheck/定向 lint/生产构建和本地浏览器流程通过；测试服完成邀请码生成/脱敏/撤销、历史影子渠道恢复、分组免审、供给发布与删除、6+6 Key 轨迹验收 | 2026-09-21 | 已实施；邀请码明文只在创建响应显示一次，列表只返回前缀；供给删除后广场详情 404、路由 503，历史用量快照保留；分组 ACL 仍由平台 Key 资源范围与分享授权控制 |
 | D-053 | `new-api/apigx/model/repo_share.go`、`new-api/apigx/api/share_test.go` | 分组运营状态幂等 | 重复把分组设置为当前已发布或已暂停状态时，若数据库报告 0 affected rows，则复查资源和当前状态；资源存在且状态一致即返回成功，不存在仍返回 404 | 分组改为创建即生效后，旧验收脚本和兼容客户端仍可能重复发送“发布”操作；MySQL 对未改变值的 UPDATE 返回 0，原逻辑误报资源不存在 | **低**：只修正重复同值更新的返回语义；SQLite、PostgreSQL 18.4、MySQL 真实生命周期矩阵及受影响 Go 包通过 | 2026-09-21 | 已实施；暂停/恢复的实际状态切换和管理员权限不变 |
 | D-054 | `new-api/apigx/{api/share.go,channelpool/projection.go,model/repo_share.go,route/route.go}`、`new-api/web/src/features/share/**`、七种语言文件 | 分享删除链路与历史残留对账 | 删除分组逐项撤下存活分享渠道；平台代建底座渠道物理删除，管理员绑定既有渠道保留记录但停用清空；启动时清理旧版孤儿分享渠道和代建底座墓碑；前端删除成功后立即刷新广场、分享与底座渠道查询 | 用户删除“我的分享”分组和渠道后，底座渠道及模型广场仍显示；原删除逻辑只软删领域对象并留下底座墓碑，分组删除也没有级联渠道，前端查询缓存继续展示旧来源 | **中**：改变分享资源删除的最终状态并增加一次启动对账；受影响 Go 四包、SQLite/PostgreSQL/MySQL 生命周期矩阵、前端 typecheck/分享模块 33 项/构建和本地浏览器回归通过；历史用量记录不删除 | 2026-09-21 | 已实施；只物理删除可证明由 APIGX 平台代建的底座渠道，管理员绑定渠道不误删；按用户要求未部署生产服务器 |
+| D-055 | `new-api/apigx/{api/share.go,model/{repo_catalog,repo_offering,repo_plaza}.go,qualityhook,route}/**`、`new-api/web/src/features/{share,apigx-platform,models,pricing}/**`、七种语言文件及关联测试 | 模型映射、身份确认与广场来源归并 | 同步只建草稿供给；分享者在送审前可映射已有标准模型或建议新模型；送审后才进入身份候选；管理员确认/改映射时按归一化身份迁移存活供给、重建底座模型/映射/能力投影并清理无引用临时身份；拒绝身份会把供给退回可编辑状态；广场按最终标准身份聚合并在后端按渠道去重同一来源 | 用户遇到只能靠大小写确认、确认后广场新增重复标准模型、同一分享渠道出现两条来源，以及“身份确认”和模型管理职责割裂；发布前也缺少“身份已确认”硬闸门 | **中高**：改变供给送审/发布前置条件、模型目录事务和底座模型投影；前端 162 文件 1786 项、typecheck、生产构建与变更文件 lint/format，Go 全仓，SQLite/PostgreSQL/MySQL 矩阵和本地真实浏览器流程通过 | 2026-09-22 | 已实施；两个仅大小写不同的上游别名归并为一个标准模型和一个来源，广场继续展示 6 小时可靠性、延迟、吞吐与参考价格；未连接或部署生产服务器 |
 | D-005 | `new-api/service/billing.go` | 修改 | 新增常量 `BillingSourceUsageOnly = "usage_only"` | T1.6：免费共享模式需要独立的资金来源标识 | 低（仅新增常量） | 2026-09-16 | 已实施 |
 | D-006 | `new-api/service/billing_session.go` | 必须修改 | ① `NewBillingSession` 最前面加分支：`IsUsageOnlyMode()` 时走 `newUsageOnlySession`（跳过 tryWallet 的余额前置）；② `reserveFunding` 的类型 switch 增加 `case *UsageOnlyFunding` 返回 nil | T1.6；计划书 §6「免费模式必须改结算路径而非数值」 | **中高**：计费会话是全站核心链路。已加 4 个单测 + 运行时 A/B 验收（默认行为零回归） | 2026-09-16 | 已实施 |
 | D-009 | `new-api/middleware/distributor.go` | 必须修改 | 在 `SetupContextForSelectedChannel` 之后、`c.Next()` 之前插入容量钩子：`relayhook.Acquire` 取租约、`defer lease.Release()` 在下游全部结束后释放；满载 429、账本不可用 503。另加 1 行 import | T1.7 第二部分；计划书 §9.2（共享容量控制必须贯穿请求生命周期） | **中高**：`Distribute()` 是所有转发请求的必经入口（含任务原渠道 pin）。改动本身是「新增一个可开关的调用」，默认关闭时行为不变 | 2026-09-16 | 已实施（默认关闭，`APIGX_CAPACITY_ENABLED`） |
@@ -79,7 +80,7 @@
 | D-010 | `new-api/apigx/relayhook/{capacity_hook,capacity_hook_test}.go` | 新增 | 容量接线：`Acquire`/`Lease.Release`/长流续租协程/错误码映射（429+Retry-After、503）；为渠道+平台 Key+用户三维度做同一次原子预留 | T1.7 | 低（新包；不反向依赖 middleware，避免循环） | 2026-09-16 | 已实施 |
 | D-008 | `new-api/apigx/capacity/{capacity,capacity_test}.go` | 新增 | 共享容量账本：Lua 原子预留/幂等归还/租约续租与过期回收；维度 key 覆盖用户·平台 Key·渠道·供给·上游 Key·上游账户池 | T1.7；计划书 §9.2（底座没有渠道/Key 级并发上限，阶段 0 已实测确认） | 无（上游不存在同名路径） | 2026-09-16 | 已实施（核心账本） |
 | D-007 | `new-api/service/apigx_usage_only.go`、`apigx_usage_only_test.go` | 新增（同包） | 模式开关（`APIGX_USAGE_ONLY`）、`UsageOnlyFunding`、`newUsageOnlySession` 及其单测 | T1.6 | 低（新文件；与底座 `funding_source.go` 同包，便于实现 FundingSource 接口而不产生循环依赖） | 2026-09-16 | 已实施 |
-| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0179-fix-retire-deleted-shared-resource-channels.patch`；fork 分支 `apigx`，HEAD `8d768a1` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-21 | 179 个补丁从锁定基线重放成功，tree `452aafd626573d0ea4eb386ec74ffb4aa33b2d37` 与 fork HEAD 一致 |
+| — | 补丁导出 | — | `deploy/patches/0001-*` 至 `0180-feat-unify-shared-model-identity-mapping.patch`；fork 分支 `apigx`，HEAD `ba64967` | 让工作区仓库可追溯 fork 状态，且能从固定提交复现 | — | 2026-09-22 | 180 个补丁从锁定基线重放成功，tree `8d4fd977c6aef33f2d7fad12cd57e125ee194708` 与 fork HEAD 一致 |
 
 ## 二、新增文件（不修改上游）
 
