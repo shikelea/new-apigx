@@ -81,6 +81,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	offerings := r.Group("/offerings")
 	{
 		offerings.PATCH("/:id/capabilities", h.updateOfferingCapabilities)
+		offerings.PUT("/:id/model-mapping", h.setOfferingModelMapping)
 		offerings.PUT("/:id/manual-price", h.setOfferingManualPrice)
 		offerings.POST("/:id/submit", h.submitOffering)
 		offerings.POST("/:id/publish", h.publishOffering)
@@ -133,6 +134,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	// 全部是**平台侧**动作（确认映射会影响对外标准 ID 与价格匹配，不能由分享者自行决定）。
 	catalog := r.Group("/model-catalog")
 	{
+		catalog.GET("/models", h.listCanonicalModels)
 		catalog.GET("/candidates", h.listAliasCandidates)
 		catalog.POST("/candidates/:id/confirm", h.confirmAliasCandidate)
 		catalog.POST("/candidates/:id/reject", h.rejectAliasCandidate)
@@ -1488,9 +1490,6 @@ func (h *handler) createOffering(c *gin.Context) {
 		ChannelID:       channelID,
 		UpstreamModelID: strings.TrimSpace(req.UpstreamModelID),
 	}
-	if req.CanonicalModelID != nil {
-		offering.CanonicalModelID = *req.CanonicalModelID
-	}
 	if req.Capabilities != nil {
 		encoded, encErr := common.Marshal(*req.Capabilities)
 		if encErr != nil {
@@ -1499,7 +1498,17 @@ func (h *handler) createOffering(c *gin.Context) {
 		}
 		offering.Capabilities = string(encoded)
 	}
-	if err := apigxmodel.CreateModelOffering(h.db, owner, offering); err != nil {
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		if err := apigxmodel.CreateModelOffering(tx, owner, offering); err != nil {
+			return err
+		}
+		if req.CanonicalModelID != nil {
+			_, err := apigxmodel.SetOfferingAliasProposal(tx, owner, offering.ID, *req.CanonicalModelID)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
@@ -1531,10 +1540,46 @@ func (h *handler) listOfferings(c *gin.Context) {
 			"upstream_model_id": item.UpstreamModelID,
 			"status":            item.Status, "revision": item.Revision,
 			"capabilities": item.CapabilityOf(), "price_rule_id": item.PriceRuleID,
-			"price_configured": h.offeringHasAcceptedPrice(item.ID),
+			"price_configured":   h.offeringHasAcceptedPrice(item.ID),
+			"canonical_model_id": item.CanonicalModelID,
 		})
+		proposal, exists, proposalErr := apigxmodel.GetOfferingAliasProposal(h.db, item.ID)
+		if item.CanonicalModelID > 0 {
+			items[len(items)-1]["mapping_state"] = apigxmodel.AliasConfirmApproved
+			items[len(items)-1]["suggested_canonical_model_id"] = item.CanonicalModelID
+		} else if proposalErr == nil && exists {
+			items[len(items)-1]["mapping_state"] = proposal.ConfirmationState
+			items[len(items)-1]["suggested_canonical_model_id"] = proposal.TargetCanonicalModelID
+		} else {
+			items[len(items)-1]["mapping_state"] = apigxmodel.AliasConfirmPending
+		}
 	}
 	ok(c, gin.H{"items": items})
+}
+
+func (h *handler) setOfferingModelMapping(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	var req struct {
+		TargetCanonicalModelID int64 `json:"target_canonical_model_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.TargetCanonicalModelID < 0 {
+		fail(c, http.StatusBadRequest, "invalid_body", "target_canonical_model_id must be zero or a positive number")
+		return
+	}
+	proposal, err := apigxmodel.SetOfferingAliasProposal(h.db, owner, id, req.TargetCanonicalModelID)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	ok(c, gin.H{"id": id, "mapping_state": proposal.ConfirmationState,
+		"suggested_canonical_model_id": proposal.TargetCanonicalModelID})
 }
 
 type updateCapabilitiesRequest struct {
@@ -1839,7 +1884,9 @@ func (h *handler) listOfferingsForReview(c *gin.Context) {
 			"share_group_name": item.ShareGroupName, "group_visibility": item.GroupVisibility,
 			"channel_id": item.ChannelID, "channel_public_id": item.ChannelPublicID, "channel_name": item.ChannelName,
 			"upstream_model_id": item.UpstreamModelID, "capabilities": caps,
-			"status": item.Status, "revision": item.Revision,
+			"canonical_model_id": item.CanonicalModelID, "canonical_api_model_id": item.CanonicalAPIModelID,
+			"mapping_confirmed": item.CanonicalModelID > 0,
+			"status":            item.Status, "revision": item.Revision,
 			"price_configured": h.offeringHasAcceptedPrice(item.OfferingID),
 			"created_at":       item.CreatedAt, "updated_at": item.UpdatedAt,
 		})
@@ -1866,6 +1913,16 @@ func (h *handler) publishOffering(c *gin.Context) {
 	if !h.offeringHasAcceptedPrice(id) {
 		fail(c, http.StatusBadRequest, "price_not_configured",
 			"该模型的价格未配置，无法发布；请先配置价格（系统设置 → 分组与模型定价设置）或提交价格同步")
+		return
+	}
+	var identity apigxmodel.ModelOffering
+	if err := h.db.Select("id", "canonical_model_id").Where("id = ?", id).First(&identity).Error; err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if identity.CanonicalModelID <= 0 {
+		fail(c, http.StatusBadRequest, "model_identity_not_confirmed",
+			"该模型的标准身份尚未确认；请先在模型管理中确认映射，再发布资源")
 		return
 	}
 	var reviewed *apigxmodel.OfferingReviewResult
@@ -2131,38 +2188,17 @@ func (h *handler) loadOrRepairBaseChannel(shareChannel *apigxmodel.Channel) (*ba
 		}
 
 		var published []apigxmodel.ModelOffering
-		if txErr := tx.Where("channel_id = ? AND status = ?", current.ID, apigxmodel.OfferingStatusPublished).
+		if txErr := tx.Where("channel_id = ? AND status = ? AND alive_flag = ?", current.ID,
+			apigxmodel.OfferingStatusPublished, apigxmodel.AliveFlagAlive).
 			Order("id ASC").Find(&published).Error; txErr != nil {
 			return txErr
 		}
-		modelIDs := make([]string, 0, len(published))
 		offeringIDs := make([]int64, 0, len(published))
-		seen := make(map[string]struct{}, len(published))
 		for i := range published {
 			offeringIDs = append(offeringIDs, published[i].ID)
-			modelID := strings.TrimSpace(published[i].UpstreamModelID)
-			if modelID == "" {
-				continue
-			}
-			if _, exists := seen[modelID]; exists {
-				continue
-			}
-			seen[modelID] = struct{}{}
-			modelIDs = append(modelIDs, modelID)
 		}
-		if len(modelIDs) > 0 {
-			joined := strings.Join(modelIDs, ",")
-			if txErr := tx.Model(&basemodel.Channel{}).Where("id = ?", repairedBaseID).
-				Update("models", joined).Error; txErr != nil {
-				return txErr
-			}
-			var repaired basemodel.Channel
-			if txErr := tx.Where("id = ?", repairedBaseID).First(&repaired).Error; txErr != nil {
-				return txErr
-			}
-			if txErr := repaired.AddAbilities(tx); txErr != nil {
-				return txErr
-			}
+		if txErr := syncBaseChannelModelProjection(tx, current.ID); txErr != nil {
+			return txErr
 		}
 		if len(offeringIDs) > 0 {
 			return tx.Model(&apigxmodel.BreakerProbeState{}).
@@ -2313,6 +2349,9 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 		"access_kind":                 item.AccessKind,
 		"capabilities":                item.Capabilities,
 		"updated_at":                  item.UpdatedAt,
+	}
+	if item.CanonicalAPIModelID != "" {
+		out["model"] = item.CanonicalAPIModelID
 	}
 	if item.OutputTokensPerSecond > 0 {
 		out["output_tokens_per_second"] = item.OutputTokensPerSecond
@@ -2843,11 +2882,11 @@ func (h *handler) listAliasCandidates(c *gin.Context) {
 	if _, valid := h.ownerID(c); !valid || !requirePlatformReviewer(c) {
 		return
 	}
-	state := 0
+	state := -1
 	if raw := c.Query("state"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 || parsed > 2 {
-			fail(c, http.StatusBadRequest, "invalid_query", "state must be 0..2")
+		if err != nil || parsed < -1 || parsed > 2 {
+			fail(c, http.StatusBadRequest, "invalid_query", "state must be -1..2")
 			return
 		}
 		state = parsed
@@ -2874,27 +2913,46 @@ func (h *handler) listAliasCandidates(c *gin.Context) {
 			"id": row.ID, "external_model_id": row.ExternalModelID, "normalized_model_id": row.NormalizedModelID,
 			"scope_type": row.ScopeType, "scope_id": row.ScopeID, "source": row.Source, "source_ref": row.SourceRef,
 			"confirmation_state": row.ConfirmationState, "target_canonical_model_id": row.TargetCanonicalID,
+			"target_api_model_id": row.TargetAPIModelID,
+			"offering_id":         row.OfferingID, "offering_public_id": row.OfferingPublicID,
+			"offering_status": row.OfferingStatus, "owner_user_id": row.OwnerUserID,
+			"share_group_name": row.ShareGroupName, "channel_name": row.ChannelName,
 		})
 	}
 	ok(c, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize})
 }
 
-// resolveConfirmTarget 从请求里取"确认到哪个标准模型"：既支持给现成的 ID，也支持给对外标准 ID
-// （后者不存在时**顺手创建** —— 否则管理员要先绕去别处建模型，这一步就会被跳过，候选永远堆着）。
-func (h *handler) resolveConfirmTarget(c *gin.Context, apiModelID string, canonicalID int64, description string, modalityType int) (int64, bool) {
-	if canonicalID > 0 {
-		return canonicalID, true
+func (h *handler) listCanonicalModels(c *gin.Context) {
+	if _, valid := h.ownerID(c); !valid {
+		return
 	}
-	if strings.TrimSpace(apiModelID) == "" {
-		fail(c, http.StatusBadRequest, "invalid_body", "api_model_id or target_canonical_model_id is required")
-		return 0, false
-	}
-	model, err := apigxmodel.EnsureCanonicalModel(h.db, apiModelID, description, modalityType)
+	models, err := apigxmodel.ListCanonicalModelOptions(h.db, 1000)
 	if err != nil {
 		failFromRepo(c, err)
-		return 0, false
+		return
 	}
-	return model.ID, true
+	items := make([]gin.H, 0, len(models))
+	for _, model := range models {
+		items = append(items, gin.H{"id": model.ID, "api_model_id": model.APIModelID,
+			"description": model.Description, "modality_type": model.ModalityType})
+	}
+	ok(c, gin.H{"items": items})
+}
+
+// resolveConfirmTarget 从请求里取"确认到哪个标准模型"：既支持给现成的 ID，也支持给对外标准 ID
+// （后者不存在时**顺手创建** —— 否则管理员要先绕去别处建模型，这一步就会被跳过，候选永远堆着）。
+func resolveConfirmTarget(db *gorm.DB, apiModelID string, canonicalID int64, description string, modalityType int) (int64, error) {
+	if canonicalID > 0 {
+		return canonicalID, nil
+	}
+	if strings.TrimSpace(apiModelID) == "" {
+		return 0, fmt.Errorf("%w: api_model_id or target_canonical_model_id is required", apigxmodel.ErrInvalidArgument)
+	}
+	model, err := apigxmodel.EnsureCanonicalModel(db, apiModelID, description, modalityType)
+	if err != nil {
+		return 0, err
+	}
+	return model.ID, nil
 }
 
 // confirmAliasCandidate 确认一个候选（平台侧）。
@@ -2917,15 +2975,35 @@ func (h *handler) confirmAliasCandidate(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
-	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
-	if !okTarget {
-		return
-	}
-	if err := apigxmodel.ConfirmAliasCandidate(h.db, id, target, owner); err != nil {
+	var target int64
+	var result *apigxmodel.AliasConfirmationResult
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		var targetErr error
+		target, targetErr = resolveConfirmTarget(tx, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
+		if targetErr != nil {
+			return targetErr
+		}
+		result, targetErr = apigxmodel.ConfirmAliasCandidate(tx, id, target, owner)
+		if targetErr != nil {
+			return targetErr
+		}
+		for _, channelID := range result.AffectedChannelIDs {
+			if targetErr = syncBaseChannelModelProjection(tx, channelID); targetErr != nil {
+				return targetErr
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": target})
+	if len(result.AffectedChannelIDs) > 0 && basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+	ok(c, gin.H{"id": id, "confirmation_state": apigxmodel.AliasConfirmApproved,
+		"target_canonical_model_id": target, "migrated_offerings": result.MigratedOfferings,
+		"affected_channels": len(result.AffectedChannelIDs)})
 }
 
 // rejectAliasCandidate 拒绝一个候选（平台侧）。
@@ -2966,16 +3044,34 @@ func (h *handler) bulkConfirmAliases(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "normalized_model_id is required")
 		return
 	}
-	target, okTarget := h.resolveConfirmTarget(c, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
-	if !okTarget {
-		return
-	}
-	affected, err := apigxmodel.BulkConfirmAliases(h.db, req.NormalizedModelID, target, owner)
+	var target int64
+	var result *apigxmodel.AliasConfirmationResult
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		var targetErr error
+		target, targetErr = resolveConfirmTarget(tx, req.APIModelID, req.TargetCanonicalModelID, req.Description, req.ModalityType)
+		if targetErr != nil {
+			return targetErr
+		}
+		result, targetErr = apigxmodel.BulkConfirmAliases(tx, req.NormalizedModelID, target, owner)
+		if targetErr != nil {
+			return targetErr
+		}
+		for _, channelID := range result.AffectedChannelIDs {
+			if targetErr = syncBaseChannelModelProjection(tx, channelID); targetErr != nil {
+				return targetErr
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	ok(c, gin.H{"confirmed": affected, "target_canonical_model_id": target})
+	if len(result.AffectedChannelIDs) > 0 && basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+	ok(c, gin.H{"confirmed": result.MigratedOfferings, "target_canonical_model_id": target,
+		"affected_channels": len(result.AffectedChannelIDs)})
 }
 
 // provisionBaseChannelForShareChannel 为"分享者自建渠道"代建一条**底座渠道**并绑定。
@@ -3264,14 +3360,9 @@ func parseOwnerUsageInt(c *gin.Context, name string, fallback int) (int, bool) {
 	return parsed, true
 }
 
-// syncBaseChannelServesModel 让"绑定到该供给所属分享渠道"的底座渠道真正能服务该模型。
-//
-// 背景（实测发现的产品缺陷）：U-1 的「分享者自建渠道」由平台**直接插入**底座 channels 行，
-// 因此**绕过了底座的建能力步骤**（底座在建/改渠道后会调用 Channel.AddAbilities）。
-// 结果：这类渠道 models 为空、abilities 为 0，底座分配器对该模型永远返回 model_not_found。
-//
-// 修法（与底座自己的姿势一致）：把该模型并入底座渠道的 models，然后重建能力。
-// 只动 models 与能力，不触碰上游地址与凭据。
+// syncBaseChannelServesModel rebuilds the complete APIGX model projection for
+// the offering's share channel. The public model list uses confirmed standard
+// IDs while model_mapping translates each standard ID to the upstream ID.
 func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
 	if db == nil {
 		return errors.New("apigx api: nil db")
@@ -3280,42 +3371,7 @@ func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
 	if err := db.Where("id = ?", offeringID).First(&offering).Error; err != nil {
 		return err
 	}
-	var shareChannel apigxmodel.Channel
-	if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
-		return err
-	}
-	if shareChannel.BaseChannelID <= 0 || offering.UpstreamModelID == "" {
-		return nil
-	}
-
-	var base basemodel.Channel
-	if err := db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error; err != nil {
-		return err
-	}
-
-	models := strings.Split(base.Models, ",")
-	exists := false
-	for _, m := range models {
-		if strings.TrimSpace(m) == offering.UpstreamModelID {
-			exists = true
-			break
-		}
-	}
-	if !exists {
-		merged := append(models, offering.UpstreamModelID)
-		joined := strings.Join(merged, ",")
-		if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
-			Update("models", joined).Error; err != nil {
-			return err
-		}
-		base.Models = joined
-	}
-
-	// 重建能力（底座建渠道后的同一姿势）
-	if err := base.AddAbilities(db); err != nil {
-		return err
-	}
-	return nil
+	return syncBaseChannelModelProjection(db, offering.ChannelID)
 }
 
 // syncBaseChannelStopsModel removes a deleted offering from the backing New API
@@ -3323,22 +3379,23 @@ func syncBaseChannelServesModel(db *gorm.DB, offeringID int64) error {
 // while new requests lose both the APIGX candidate and the base ability in the
 // same transaction as the soft delete.
 func syncBaseChannelStopsModel(db *gorm.DB, offering *apigxmodel.ModelOffering) error {
-	if db == nil || offering == nil || offering.ChannelID <= 0 || offering.UpstreamModelID == "" {
+	if db == nil || offering == nil || offering.ChannelID <= 0 {
 		return nil
 	}
-	var remaining int64
-	if err := db.Model(&apigxmodel.ModelOffering{}).
-		Where("channel_id = ? AND upstream_model_id = ? AND status = ? AND alive_flag = ?",
-			offering.ChannelID, offering.UpstreamModelID, apigxmodel.OfferingStatusPublished, apigxmodel.AliveFlagAlive).
-		Count(&remaining).Error; err != nil {
-		return err
-	}
-	if remaining > 0 {
-		return nil
-	}
+	return syncBaseChannelModelProjection(db, offering.ChannelID)
+}
 
+// syncBaseChannelModelProjection is the single writer for the model-facing
+// portion of a backing New API channel. Managed channels are rebuilt in full.
+// Administrator-owned bound channels retain models and mappings that do not
+// belong to any APIGX offering on this share channel.
+func syncBaseChannelModelProjection(db *gorm.DB, shareChannelID int64) error {
+	if db == nil || shareChannelID <= 0 {
+		return nil
+	}
 	var shareChannel apigxmodel.Channel
-	if err := db.Where("id = ?", offering.ChannelID).First(&shareChannel).Error; err != nil {
+	if err := db.Where("id = ? AND alive_flag = ?", shareChannelID, apigxmodel.AliveFlagAlive).
+		First(&shareChannel).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
@@ -3354,17 +3411,141 @@ func syncBaseChannelStopsModel(db *gorm.DB, offering *apigxmodel.ModelOffering) 
 		}
 		return err
 	}
-	kept := make([]string, 0)
-	for _, modelID := range strings.Split(base.Models, ",") {
-		modelID = strings.TrimSpace(modelID)
-		if modelID != "" && modelID != offering.UpstreamModelID {
-			kept = append(kept, modelID)
-		}
-	}
-	if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
-		Update("models", strings.Join(kept, ",")).Error; err != nil {
+
+	var allOfferings []apigxmodel.ModelOffering
+	if err := db.Unscoped().Where("channel_id = ?", shareChannel.ID).Order("id ASC").Find(&allOfferings).Error; err != nil {
 		return err
 	}
-	return db.Where("channel_id = ? AND model = ?", base.Id, offering.UpstreamModelID).
-		Delete(&basemodel.Ability{}).Error
+	canonicalIDs := make([]int64, 0, len(allOfferings))
+	canonicalSeen := make(map[int64]struct{}, len(allOfferings))
+	for i := range allOfferings {
+		if allOfferings[i].CanonicalModelID <= 0 {
+			continue
+		}
+		if _, exists := canonicalSeen[allOfferings[i].CanonicalModelID]; exists {
+			continue
+		}
+		canonicalSeen[allOfferings[i].CanonicalModelID] = struct{}{}
+		canonicalIDs = append(canonicalIDs, allOfferings[i].CanonicalModelID)
+	}
+	canonicalByID := make(map[int64]apigxmodel.CanonicalModel, len(canonicalIDs))
+	if len(canonicalIDs) > 0 {
+		var canonicals []apigxmodel.CanonicalModel
+		if err := db.Where("id IN ?", canonicalIDs).Find(&canonicals).Error; err != nil {
+			return err
+		}
+		for i := range canonicals {
+			canonicalByID[canonicals[i].ID] = canonicals[i]
+		}
+	}
+
+	knownModelIDs := make(map[string]struct{}, len(allOfferings)*2)
+	for i := range allOfferings {
+		if upstream := strings.TrimSpace(allOfferings[i].UpstreamModelID); upstream != "" {
+			knownModelIDs[upstream] = struct{}{}
+		}
+		if canonical := canonicalByID[allOfferings[i].CanonicalModelID]; strings.TrimSpace(canonical.APIModelID) != "" {
+			knownModelIDs[strings.TrimSpace(canonical.APIModelID)] = struct{}{}
+		}
+	}
+
+	managed := base.Tag != nil && *base.Tag == channelpool.ManagedBaseChannelTag
+	if !managed {
+		managed = base.Name == "APIGX-"+strings.TrimSpace(shareChannel.Name) && base.Group == "default"
+	}
+	models := make([]string, 0)
+	modelSeen := make(map[string]struct{})
+	modelMapping := make(map[string]string)
+	if !managed {
+		for _, modelID := range strings.Split(base.Models, ",") {
+			modelID = strings.TrimSpace(modelID)
+			if modelID == "" {
+				continue
+			}
+			if _, ours := knownModelIDs[modelID]; ours {
+				continue
+			}
+			if _, duplicate := modelSeen[modelID]; duplicate {
+				continue
+			}
+			modelSeen[modelID] = struct{}{}
+			models = append(models, modelID)
+		}
+		rawMapping := strings.TrimSpace(base.GetModelMapping())
+		if rawMapping != "" && rawMapping != "{}" {
+			if err := common.UnmarshalJsonStr(rawMapping, &modelMapping); err != nil {
+				return fmt.Errorf("apigx api: invalid backing channel model mapping: %w", err)
+			}
+		}
+		for source, target := range modelMapping {
+			_, sourceOwned := knownModelIDs[strings.TrimSpace(source)]
+			_, targetOwned := knownModelIDs[strings.TrimSpace(target)]
+			if sourceOwned || targetOwned {
+				delete(modelMapping, source)
+			}
+		}
+	}
+
+	// Lowest offering ID is the stable representative if one channel published
+	// multiple upstream aliases for the same standard model.
+	for i := range allOfferings {
+		offering := &allOfferings[i]
+		if offering.AliveFlag != apigxmodel.AliveFlagAlive || offering.Status != apigxmodel.OfferingStatusPublished ||
+			!offering.DeletedAt.Time.IsZero() {
+			continue
+		}
+		upstreamID := strings.TrimSpace(offering.UpstreamModelID)
+		publicID := upstreamID
+		if canonical := canonicalByID[offering.CanonicalModelID]; canonical.Status == 1 && strings.TrimSpace(canonical.APIModelID) != "" {
+			publicID = strings.TrimSpace(canonical.APIModelID)
+		}
+		if publicID == "" {
+			continue
+		}
+		if _, duplicate := modelSeen[publicID]; duplicate {
+			continue
+		}
+		modelSeen[publicID] = struct{}{}
+		models = append(models, publicID)
+		if upstreamID != "" && upstreamID != publicID {
+			modelMapping[publicID] = upstreamID
+		}
+	}
+
+	encoded, err := common.Marshal(modelMapping)
+	if err != nil {
+		return err
+	}
+	mappingJSON := string(encoded)
+	base.Models = strings.Join(models, ",")
+	base.ModelMapping = &mappingJSON
+	if err := db.Model(&basemodel.Channel{}).Where("id = ?", base.Id).
+		Updates(map[string]any{"models": base.Models, "model_mapping": mappingJSON}).Error; err != nil {
+		return err
+	}
+	return base.UpdateAbilities(db)
+}
+
+// ReconcileBaseChannelModelProjections upgrades historical backing channels
+// after offering identities have been backfilled. It is safe to run at every
+// startup and does not touch credentials, addresses or administrator-owned
+// models outside the APIGX projection.
+func ReconcileBaseChannelModelProjections(db *gorm.DB) (int, error) {
+	if db == nil {
+		return 0, errors.New("apigx api: nil db")
+	}
+	var channels []apigxmodel.Channel
+	if err := db.Where("alive_flag = ? AND base_channel_id > 0", apigxmodel.AliveFlagAlive).
+		Order("id ASC").Find(&channels).Error; err != nil {
+		return 0, err
+	}
+	for i := range channels {
+		if err := syncBaseChannelModelProjection(db, channels[i].ID); err != nil {
+			return i, err
+		}
+	}
+	if len(channels) > 0 && basemodel.DB != nil {
+		basemodel.InitChannelCache()
+	}
+	return len(channels), nil
 }

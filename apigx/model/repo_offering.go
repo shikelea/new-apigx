@@ -64,22 +64,24 @@ type OfferingReviewResult struct {
 // OfferingReviewItem 是管理员待审核队列所需的最小跨 owner 投影。
 // 不包含上游地址、Key、账户池或任何凭据材料。
 type OfferingReviewItem struct {
-	OfferingID         int64
-	OfferingPublicID   string
-	OwnerUserID        int64
-	ShareGroupID       int64
-	ShareGroupPublicID string
-	ShareGroupName     string
-	GroupVisibility    int
-	ChannelID          int64
-	ChannelPublicID    string
-	ChannelName        string
-	UpstreamModelID    string
-	Capabilities       string
-	Status             int
-	Revision           int64
-	CreatedAt          int64
-	UpdatedAt          int64
+	OfferingID          int64
+	OfferingPublicID    string
+	OwnerUserID         int64
+	ShareGroupID        int64
+	ShareGroupPublicID  string
+	ShareGroupName      string
+	GroupVisibility     int
+	ChannelID           int64
+	ChannelPublicID     string
+	ChannelName         string
+	UpstreamModelID     string
+	CanonicalModelID    int64
+	CanonicalAPIModelID string
+	Capabilities        string
+	Status              int
+	Revision            int64
+	CreatedAt           int64
+	UpdatedAt           int64
 }
 
 // OfferingKeyHashFor 计算供给的业务键哈希（渠道 + 上游模型名）。
@@ -122,12 +124,6 @@ func CreateModelOffering(db *gorm.DB, ownerUserID int64, offering *ModelOffering
 	touchTimestamps(true, &offering.CreatedAt, &offering.UpdatedAt)
 	if err := db.Create(offering).Error; err != nil {
 		return err
-	}
-	// 顺手把上游模型名登记为**候选**别名（幂等；候选不会当结论用，见 repo_catalog.go）。
-	// 放在仓储层是为了让所有调用方（含"一键导入"的批量路径）都覆盖到；
-	// 失败**不影响供给创建**（目录是辅助能力，不该挡住主流程），因此只记录不返回错误。
-	if err := RecordAliasCandidate(db, AliasScopePlatform, 0, 0, offering.UpstreamModelID); err != nil {
-		common.SysError("apigx: record alias candidate failed: " + err.Error())
 	}
 	return nil
 }
@@ -181,7 +177,69 @@ func UpdateModelOfferingCapabilities(db *gorm.DB, ownerUserID, id int64, caps Ca
 // 状态机刻意做窄：**已发布的供给不能靠提交动作改状态**（改价/改能力应当走修订流程），
 // 否则一次误点就会让已对外可见的供给退回待审核、对使用者表现为"模型突然消失"。
 func SubmitModelOffering(db *gorm.DB, ownerUserID, id int64) error {
-	return transitionOffering(db, ownerUserID, id, []int{OfferingStatusDraft, OfferingStatusRejected}, OfferingStatusPending)
+	if db == nil {
+		return errors.New("apigxmodel: nil db")
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		offering, err := GetModelOffering(tx, ownerUserID, id)
+		if err != nil {
+			return err
+		}
+		if offering.Status != OfferingStatusDraft && offering.Status != OfferingStatusRejected {
+			return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, OfferingStatusPending)
+		}
+
+		// A previously confirmed platform mapping is reusable. A sharer may have
+		// proposed a different target, in which case an administrator must resolve
+		// the conflict instead of silently overwriting that proposal.
+		proposal, hasProposal, err := GetOfferingAliasProposal(tx, offering.ID)
+		if err != nil {
+			return err
+		}
+		canonical, resolved, err := ResolveCanonicalModel(tx, offering.UpstreamModelID)
+		if err != nil {
+			return err
+		}
+		if resolved && (!hasProposal || proposal.TargetCanonicalModelID == 0 || proposal.TargetCanonicalModelID == canonical.ID) {
+			offering.CanonicalModelID = canonical.ID
+			if !hasProposal {
+				proposal, err = upsertOfferingAliasProposal(tx, offering, canonical.ID)
+				if err != nil {
+					return err
+				}
+			}
+			if err := approveOfferingAliasProposal(tx, proposal.ID, canonical.ID, 0); err != nil {
+				return err
+			}
+		} else {
+			targetCanonicalID := int64(0)
+			if hasProposal {
+				targetCanonicalID = proposal.TargetCanonicalModelID
+			}
+			// Resubmitting a rejected identity must reopen its proposal. Keeping the
+			// rejected alias unchanged would leave the offering pending forever while
+			// it remains absent from the administrator's pending identity queue.
+			if _, err := upsertOfferingAliasProposal(tx, offering, targetCanonicalID); err != nil {
+				return err
+			}
+			offering.CanonicalModelID = 0
+		}
+
+		updated := tx.Model(&ModelOffering{}).
+			Where("id = ? AND alive_flag = ? AND status IN ?", offering.ID, AliveFlagAlive,
+				[]int{OfferingStatusDraft, OfferingStatusRejected}).
+			Updates(map[string]any{
+				"status": OfferingStatusPending, "canonical_model_id": offering.CanonicalModelID,
+				"updated_at": common.GetTimestamp(),
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return fmt.Errorf("%w: offering state changed", ErrInvalidArgument)
+		}
+		return nil
+	})
 }
 
 // PublishModelOffering 平台审核通过（待审核 → 已发布）。
@@ -213,9 +271,11 @@ func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingR
 	offeringTable := ModelOffering{}.TableName()
 	channelTable := Channel{}.TableName()
 	groupTable := ShareGroup{}.TableName()
+	canonicalTable := CanonicalModel{}.TableName()
 	base := db.Table(offeringTable+" AS o").
 		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
 		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
+		Joins("LEFT JOIN "+canonicalTable+" AS cm ON cm.id = o.canonical_model_id").
 		Where("o.deleted_at IS NULL AND o.alive_flag = ?", AliveFlagAlive)
 	if status != -1 {
 		base = base.Where("o.status = ?", status)
@@ -230,7 +290,8 @@ func ListOfferingsForReview(db *gorm.DB, status, offset, limit int) ([]OfferingR
 		"c.owner_user_id AS owner_user_id, g.id AS share_group_id, g.public_id AS share_group_public_id, " +
 		"g.name AS share_group_name, g.default_visibility AS group_visibility, " +
 		"c.id AS channel_id, c.public_id AS channel_public_id, c.name AS channel_name, " +
-		"o.upstream_model_id AS upstream_model_id, o.capabilities AS capabilities, " +
+		"o.upstream_model_id AS upstream_model_id, o.canonical_model_id AS canonical_model_id, " +
+		"cm.api_model_id AS canonical_api_model_id, o.capabilities AS capabilities, " +
 		"o.status AS status, o.revision AS revision, o.created_at AS created_at, o.updated_at AS updated_at").
 		Order("o.updated_at ASC, o.id ASC").Offset(offset).Limit(limit).Scan(&items).Error
 	return items, total, err
@@ -274,6 +335,9 @@ func ReviewModelOffering(db *gorm.DB, id int64, toStatus int, review OfferingRev
 		}
 		if offering.Status != OfferingStatusPending {
 			return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, toStatus)
+		}
+		if toStatus == OfferingStatusPublished && offering.CanonicalModelID <= 0 {
+			return fmt.Errorf("%w: model identity must be confirmed before publishing", ErrInvalidArgument)
 		}
 
 		now := common.GetTimestamp()
@@ -398,6 +462,9 @@ func transitionOffering(db *gorm.DB, ownerUserID, id int64, from []int, to int) 
 	if !allowed {
 		return fmt.Errorf("%w: offering %d cannot move from status %d to %d", ErrInvalidArgument, id, offering.Status, to)
 	}
+	if to == OfferingStatusPublished && offering.CanonicalModelID <= 0 {
+		return fmt.Errorf("%w: model identity must be confirmed before publishing", ErrInvalidArgument)
+	}
 	now := common.GetTimestamp()
 	updates := map[string]any{"status": to, "updated_at": now}
 	if to == OfferingStatusPublished {
@@ -491,8 +558,18 @@ func FindOfferingByUpstreamModel(db *gorm.DB, channelID int64, upstreamModelID s
 		return 0, false, nil
 	}
 	var offering ModelOffering
-	err := db.Where("channel_id = ? AND upstream_model_id = ? AND alive_flag = ?",
-		channelID, upstreamModelID, AliveFlagAlive).First(&offering).Error
+	err := db.Where("channel_id = ? AND upstream_model_id = ? AND status = ? AND alive_flag = ?",
+		channelID, upstreamModelID, OfferingStatusPublished, AliveFlagAlive).Order("id ASC").First(&offering).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		var canonical CanonicalModel
+		canonicalErr := db.Where("api_model_id = ? AND status = ?", upstreamModelID, 1).First(&canonical).Error
+		if canonicalErr == nil {
+			err = db.Where("channel_id = ? AND canonical_model_id = ? AND status = ? AND alive_flag = ?",
+				channelID, canonical.ID, OfferingStatusPublished, AliveFlagAlive).Order("id ASC").First(&offering).Error
+		} else if !errors.Is(canonicalErr, gorm.ErrRecordNotFound) {
+			return 0, false, canonicalErr
+		}
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, false, nil
 	}
@@ -519,8 +596,36 @@ func ListPublishedOfferingsByModel(db *gorm.DB, upstreamModelID string) ([]Model
 	groupPublished := "channel_id IN (SELECT id FROM " + channelTable +
 		" WHERE share_group_id IN (SELECT id FROM " + groupTable +
 		" WHERE publish_status = ? AND deleted_at IS NULL) AND deleted_at IS NULL)"
-	err := db.Where("upstream_model_id = ? AND status = ?", upstreamModelID, OfferingStatusPublished).
+	var canonical CanonicalModel
+	canonicalErr := db.Where("api_model_id = ? AND status = ?", upstreamModelID, 1).First(&canonical).Error
+	query := db.Where("status = ?", OfferingStatusPublished)
+	if canonicalErr == nil {
+		query = query.Where("upstream_model_id = ? OR canonical_model_id = ?", upstreamModelID, canonical.ID)
+	} else if errors.Is(canonicalErr, gorm.ErrRecordNotFound) {
+		query = query.Where("upstream_model_id = ?", upstreamModelID)
+	} else {
+		return nil, canonicalErr
+	}
+	err := query.
 		Where(groupPublished, ShareGroupPublishPublished).
 		Order("id ASC").Find(&offerings).Error
-	return offerings, err
+	if err != nil {
+		return nil, err
+	}
+	if canonicalErr != nil {
+		return offerings, nil
+	}
+	// A backing channel can contain multiple upstream aliases that were mapped
+	// to one public model. It is still one selectable source, so keep one stable
+	// representative per share channel for routing and explanations.
+	unique := make([]ModelOffering, 0, len(offerings))
+	seenChannels := make(map[int64]struct{}, len(offerings))
+	for i := range offerings {
+		if _, duplicate := seenChannels[offerings[i].ChannelID]; duplicate {
+			continue
+		}
+		seenChannels[offerings[i].ChannelID] = struct{}{}
+		unique = append(unique, offerings[i])
+	}
+	return unique, nil
 }

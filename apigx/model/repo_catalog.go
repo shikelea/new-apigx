@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -57,6 +58,10 @@ const (
 	AliasConfirmRejected = 2 // 已拒绝
 
 	AliasScopePlatform = 0 // 平台全局
+	AliasScopeOffering = 3 // 单条供给
+
+	AliasSourceUpstream         = 0 // 上游目录
+	AliasSourceSharerSuggestion = 2 // 分享者建议
 )
 
 // NormalizeModelIDForAlias 归一化模型名用于匹配。
@@ -100,7 +105,7 @@ func RecordAliasCandidate(db *gorm.DB, scopeType int, scopeID int64, source int,
 	row := ModelAlias{
 		ScopeType:         scopeType,
 		ScopeID:           scopeID,
-		Source:            0, // 上游目录
+		Source:            source,
 		ExternalModelID:   externalModelID,
 		NormalizedModelID: normalized,
 		AliasKeyHash:      hash,
@@ -225,6 +230,64 @@ func ResolveCanonicalModels(db *gorm.DB, externalModelIDs []string) (map[string]
 	return out, nil
 }
 
+// ReconcileOfferingCanonicalModels backfills the denormalized identity on
+// offerings created by older releases. Only administrator-approved platform
+// aliases are used; pending and rejected candidates remain unresolved.
+func ReconcileOfferingCanonicalModels(db *gorm.DB) (int64, error) {
+	if db == nil {
+		return 0, errors.New("apigxmodel: nil db")
+	}
+	var offerings []ModelOffering
+	if err := db.Where("canonical_model_id = 0 AND alive_flag = ?", AliveFlagAlive).Find(&offerings).Error; err != nil {
+		return 0, err
+	}
+	var updated int64
+	for i := range offerings {
+		canonical, ok, err := ResolveCanonicalModel(db, offerings[i].UpstreamModelID)
+		if err != nil {
+			return updated, err
+		}
+		if !ok {
+			if offerings[i].Status == OfferingStatusPending || offerings[i].Status == OfferingStatusPublished {
+				_, exists, proposalErr := GetOfferingAliasProposal(db, offerings[i].ID)
+				if proposalErr != nil {
+					return updated, proposalErr
+				}
+				if !exists {
+					_, proposalErr = upsertOfferingAliasProposal(db, &offerings[i], 0)
+				}
+				if proposalErr != nil {
+					return updated, proposalErr
+				}
+			}
+			continue
+		}
+		if offerings[i].Status == OfferingStatusPending || offerings[i].Status == OfferingStatusPublished {
+			proposal, exists, proposalErr := GetOfferingAliasProposal(db, offerings[i].ID)
+			if proposalErr != nil {
+				return updated, proposalErr
+			}
+			if !exists {
+				proposal, proposalErr = upsertOfferingAliasProposal(db, &offerings[i], canonical.ID)
+			}
+			if proposalErr != nil {
+				return updated, proposalErr
+			}
+			if err := approveOfferingAliasProposal(db, proposal.ID, canonical.ID, 0); err != nil {
+				return updated, err
+			}
+		}
+		res := db.Model(&ModelOffering{}).
+			Where("id = ? AND canonical_model_id = 0 AND alive_flag = ?", offerings[i].ID, AliveFlagAlive).
+			Updates(map[string]any{"canonical_model_id": canonical.ID, "updated_at": common.GetTimestamp()})
+		if res.Error != nil {
+			return updated, res.Error
+		}
+		updated += res.RowsAffected
+	}
+	return updated, nil
+}
+
 // AliasCandidateView 是候选列表对外的一行（含来源与建议目标）。
 type AliasCandidateView struct {
 	ID                int64
@@ -236,6 +299,13 @@ type AliasCandidateView struct {
 	SourceRef         string
 	ConfirmationState int
 	TargetCanonicalID int64
+	TargetAPIModelID  string
+	OfferingID        int64
+	OfferingPublicID  string
+	OfferingStatus    int
+	OwnerUserID       int64
+	ShareGroupName    string
+	ChannelName       string
 }
 
 // ListAliasCandidates 列出候选（默认只看待确认的），按 ID 倒序。
@@ -251,13 +321,40 @@ func ListAliasCandidates(db *gorm.DB, state int, limit, offset int) ([]AliasCand
 	if offset < 0 {
 		offset = 0
 	}
-	query := db.Model(&ModelAlias{}).Where("confirmation_state = ? AND deleted_at IS NULL", state)
+	aliasTable := ModelAlias{}.TableName()
+	offeringTable := ModelOffering{}.TableName()
+	channelTable := Channel{}.TableName()
+	groupTable := ShareGroup{}.TableName()
+	canonicalTable := CanonicalModel{}.TableName()
+	query := db.Table(aliasTable+" AS a").
+		Joins("JOIN "+offeringTable+" AS o ON o.id = a.scope_id AND o.deleted_at IS NULL AND o.alive_flag = ?", AliveFlagAlive).
+		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
+		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
+		Joins("LEFT JOIN "+canonicalTable+" AS cm ON cm.id = a.target_canonical_model_id").
+		Where("a.scope_type = ? AND a.source = ? AND a.deleted_at IS NULL", AliasScopeOffering, AliasSourceSharerSuggestion).
+		Where("o.status IN ?", []int{OfferingStatusPending, OfferingStatusPublished})
+	if state >= 0 {
+		query = query.Where("a.confirmation_state = ?", state)
+	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
-	var rows []ModelAlias
-	if err := query.Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+	type row struct {
+		ModelAlias
+		TargetAPIModelID string
+		OfferingID       int64
+		OfferingPublicID string
+		OfferingStatus   int
+		OwnerUserID      int64
+		ShareGroupName   string
+		ChannelName      string
+	}
+	var rows []row
+	if err := query.Select("a.*, cm.api_model_id AS target_api_model_id, o.id AS offering_id, " +
+		"o.public_id AS offering_public_id, o.status AS offering_status, c.owner_user_id AS owner_user_id, " +
+		"g.name AS share_group_name, c.name AS channel_name").
+		Order("a.updated_at DESC, a.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	out := make([]AliasCandidateView, 0, len(rows))
@@ -266,9 +363,120 @@ func ListAliasCandidates(db *gorm.DB, state int, limit, offset int) ([]AliasCand
 			ID: row.ID, ExternalModelID: row.ExternalModelID, NormalizedModelID: row.NormalizedModelID,
 			ScopeType: row.ScopeType, ScopeID: row.ScopeID, Source: row.Source, SourceRef: row.SourceRef,
 			ConfirmationState: row.ConfirmationState, TargetCanonicalID: row.TargetCanonicalModelID,
+			TargetAPIModelID: row.TargetAPIModelID, OfferingID: row.OfferingID,
+			OfferingPublicID: row.OfferingPublicID, OfferingStatus: row.OfferingStatus,
+			OwnerUserID: row.OwnerUserID, ShareGroupName: row.ShareGroupName, ChannelName: row.ChannelName,
 		})
 	}
 	return out, total, nil
+}
+
+type CanonicalModelOption struct {
+	ID           int64
+	APIModelID   string
+	Description  string
+	ModalityType int
+}
+
+func ListCanonicalModelOptions(db *gorm.DB, limit int) ([]CanonicalModelOption, error) {
+	if db == nil {
+		return nil, errors.New("apigxmodel: nil db")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	var models []CanonicalModel
+	if err := db.Where("status = ?", 1).Order("api_model_id ASC").Limit(limit).Find(&models).Error; err != nil {
+		return nil, err
+	}
+	out := make([]CanonicalModelOption, 0, len(models))
+	for _, model := range models {
+		out = append(out, CanonicalModelOption{ID: model.ID, APIModelID: model.APIModelID,
+			Description: model.Description, ModalityType: model.ModalityType})
+	}
+	return out, nil
+}
+
+func GetOfferingAliasProposal(db *gorm.DB, offeringID int64) (*ModelAlias, bool, error) {
+	if db == nil || offeringID <= 0 {
+		return nil, false, nil
+	}
+	var alias ModelAlias
+	err := db.Where("scope_type = ? AND scope_id = ? AND source = ? AND deleted_at IS NULL",
+		AliasScopeOffering, offeringID, AliasSourceSharerSuggestion).First(&alias).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return &alias, true, nil
+}
+
+func upsertOfferingAliasProposal(db *gorm.DB, offering *ModelOffering, targetCanonicalID int64) (*ModelAlias, error) {
+	if db == nil || offering == nil || offering.ID <= 0 {
+		return nil, fmt.Errorf("%w: offering is required", ErrInvalidArgument)
+	}
+	if targetCanonicalID > 0 {
+		var count int64
+		if err := db.Model(&CanonicalModel{}).Where("id = ? AND status = ?", targetCanonicalID, 1).Count(&count).Error; err != nil {
+			return nil, err
+		}
+		if count != 1 {
+			return nil, fmt.Errorf("%w: canonical model is not active", ErrInvalidArgument)
+		}
+	}
+	normalized := NormalizeModelIDForAlias(offering.UpstreamModelID)
+	hash := aliasKeyHash(AliasScopeOffering, offering.ID, AliasSourceSharerSuggestion, normalized)
+	now := common.GetTimestamp()
+	var alias ModelAlias
+	err := db.Where("alias_key_hash = ? AND deleted_at IS NULL", hash).First(&alias).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		alias = ModelAlias{ScopeType: AliasScopeOffering, ScopeID: offering.ID,
+			Source: AliasSourceSharerSuggestion, ExternalModelID: offering.UpstreamModelID,
+			NormalizedModelID: normalized, AliasKeyHash: hash, TargetCanonicalModelID: targetCanonicalID,
+			Relation: AliasRelationCandidate, ConfirmationState: AliasConfirmPending,
+			CreatedAt: now, UpdatedAt: now}
+		if err := db.Create(&alias).Error; err != nil {
+			return nil, err
+		}
+		return &alias, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Model(&ModelAlias{}).Where("id = ?", alias.ID).Updates(map[string]any{
+		"target_canonical_model_id": targetCanonicalID, "relation": AliasRelationCandidate,
+		"confirmation_state": AliasConfirmPending, "confirmed_by_user_id": 0, "confirmed_at": 0,
+		"updated_at": now,
+	}).Error; err != nil {
+		return nil, err
+	}
+	alias.TargetCanonicalModelID = targetCanonicalID
+	alias.ConfirmationState = AliasConfirmPending
+	return &alias, nil
+}
+
+func SetOfferingAliasProposal(db *gorm.DB, ownerUserID, offeringID, targetCanonicalID int64) (*ModelAlias, error) {
+	if db == nil {
+		return nil, errors.New("apigxmodel: nil db")
+	}
+	offering, err := GetModelOffering(db, ownerUserID, offeringID)
+	if err != nil {
+		return nil, err
+	}
+	if offering.Status != OfferingStatusDraft && offering.Status != OfferingStatusRejected {
+		return nil, fmt.Errorf("%w: mapping can only be proposed for draft or rejected offerings", ErrInvalidArgument)
+	}
+	return upsertOfferingAliasProposal(db, offering, targetCanonicalID)
+}
+
+func approveOfferingAliasProposal(db *gorm.DB, aliasID, targetCanonicalID, confirmedByUserID int64) error {
+	return db.Model(&ModelAlias{}).Where("id = ? AND deleted_at IS NULL", aliasID).Updates(map[string]any{
+		"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
+		"target_canonical_model_id": targetCanonicalID, "confirmed_by_user_id": confirmedByUserID,
+		"confirmed_at": common.GetTimestamp(), "updated_at": common.GetTimestamp(),
+	}).Error
 }
 
 // EnsureCanonicalModel 按对外标准 ID 找标准模型；不存在则创建（草稿→生效由调用方决定）。
@@ -311,32 +519,149 @@ func EnsureCanonicalModel(db *gorm.DB, apiModelID, description string, modalityT
 	return created, nil
 }
 
-// ConfirmAliasCandidate 确认一个候选（**只从"待确认"推进**）。
-//
-// 已确认/已拒绝的行不动：确认是**单向**的，重复提交不会改变结论，
-// 也不会把别人已经拒绝过的候选又悄悄确认回来。
-func ConfirmAliasCandidate(db *gorm.DB, id, targetCanonicalID, confirmedByUserID int64) error {
+type AliasConfirmationResult struct {
+	AliasID            int64
+	TargetCanonicalID  int64
+	MigratedOfferings  int64
+	PreviousTargets    []int64
+	AffectedChannelIDs []int64
+}
+
+// ConfirmAliasCandidate confirms or edits one submitted offering mapping.
+// The platform alias and all live offerings with the same normalized upstream
+// identity move in one transaction, so editing a mapping cannot create a new
+// catalog identity while leaving existing sources under the old one.
+func ConfirmAliasCandidate(db *gorm.DB, id, targetCanonicalID, confirmedByUserID int64) (*AliasConfirmationResult, error) {
 	if db == nil {
-		return errors.New("apigxmodel: nil db")
+		return nil, errors.New("apigxmodel: nil db")
 	}
-	if targetCanonicalID <= 0 {
-		return fmt.Errorf("%w: target canonical model is required", ErrInvalidArgument)
+	if id <= 0 || targetCanonicalID <= 0 || confirmedByUserID <= 0 {
+		return nil, fmt.Errorf("%w: alias, target canonical model and reviewer are required", ErrInvalidArgument)
 	}
-	res := db.Model(&ModelAlias{}).
-		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
-		Updates(map[string]any{
-			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
-			"target_canonical_model_id": targetCanonicalID,
-			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": common.GetTimestamp(),
-			"updated_at": common.GetTimestamp(),
+	result := &AliasConfirmationResult{AliasID: id, TargetCanonicalID: targetCanonicalID}
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var target CanonicalModel
+		if err := tx.Where("id = ? AND status = ?", targetCanonicalID, 1).First(&target).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: canonical model is not active", ErrInvalidArgument)
+			}
+			return err
+		}
+		var selected ModelAlias
+		if err := tx.Where("id = ? AND deleted_at IS NULL", id).First(&selected).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if selected.ScopeType != AliasScopeOffering || selected.Source != AliasSourceSharerSuggestion {
+			return fmt.Errorf("%w: only submitted offering mappings can be confirmed", ErrInvalidArgument)
+		}
+		var selectedOffering ModelOffering
+		if err := tx.Where("id = ? AND alive_flag = ? AND status IN ?", selected.ScopeID, AliveFlagAlive,
+			[]int{OfferingStatusPending, OfferingStatusPublished}).First(&selectedOffering).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: model mapping is not submitted for review", ErrInvalidArgument)
+			}
+			return err
+		}
+
+		var offerings []ModelOffering
+		if err := tx.Where("alive_flag = ?", AliveFlagAlive).Find(&offerings).Error; err != nil {
+			return err
+		}
+		offeringIDs := make([]int64, 0)
+		previousSet := map[int64]struct{}{}
+		channelSet := map[int64]struct{}{}
+		for _, offering := range offerings {
+			if NormalizeModelIDForAlias(offering.UpstreamModelID) != selected.NormalizedModelID {
+				continue
+			}
+			offeringIDs = append(offeringIDs, offering.ID)
+			channelSet[offering.ChannelID] = struct{}{}
+			if offering.CanonicalModelID > 0 && offering.CanonicalModelID != targetCanonicalID {
+				previousSet[offering.CanonicalModelID] = struct{}{}
+			}
+		}
+		for channelID := range channelSet {
+			result.AffectedChannelIDs = append(result.AffectedChannelIDs, channelID)
+		}
+		sort.Slice(result.AffectedChannelIDs, func(i, j int) bool {
+			return result.AffectedChannelIDs[i] < result.AffectedChannelIDs[j]
 		})
-	if res.Error != nil {
-		return res.Error
+		if len(offeringIDs) > 0 {
+			updated := tx.Model(&ModelOffering{}).Where("id IN ? AND alive_flag = ?", offeringIDs, AliveFlagAlive).
+				Updates(map[string]any{"canonical_model_id": targetCanonicalID, "updated_at": common.GetTimestamp()})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			result.MigratedOfferings = updated.RowsAffected
+		}
+
+		// One normalized external identity has one platform conclusion. Update all
+		// submitted candidates so stale duplicate review rows disappear.
+		now := common.GetTimestamp()
+		if err := tx.Model(&ModelAlias{}).
+			Where("normalized_model_id = ? AND scope_type = ? AND source = ? AND deleted_at IS NULL",
+				selected.NormalizedModelID, AliasScopeOffering, AliasSourceSharerSuggestion).
+			Updates(map[string]any{"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
+				"target_canonical_model_id": targetCanonicalID, "confirmed_by_user_id": confirmedByUserID,
+				"confirmed_at": now, "updated_at": now}).Error; err != nil {
+			return err
+		}
+
+		globalHash := aliasKeyHash(AliasScopePlatform, 0, AliasSourceUpstream, selected.NormalizedModelID)
+		var global ModelAlias
+		globalErr := tx.Where("alias_key_hash = ? AND deleted_at IS NULL", globalHash).First(&global).Error
+		if errors.Is(globalErr, gorm.ErrRecordNotFound) {
+			global = ModelAlias{ScopeType: AliasScopePlatform, Source: AliasSourceUpstream,
+				ExternalModelID: selected.ExternalModelID, NormalizedModelID: selected.NormalizedModelID,
+				AliasKeyHash: globalHash, TargetCanonicalModelID: targetCanonicalID,
+				Relation: AliasRelationConfirmed, ConfirmationState: AliasConfirmApproved,
+				ConfirmedByUserID: confirmedByUserID, ConfirmedAt: now, CreatedAt: now, UpdatedAt: now}
+			if err := tx.Create(&global).Error; err != nil {
+				return err
+			}
+		} else if globalErr != nil {
+			return globalErr
+		} else {
+			if global.TargetCanonicalModelID > 0 && global.TargetCanonicalModelID != targetCanonicalID {
+				previousSet[global.TargetCanonicalModelID] = struct{}{}
+			}
+			if err := tx.Model(&ModelAlias{}).Where("id = ?", global.ID).Updates(map[string]any{
+				"target_canonical_model_id": targetCanonicalID, "relation": AliasRelationConfirmed,
+				"confirmation_state": AliasConfirmApproved, "confirmed_by_user_id": confirmedByUserID,
+				"confirmed_at": now, "updated_at": now,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		for previousID := range previousSet {
+			var offeringRefs, aliasRefs int64
+			if err := tx.Model(&ModelOffering{}).Where("canonical_model_id = ? AND alive_flag = ?", previousID, AliveFlagAlive).Count(&offeringRefs).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&ModelAlias{}).Where("target_canonical_model_id = ? AND confirmation_state = ? AND deleted_at IS NULL", previousID, AliasConfirmApproved).Count(&aliasRefs).Error; err != nil {
+				return err
+			}
+			if offeringRefs == 0 && aliasRefs == 0 {
+				if err := tx.Model(&CanonicalModel{}).Where("id = ? AND status = ?", previousID, 1).
+					Updates(map[string]any{"status": 3, "merged_into_id": targetCanonicalID, "updated_at": now}).Error; err != nil {
+					return err
+				}
+				result.PreviousTargets = append(result.PreviousTargets, previousID)
+			}
+		}
+		sort.Slice(result.PreviousTargets, func(i, j int) bool {
+			return result.PreviousTargets[i] < result.PreviousTargets[j]
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if res.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return result, nil
 }
 
 // RejectAliasCandidate 拒绝一个候选（同样只从"待确认"推进）。
@@ -344,43 +669,79 @@ func RejectAliasCandidate(db *gorm.DB, id, confirmedByUserID int64) error {
 	if db == nil {
 		return errors.New("apigxmodel: nil db")
 	}
-	res := db.Model(&ModelAlias{}).
-		Where("id = ? AND confirmation_state = ? AND deleted_at IS NULL", id, AliasConfirmPending).
-		Updates(map[string]any{
-			"confirmation_state": AliasConfirmRejected, "relation": AliasRelationCandidate,
-			"confirmed_by_user_id": confirmedByUserID, "confirmed_at": common.GetTimestamp(),
-			"updated_at": common.GetTimestamp(),
-		})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return db.Transaction(func(tx *gorm.DB) error {
+		var alias ModelAlias
+		if err := tx.Where("id = ? AND scope_type = ? AND source = ? AND confirmation_state = ? AND deleted_at IS NULL",
+			id, AliasScopeOffering, AliasSourceSharerSuggestion, AliasConfirmPending).First(&alias).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		var offering ModelOffering
+		if err := tx.Where("id = ? AND alive_flag = ? AND status = ?", alias.ScopeID, AliveFlagAlive,
+			OfferingStatusPending).First(&offering).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
+			return err
+		}
+		now := common.GetTimestamp()
+		res := tx.Model(&ModelAlias{}).Where("id = ? AND confirmation_state = ?", alias.ID, AliasConfirmPending).
+			Updates(map[string]any{
+				"confirmation_state": AliasConfirmRejected, "relation": AliasRelationCandidate,
+				"confirmed_by_user_id": confirmedByUserID, "confirmed_at": now, "updated_at": now,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		// Identity rejection returns the submitted offering to the sharer. They
+		// can then choose another existing model or resubmit it as a new model.
+		offeringUpdate := tx.Model(&ModelOffering{}).
+			Where("id = ? AND alive_flag = ? AND status = ?", offering.ID, AliveFlagAlive, OfferingStatusPending).
+			Updates(map[string]any{
+				"status": OfferingStatusRejected, "canonical_model_id": 0, "updated_at": now,
+			})
+		if offeringUpdate.Error != nil {
+			return offeringUpdate.Error
+		}
+		if offeringUpdate.RowsAffected != 1 {
+			return fmt.Errorf("%w: offering state changed", ErrInvalidArgument)
+		}
+		return nil
+	})
 }
 
 // BulkConfirmAliases 把**归一化后同名**的待确认候选一次性确认到同一个标准模型（§4「批量匹配」）。
 //
 // 返回确认的行数。只动待确认的行 —— 已确认/已拒绝的保持不变。
-func BulkConfirmAliases(db *gorm.DB, normalizedModelID string, targetCanonicalID, confirmedByUserID int64) (int64, error) {
+func BulkConfirmAliases(db *gorm.DB, normalizedModelID string, targetCanonicalID, confirmedByUserID int64) (*AliasConfirmationResult, error) {
 	if db == nil {
-		return 0, errors.New("apigxmodel: nil db")
+		return nil, errors.New("apigxmodel: nil db")
 	}
 	normalized := NormalizeModelIDForAlias(normalizedModelID)
 	if normalized == "" || targetCanonicalID <= 0 {
-		return 0, fmt.Errorf("%w: normalized model id and target are required", ErrInvalidArgument)
+		return nil, fmt.Errorf("%w: normalized model id and target are required", ErrInvalidArgument)
 	}
-	now := common.GetTimestamp()
-	res := db.Model(&ModelAlias{}).
-		Where("normalized_model_id = ? AND confirmation_state = ? AND deleted_at IS NULL", normalized, AliasConfirmPending).
-		Updates(map[string]any{
-			"relation": AliasRelationConfirmed, "confirmation_state": AliasConfirmApproved,
-			"target_canonical_model_id": targetCanonicalID,
-			"confirmed_by_user_id":      confirmedByUserID, "confirmed_at": now, "updated_at": now,
-		})
-	if res.Error != nil {
-		return 0, res.Error
+	var candidate ModelAlias
+	offeringTable := ModelOffering{}.TableName()
+	if err := db.Table(ModelAlias{}.TableName()+" AS a").Select("a.*").
+		Joins("JOIN "+offeringTable+" AS o ON o.id = a.scope_id AND o.deleted_at IS NULL AND o.alive_flag = ?", AliveFlagAlive).
+		Where("a.normalized_model_id = ? AND a.scope_type = ? AND a.source = ? AND a.deleted_at IS NULL",
+			normalized, AliasScopeOffering, AliasSourceSharerSuggestion).
+		Where("o.status IN ?", []int{OfferingStatusPending, OfferingStatusPublished}).
+		Order("a.id ASC").First(&candidate).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
 	}
-	return res.RowsAffected, nil
+	result, err := ConfirmAliasCandidate(db, candidate.ID, targetCanonicalID, confirmedByUserID)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }

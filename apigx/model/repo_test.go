@@ -476,6 +476,20 @@ func TestAPIKeyPreferencesUpsertAndValidation(t *testing.T) {
 
 // ---- 模型供给与发布流程（T1.8） ----
 
+func confirmOfferingIdentityForTest(t *testing.T, db *gorm.DB, offeringID, reviewer int64) *CanonicalModel {
+	t.Helper()
+	proposal, exists, err := GetOfferingAliasProposal(db, offeringID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	canonical := &CanonicalModel{
+		APIModelID: fmt.Sprintf("canonical-%d", offeringID), ModalityType: ModalityChat, Status: 1,
+	}
+	require.NoError(t, db.Create(canonical).Error)
+	_, err = ConfirmAliasCandidate(db, proposal.ID, canonical.ID, reviewer)
+	require.NoError(t, err)
+	return canonical
+}
+
 func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
 	db := newRepoDB(t)
 	const owner, other int64 = 13001, 13002
@@ -506,6 +520,7 @@ func TestModelOfferingLifecycleAndOwnership(t *testing.T) {
 	// 待审核不能被重复提交
 	assert.ErrorIs(t, SubmitModelOffering(db, owner, offering.ID), ErrInvalidArgument)
 
+	confirmOfferingIdentityForTest(t, db, offering.ID, owner)
 	require.NoError(t, PublishModelOffering(db, owner, offering.ID))
 	got, err = GetModelOffering(db, owner, offering.ID)
 	require.NoError(t, err)
@@ -544,6 +559,7 @@ func TestReviewerScopedOfferingReviewIsCrossOwnerAtomicAndAudited(t *testing.T) 
 	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-model"}
 	require.NoError(t, CreateModelOffering(db, owner, offering))
 	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
+	confirmOfferingIdentityForTest(t, db, offering.ID, reviewer)
 
 	items, total, err := ListOfferingsForReview(db, OfferingStatusPending, 0, 20)
 	require.NoError(t, err)

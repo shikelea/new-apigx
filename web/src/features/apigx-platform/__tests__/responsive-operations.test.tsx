@@ -37,6 +37,9 @@ const reviewOffering: ReviewOffering = {
   channel_public_id: 'channel-demo',
   channel_name: 'Primary route',
   upstream_model_id: 'demo-chat-model',
+  canonical_model_id: 4,
+  canonical_api_model_id: 'demo-chat-model',
+  mapping_confirmed: true,
   status: 1,
   revision: 1,
   price_configured: true,
@@ -54,6 +57,12 @@ const aliasCandidate: AliasCandidate = {
   source_ref: 'channel-demo',
   confirmation_state: 0,
   target_canonical_model_id: 0,
+  offering_id: 17,
+  offering_public_id: 'offering-demo',
+  offering_status: 1,
+  owner_user_id: 9,
+  share_group_name: 'Community pool',
+  channel_name: 'Primary route',
 }
 
 it('keeps every review action in the mobile card instead of the desktop table overflow', async () => {
@@ -97,16 +106,13 @@ it('keeps every review action in the mobile card instead of the desktop table ov
 it('keeps all model-catalog actions in the mobile candidate card', async () => {
   const user = userEvent.setup()
   const onConfirm = vi.fn()
-  const onBulk = vi.fn()
   const onReject = vi.fn()
 
   render(
     <AliasCandidateMobileCards
       items={[aliasCandidate]}
-      bulkPending={false}
       rejectPending={false}
       onConfirm={onConfirm}
-      onBulk={onBulk}
       onReject={onReject}
     />
   )
@@ -117,14 +123,8 @@ it('keeps all model-catalog actions in the mobile candidate card', async () => {
   await user.click(
     within(region).getByRole('button', { name: 'Confirm model' })
   )
-  await user.click(
-    within(region).getByRole('button', {
-      name: 'Confirm all matching names',
-    })
-  )
   await user.click(within(region).getByRole('button', { name: 'Reject' }))
 
   expect(onConfirm).toHaveBeenCalledWith(aliasCandidate)
-  expect(onBulk).toHaveBeenCalledWith('demo-chat-model')
   expect(onReject).toHaveBeenCalledWith(23)
 })

@@ -22,6 +22,7 @@ import type {
   AliasCandidateListResponse,
   ApplyRouteRankingPayload,
   ConfirmAliasPayload,
+  CanonicalModelListResponse,
   ManualPricePayload,
   PriceRuleResponse,
   ReviewOfferingListResponse,
@@ -92,6 +93,11 @@ export async function getAliasCandidates(
   const res = await api.get('/api/apigx/model-catalog/candidates', {
     params: { state, page, page_size: pageSize },
   })
+  return res.data
+}
+
+export async function getCanonicalModels(): Promise<CanonicalModelListResponse> {
+  const res = await api.get('/api/apigx/model-catalog/models')
   return res.data
 }
 

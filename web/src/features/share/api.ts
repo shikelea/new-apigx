@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { api } from '@/lib/api'
 
 import type {
+  CanonicalModelListResponse,
   BulkSubmitOfferingsResponse,
   CapacityPolicyPayload,
   ChannelDetailResponse,
@@ -176,11 +177,29 @@ export async function setOfferingManualPrice(
 /** 为**指定上游模型**建一条供给（草稿）—— 用于"勾选导入"，而不是一次性全量导入。 */
 export async function createOffering(
   channelId: number,
-  upstreamModelID: string
+  upstreamModelID: string,
+  canonicalModelID?: number
 ): Promise<{ success: boolean; data?: unknown }> {
   const res = await api.post(`/api/apigx/channels/${channelId}/offerings`, {
     upstream_model_id: upstreamModelID,
+    canonical_model_id: canonicalModelID,
   })
+  return res.data
+}
+
+export async function getCanonicalModels(): Promise<CanonicalModelListResponse> {
+  const res = await api.get('/api/apigx/model-catalog/models')
+  return res.data
+}
+
+export async function setOfferingModelMapping(
+  offeringId: number,
+  targetCanonicalModelID: number
+): Promise<{ success: boolean; data?: unknown }> {
+  const res = await api.put(
+    `/api/apigx/offerings/${offeringId}/model-mapping`,
+    { target_canonical_model_id: targetCanonicalModelID }
+  )
   return res.data
 }
 

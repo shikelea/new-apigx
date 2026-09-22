@@ -39,15 +39,28 @@ func TestBillingSessionRecordsQualityOnceAcrossSettlementRetry(t *testing.T) {
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	require.NoError(t, apigxmodel.Migrate(db))
 
-	group := &apigxmodel.ShareGroup{OwnerUserID: 1001, Name: "billing-quality", PublicID: "billing-quality-group"}
+	group := &apigxmodel.ShareGroup{
+		OwnerUserID: 1001, Name: "billing-quality", PublicID: "billing-quality-group",
+		DefaultVisibility: apigxmodel.ShareGroupVisibilityPublic,
+		PublishStatus:     apigxmodel.ShareGroupPublishPublished,
+	}
 	require.NoError(t, apigxmodel.CreateShareGroup(db, group))
 	channel := &apigxmodel.Channel{
 		OwnerUserID: 1001, ShareGroupID: group.ID, PublicID: "billing-quality-channel",
 		Name: "billing-quality", BaseChannelID: 7002,
 	}
 	require.NoError(t, apigxmodel.CreateChannel(db, channel))
-	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "billing-quality-model"}
+	canonical, err := apigxmodel.EnsureCanonicalModel(db, "billing-quality-model", "", apigxmodel.ModalityChat)
+	require.NoError(t, err)
+	offering := &apigxmodel.ModelOffering{
+		ChannelID: channel.ID, UpstreamModelID: "billing-quality-model",
+		CanonicalModelID: canonical.ID,
+	}
 	require.NoError(t, apigxmodel.CreateModelOffering(db, 1001, offering))
+	require.NoError(t, db.Model(offering).Updates(map[string]any{
+		"canonical_model_id": canonical.ID,
+		"status":             apigxmodel.OfferingStatusPublished,
+	}).Error)
 
 	previousDB := channelpool.CurrentDB
 	channelpool.SetDBProvider(func() *gorm.DB { return db })

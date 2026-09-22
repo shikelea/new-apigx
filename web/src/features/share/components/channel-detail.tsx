@@ -22,6 +22,7 @@ import {
   ArrowLeft,
   CircleCheck,
   CircleDashed,
+  GitMerge,
   Send,
   Trash2,
 } from 'lucide-react'
@@ -46,6 +47,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 
 import {
   deleteOffering,
+  getCanonicalModels,
   getChannel,
   getChannelKeys,
   getChannelOfferings,
@@ -61,6 +63,7 @@ import { normalizeOfferingCapabilities } from '../lib/offering-capabilities'
 import type { Offering } from '../types'
 import { ChannelActions } from './channel-actions'
 import { KeyPoolCard } from './key-pool-card'
+import { ModelMappingDialog } from './model-mapping-dialog'
 import { PriceMatchCard } from './price-match-card'
 
 export function ChannelDetailView(props: { channelId: number }) {
@@ -69,6 +72,7 @@ export function ChannelDetailView(props: { channelId: number }) {
   const [deletingOffering, setDeletingOffering] = useState<Offering | null>(
     null
   )
+  const [mappingOffering, setMappingOffering] = useState<Offering | null>(null)
 
   const submitMutation = useMutation({
     mutationFn: (offeringId: number) => submitOffering(offeringId),
@@ -128,21 +132,32 @@ export function ChannelDetailView(props: { channelId: number }) {
     queryKey: ['apigx-channel-offerings', props.channelId],
     queryFn: () => getChannelOfferings(props.channelId),
   })
+  const canonicalModelsQuery = useQuery({
+    queryKey: ['apigx-canonical-models'],
+    queryFn: getCanonicalModels,
+  })
 
   if (
     channelQuery.isPending ||
     keysQuery.isPending ||
-    offeringsQuery.isPending
+    offeringsQuery.isPending ||
+    canonicalModelsQuery.isPending
   ) {
     return <LoadingState />
   }
-  if (channelQuery.isError || keysQuery.isError || offeringsQuery.isError) {
+  if (
+    channelQuery.isError ||
+    keysQuery.isError ||
+    offeringsQuery.isError ||
+    canonicalModelsQuery.isError
+  ) {
     return (
       <ErrorState
         onRetry={() => {
           void channelQuery.refetch()
           void keysQuery.refetch()
           void offeringsQuery.refetch()
+          void canonicalModelsQuery.refetch()
         }}
       />
     )
@@ -151,6 +166,10 @@ export function ChannelDetailView(props: { channelId: number }) {
   const channel = channelQuery.data?.data
   const keys = keysQuery.data?.data?.items ?? []
   const offerings = offeringsQuery.data?.data?.items ?? []
+  const canonicalModels = canonicalModelsQuery.data?.data?.items ?? []
+  const canonicalByID = new Map(
+    canonicalModels.map((model) => [model.id, model.api_model_id])
+  )
   if (!channel) {
     return <EmptyState title={t('share.detail.missing')} />
   }
@@ -180,6 +199,48 @@ export function ChannelDetailView(props: { channelId: number }) {
       cell: (row) => (
         <code className='text-xs break-all'>{row.upstream_model_id}</code>
       ),
+    },
+    {
+      id: 'mapping',
+      header: t('share.mapping.column'),
+      className: 'min-w-48',
+      cell: (row) => {
+        const confirmedName = canonicalByID.get(row.canonical_model_id)
+        const suggestedName = canonicalByID.get(
+          row.suggested_canonical_model_id
+        )
+        if (row.canonical_model_id > 0) {
+          return (
+            <div className='space-y-1'>
+              <Badge variant='default'>{t('share.mapping.confirmed')}</Badge>
+              <code className='block text-xs break-all'>
+                {confirmedName ?? `#${String(row.canonical_model_id)}`}
+              </code>
+            </div>
+          )
+        }
+        if (row.status === 1) {
+          return (
+            <div className='space-y-1'>
+              <Badge variant='outline'>{t('share.mapping.awaiting')}</Badge>
+              <span className='text-muted-foreground block text-xs break-all'>
+                {suggestedName ?? t('share.mapping.newStandard')}
+              </span>
+            </div>
+          )
+        }
+        if (row.mapping_state === 2) {
+          return <Badge variant='warning'>{t('share.mapping.rejected')}</Badge>
+        }
+        return (
+          <div className='space-y-1'>
+            <Badge variant='secondary'>{t('share.mapping.draft')}</Badge>
+            <span className='text-muted-foreground block text-xs break-all'>
+              {suggestedName ?? t('share.mapping.newStandard')}
+            </span>
+          </div>
+        )
+      },
     },
     {
       id: 'status',
@@ -214,7 +275,17 @@ export function ChannelDetailView(props: { channelId: number }) {
       id: 'actions',
       header: '',
       cell: (row) => (
-        <div className='flex justify-end gap-1'>
+        <div className='flex flex-wrap justify-end gap-1'>
+          {row.status === 0 || row.status === 3 ? (
+            <Button
+              variant='ghost'
+              size='sm'
+              onClick={() => setMappingOffering(row)}
+            >
+              <GitMerge />
+              {t('share.mapping.action')}
+            </Button>
+          ) : null}
           <SubmitOfferingButton
             offering={row}
             pending={submitMutation.isPending}
@@ -357,6 +428,21 @@ export function ChannelDetailView(props: { channelId: number }) {
           </Card>
 
           <PriceMatchCard channelId={props.channelId} offerings={offerings} />
+
+          <ModelMappingDialog
+            offering={mappingOffering}
+            models={canonicalModels}
+            open={mappingOffering !== null}
+            onOpenChange={(open) => {
+              if (!open) setMappingOffering(null)
+            }}
+            onSaved={() => {
+              setMappingOffering(null)
+              void queryClient.invalidateQueries({
+                queryKey: ['apigx-channel-offerings', props.channelId],
+              })
+            }}
+          />
 
           <ConfirmDialog
             open={deletingOffering !== null}

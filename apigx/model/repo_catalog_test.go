@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // 模型目录：候选登记 + 解析。
@@ -84,4 +85,118 @@ func TestResolveCanonicalModelMissReturnsFalse(t *testing.T) {
 	_, ok, err := ResolveCanonicalModel(db, "never-registered")
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+func createIdentityTestOffering(
+	t *testing.T,
+	db *gorm.DB,
+	owner, baseChannelID int64,
+	name, upstreamModelID string,
+) *ModelOffering {
+	t.Helper()
+	group := &ShareGroup{OwnerUserID: owner, Name: name, DefaultVisibility: ShareGroupVisibilityPublic}
+	require.NoError(t, CreateShareGroup(db, group))
+	channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: name, BaseChannelID: baseChannelID}
+	require.NoError(t, CreateChannel(db, channel))
+	offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: upstreamModelID}
+	require.NoError(t, CreateModelOffering(db, owner, offering))
+	return offering
+}
+
+func TestOfferingIdentityAppearsOnlyAfterSubmission(t *testing.T) {
+	db := newRepoDB(t)
+	const owner, reviewer int64 = 8101, 8199
+	offering := createIdentityTestOffering(t, db, owner, 81_001, "identity-submit", "Vendor-Model-X")
+
+	var count int64
+	require.NoError(t, db.Model(&ModelAlias{}).Count(&count).Error)
+	assert.Zero(t, count, "draft imports must not enter model identity review")
+
+	target := &CanonicalModel{APIModelID: "standard-model-x", ModalityType: ModalityChat, Status: 1}
+	require.NoError(t, db.Create(target).Error)
+	proposal, err := SetOfferingAliasProposal(db, owner, offering.ID, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, AliasConfirmPending, proposal.ConfirmationState)
+	_, err = SetOfferingAliasProposal(db, owner+1, offering.ID, target.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+
+	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
+	items, total, err := ListAliasCandidates(db, AliasConfirmPending, 20, 0)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, total)
+	require.Len(t, items, 1)
+	assert.Equal(t, offering.ID, items[0].OfferingID)
+	assert.Equal(t, target.ID, items[0].TargetCanonicalID)
+
+	result, err := ConfirmAliasCandidate(db, items[0].ID, target.ID, reviewer)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, result.MigratedOfferings)
+	var stored ModelOffering
+	require.NoError(t, db.First(&stored, offering.ID).Error)
+	assert.Equal(t, target.ID, stored.CanonicalModelID)
+}
+
+func TestRejectedIdentityReturnsOfferingForRevision(t *testing.T) {
+	db := newRepoDB(t)
+	const owner, reviewer int64 = 8201, 8299
+	offering := createIdentityTestOffering(t, db, owner, 82_001, "identity-reject", "vendor-rejected")
+	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
+	proposal, exists, err := GetOfferingAliasProposal(db, offering.ID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.NoError(t, RejectAliasCandidate(db, proposal.ID, reviewer))
+
+	var stored ModelOffering
+	require.NoError(t, db.First(&stored, offering.ID).Error)
+	assert.Equal(t, OfferingStatusRejected, stored.Status)
+	assert.Zero(t, stored.CanonicalModelID)
+
+	target := &CanonicalModel{APIModelID: "revised-standard", ModalityType: ModalityChat, Status: 1}
+	require.NoError(t, db.Create(target).Error)
+	_, err = SetOfferingAliasProposal(db, owner, offering.ID, target.ID)
+	require.NoError(t, err)
+	require.NoError(t, SubmitModelOffering(db, owner, offering.ID))
+	proposal, exists, err = GetOfferingAliasProposal(db, offering.ID)
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Equal(t, AliasConfirmPending, proposal.ConfirmationState)
+	assert.Equal(t, target.ID, proposal.TargetCanonicalModelID)
+}
+
+func TestEditingConfirmedIdentityMigratesExistingOfferings(t *testing.T) {
+	db := newRepoDB(t)
+	const reviewer int64 = 8399
+	first := createIdentityTestOffering(t, db, 8301, 83_001, "identity-first", "Vendor-Same")
+	second := createIdentityTestOffering(t, db, 8302, 83_002, "identity-second", " vendor-same ")
+	require.NoError(t, SubmitModelOffering(db, 8301, first.ID))
+	require.NoError(t, SubmitModelOffering(db, 8302, second.ID))
+	firstProposal, _, err := GetOfferingAliasProposal(db, first.ID)
+	require.NoError(t, err)
+	secondProposal, _, err := GetOfferingAliasProposal(db, second.ID)
+	require.NoError(t, err)
+
+	original := &CanonicalModel{APIModelID: "standard-original", ModalityType: ModalityChat, Status: 1}
+	replacement := &CanonicalModel{APIModelID: "standard-replacement", ModalityType: ModalityChat, Status: 1}
+	require.NoError(t, db.Create(original).Error)
+	require.NoError(t, db.Create(replacement).Error)
+	result, err := ConfirmAliasCandidate(db, firstProposal.ID, original.ID, reviewer)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, result.MigratedOfferings)
+
+	result, err = ConfirmAliasCandidate(db, secondProposal.ID, replacement.ID, reviewer)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, result.MigratedOfferings)
+	for _, id := range []int64{first.ID, second.ID} {
+		var offering ModelOffering
+		require.NoError(t, db.First(&offering, id).Error)
+		assert.Equal(t, replacement.ID, offering.CanonicalModelID)
+	}
+	var old CanonicalModel
+	require.NoError(t, db.First(&old, original.ID).Error)
+	assert.Equal(t, 3, old.Status)
+	assert.Equal(t, replacement.ID, old.MergedIntoID)
+	resolved, ok, err := ResolveCanonicalModel(db, "VENDOR-SAME")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, replacement.ID, resolved.ID)
 }

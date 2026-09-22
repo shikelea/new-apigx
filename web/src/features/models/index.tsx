@@ -19,12 +19,13 @@ For commercial licensing, please contact support@quantumnous.com
 import { useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { Plus } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { AliasCandidatesCard } from '@/features/apigx-platform/components/alias-candidates-card'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { listDeployments } from './api'
@@ -59,6 +60,10 @@ const SECTION_META: Record<
     titleKey: 'Deployments',
     tabKey: 'Deployments',
   },
+  identities: {
+    titleKey: 'Model identity review',
+    tabKey: 'Model identity review',
+  },
 }
 
 function ModelsContent() {
@@ -92,7 +97,7 @@ function ModelsContent() {
 
   const meta = SECTION_META[activeSection] ?? SECTION_META.metadata
 
-  let actions = <ModelsPrimaryButtons />
+  let actions: ReactNode = <ModelsPrimaryButtons />
   let content = <ModelsTable />
   if (activeSection === 'vendors') {
     actions = (
@@ -116,6 +121,9 @@ function ModelsContent() {
       </Button>
     )
     content = <DeploymentsSection />
+  } else if (activeSection === 'identities') {
+    actions = null
+    content = <AliasCandidatesCard />
   }
 
   return (

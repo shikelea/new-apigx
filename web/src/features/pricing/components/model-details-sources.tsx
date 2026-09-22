@@ -51,6 +51,7 @@ import type {
 import { handleServerError } from '@/lib/handle-server-error'
 
 import { useApigxModelSources } from '../hooks/use-apigx-model-sources'
+import { dedupeModelSources } from '../lib/apigx-sources'
 import { buildModelSourcePreferences } from '../lib/source-preferences'
 
 const STRATEGIES = [
@@ -73,9 +74,11 @@ export function ModelDetailsSources(props: { modelName: string }) {
   const modelName = props.modelName
   const sources = useMemo(
     () =>
-      items.filter(
-        (item) =>
-          item.model === modelName || item.canonical_model_id === modelName
+      dedupeModelSources(
+        items.filter(
+          (item) =>
+            item.model === modelName || item.canonical_model_id === modelName
+        )
       ),
     [items, modelName]
   )

@@ -79,6 +79,9 @@ func RecordFromRelay(relayInfo *relaycommon.RelayInfo, apiErr *types.NewAPIError
 		return
 	}
 	modelName := relayInfo.GetOriginModelName()
+	if relayInfo.ChannelMeta != nil && relayInfo.UpstreamModelName != "" {
+		modelName = relayInfo.UpstreamModelName
+	}
 	offeringID, found, err := apigxmodel.FindOfferingByUpstreamModel(db, shareChannelID, modelName)
 	if err != nil {
 		common.SysError("apigx quality: lookup offering failed: " + err.Error())

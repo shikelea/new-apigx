@@ -20,6 +20,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import {
   StaticDataTable,
@@ -28,21 +29,16 @@ import {
 import { EmptyState } from '@/components/empty-state'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { handleServerError } from '@/lib/handle-server-error'
 
-import {
-  bulkConfirmAliases,
-  getAliasCandidates,
-  rejectAliasCandidate,
-} from '../api'
+import { getAliasCandidates, rejectAliasCandidate } from '../api'
 import type { AliasCandidate } from '../types'
 import { AliasConfirmDialog } from './alias-confirm-dialog'
 
 export function AliasCandidateMobileCards(props: {
   items: AliasCandidate[]
-  bulkPending: boolean
   rejectPending: boolean
   onConfirm: (candidate: AliasCandidate) => void
-  onBulk: (normalizedModelID: string) => void
   onReject: (id: number) => void
 }) {
   const { t } = useTranslation()
@@ -54,42 +50,47 @@ export function AliasCandidateMobileCards(props: {
     >
       {props.items.map((row) => (
         <div className='space-y-4 rounded-lg border p-4' key={row.id}>
-          <div className='space-y-3'>
-            <div>
-              <p className='text-muted-foreground text-xs'>
-                {t('Upstream model')}
-              </p>
-              <code className='mt-1 block text-xs font-semibold break-all'>
-                {row.external_model_id}
-              </code>
+          <div>
+            <code className='block text-xs font-semibold break-all'>
+              {row.external_model_id}
+            </code>
+            <p className='text-muted-foreground mt-1 text-xs break-words'>
+              {row.share_group_name || '—'} · {row.channel_name || '—'}
+            </p>
+          </div>
+          <div className='grid grid-cols-2 gap-2 text-xs'>
+            <div className='bg-muted/30 rounded-md border p-2'>
+              <span className='text-muted-foreground block'>
+                {t('identity.sharer')}
+              </span>
+              <span className='mt-1 block font-medium'>
+                {t('Provider {{id}}', { id: row.owner_user_id })}
+              </span>
             </div>
-            <div>
-              <p className='text-muted-foreground text-xs'>
-                {t('Suggested model name')}
-              </p>
-              <code className='mt-1 block text-xs break-all'>
-                {row.normalized_model_id}
+            <div className='bg-muted/30 rounded-md border p-2'>
+              <span className='text-muted-foreground block'>
+                {t('identity.target')}
+              </span>
+              <code className='mt-1 block break-all'>
+                {row.target_api_model_id || t('identity.newModelPending')}
               </code>
             </div>
           </div>
-          <div className='grid gap-2'>
+          <div className='grid gap-2 sm:grid-cols-2'>
             <Button variant='outline' onClick={() => props.onConfirm(row)}>
-              {t('Confirm model')}
+              {row.confirmation_state === 1
+                ? t('identity.editMapping')
+                : t('Confirm model')}
             </Button>
-            <Button
-              variant='outline'
-              disabled={props.bulkPending}
-              onClick={() => props.onBulk(row.normalized_model_id)}
-            >
-              {t('Confirm all matching names')}
-            </Button>
-            <Button
-              variant='outline'
-              disabled={props.rejectPending}
-              onClick={() => props.onReject(row.id)}
-            >
-              {t('Reject')}
-            </Button>
+            {row.confirmation_state === 0 ? (
+              <Button
+                variant='outline'
+                disabled={props.rejectPending}
+                onClick={() => props.onReject(row.id)}
+              >
+                {t('Reject')}
+              </Button>
+            ) : null}
           </div>
         </div>
       ))}
@@ -97,77 +98,89 @@ export function AliasCandidateMobileCards(props: {
   )
 }
 
-/**
- * 模型身份确认（§4「批量匹配、人工覆盖」）。
- *
- * 新抓取的上游模型需要管理员确认它对应的统一模型；确认后，模型广场才能
- * 合并相同模型的分享来源。未经确认的名称只提供操作建议，不参与自动路由。
- */
+/** Submitted share-model identities, managed alongside the system model list. */
 export function AliasCandidatesCard() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const [state, setState] = useState<0 | 1>(0)
   const [editing, setEditing] = useState<AliasCandidate | null>(null)
 
   const query = useQuery({
-    queryKey: ['apigx-alias-candidates'],
-    queryFn: () => getAliasCandidates(0),
+    queryKey: ['apigx-alias-candidates', state],
+    queryFn: () => getAliasCandidates(state, 1, 200),
   })
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ['apigx-alias-candidates'] })
+    void queryClient.invalidateQueries({ queryKey: ['apigx-canonical-models'] })
+    void queryClient.invalidateQueries({
+      queryKey: ['apigx-channel-offerings'],
+    })
+    void queryClient.invalidateQueries({ queryKey: ['apigx-review-offerings'] })
+    void queryClient.invalidateQueries({ queryKey: ['apigx-plaza'] })
   }
 
   const reject = useMutation({
     mutationFn: (id: number) => rejectAliasCandidate(id),
-    onSuccess: refresh,
-  })
-
-  const bulk = useMutation({
-    mutationFn: (normalized: string) =>
-      bulkConfirmAliases(normalized, {
-        api_model_id: normalized,
-        modality_type: 1,
-      }),
-    onSuccess: refresh,
+    onSuccess: () => {
+      toast.success(t('identity.rejected'))
+      refresh()
+    },
+    onError: (error) => handleServerError(error),
   })
 
   const items = query.data?.data?.items ?? []
-
   const columns: StaticDataTableColumn<AliasCandidate>[] = [
     {
-      id: 'external',
+      id: 'model',
       header: t('Upstream model'),
-      cell: (row) => row.external_model_id,
+      className: 'min-w-48',
+      cell: (row) => (
+        <div>
+          <code className='text-xs font-semibold break-all'>
+            {row.external_model_id}
+          </code>
+          <div className='text-muted-foreground mt-1 text-xs break-words'>
+            {row.share_group_name || '—'} · {row.channel_name || '—'}
+          </div>
+        </div>
+      ),
     },
     {
-      id: 'normalized',
-      header: t('Suggested model name'),
-      cell: (row) => row.normalized_model_id,
+      id: 'owner',
+      header: t('identity.sharer'),
+      cell: (row) => t('Provider {{id}}', { id: row.owner_user_id }),
+    },
+    {
+      id: 'target',
+      header: t('identity.target'),
+      className: 'min-w-48',
+      cell: (row) => (
+        <code className='text-xs break-all'>
+          {row.target_api_model_id || t('identity.newModelPending')}
+        </code>
+      ),
     },
     {
       id: 'actions',
       header: '',
       cell: (row) => (
-        <div className='flex gap-2'>
+        <div className='flex flex-wrap justify-end gap-2'>
           <Button size='sm' variant='outline' onClick={() => setEditing(row)}>
-            {t('Confirm model')}
+            {row.confirmation_state === 1
+              ? t('identity.editMapping')
+              : t('Confirm model')}
           </Button>
-          <Button
-            size='sm'
-            variant='outline'
-            disabled={bulk.isPending}
-            onClick={() => bulk.mutate(row.normalized_model_id)}
-          >
-            {t('Confirm all matching names')}
-          </Button>
-          <Button
-            size='sm'
-            variant='outline'
-            disabled={reject.isPending}
-            onClick={() => reject.mutate(row.id)}
-          >
-            {t('Reject')}
-          </Button>
+          {row.confirmation_state === 0 ? (
+            <Button
+              size='sm'
+              variant='outline'
+              disabled={reject.isPending}
+              onClick={() => reject.mutate(row.id)}
+            >
+              {t('Reject')}
+            </Button>
+          ) : null}
         </div>
       ),
     },
@@ -175,25 +188,47 @@ export function AliasCandidatesCard() {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>{t('Model identity review')}</CardTitle>
+      <CardHeader className='gap-4'>
+        <div className='flex flex-wrap items-start justify-between gap-3'>
+          <div>
+            <CardTitle>{t('Model identity review')}</CardTitle>
+            <p className='text-muted-foreground mt-1 max-w-3xl text-sm'>
+              {t('identity.description')}
+            </p>
+          </div>
+          <div className='flex rounded-lg border p-1'>
+            <Button
+              size='sm'
+              variant={state === 0 ? 'secondary' : 'ghost'}
+              onClick={() => setState(0)}
+            >
+              {t('identity.pending')}
+            </Button>
+            <Button
+              size='sm'
+              variant={state === 1 ? 'secondary' : 'ghost'}
+              onClick={() => setState(1)}
+            >
+              {t('identity.confirmed')}
+            </Button>
+          </div>
+        </div>
       </CardHeader>
-      <CardContent className='space-y-4'>
-        <p className='text-muted-foreground text-xs'>
-          {t(
-            'Newly discovered models appear here for review. Confirm which model they belong to, and the model plaza will combine matching resources under one name with a shared description.'
-          )}
-        </p>
+      <CardContent>
         {items.length === 0 ? (
-          <EmptyState title={t('No models awaiting confirmation')} />
+          <EmptyState
+            title={
+              state === 0
+                ? t('No models awaiting confirmation')
+                : t('identity.noConfirmed')
+            }
+          />
         ) : (
           <>
             <AliasCandidateMobileCards
               items={items}
-              bulkPending={bulk.isPending}
               rejectPending={reject.isPending}
               onConfirm={setEditing}
-              onBulk={(normalizedModelID) => bulk.mutate(normalizedModelID)}
               onReject={(id) => reject.mutate(id)}
             />
             <div className='hidden md:block'>

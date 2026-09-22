@@ -53,6 +53,9 @@ export interface ReviewOffering {
   channel_public_id: string
   channel_name: string
   upstream_model_id: string
+  canonical_model_id?: number
+  canonical_api_model_id?: string
+  mapping_confirmed?: boolean
   capabilities?: Record<string, boolean>
   status: number
   revision: number
@@ -98,6 +101,25 @@ export interface AliasCandidate {
   /** 0=待确认 / 1=已确认 / 2=已拒绝 */
   confirmation_state: number
   target_canonical_model_id: number
+  target_api_model_id?: string
+  offering_id: number
+  offering_public_id: string
+  offering_status: number
+  owner_user_id: number
+  share_group_name: string
+  channel_name: string
+}
+
+export interface CanonicalModelOption {
+  id: number
+  api_model_id: string
+  description: string
+  modality_type: number
+}
+
+export interface CanonicalModelListResponse {
+  success: boolean
+  data?: { items: CanonicalModelOption[] }
 }
 
 export interface AliasCandidateListResponse {

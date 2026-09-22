@@ -36,10 +36,30 @@ const item = (
 describe('模型广场：分享来源聚合', () => {
   it('同一模型的多个来源被汇总，分组按名称去重排序并带上对外 ID', () => {
     const map = summarizeModelSources([
-      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
-      item({ model: 'm1', group_name: 'A组', group_public_id: 'ga' }),
-      item({ model: 'm1', group_name: 'B组', group_public_id: 'gb' }),
-      item({ model: 'm2', group_name: 'A组', group_public_id: 'ga' }),
+      item({
+        model: 'm1',
+        channel_public_id: 'c1',
+        group_name: 'B组',
+        group_public_id: 'gb',
+      }),
+      item({
+        model: 'm1',
+        channel_public_id: 'c2',
+        group_name: 'A组',
+        group_public_id: 'ga',
+      }),
+      item({
+        model: 'm1',
+        channel_public_id: 'c3',
+        group_name: 'B组',
+        group_public_id: 'gb',
+      }),
+      item({
+        model: 'm2',
+        channel_public_id: 'c4',
+        group_name: 'A组',
+        group_public_id: 'ga',
+      }),
     ])
     expect(map.get('m1')?.sourceCount).toBe(3)
     expect(map.get('m1')?.groups).toEqual([
@@ -70,10 +90,52 @@ describe('模型广场：分享来源聚合', () => {
 
   it('已确认的标准模型 ID 会被带出（§8.2 对外标准 ID）', () => {
     const map = summarizeModelSources([
-      item({ model: 'm1' }),
-      item({ model: 'm1', canonical_model_id: 'standard-1' }),
+      item({ model: 'm1', channel_public_id: 'c1' }),
+      item({
+        model: 'm1',
+        channel_public_id: 'c2',
+        canonical_model_id: 'standard-1',
+      }),
     ])
     expect(map.get('m1')?.canonicalModelID).toBe('standard-1')
+  })
+
+  it('同一渠道映射到同一标准模型时只保留质量证据更完整的来源', () => {
+    const models = aggregateResourceModels(
+      [
+        item({
+          model: 'standard-m1',
+          access_kind: 'public',
+          channel_public_id: 'same-channel',
+          offering_public_id: 'older-alias',
+          sample_count: 0,
+          insufficient: true,
+          updated_at: 20,
+        }),
+        item({
+          model: 'standard-m1',
+          access_kind: 'public',
+          channel_public_id: 'same-channel',
+          offering_public_id: 'measured-alias',
+          sample_count: 12,
+          insufficient: false,
+          latency_ms_p50: 180,
+          output_tokens_per_second: 42,
+          reliability_lower_bound_ppm: 970_000,
+          updated_at: 10,
+        }),
+      ],
+      'public'
+    )
+
+    expect(models).toHaveLength(1)
+    expect(models[0]?.sources).toHaveLength(1)
+    expect(models[0]?.sources[0]?.offering_public_id).toBe('measured-alias')
+    expect(models[0]?.quality).toMatchObject({
+      lowestLatencyMsP50: 180,
+      highestOutputTokensPerSecond: 42,
+      bestReliabilityLowerBoundPpm: 970_000,
+    })
   })
 
   it('分享分组选项去重排序，空名不进入选项', () => {
@@ -88,15 +150,16 @@ describe('模型广场：分享来源聚合', () => {
 
   it('按公开、私有、分享给我筛选，并按模型 ID 聚合来源', () => {
     const items = [
-      item({ model: 'm2', access_kind: 'public' }),
+      item({ model: 'm2', access_kind: 'public', channel_public_id: 'c2' }),
       item({
         model: 'm1',
         access_kind: 'public',
+        channel_public_id: 'c1',
         model_description: '公开模型',
       }),
-      item({ model: 'm1', access_kind: 'public' }),
-      item({ model: 'm1', access_kind: 'private' }),
-      item({ model: 'm3', access_kind: 'shared' }),
+      item({ model: 'm1', access_kind: 'public', channel_public_id: 'c3' }),
+      item({ model: 'm1', access_kind: 'private', channel_public_id: 'c4' }),
+      item({ model: 'm3', access_kind: 'shared', channel_public_id: 'c5' }),
     ]
 
     const publicModels = aggregateResourceModels(items, 'public')

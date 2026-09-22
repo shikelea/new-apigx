@@ -55,7 +55,6 @@ import {
   rejectOffering,
   setManualPrice,
 } from './api'
-import { AliasCandidatesCard } from './components/alias-candidates-card'
 import { canSubmitManualPrice, parseUsdPerMillion } from './lib/price'
 import type { PriceDimension, ReviewOffering } from './types'
 
@@ -109,7 +108,11 @@ export function ReviewOfferingMobileCards(props: {
               {t('apigxPlatform.configurePrice')}
             </Button>
             <Button
-              disabled={!row.price_configured || props.reviewPending}
+              disabled={
+                !row.price_configured ||
+                !row.mapping_confirmed ||
+                props.reviewPending
+              }
               onClick={() => props.onPublish(row.id)}
             >
               {t('apigxPlatform.publish')}
@@ -122,6 +125,11 @@ export function ReviewOfferingMobileCards(props: {
               {t('apigxPlatform.reject')}
             </Button>
           </div>
+          {!row.mapping_confirmed ? (
+            <p className='text-muted-foreground text-xs'>
+              {t('identity.publishBlocked')}
+            </p>
+          ) : null}
         </div>
       ))}
     </section>
@@ -266,6 +274,24 @@ export function ApigxPlatform() {
         t('Provider {{id}}', { id: row.owner_user_id }),
     },
     {
+      id: 'identity',
+      header: t('Model identity review'),
+      cell: (row) => (
+        <div className='space-y-1'>
+          <Badge variant={row.mapping_confirmed ? 'default' : 'warning'}>
+            {row.mapping_confirmed
+              ? t('identity.confirmed')
+              : t('identity.pending')}
+          </Badge>
+          {row.canonical_api_model_id ? (
+            <code className='block text-xs break-all'>
+              {row.canonical_api_model_id}
+            </code>
+          ) : null}
+        </div>
+      ),
+    },
+    {
       id: 'price',
       header: t('apigxPlatform.review.price'),
       cell: (row) => (
@@ -291,7 +317,11 @@ export function ApigxPlatform() {
           </Button>
           <Button
             size='sm'
-            disabled={!row.price_configured || reviewMutation.isPending}
+            disabled={
+              !row.price_configured ||
+              !row.mapping_confirmed ||
+              reviewMutation.isPending
+            }
             onClick={() => reviewMutation.mutate({ id: row.id, publish: true })}
           >
             {t('apigxPlatform.publish')}
@@ -530,8 +560,6 @@ export function ApigxPlatform() {
           </div>
         </CardContent>
       </Card>
-
-      <AliasCandidatesCard />
     </div>
   )
 }

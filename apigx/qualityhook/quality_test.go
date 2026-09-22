@@ -84,6 +84,8 @@ func TestRecordFromRelayPersistsTextThroughput(t *testing.T) {
 	require.NoError(t, apigxmodel.CreateChannel(db, channel))
 	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "quality-model"}
 	require.NoError(t, apigxmodel.CreateModelOffering(db, 1001, offering))
+	require.NoError(t, db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", offering.ID).
+		Update("status", apigxmodel.OfferingStatusPublished).Error)
 
 	previousDB := channelpool.CurrentDB
 	channelpool.SetDBProvider(func() *gorm.DB { return db })

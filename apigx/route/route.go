@@ -25,5 +25,15 @@ func Register(apiRouter *gin.RouterGroup) {
 	} else if cleaned > 0 {
 		common.SysLog("apigx: reconciled deleted share resources")
 	}
+	if migrated, err := apigxmodel.ReconcileOfferingCanonicalModels(apigxmodel.DefaultDB()); err != nil {
+		common.SysError("apigx: reconcile offering model identities failed: " + err.Error())
+	} else if migrated > 0 {
+		common.SysLog("apigx: reconciled offering model identities")
+	}
+	if projected, err := apigxapi.ReconcileBaseChannelModelProjections(apigxmodel.DefaultDB()); err != nil {
+		common.SysError("apigx: reconcile backing channel model projections failed: " + err.Error())
+	} else if projected > 0 {
+		common.SysLog("apigx: reconciled backing channel model projections")
+	}
 	apigxapi.Register(apiRouter.Group(BasePath), apigxmodel.DefaultDB())
 }

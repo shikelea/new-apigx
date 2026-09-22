@@ -80,6 +80,11 @@ func newBreakerTestEnv(t *testing.T) *breakerTestEnv {
 		ChannelID: channel.ID, CanonicalModelID: canonical.ID, UpstreamModelID: "breaker-model",
 	}
 	require.NoError(t, apigxmodel.CreateModelOffering(db, owner, offering))
+	require.NoError(t, db.Model(&apigxmodel.ModelOffering{}).Where("id = ?", offering.ID).
+		Updates(map[string]any{
+			"canonical_model_id": canonical.ID,
+			"status":             apigxmodel.OfferingStatusPublished,
+		}).Error)
 	env.offeringID = offering.ID
 	return env
 }

@@ -65,6 +65,39 @@ export interface ResourceModelSummary {
   quality: ResourceModelQualitySummary
 }
 
+function sourceCompleteness(source: PlazaOfferingItem): number {
+  let score = Math.max(source.sample_count ?? 0, 0) * 10
+  if ((source.latency_ms_p50 ?? 0) > 0) score += 3
+  if ((source.output_tokens_per_second ?? 0) > 0) score += 3
+  if ((source.reliability_lower_bound_ppm ?? 0) > 0) score += 3
+  if (source.model_description) score += 1
+  return score
+}
+
+/**
+ * A share channel is one selectable source even when it imported multiple
+ * upstream aliases that now map to the same public model. Keep the row with
+ * the strongest observed evidence so deduplication never hides known quality.
+ */
+export function dedupeModelSources(
+  sources: PlazaOfferingItem[]
+): PlazaOfferingItem[] {
+  const byChannel = new Map<string, PlazaOfferingItem>()
+  for (const source of sources) {
+    const key = source.channel_public_id || source.offering_public_id
+    const current = byChannel.get(key)
+    if (
+      !current ||
+      sourceCompleteness(source) > sourceCompleteness(current) ||
+      (sourceCompleteness(source) === sourceCompleteness(current) &&
+        source.updated_at > current.updated_at)
+    ) {
+      byChannel.set(key, source)
+    }
+  }
+  return [...byChannel.values()]
+}
+
 export function summarizeResourceQuality(
   sources: PlazaOfferingItem[]
 ): ResourceModelQualitySummary {
@@ -148,19 +181,22 @@ export function aggregateResourceModels(
   }
 
   return [...byModel.entries()]
-    .map(([modelID, sources]) => ({
-      modelID,
-      canonicalModelID: sources.find((source) => source.canonical_model_id)
-        ?.canonical_model_id,
-      description: sources.find((source) => source.model_description)
-        ?.model_description,
-      sources: [...sources].sort((left, right) => {
-        const leftName = left.owner_display_name ?? left.group_name ?? ''
-        const rightName = right.owner_display_name ?? right.group_name ?? ''
-        return leftName.localeCompare(rightName)
-      }),
-      quality: summarizeResourceQuality(sources),
-    }))
+    .map(([modelID, rawSources]) => {
+      const sources = dedupeModelSources(rawSources)
+      return {
+        modelID,
+        canonicalModelID: sources.find((source) => source.canonical_model_id)
+          ?.canonical_model_id,
+        description: sources.find((source) => source.model_description)
+          ?.model_description,
+        sources: [...sources].sort((left, right) => {
+          const leftName = left.owner_display_name ?? left.group_name ?? ''
+          const rightName = right.owner_display_name ?? right.group_name ?? ''
+          return leftName.localeCompare(rightName)
+        }),
+        quality: summarizeResourceQuality(sources),
+      }
+    })
     .sort((left, right) => left.modelID.localeCompare(right.modelID))
 }
 
@@ -181,7 +217,8 @@ export function summarizeModelSources(
   }
 
   const out = new Map<string, ModelSourcesSummary>()
-  for (const [model, list] of byModel) {
+  for (const [model, rawList] of byModel) {
+    const list = dedupeModelSources(rawList)
     // 按分组名去重（同一分组的多条来源只出现一次），再按名称排序。
     // 注意：即使拿不到对外 ID 也要**保留分组名** —— 否则筛选里会凭空少掉这个分组；
     // 对外 ID 只用于生成"分享分组页"的链接（没有 ID 时就不渲染链接）。

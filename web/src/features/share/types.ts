@@ -118,6 +118,22 @@ export interface Offering {
   capabilities?: OfferingCapabilities
   price_rule_id: number
   price_configured: boolean
+  canonical_model_id: number
+  suggested_canonical_model_id: number
+  /** 0=待确认 / 1=已确认 / 2=已拒绝 */
+  mapping_state: number
+}
+
+export interface CanonicalModelOption {
+  id: number
+  api_model_id: string
+  description: string
+  modality_type: number
+}
+
+export interface CanonicalModelListResponse {
+  success: boolean
+  data?: { items: CanonicalModelOption[] }
 }
 
 export interface OfferingCapabilities {

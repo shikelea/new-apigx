@@ -175,11 +175,18 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
 	offeringTable := ModelOffering{}.TableName()
 	channelTable := Channel{}.TableName()
 	groupTable := ShareGroup{}.TableName()
+	canonicalTable := CanonicalModel{}.TableName()
 
 	query := db.Table(offeringTable+" AS o").
-		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL").
-		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL").
-		Where("o.deleted_at IS NULL AND o.status = ?", OfferingStatusPublished)
+		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
+		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
+		Joins("LEFT JOIN "+canonicalTable+" AS cm ON cm.id = o.canonical_model_id").
+		Where("o.deleted_at IS NULL AND o.alive_flag = ? AND o.status = ? AND o.canonical_model_id > 0",
+			AliveFlagAlive, OfferingStatusPublished).
+		Where("o.id = (SELECT MIN(o2.id) FROM "+offeringTable+" AS o2 WHERE "+
+			"o2.channel_id = o.channel_id AND o2.canonical_model_id = o.canonical_model_id "+
+			"AND o2.status = ? AND o2.alive_flag = ? AND o2.deleted_at IS NULL)",
+			OfferingStatusPublished, AliveFlagAlive)
 
 	visibility, visibilityArgs := plazaVisibilityPredicate(viewerUserID)
 	query = query.Where(visibility, visibilityArgs...)
@@ -190,37 +197,29 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
 	}
 
 	type row struct {
-		ID               int64
-		GroupPublicID    string
-		GroupName        string
-		GroupDescription string
-		PublicID         string
-		UpstreamModelID  string
-		ChannelPublicID  string
-		OwnerUserID      int64
-		GroupVisibility  int
-		Capabilities     string
-		UpdatedAt        int64
+		ID                  int64
+		GroupPublicID       string
+		GroupName           string
+		GroupDescription    string
+		PublicID            string
+		UpstreamModelID     string
+		ChannelPublicID     string
+		OwnerUserID         int64
+		GroupVisibility     int
+		Capabilities        string
+		UpdatedAt           int64
+		CanonicalAPIModelID string
+		ModelDescription    string
 	}
 	var rows []row
 	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
 		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
 		"g.public_id AS group_public_id, g.name AS group_name, g.description AS group_description, g.default_visibility AS group_visibility, " +
-		"o.capabilities AS capabilities, o.updated_at AS updated_at").
+		"o.capabilities AS capabilities, o.updated_at AS updated_at, cm.api_model_id AS canonical_api_model_id, " +
+		"cm.description AS model_description").
 		Order("o.updated_at DESC, o.id DESC").Limit(limit).Offset(offset).Scan(&rows).Error
 	if err != nil {
 		return nil, 0, err
-	}
-
-	// 一次性解析本页涉及的所有上游模型名（避免逐个查库）
-	upstreamIDs := make([]string, 0, len(rows))
-	for _, r := range rows {
-		upstreamIDs = append(upstreamIDs, r.UpstreamModelID)
-	}
-	canonicalByUpstream, resolveErr := ResolveCanonicalModels(db, upstreamIDs)
-	if resolveErr != nil {
-		// 目录是辅助能力：解析失败不该让广场整体 500，退化为"只显示上游名"
-		canonicalByUpstream = map[string]CanonicalModel{}
 	}
 
 	items := make([]PlazaItem, 0, len(rows))
@@ -246,8 +245,8 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
 			Insufficient:             quality.Insufficient,
 			Stale:                    quality.Stale,
 			UpstreamModelID:          r.UpstreamModelID,
-			CanonicalAPIModelID:      canonicalByUpstream[r.UpstreamModelID].APIModelID,
-			ModelDescription:         canonicalByUpstream[r.UpstreamModelID].Description,
+			CanonicalAPIModelID:      r.CanonicalAPIModelID,
+			ModelDescription:         r.ModelDescription,
 			ChannelPublicID:          r.ChannelPublicID,
 			GroupPublicID:            r.GroupPublicID,
 			GroupName:                r.GroupName,
@@ -310,6 +309,15 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
 		quality = QualityView{Insufficient: true}
 	}
 	throughput, _ := quality.OutputTokensPerSecond()
+	canonicalAPIModelID := ""
+	modelDescription := ""
+	if offering.CanonicalModelID > 0 {
+		var canonical CanonicalModel
+		if err := db.Where("id = ?", offering.CanonicalModelID).First(&canonical).Error; err == nil {
+			canonicalAPIModelID = canonical.APIModelID
+			modelDescription = canonical.Description
+		}
+	}
 	return &PlazaItem{
 		OfferingID:               offering.ID,
 		OfferingPublicID:         offering.PublicID,
@@ -320,6 +328,8 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
 		Insufficient:             quality.Insufficient,
 		Stale:                    quality.Stale,
 		UpstreamModelID:          offering.UpstreamModelID,
+		CanonicalAPIModelID:      canonicalAPIModelID,
+		ModelDescription:         modelDescription,
 		ChannelPublicID:          channel.PublicID,
 		OwnerUserID:              channel.OwnerUserID,
 		AccessKind:               plazaAccessKind(viewerUserID, channel.OwnerUserID, group.DefaultVisibility),

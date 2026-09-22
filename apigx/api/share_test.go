@@ -785,7 +785,7 @@ func TestDeleteShareGroupCascadesManagedChannels(t *testing.T) {
 	require.Condition(t, func() bool {
 		for _, raw := range items {
 			item, _ := raw.(map[string]any)
-			if item["model"] == publishedModel {
+			if item["model"] == "canonical-"+publishedModel {
 				return true
 			}
 		}
@@ -875,6 +875,7 @@ func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, re
 	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", reviewer,
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	canonical := confirmTestOfferingIdentity(t, env.db, offeringID, reviewer, "canonical-"+modelID)
 
 	callbackName := "b3:fail_ability_projection:" + env.db.Dialector.Name()
 	require.NoError(t, env.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
@@ -898,10 +899,10 @@ func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, re
 	require.NoError(t, err)
 	var base basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
-	assert.NotContains(t, base.Models, modelID)
+	assert.NotContains(t, base.Models, canonical.APIModelID)
 	var abilityCount int64
 	require.NoError(t, env.db.Model(&basemodel.Ability{}).
-		Where("channel_id = ? AND model = ?", shareChannel.BaseChannelID, modelID).Count(&abilityCount).Error)
+		Where("channel_id = ? AND model = ?", shareChannel.BaseChannelID, canonical.APIModelID).Count(&abilityCount).Error)
 	assert.Zero(t, abilityCount)
 
 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish",
@@ -910,10 +911,104 @@ func assertOfferingPublishProjectionAtomic(t *testing.T, env *testEnv, owner, re
 	require.NoError(t, env.db.Where("id = ?", offeringID).First(&offering).Error)
 	assert.Equal(t, apigxmodel.OfferingStatusPublished, offering.Status)
 	require.NoError(t, env.db.Where("id = ?", shareChannel.BaseChannelID).First(&base).Error)
-	assert.Contains(t, base.Models, modelID)
+	assert.Contains(t, base.Models, canonical.APIModelID)
+	var mapping map[string]string
+	require.NotNil(t, base.ModelMapping)
+	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
+	assert.Equal(t, modelID, mapping[canonical.APIModelID])
 	require.NoError(t, env.db.Model(&basemodel.Ability{}).
-		Where("channel_id = ? AND model = ? AND enabled = ?", shareChannel.BaseChannelID, modelID, true).Count(&abilityCount).Error)
+		Where("channel_id = ? AND model = ? AND enabled = ?", shareChannel.BaseChannelID, canonical.APIModelID, true).Count(&abilityCount).Error)
 	assert.EqualValues(t, 1, abilityCount)
+}
+
+func TestBaseChannelProjectionUsesOneStableAliasPerCanonicalModel(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 9820001
+	groupID := env.createGroup(t, owner, "标准模型投影组")
+	baseID := nextBaseChannelID()
+	managedTag := channelpool.ManagedBaseChannelTag
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseID), Name: "APIGX-标准模型投影", Group: "default", Key: "fixture-key",
+		Status: common.ChannelStatusEnabled, Tag: &managedTag,
+	}).Error)
+	channelID := env.createChannel(t, owner, groupID, baseID)
+	canonical, err := apigxmodel.EnsureCanonicalModel(env.db, "standard-shared-model", "", apigxmodel.ModalityChat)
+	require.NoError(t, err)
+
+	publishAlias := func(upstream string) *apigxmodel.ModelOffering {
+		offering := &apigxmodel.ModelOffering{ChannelID: channelID, UpstreamModelID: upstream}
+		require.NoError(t, apigxmodel.CreateModelOffering(env.db, owner, offering))
+		require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offering.ID))
+		proposal, exists, proposalErr := apigxmodel.GetOfferingAliasProposal(env.db, offering.ID)
+		require.NoError(t, proposalErr)
+		require.True(t, exists)
+		_, confirmErr := apigxmodel.ConfirmAliasCandidate(env.db, proposal.ID, canonical.ID, owner)
+		require.NoError(t, confirmErr)
+		require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offering.ID))
+		return offering
+	}
+
+	first := publishAlias("vendor-model-a")
+	second := publishAlias("vendor-model-b")
+	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
+
+	var base basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
+	assert.Equal(t, "standard-shared-model", base.Models)
+	var mapping map[string]string
+	require.NotNil(t, base.ModelMapping)
+	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
+	assert.Equal(t, first.UpstreamModelID, mapping[canonical.APIModelID], "最低供给 ID 是稳定代表")
+	var abilityCount int64
+	require.NoError(t, env.db.Model(&basemodel.Ability{}).
+		Where("channel_id = ? AND model = ? AND enabled = ?", baseID, canonical.APIModelID, true).
+		Count(&abilityCount).Error)
+	assert.EqualValues(t, 1, abilityCount)
+
+	// 删除稳定代表后，同渠道的下一个别名自动接管真实上游映射。
+	require.NoError(t, apigxmodel.DeleteModelOffering(env.db, owner, first.ID))
+	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
+	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
+	require.NotNil(t, base.ModelMapping)
+	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
+	assert.Equal(t, second.UpstreamModelID, mapping[canonical.APIModelID])
+}
+
+func TestBoundBaseChannelProjectionPreservesAdministratorModels(t *testing.T) {
+	env := newTestEnv(t, true)
+	const owner int64 = 9820002
+	groupID := env.createGroup(t, owner, "绑定渠道投影组")
+	baseID := nextBaseChannelID()
+	adminMapping := `{"admin-public":"admin-upstream"}`
+	require.NoError(t, env.db.Create(&basemodel.Channel{
+		Id: int(baseID), Name: "管理员原有渠道", Group: "default", Key: "fixture-key",
+		Status: common.ChannelStatusEnabled, Models: "admin-native", ModelMapping: &adminMapping,
+	}).Error)
+	channelID := env.createChannel(t, owner, groupID, baseID)
+	offering := &apigxmodel.ModelOffering{ChannelID: channelID, UpstreamModelID: "vendor-upstream"}
+	require.NoError(t, apigxmodel.CreateModelOffering(env.db, owner, offering))
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offering.ID))
+	canonical := confirmTestOfferingIdentity(t, env.db, offering.ID, owner, "shared-public")
+	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offering.ID))
+	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
+
+	var base basemodel.Channel
+	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
+	assert.ElementsMatch(t, []string{"admin-native", canonical.APIModelID}, strings.Split(base.Models, ","))
+	var mapping map[string]string
+	require.NotNil(t, base.ModelMapping)
+	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
+	assert.Equal(t, "admin-upstream", mapping["admin-public"])
+	assert.Equal(t, offering.UpstreamModelID, mapping[canonical.APIModelID])
+
+	require.NoError(t, apigxmodel.DeleteModelOffering(env.db, owner, offering.ID))
+	require.NoError(t, syncBaseChannelModelProjection(env.db, channelID))
+	require.NoError(t, env.db.Where("id = ?", baseID).First(&base).Error)
+	assert.Equal(t, "admin-native", base.Models)
+	require.NotNil(t, base.ModelMapping)
+	mapping = nil
+	require.NoError(t, json.Unmarshal([]byte(*base.ModelMapping), &mapping))
+	assert.Equal(t, map[string]string{"admin-public": "admin-upstream"}, mapping)
 }
 
 func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
@@ -1433,6 +1528,7 @@ func TestPlatformKeyPreferencesAPI(t *testing.T) {
 	offering := &apigxmodel.ModelOffering{ChannelID: channel.ID, UpstreamModelID: "public-pin-model"}
 	require.NoError(t, apigxmodel.CreateModelOffering(env.db, other, offering))
 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, other, offering.ID))
+	confirmTestOfferingIdentity(t, env.db, offering.ID, other, offering.UpstreamModelID)
 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, other, offering.ID))
 	rec, body = env.do(t, http.MethodPut, "/api/platform-keys/4321/preferences", owner,
 		`{"scope_mode":2,"pinned_offering_public_id":"`+offering.PublicID+`","allow_fallback":true}`)
@@ -1513,6 +1609,7 @@ func TestOfferingLifecycleThroughAPI(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
 	require.Equal(t, http.StatusOK, rec.Code, "配置价格应当成功")
+	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "gpt-x")
 
 	rec, _ = env.doWithRole(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "", common.RoleCommonUser)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "普通用户不得自行发布")
@@ -1604,6 +1701,7 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
 	rec, _ := env.do(t, http.MethodPut, "/api/price-rules", reviewer,
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(publishID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	confirmTestOfferingIdentity(t, env.db, publishID, reviewer, "review-publish")
 
 	// 普通用户不能读取平台待审核队列；管理员能看到其他 owner 的资源。
 	rec, _ = env.doWithRole(t, http.MethodGet, "/api/reviews/offerings", owner, "", common.RoleCommonUser)
@@ -1618,6 +1716,7 @@ func TestReviewerCanReviewCrossOwnerOfferingsAndWritesAudit(t *testing.T) {
 	assert.Equal(t, "共享者甲", first["owner_display_name"])
 	assert.Equal(t, "review-publish", first["upstream_model_id"])
 	assert.Equal(t, true, first["price_configured"])
+	assert.Equal(t, true, first["mapping_confirmed"])
 	assert.NotContains(t, rec.Body.String(), plainSecret)
 
 	// 分享者即使知道 ID，也不能用普通用户角色自行通过审核。
@@ -1709,6 +1808,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	rec, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
 	require.Equal(t, http.StatusOK, rec.Code, "配置价格应当成功")
+	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "m-plaza")
 
 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -1747,6 +1847,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	privateOfferingID := int64(body["data"].(map[string]any)["id"].(float64))
 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, privateOfferingID))
+	confirmTestOfferingIdentity(t, env.db, privateOfferingID, owner, "m-private")
 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, privateOfferingID))
 
 	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
@@ -1824,6 +1925,7 @@ func TestRouteExplainEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	publishedID := int64(body["data"].(map[string]any)["id"].(float64))
 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, publishedID))
+	confirmTestOfferingIdentity(t, env.db, publishedID, owner, "explain-x")
 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, publishedID))
 
 	rec, body = env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
@@ -1892,6 +1994,7 @@ func TestRouteApplyEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "apply-x")
 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
 
 	// ① 普通用户不得应用（跨分享者的排序是平台侧动作）
@@ -2300,6 +2403,7 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "quality-model")
 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
 
 	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
@@ -2339,8 +2443,8 @@ func TestPlazaCarriesQualitySummary(t *testing.T) {
 	assert.InDelta(t, 120, detail["output_tokens_per_second"], 0.001)
 }
 
-// 对外标准模型 ID 与介绍：**只有映射已确认时**广场才显示（§8.2）。未确认时显示上游名，
-// 绝不把"候选"当结论 —— 否则客户端会按一个没人确认过的标准 ID 去调用。
+// 对外标准模型 ID 与介绍只能来自已确认的供给身份。未确认前禁止发布，
+// 因此广场不会暴露临时上游名，也不会让客户端调用尚未确认的身份。
 func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
 	env := newTestEnv(t, true)
 	const owner int64 = 9401
@@ -2351,94 +2455,125 @@ func TestPlazaCanonicalModelOnlyAfterConfirmation(t *testing.T) {
 	require.NoError(t, env.db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座目录", Key: "x", Status: common.ChannelStatusEnabled}).Error)
 	channelID := env.createChannel(t, owner, group.ID, baseChannelID)
 
-	// 建供给会自动登记"候选"别名（见 repo_offering.go）
+	// 同步/新建只产生草稿，草稿不得进入管理员身份确认队列。
 	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
 		`{"upstream_model_id":"upstream-name-x"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	offeringID := int64(body["data"].(map[string]any)["id"].(float64))
+	rec, body = env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, body["data"].(map[string]any)["items"])
+
 	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
-	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
 
-	// 候选阶段：标准 ID 与介绍必须为空
-	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	// 提交后才出现待确认身份；没确认前发布必须失败，广场也保持不可见。
+	rec, body = env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	candidates, _ := body["data"].(map[string]any)["items"].([]any)
+	require.Len(t, candidates, 1)
+	candidateID := int64(candidates[0].(map[string]any)["id"].(float64))
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	items, _ := body["data"].(map[string]any)["items"].([]any)
-	require.NotEmpty(t, items)
-	first, _ := items[0].(map[string]any)
-	assert.Equal(t, "", first["canonical_model_id"], "未确认的映射不得对外给出标准模型 ID")
-	assert.Equal(t, "", first["model_description"])
+	assert.Empty(t, items)
 
-	// 确认映射后：标准 ID 与介绍出现
-	canonical := apigxmodel.CanonicalModel{APIModelID: "standard-model-1", Description: "这是标准模型的介绍", ModalityType: 1, Status: 1}
-	require.NoError(t, env.db.Create(&canonical).Error)
-	require.NoError(t, env.db.Model(&apigxmodel.ModelAlias{}).
-		Where("normalized_model_id = ?", "upstream-name-x").
-		Updates(map[string]any{"relation": apigxmodel.AliasRelationConfirmed,
-			"confirmation_state": apigxmodel.AliasConfirmApproved, "target_canonical_model_id": canonical.ID}).Error)
+	// 管理员确认映射并发布后，广场才出现标准 ID 与介绍。
+	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateID, 10)+"/confirm", owner,
+		`{"api_model_id":"standard-model-1","description":"这是标准模型的介绍","modality_type":1}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(offeringID, 10)+"/publish", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	_, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	rec, body = env.do(t, http.MethodGet, "/api/plaza", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	items, _ = body["data"].(map[string]any)["items"].([]any)
-	first, _ = items[0].(map[string]any)
+	require.Len(t, items, 1)
+	first, _ := items[0].(map[string]any)
 	assert.Equal(t, "standard-model-1", first["canonical_model_id"])
 	assert.Equal(t, "这是标准模型的介绍", first["model_description"])
 }
 
-// 别名确认工作流：计划书 §4「批量匹配、人工覆盖」。重点是**单向推进**与"确认后才对外生效"。
+// 身份确认工作流：草稿不入队，送审后按供给显示；同一归一化身份一次确认并迁移，
+// 已确认映射可修改，拒绝后供给回到分享者可编辑状态并可重新送审。
 func TestAliasConfirmationWorkflow(t *testing.T) {
 	env := newTestEnv(t, true)
 	const owner int64 = 9501
-
-	// 造三条候选：两条同名（大小写/空白不同）、一条不同名
-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "Vendor-Model-A"))
-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "  vendor-model-a "))
-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "vendor-model-b"))
+	groupID := env.createGroup(t, owner, "身份审核组")
+	createDraft := func(model string) int64 {
+		channelID := env.createChannel(t, owner, groupID, nextBaseChannelID())
+		rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
+			`{"upstream_model_id":"`+model+`"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return int64(body["data"].(map[string]any)["id"].(float64))
+	}
+	a1 := createDraft("Vendor-Model-A")
+	a2 := createDraft("vendor-model-a")
+	b := createDraft("vendor-model-b")
 
 	rec, body := env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, body["data"].(map[string]any)["items"], "草稿不得进入身份确认")
+	for _, offeringID := range []int64{a1, a2, b} {
+		require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	}
+	rec, body = env.do(t, http.MethodGet, "/api/model-catalog/candidates", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	items, _ := body["data"].(map[string]any)["items"].([]any)
-	// 登记了三个**名字**，但其中两个归一化后同名 => 只会有 2 条候选（幂等生效）
-	require.Len(t, items, 2, "同名候选应被归一化去重")
-	// 按**身份**取行，不按下标 —— 列表按 id 倒序，用下标会取错（我踩过）
-	var candidateA, candidateB apigxmodel.ModelAlias
-	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-a").First(&candidateA).Error)
-	require.NoError(t, env.db.Where("normalized_model_id = ?", "vendor-model-b").First(&candidateB).Error)
-	id := candidateA.ID
+	require.Len(t, items, 3, "每个已送审供给都应有可追溯的身份行")
 
-	// 确认：**顺手创建标准模型**
-	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
+	proposalA, exists, err := apigxmodel.GetOfferingAliasProposal(env.db, a1)
+	require.NoError(t, err)
+	require.True(t, exists)
+	proposalB, exists, err := apigxmodel.GetOfferingAliasProposal(env.db, b)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	// 确认任一 A 供给时，归一化同名的两条供给一起迁移。
+	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(proposalA.ID, 10)+"/confirm", owner,
 		`{"api_model_id":"vendor-model-a","description":"介绍A","modality_type":1}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.EqualValues(t, 2, body["data"].(map[string]any)["migrated_offerings"])
+	var offerings []apigxmodel.ModelOffering
+	require.NoError(t, env.db.Where("id IN ?", []int64{a1, a2}).Order("id ASC").Find(&offerings).Error)
+	require.Len(t, offerings, 2)
+	assert.Positive(t, offerings[0].CanonicalModelID)
+	assert.Equal(t, offerings[0].CanonicalModelID, offerings[1].CanonicalModelID)
 
-	// 重复确认必须 404（单向：已经确认过的不再改动）
-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/confirm", owner,
-		`{"api_model_id":"vendor-model-a"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code, "重复确认应被拒（单向推进）")
-
-	// 已确认的不能再被拒绝
-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(id, 10)+"/reject", owner, "")
-	assert.Equal(t, http.StatusNotFound, rec.Code, "已确认的候选不得被拒绝")
-
-	// 另一条候选：拒绝后不能再确认
-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/reject", owner, "")
-	assert.Equal(t, http.StatusOK, rec.Code)
-	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(candidateB.ID, 10)+"/confirm", owner,
-		`{"api_model_id":"vendor-model-b"}`)
-	assert.Equal(t, http.StatusNotFound, rec.Code, "已拒绝的候选不得再被确认")
-
-	// 批量匹配：把所有**归一化后同名**的待确认候选一次确认（此处同名两条已被归一化为一条，故为 0 或 1）
-	require.NoError(t, apigxmodel.RecordAliasCandidate(env.db, apigxmodel.AliasScopePlatform, 0, 0, "bulk-name-x"))
-	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/bulk-confirm", owner,
-		`{"normalized_model_id":"bulk-name-x","api_model_id":"bulk-name-x"}`)
+	// 已确认映射可在模型管理中改正，两条供给必须再次一起迁移。
+	previousTarget := offerings[0].CanonicalModelID
+	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(proposalA.ID, 10)+"/confirm", owner,
+		`{"api_model_id":"vendor-model-a-v2","description":"修正后介绍","modality_type":1}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	affected := body["data"].(map[string]any)["confirmed"].(float64)
-	assert.EqualValues(t, 1, affected, "批量匹配应确认同名候选")
+	require.NoError(t, env.db.Where("id IN ?", []int64{a1, a2}).Order("id ASC").Find(&offerings).Error)
+	assert.NotEqual(t, previousTarget, offerings[0].CanonicalModelID)
+	assert.Equal(t, offerings[0].CanonicalModelID, offerings[1].CanonicalModelID)
 
-	// 批量确认后，解析就通了（只认已确认）
-	canonical, okModel, err := apigxmodel.ResolveCanonicalModel(env.db, "BULK-NAME-X")
+	// 拒绝 B 身份后供给回到 rejected，分享者可修改并重新送审。
+	rec, _ = env.do(t, http.MethodPost, "/api/model-catalog/candidates/"+strconv.FormatInt(proposalB.ID, 10)+"/reject", owner, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rejected apigxmodel.ModelOffering
+	require.NoError(t, env.db.Where("id = ?", b).First(&rejected).Error)
+	assert.Equal(t, apigxmodel.OfferingStatusRejected, rejected.Status)
+	assert.Zero(t, rejected.CanonicalModelID)
+	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, b))
+	reopened, exists, err := apigxmodel.GetOfferingAliasProposal(env.db, b)
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Equal(t, apigxmodel.AliasConfirmPending, reopened.ConfirmationState)
+
+	// 批量确认复用同一条领域链路，并产生可解析的平台结论。
+	rec, body = env.do(t, http.MethodPost, "/api/model-catalog/bulk-confirm", owner,
+		`{"normalized_model_id":"vendor-model-b","api_model_id":"standard-model-b","modality_type":1}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.EqualValues(t, 1, body["data"].(map[string]any)["confirmed"])
+	canonical, okModel, err := apigxmodel.ResolveCanonicalModel(env.db, "VENDOR-MODEL-B")
 	require.NoError(t, err)
 	require.True(t, okModel)
-	assert.Equal(t, "bulk-name-x", canonical.APIModelID)
+	assert.Equal(t, "standard-model-b", canonical.APIModelID)
 }
 
 // 授权必须**真正生效**：受限（非公开）分组对"受邀者"可见，对陌生人**不可见**。
@@ -2466,6 +2601,7 @@ func TestPlazaHonoursGrantsForLimitedGroups(t *testing.T) {
 	_, _ = env.do(t, http.MethodPut, "/api/price-rules", owner,
 		`{"scope_type":0,"scope_id":`+strconv.FormatInt(offeringID, 10)+`,"input_usd_per_million":1,"output_usd_per_million":2}`)
 	require.NoError(t, apigxmodel.SubmitModelOffering(env.db, owner, offeringID))
+	confirmTestOfferingIdentity(t, env.db, offeringID, owner, "limited-model")
 	require.NoError(t, apigxmodel.PublishModelOffering(env.db, owner, offeringID))
 
 	// ① 未授权时：陌生人看不到（列表空），详情 404
@@ -2727,7 +2863,24 @@ func TestSuspendedGroupStopsServing(t *testing.T) {
 	assert.Empty(t, after, "分组暂停后不应再有候选（新请求及时停止）")
 }
 
-// publishTestOffering 造一条"平台已审核通过"的供给（新建→提交→发布）。
+func confirmTestOfferingIdentity(
+	t *testing.T,
+	db *gorm.DB,
+	offeringID, reviewer int64,
+	apiModelID string,
+) *apigxmodel.CanonicalModel {
+	t.Helper()
+	proposal, exists, err := apigxmodel.GetOfferingAliasProposal(db, offeringID)
+	require.NoError(t, err)
+	require.True(t, exists, "submitted offering should create an identity proposal")
+	canonical, err := apigxmodel.EnsureCanonicalModel(db, apiModelID, "", apigxmodel.ModalityChat)
+	require.NoError(t, err)
+	_, err = apigxmodel.ConfirmAliasCandidate(db, proposal.ID, canonical.ID, reviewer)
+	require.NoError(t, err)
+	return &canonical
+}
+
+// publishTestOffering 造一条"平台已审核通过"的供给（新建→定价→提交→确认身份→发布）。
 func publishTestOffering(t *testing.T, env *testEnv, owner, channelID int64, model string) {
 	t.Helper()
 	rec, body := env.do(t, http.MethodPost, "/api/channels/"+strconv.FormatInt(channelID, 10)+"/offerings", owner,
@@ -2743,6 +2896,7 @@ func publishTestOffering(t *testing.T, env *testEnv, owner, channelID int64, mod
 
 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(int64(id), 10)+"/submit", owner, "")
 	require.Equal(t, http.StatusOK, rec.Code)
+	confirmTestOfferingIdentity(t, env.db, int64(id), owner, model)
 	rec, _ = env.do(t, http.MethodPost, "/api/offerings/"+strconv.FormatInt(int64(id), 10)+"/publish", owner, "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }

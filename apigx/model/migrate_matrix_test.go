@@ -118,6 +118,7 @@ func assertOfferingReviewDialect(t *testing.T, db *gorm.DB) {
 		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "review-matrix-model"}
 		require.NoError(t, CreateModelOffering(tx, owner, offering))
 		require.NoError(t, SubmitModelOffering(tx, owner, offering.ID))
+		confirmOfferingIdentityForTest(t, tx, offering.ID, reviewer)
 
 		items, total, listErr := ListOfferingsForReview(tx, OfferingStatusPending, int(pendingBefore), 20)
 		require.NoError(t, listErr)
