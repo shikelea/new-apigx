@@ -1,0 +1,852 @@
+From 88230c15161539285949f6fe8df93b8f60ccc455 Mon Sep 17 00:00:00 2001
+From: shikelea <chengxinim@163.com>
+Date: Tue, 22 Sep 2026 18:12:35 +0800
+Subject: [PATCH 182/182] fix: cool retryable multi-key failures
+
+---
+ apigx/channelpool/key_stats.go                |  23 ++++
+ apigx/channelpool/outcome.go                  |  14 ++-
+ apigx/channelpool/projection.go               |  26 +++-
+ apigx/channelpool/projection_test.go          | 112 +++++++++++++++--
+ apigx/model/repo_upstream.go                  |  20 ++-
+ model/channel.go                              | 115 ++++++++++++++++--
+ model/channel_status_test.go                  |  32 +++++
+ .../share/__tests__/key-pool-card.test.tsx    |  30 +++++
+ .../share/components/key-pool-card.tsx        |  34 ++++--
+ web/src/i18n/locales/en.json                  |   3 +-
+ web/src/i18n/locales/fr.json                  |   3 +-
+ web/src/i18n/locales/ja.json                  |   3 +-
+ web/src/i18n/locales/ru.json                  |   3 +-
+ web/src/i18n/locales/vi.json                  |   3 +-
+ web/src/i18n/locales/zh-TW.json               |   3 +-
+ web/src/i18n/locales/zh.json                  |   3 +-
+ 16 files changed, 385 insertions(+), 42 deletions(-)
+
+diff --git a/apigx/channelpool/key_stats.go b/apigx/channelpool/key_stats.go
+index 3da94a6..fc3f244 100644
+--- a/apigx/channelpool/key_stats.go
++++ b/apigx/channelpool/key_stats.go
+@@ -2,6 +2,7 @@ package channelpool
+ 
+ import (
+ 	"fmt"
++	"net/http"
+ 	"sync/atomic"
+ 
+ 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+@@ -17,6 +18,11 @@ import (
+ // 在真实流量下验证过之前，不应改变既有行为。
+ var keyStatsEnabled atomic.Bool
+ 
++// retryableKeyCooldownSeconds is deliberately short: it prevents an unhealthy
++// credential from being selected by immediately following requests while
++// still allowing automatic recovery without a probe or manual pool apply.
++const retryableKeyCooldownSeconds int64 = 60
++
+ func init() {
+ 	keyStatsEnabled.Store(common.GetEnvOrDefaultBool("APIGX_KEY_STATS_ENABLED", false))
+ }
+@@ -56,12 +62,29 @@ func RecordFailureFromContext(c *gin.Context, channelID int, statusCode int, err
+ 		// 401/403 表示上游明确拒绝了这份凭据 → Key 级故障隔离（计划书 §9.2）
+ 		AuthFailed: statusCode == 401 || statusCode == 403,
+ 	}
++	if shouldCooldownRetryableKey(statusCode) {
++		outcome.CooldownSeconds = retryableKeyCooldownSeconds
++	}
+ 	if err := RecordKeyOutcome(db, channelID, keyIndex, outcome); err != nil {
+ 		// 统计失败只记日志，绝不影响请求结果
+ 		common.SysError("channelpool: record key failure failed: " + err.Error())
+ 	}
+ }
+ 
++// shouldCooldownRetryableKey mirrors the transport-level retry boundary that
++// can be determined from an HTTP status alone. 429 is intentionally excluded:
++// it changes keys only inside the current request and remains eligible for the
++// next request. Client/business errors also do not punish a healthy key.
++func shouldCooldownRetryableKey(statusCode int) bool {
++	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
++		return false
++	}
++	if statusCode < 100 || statusCode > 599 {
++		return true
++	}
++	return statusCode == http.StatusRequestTimeout || statusCode >= http.StatusInternalServerError
++}
++
+ // formatOutcomeCode 生成脱敏的失败标签，例如 `429_upstream_rate_limited`。
+ func formatOutcomeCode(statusCode int, errorCode string) string {
+ 	if errorCode == "" {
+diff --git a/apigx/channelpool/outcome.go b/apigx/channelpool/outcome.go
+index 59496d2..51122d3 100644
+--- a/apigx/channelpool/outcome.go
++++ b/apigx/channelpool/outcome.go
+@@ -19,8 +19,8 @@ type KeyOutcome struct {
+ 	// AuthFailed 表示上游明确拒绝了这份凭据（401/403 之类）：
+ 	// 计划书 §9.2 要求做 **Key 级故障隔离**，此时把该 Key 标为失效而不是停整个渠道。
+ 	AuthFailed bool
+-	// CooldownSeconds > 0 时把该 Key 置入冷却（例如上游限流）。
+-	// Key 级限流只让这一把冷却；确认是账户级/渠道级故障才应作用于共享范围。
++	// CooldownSeconds > 0 时把该 Key 置入临时冷却（例如 408、5xx 或网络错误）。
++	// 429 只在当前请求内换 Key，不写跨请求冷却；确认是账户级/渠道级故障才应作用于共享范围。
+ 	CooldownSeconds int64
+ }
+ 
+@@ -74,6 +74,7 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
+ 
+ 	now := common.GetTimestamp()
+ 	updates := map[string]any{"updated_at": now}
++	cooldownUntil := int64(0)
+ 	if outcome.Success {
+ 		updates["last_ok_at"] = now
+ 	} else {
+@@ -84,7 +85,8 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
+ 		updates["status"] = apigxmodel.UpstreamKeyStatusInvalid
+ 	}
+ 	if outcome.CooldownSeconds > 0 {
+-		updates["cooldown_until"] = now + outcome.CooldownSeconds
++		cooldownUntil = now + outcome.CooldownSeconds
++		updates["cooldown_until"] = cooldownUntil
+ 	}
+ 
+ 	if err := db.Model(&apigxmodel.UpstreamKey{}).
+@@ -106,6 +108,12 @@ func RecordKeyOutcome(db *gorm.DB, baseChannelID int, keyIndex int, outcome KeyO
+ 				truncateErrorCode(outcome.ErrorCode))
+ 		}
+ 	}
++	if cooldownUntil > 0 {
++		keyValue, ok := projection.IndexToKeyValue[keyIndex]
++		if !ok || !basemodel.UpdateChannelKeyCooldown(baseChannelID, keyValue, cooldownUntil) {
++			return fmt.Errorf("channelpool: cannot persist base cooldown for channel %d key index %d", baseChannelID, keyIndex)
++		}
++	}
+ 	return nil
+ }
+ 
+diff --git a/apigx/channelpool/projection.go b/apigx/channelpool/projection.go
+index f5c36c5..56eec6f 100644
+--- a/apigx/channelpool/projection.go
++++ b/apigx/channelpool/projection.go
+@@ -240,8 +240,9 @@ type Projection struct {
+ // 顺序**必须确定**：按 (weight DESC, id ASC) 排列（与 `ListUpstreamKeysByChannel` 一致），
+ // 这样索引到 StableKeyID 的映射在池未变化时可以稳定重算。
+ //
+-// 只投影**当前可用**的 Key（启用 + 未到期 + 不在冷却）：分享者显式停用或已失效的凭据
+-// 不应继续被发往上游。运行期故障（上游拒绝）仍由底座按索引隔离。
++// 只投影**可运行**的 Key（启用 + 未到期）。冷却中的 Key 仍留在投影中，并把截止时间
++// 写入底座 ChannelInfo：运行时会暂时跳过，到期后自动恢复，无需再次应用 Key 池。
++// 分享者显式停用、鉴权失效或已到期的凭据不会进入投影。
+ func ProjectKeyPool(db *gorm.DB, shareChannelID int64) (*Projection, error) {
+ 	built, err := buildPool(db, shareChannelID)
+ 	if err != nil {
+@@ -343,6 +344,7 @@ type builtPool struct {
+ 	secrets      []string
+ 	stableIDs    []string
+ 	weights      []int64
++	cooldowns    []int64
+ }
+ 
+ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+@@ -357,10 +359,18 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 		return nil, fmt.Errorf("channelpool: share channel %d has no base channel", shareChannelID)
+ 	}
+ 
+-	keys, err := apigxmodel.AvailableUpstreamKeys(db, shareChannel.OwnerUserID, shareChannelID, common.GetTimestamp())
++	keys, err := apigxmodel.ListUpstreamKeysByChannel(db, shareChannel.OwnerUserID, shareChannelID)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	now := common.GetTimestamp()
++	projectable := make([]apigxmodel.UpstreamKey, 0, len(keys))
++	for i := range keys {
++		if apigxmodel.IsUpstreamKeyProjectable(&keys[i], now) {
++			projectable = append(projectable, keys[i])
++		}
++	}
++	keys = projectable
+ 	if len(keys) == 0 {
+ 		return nil, ErrNoUsableKey
+ 	}
+@@ -373,6 +383,7 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 	// `GetNextEnabledKey` 直接执行加权轮询/随机；不再复制明文 Key 来表达份额。
+ 	stableIDs := make([]string, 0, len(keys))
+ 	weights := make([]int64, 0, len(keys))
++	cooldowns := make([]int64, 0, len(keys))
+ 	for i := range keys {
+ 		plain, err := secretbox.Decrypt(keys[i].SecretRef)
+ 		if err != nil {
+@@ -387,6 +398,7 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 		secrets = append(secrets, plain)
+ 		stableIDs = append(stableIDs, keys[i].StableKeyID)
+ 		weights = append(weights, effectiveWeight(keys[i].Weight))
++		cooldowns = append(cooldowns, keys[i].CooldownUntil)
+ 	}
+ 	if len(secrets) == 0 {
+ 		return nil, ErrNoUsableKey
+@@ -398,6 +410,7 @@ func buildPool(db *gorm.DB, shareChannelID int64) (*builtPool, error) {
+ 		secrets:      secrets,
+ 		stableIDs:    stableIDs,
+ 		weights:      weights,
++		cooldowns:    cooldowns,
+ 	}, nil
+ }
+ 
+@@ -421,9 +434,16 @@ func writePoolToBaseChannel(db *gorm.DB, built *builtPool) error {
+ 	baseChannel.ChannelInfo.MultiKeyStatusByStableID = nil
+ 	baseChannel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
+ 	baseChannel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
++	baseChannel.ChannelInfo.MultiKeyCooldownUntil = nil
++	baseChannel.ChannelInfo.MultiKeyCooldownUntilByStableID = nil
+ 	baseChannel.ChannelInfo.MultiKeyStatusSources = nil
+ 	baseChannel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
+ 	baseChannel.ChannelInfo.MultiKeyPollingIndex = 0
++	for index, until := range built.cooldowns {
++		if until > common.GetTimestamp() {
++			baseChannel.ChannelInfo.SetMultiKeyCooldownUntilAt(index, until)
++		}
++	}
+ 
+ 	// 池子重新有可用凭据时，把**因全池失效而被自动停用**的渠道恢复过来。
+ 	//
+diff --git a/apigx/channelpool/projection_test.go b/apigx/channelpool/projection_test.go
+index eba0186..0736f89 100644
+--- a/apigx/channelpool/projection_test.go
++++ b/apigx/channelpool/projection_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"net/http/httptest"
+ 	"os"
+ 	"path/filepath"
++	"strconv"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -111,8 +112,12 @@ func TestBaseChannelRetirementOnConfiguredDialects(t *testing.T) {
+ 				base := &basemodel.Channel{
+ 					Id: 9_820_001, Name: "b3-lifecycle", Key: "sk-one\nsk-two", Models: "model-a",
+ 					Group: "default", Status: common.ChannelStatusEnabled,
+-					ChannelInfo: basemodel.ChannelInfo{IsMultiKey: true, MultiKeySize: 2},
++					ChannelInfo: basemodel.ChannelInfo{
++						IsMultiKey: true, MultiKeySize: 2,
++						MultiKeyStableIDs: []string{"stable-one", "stable-two"},
++					},
+ 				}
++				base.ChannelInfo.SetMultiKeyCooldownUntilAt(0, 10_060)
+ 				require.NoError(t, tx.Create(base).Error)
+ 				require.NoError(t, tx.Create(&basemodel.Ability{
+ 					Group: "default", Model: "model-a", ChannelId: base.Id, Enabled: true,
+@@ -124,6 +129,9 @@ func TestBaseChannelRetirementOnConfiguredDialects(t *testing.T) {
+ 				var quiesced basemodel.Channel
+ 				require.NoError(t, tx.Where("id = ?", base.Id).First(&quiesced).Error)
+ 				assert.Equal(t, common.ChannelStatusManuallyDisabled, quiesced.Status)
++				assert.EqualValues(t, 10_060, quiesced.ChannelInfo.MultiKeyCooldownUntilAt(0))
++				assert.False(t, quiesced.ChannelInfo.MultiKeySelectableAt(0, 10_000))
++				assert.True(t, quiesced.ChannelInfo.MultiKeySelectableAt(0, 10_060))
+ 				var ability basemodel.Ability
+ 				require.NoError(t, tx.Where("channel_id = ?", base.Id).First(&ability).Error)
+ 				assert.False(t, ability.Enabled)
+@@ -228,14 +236,15 @@ func mustStable(t *testing.T, p *Projection, index int) string {
+ 	return stable
+ }
+ 
+-// 只投影可用 Key：分享者显式停用 / 已到期 / 冷却中的凭据不应继续发往上游。
+-func TestProjectKeyPoolSkipsUnusableKeys(t *testing.T) {
++// 停用、鉴权失效或到期的凭据不应投影；冷却凭据必须保留并携带截止时间，
++// 这样重启后仍会先跳过并在到期时自动恢复。
++func TestProjectKeyPoolSkipsInactiveKeysAndPersistsCooldown(t *testing.T) {
+ 	db := setupProjectionEnv(t)
+ 	const owner int64 = 9002
+ 	const baseChannelID int64 = 4243
+ 	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
+ 
+-	secrets := []string{"sk-live-aaaaaaaa", "sk-disabled-bbbb", "sk-expired-cccccc"}
++	secrets := []string{"sk-live-aaaaaaaa", "sk-disabled-bbbb", "sk-expired-cccccc", "sk-cooling-dddddd"}
+ 	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID, secrets, nil)
+ 
+ 	now := common.GetTimestamp()
+@@ -245,17 +254,25 @@ func TestProjectKeyPoolSkipsUnusableKeys(t *testing.T) {
+ 	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
+ 		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-c").
+ 		Update("expires_at", now-1).Error)
++	require.NoError(t, db.Model(&apigxmodel.UpstreamKey{}).
++		Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-d").
++		Update("cooldown_until", now+60).Error)
+ 
+ 	projection, err := ProjectKeyPool(db, shareChannel.ID)
+ 	require.NoError(t, err)
+-	assert.Equal(t, 1, projection.KeyCount)
++	assert.Equal(t, 2, projection.KeyCount)
+ 
+ 	var loaded basemodel.Channel
+ 	require.NoError(t, db.Where("id = ?", baseChannelID).First(&loaded).Error)
+ 	keys := loaded.GetKeys()
+-	require.Len(t, keys, 1)
++	require.Len(t, keys, 2)
+ 	assert.Equal(t, "sk-live-aaaaaaaa", keys[0])
+-	assert.Equal(t, 1, loaded.ChannelInfo.MultiKeySize)
++	assert.Equal(t, "sk-cooling-dddddd", keys[1])
++	assert.Equal(t, 2, loaded.ChannelInfo.MultiKeySize)
++	assert.Equal(t, now+60, loaded.ChannelInfo.MultiKeyCooldownUntilAt(1))
++	assert.False(t, loaded.ChannelInfo.MultiKeySelectableAt(1, now))
++	assert.True(t, loaded.ChannelInfo.MultiKeySelectableAt(1, now+60),
++		"cooldown expiry must restore the projected key without another apply")
+ }
+ 
+ // 重投影必须清空按索引存放的旧状态：Key 顺序变了，旧状态会套到别的凭据上。
+@@ -405,6 +422,24 @@ func TestRecordKeyOutcomeSetsCooldown(t *testing.T) {
+ 	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
+ 	assert.Greater(t, key.CooldownUntil, now+60, "冷却应延伸到未来")
+ 	assert.False(t, apigxmodel.IsUpstreamKeyUsable(&key, now), "冷却期内该 Key 不可用")
++
++	var base basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
++	assert.Equal(t, key.CooldownUntil, base.ChannelInfo.MultiKeyCooldownUntilAt(0),
++		"领域冷却必须同步到底座运行时投影")
++	_, _, selectionErr := base.GetNextEnabledKey()
++	require.NotNil(t, selectionErr, "冷却中的 Key 不得被后续请求选中")
++	assert.Equal(t, common.ChannelStatusEnabled, base.Status, "临时 Key 冷却不应停掉整个渠道")
++
++	base.ChannelInfo.SetMultiKeyCooldownUntilAt(0, now-1)
++	require.NoError(t, db.Model(&basemodel.Channel{}).Where("id = ?", baseChannelID).
++		Update("channel_info", base.ChannelInfo).Error)
++	var restarted basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&restarted).Error)
++	selected, index, selectionErr := restarted.GetNextEnabledKey()
++	require.Nil(t, selectionErr)
++	assert.Equal(t, "sk-cool-aaaaaaaa", selected)
++	assert.Zero(t, index, "过期冷却在重启加载后也应自动恢复")
+ }
+ 
+ // 非我们的渠道（管理员自建）没有可记对象：静默跳过，不报错、不误写。
+@@ -518,6 +553,7 @@ func TestRecordFailureFromContextDoesNotInvalidateOnClientError(t *testing.T) {
+ 	require.NoError(t, db.Where("channel_id = ?", shareChannel.ID).First(&key).Error)
+ 	assert.Equal(t, apigxmodel.UpstreamKeyStatusEnabled, key.Status, "业务错误不得使凭据失效")
+ 	assert.Equal(t, "400_invalid_request_error", key.LastErrorCode, "但仍要留下错误记录")
++	assert.Zero(t, key.CooldownUntil, "request errors must not cool a healthy credential")
+ }
+ 
+ func TestRecordFailureFromContextDoesNotCooldownRateLimitedKey(t *testing.T) {
+@@ -546,6 +582,68 @@ func TestRecordFailureFromContextDoesNotCooldownRateLimitedKey(t *testing.T) {
+ 	assert.True(t, apigxmodel.IsUpstreamKeyUsable(&key, common.GetTimestamp()),
+ 		"the next request may select the same credential again")
+ 	assert.Equal(t, "429_rate_limited", key.LastErrorCode)
++	var base basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
++	assert.Zero(t, base.ChannelInfo.MultiKeyCooldownUntilAt(0),
++		"429 must not leak a cooldown into the base runtime")
++	selected, _, selectionErr := base.GetNextEnabledKey()
++	require.Nil(t, selectionErr)
++	assert.Equal(t, "sk-rate-limit-aaaaaa", selected,
++		"the same credential remains eligible for the next request")
++}
++
++func TestRetryableFailureCooldownClassification(t *testing.T) {
++	for _, test := range []struct {
++		statusCode int
++		want       bool
++	}{
++		{statusCode: 0, want: true},
++		{statusCode: http.StatusRequestTimeout, want: true},
++		{statusCode: http.StatusInternalServerError, want: true},
++		{statusCode: http.StatusServiceUnavailable, want: true},
++		{statusCode: http.StatusTooManyRequests, want: false},
++		{statusCode: http.StatusUnauthorized, want: false},
++		{statusCode: http.StatusForbidden, want: false},
++		{statusCode: http.StatusBadRequest, want: false},
++		{statusCode: http.StatusNotFound, want: false},
++	} {
++		t.Run(strconv.Itoa(test.statusCode), func(t *testing.T) {
++			assert.Equal(t, test.want, shouldCooldownRetryableKey(test.statusCode))
++		})
++	}
++}
++
++func TestRecordFailureFromContextCooldownsRetryableUpstreamFailure(t *testing.T) {
++	db := setupProjectionEnv(t)
++	const owner int64 = 9205
++	const baseChannelID int64 = 6266
++	require.NoError(t, db.Create(&basemodel.Channel{Id: int(baseChannelID), Name: "底座", Key: "x", Status: common.ChannelStatusEnabled}).Error)
++	shareChannel := seedShareChannelWithKeys(t, db, owner, baseChannelID,
++		[]string{"sk-retryable-aaaaaa", "sk-healthy-bbbbbbbb"}, nil)
++	_, err := ProjectKeyPool(db, shareChannel.ID)
++	require.NoError(t, err)
++
++	previous := dbProvider
++	SetDBProvider(func() *gorm.DB { return db })
++	t.Cleanup(func() { SetDBProvider(previous); SetKeyStatsEnabled(false) })
++	SetKeyStatsEnabled(true)
++
++	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
++	common.SetContextKey(ctx, constant.ContextKeyChannelIsMultiKey, true)
++	common.SetContextKey(ctx, constant.ContextKeyChannelMultiKeyIndex, 0)
++	RecordFailureFromContext(ctx, int(baseChannelID), http.StatusServiceUnavailable, "upstream_unavailable")
++
++	var failed apigxmodel.UpstreamKey
++	require.NoError(t, db.Where("channel_id = ? AND stable_key_id = ?", shareChannel.ID, "stable-a").First(&failed).Error)
++	assert.Greater(t, failed.CooldownUntil, common.GetTimestamp())
++
++	var base basemodel.Channel
++	require.NoError(t, db.Where("id = ?", baseChannelID).First(&base).Error)
++	assert.Equal(t, failed.CooldownUntil, base.ChannelInfo.MultiKeyCooldownUntilAt(0))
++	selected, index, selectionErr := base.GetNextEnabledKey()
++	require.Nil(t, selectionErr)
++	assert.Equal(t, "sk-healthy-bbbbbbbb", selected)
++	assert.Equal(t, 1, index, "the next request must skip the cooled credential")
+ }
+ 
+ // **最关键的一条**：失效必须同时落到底座，否则底座会继续使用已失效的凭据。
+diff --git a/apigx/model/repo_upstream.go b/apigx/model/repo_upstream.go
+index bc24066..491cff6 100644
+--- a/apigx/model/repo_upstream.go
++++ b/apigx/model/repo_upstream.go
+@@ -36,11 +36,10 @@ const (
+ 	CircuitStateHalfOpen int = 2
+ )
+ 
+-// IsUpstreamKeyUsable 报告某把 Key 在给定时刻是否可用于新请求。
+-//
+-// 三条判据都必须成立：启用、未到期、不在冷却期。**任一条不成立都不是「不可用」的近似**，
+-// 而是确定的「跳过该 Key」（计划书 §9.2：Key 满载、到期、失效或冷却时跳过）。
+-func IsUpstreamKeyUsable(key *UpstreamKey, now int64) bool {
++// IsUpstreamKeyProjectable reports whether a credential belongs in the base
++// multi-key projection. Cooling keys stay projected so the runtime can skip
++// them until their persisted deadline and restore them automatically.
++func IsUpstreamKeyProjectable(key *UpstreamKey, now int64) bool {
+ 	if key == nil {
+ 		return false
+ 	}
+@@ -50,6 +49,17 @@ func IsUpstreamKeyUsable(key *UpstreamKey, now int64) bool {
+ 	if key.ExpiresAt > 0 && key.ExpiresAt <= now {
+ 		return false
+ 	}
++	return true
++}
++
++// IsUpstreamKeyUsable 报告某把 Key 在给定时刻是否可用于新请求。
++//
++// 三条判据都必须成立：启用、未到期、不在冷却期。**任一条不成立都不是「不可用」的近似**，
++// 而是确定的「跳过该 Key」（计划书 §9.2：Key 满载、到期、失效或冷却时跳过）。
++func IsUpstreamKeyUsable(key *UpstreamKey, now int64) bool {
++	if !IsUpstreamKeyProjectable(key, now) {
++		return false
++	}
+ 	if key.CooldownUntil > 0 && key.CooldownUntil > now {
+ 		return false
+ 	}
+diff --git a/model/channel.go b/model/channel.go
+index bf67e21..0fb679f 100644
+--- a/model/channel.go
++++ b/model/channel.go
+@@ -62,13 +62,17 @@ type Channel struct {
+ const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
+ 
+ type ChannelInfo struct {
+-	IsMultiKey             bool                  `json:"is_multi_key"`                        // 是否多Key模式
+-	MultiKeySize           int                   `json:"multi_key_size"`                      // 多Key模式下的Key数量
+-	MultiKeyStatusList     map[int]int           `json:"multi_key_status_list"`               // key状态列表，key index -> status
+-	MultiKeyDisabledReason map[int]string        `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
+-	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
+-	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
+-	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
++	IsMultiKey             bool           `json:"is_multi_key"`                        // 是否多Key模式
++	MultiKeySize           int            `json:"multi_key_size"`                      // 多Key模式下的Key数量
++	MultiKeyStatusList     map[int]int    `json:"multi_key_status_list"`               // key状态列表，key index -> status
++	MultiKeyDisabledReason map[int]string `json:"multi_key_disabled_reason,omitempty"` // key禁用原因列表，key index -> reason
++	MultiKeyDisabledTime   map[int]int64  `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
++	// MultiKeyCooldownUntil is independent from persistent health marks. A key
++	// is skipped while the deadline is in the future and becomes selectable
++	// again automatically when the deadline passes.
++	MultiKeyCooldownUntil map[int]int64         `json:"multi_key_cooldown_until,omitempty"`
++	MultiKeyPollingIndex  int                   `json:"multi_key_polling_index"` // 多Key模式下轮询的key索引
++	MultiKeyMode          constant.MultiKeyMode `json:"multi_key_mode"`
+ 	// MultiKeyStableIDs 与真实 Key 列表一一对齐。APIGX 用它让健康、容量和统计锚定稳定身份，
+ 	// 避免增删、重排或权重变化后把按位置保存的状态套到另一把 Key 上。
+ 	MultiKeyStableIDs []string `json:"multi_key_stable_ids,omitempty"`
+@@ -79,6 +83,7 @@ type ChannelInfo struct {
+ 	MultiKeyStatusByStableID         map[string]int    `json:"multi_key_status_by_stable_id,omitempty"`
+ 	MultiKeyDisabledReasonByStableID map[string]string `json:"multi_key_disabled_reason_by_stable_id,omitempty"`
+ 	MultiKeyDisabledTimeByStableID   map[string]int64  `json:"multi_key_disabled_time_by_stable_id,omitempty"`
++	MultiKeyCooldownUntilByStableID  map[string]int64  `json:"multi_key_cooldown_until_by_stable_id,omitempty"`
+ 	// 状态来源表让底座健康、容量和熔断分别持有自己的标记。MultiKeyStatusList 与
+ 	// MultiKeyStatusByStableID 只是给既有接口读取的合并镜像，恢复一个来源不会误删另一个来源。
+ 	MultiKeyStatusSources           map[int]map[string]int    `json:"multi_key_status_sources,omitempty"`
+@@ -140,6 +145,51 @@ func (c *ChannelInfo) MultiKeyStatusAt(index int) int {
+ 	return common.ChannelStatusEnabled
+ }
+ 
++// MultiKeyCooldownUntilAt returns the persisted cooldown deadline for one
++// credential. Stable identity takes precedence so reordering keys cannot move
++// a cooldown to a different credential.
++func (c *ChannelInfo) MultiKeyCooldownUntilAt(index int) int64 {
++	if c == nil || index < 0 {
++		return 0
++	}
++	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++		return c.MultiKeyCooldownUntilByStableID[stableID]
++	}
++	return c.MultiKeyCooldownUntil[index]
++}
++
++// MultiKeySelectableAt combines persistent health and temporary cooldown.
++// Expired deadlines require no background job or manual pool re-application.
++func (c *ChannelInfo) MultiKeySelectableAt(index int, now int64) bool {
++	return c != nil && c.MultiKeyStatusAt(index) == common.ChannelStatusEnabled &&
++		c.MultiKeyCooldownUntilAt(index) <= now
++}
++
++// SetMultiKeyCooldownUntilAt updates both the stable-ID authority and the
++// positional compatibility mirror. A non-future deadline clears the cooldown.
++func (c *ChannelInfo) SetMultiKeyCooldownUntilAt(index int, until int64) {
++	if c == nil || index < 0 {
++		return
++	}
++	if until <= 0 {
++		delete(c.MultiKeyCooldownUntil, index)
++		if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++			delete(c.MultiKeyCooldownUntilByStableID, stableID)
++		}
++		return
++	}
++	if c.MultiKeyCooldownUntil == nil {
++		c.MultiKeyCooldownUntil = make(map[int]int64)
++	}
++	c.MultiKeyCooldownUntil[index] = until
++	if stableID, ok := c.MultiKeyStableIDAt(index); ok {
++		if c.MultiKeyCooldownUntilByStableID == nil {
++			c.MultiKeyCooldownUntilByStableID = make(map[string]int64)
++		}
++		c.MultiKeyCooldownUntilByStableID[stableID] = until
++	}
++}
++
+ func multiKeyStatusMarkSource(markValue int) string {
+ 	return fmt.Sprintf("mark:%d", markValue)
+ }
+@@ -530,7 +580,7 @@ func (channel *Channel) GetNextEnabledKeyExcluding(excluded MultiKeyExclusions)
+ 	// Collect indexes of enabled keys
+ 	enabledIdx := make([]int, 0, len(keys))
+ 	for i := range keys {
+-		if channel.ChannelInfo.MultiKeyStatusAt(i) == common.ChannelStatusEnabled &&
++		if channel.ChannelInfo.MultiKeySelectableAt(i, common.GetTimestamp()) &&
+ 			!excluded.contains(&channel.ChannelInfo, i) {
+ 			enabledIdx = append(enabledIdx, i)
+ 		}
+@@ -607,7 +657,7 @@ func (channel *Channel) HasEnabledKeyExcluding(excluded MultiKeyExclusions) bool
+ 		return false
+ 	}
+ 	for index := range channel.GetKeys() {
+-		if channel.ChannelInfo.MultiKeyStatusAt(index) == common.ChannelStatusEnabled &&
++		if channel.ChannelInfo.MultiKeySelectableAt(index, common.GetTimestamp()) &&
+ 			!excluded.contains(&channel.ChannelInfo, index) {
+ 			return true
+ 		}
+@@ -919,6 +969,7 @@ func (channel *Channel) Update() error {
+ 			channel.ChannelInfo.MultiKeyStatusByStableID = nil
+ 			channel.ChannelInfo.MultiKeyDisabledReasonByStableID = nil
+ 			channel.ChannelInfo.MultiKeyDisabledTimeByStableID = nil
++			channel.ChannelInfo.MultiKeyCooldownUntilByStableID = nil
+ 			channel.ChannelInfo.MultiKeyStatusSources = nil
+ 			channel.ChannelInfo.MultiKeyStatusSourcesByStableID = nil
+ 		}
+@@ -937,6 +988,13 @@ func (channel *Channel) Update() error {
+ 				}
+ 			}
+ 		}
++		if channel.ChannelInfo.MultiKeyCooldownUntil != nil {
++			for idx := range channel.ChannelInfo.MultiKeyCooldownUntil {
++				if idx >= channel.ChannelInfo.MultiKeySize {
++					delete(channel.ChannelInfo.MultiKeyCooldownUntil, idx)
++				}
++			}
++		}
+ 	}
+ 	var err error
+ 	err = DB.Model(channel).Updates(channel).Error
+@@ -1141,6 +1199,45 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
+ 	return true
+ }
+ 
++// UpdateChannelKeyCooldown persists a temporary per-key cooldown without
++// changing the key's health status or disabling the whole channel. Selection
++// reads the deadline directly, so expiry restores traffic automatically.
++func UpdateChannelKeyCooldown(channelId int, usingKey string, until int64) bool {
++	if channelId <= 0 || usingKey == "" {
++		return false
++	}
++	if common.MemoryCacheEnabled {
++		channelStatusLock.Lock()
++		defer channelStatusLock.Unlock()
++	}
++
++	pollingLock := GetChannelPollingLock(channelId)
++	pollingLock.Lock()
++	defer pollingLock.Unlock()
++
++	channel, err := CacheGetChannel(channelId)
++	if err != nil || channel == nil || !channel.ChannelInfo.IsMultiKey {
++		return false
++	}
++	keyIndex := -1
++	for index, key := range channel.GetKeys() {
++		if key == usingKey {
++			keyIndex = index
++			break
++		}
++	}
++	if keyIndex < 0 {
++		return false
++	}
++	channel.ChannelInfo.SetMultiKeyCooldownUntilAt(keyIndex, until)
++	if err := DB.Model(&Channel{}).Where("id = ?", channelId).
++		Update("channel_info", channel.ChannelInfo).Error; err != nil {
++		common.SysLog(fmt.Sprintf("failed to update multi-key cooldown: channel_id=%d, error=%v", channelId, err))
++		return false
++	}
++	return true
++}
++
+ func EnableChannelByTag(tag string) error {
+ 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
+ 	if err != nil {
+diff --git a/model/channel_status_test.go b/model/channel_status_test.go
+index e152691..de360cb 100644
+--- a/model/channel_status_test.go
++++ b/model/channel_status_test.go
+@@ -137,6 +137,38 @@ func TestGetNextEnabledKeyExcludingNeverRepeatsFailedKey(t *testing.T) {
+ 	}
+ }
+ 
++func TestMultiKeyCooldownSkipsThenAutomaticallyExpires(t *testing.T) {
++	setupChannelStatusTest(t)
++
++	channel := Channel{
++		Name:   "temporary-key-cooldown",
++		Key:    "key-a\nkey-b",
++		Status: common.ChannelStatusEnabled,
++		ChannelInfo: ChannelInfo{
++			IsMultiKey:        true,
++			MultiKeySize:      2,
++			MultiKeyMode:      constant.MultiKeyModePolling,
++			MultiKeyStableIDs: []string{"stable-a", "stable-b"},
++		},
++	}
++	referenceTime := int64(10_000)
++	channel.ChannelInfo.SetMultiKeyCooldownUntilAt(0, referenceTime+60)
++	require.NoError(t, DB.Create(&channel).Error)
++
++	var reloaded Channel
++	require.NoError(t, DB.First(&reloaded, channel.Id).Error)
++	assert.False(t, reloaded.ChannelInfo.MultiKeySelectableAt(0, referenceTime))
++	assert.True(t, reloaded.ChannelInfo.MultiKeySelectableAt(1, referenceTime))
++	assert.True(t, reloaded.ChannelInfo.MultiKeySelectableAt(0, referenceTime+60),
++		"deadline expiry must restore selection without rewriting the pool")
++
++	// Stable identity remains authoritative after a key reorder.
++	reloaded.Key = "key-b\nkey-a"
++	reloaded.ChannelInfo.MultiKeyStableIDs = []string{"stable-b", "stable-a"}
++	assert.True(t, reloaded.ChannelInfo.MultiKeySelectableAt(0, referenceTime))
++	assert.False(t, reloaded.ChannelInfo.MultiKeySelectableAt(1, referenceTime))
++}
++
+ func TestMultiKeyExclusionFollowsStableIdentityAfterReorder(t *testing.T) {
+ 	setupChannelStatusTest(t)
+ 
+diff --git a/web/src/features/share/__tests__/key-pool-card.test.tsx b/web/src/features/share/__tests__/key-pool-card.test.tsx
+index 34778b1..eba166b 100644
+--- a/web/src/features/share/__tests__/key-pool-card.test.tsx
++++ b/web/src/features/share/__tests__/key-pool-card.test.tsx
+@@ -31,6 +31,7 @@ beforeAll(() => {
+     'share.keyPool': 'Key pool',
+     'share.keyPool.description': 'Manage credentials.',
+     'share.keyPool.failoverDescription': 'Fail over to the next key.',
++    'share.key.coolingUntil': 'Cooling until {{time}}',
+     'share.keyPool.empty': 'No upstream key yet',
+     'share.key.batchAdd': 'Batch add keys',
+     'share.key.batchAddDescription': 'One credential per line.',
+@@ -41,6 +42,35 @@ beforeAll(() => {
+   })
+ })
+ 
++it('shows the temporary cooldown deadline for a key', () => {
++  const client = new QueryClient({
++    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
++  })
++  render(
++    <QueryClientProvider client={client}>
++      <KeyPoolCard
++        channelId={42}
++        keys={[
++          {
++            id: 1,
++            stable_key_id: 'stable-a',
++            name: 'primary',
++            status: 1,
++            weight: 1,
++            cooldown_until: 4_102_444_800,
++            expires_at: 0,
++            credential_version: 1,
++            usable: false,
++            masked: 'sk-••••aaaa',
++          },
++        ]}
++      />
++    </QueryClientProvider>
++  )
++
++  expect(screen.getByText(/Cooling until/)).toBeInTheDocument()
++})
++
+ afterEach(() => {
+   vi.restoreAllMocks()
+ })
+diff --git a/web/src/features/share/components/key-pool-card.tsx b/web/src/features/share/components/key-pool-card.tsx
+index 525841d..feb13b0 100644
+--- a/web/src/features/share/components/key-pool-card.tsx
++++ b/web/src/features/share/components/key-pool-card.tsx
+@@ -60,6 +60,14 @@ import type { UpstreamKey } from '../types'
+ 
+ type KeyEditor = { mode: 'rotate' | 'weight'; key: UpstreamKey } | null
+ 
++function formatCooldownTime(timestamp: number): string {
++  return new Intl.DateTimeFormat(undefined, {
++    hour: '2-digit',
++    minute: '2-digit',
++    second: '2-digit',
++  }).format(new Date(timestamp * 1000))
++}
++
+ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+   const { t } = useTranslation()
+   const queryClient = useQueryClient()
+@@ -177,14 +185,24 @@ export function KeyPoolCard(props: { channelId: number; keys: UpstreamKey[] }) {
+     {
+       id: 'status',
+       header: t('share.key.status'),
+-      cell: (row) => (
+-        <div className='flex flex-wrap gap-1.5'>
+-          <Badge variant={row.usable ? 'default' : 'outline'}>
+-            {t(keyStatusLabelKey(row.status))}
+-          </Badge>
+-          <Badge variant='outline'>v{row.credential_version}</Badge>
+-        </div>
+-      ),
++      cell: (row) => {
++        const cooling = row.cooldown_until > Math.floor(Date.now() / 1000)
++        return (
++          <div className='flex flex-wrap gap-1.5'>
++            <Badge variant={row.usable ? 'default' : 'outline'}>
++              {t(keyStatusLabelKey(row.status))}
++            </Badge>
++            {cooling ? (
++              <Badge variant='outline'>
++                {t('share.key.coolingUntil', {
++                  time: formatCooldownTime(row.cooldown_until),
++                })}
++              </Badge>
++            ) : null}
++            <Badge variant='outline'>v{row.credential_version}</Badge>
++          </div>
++        )
++      },
+     },
+     {
+       id: 'actions',
+diff --git a/web/src/i18n/locales/en.json b/web/src/i18n/locales/en.json
+index ea14431..7ad5deb 100644
+--- a/web/src/i18n/locales/en.json
++++ b/web/src/i18n/locales/en.json
+@@ -6834,7 +6834,8 @@
+     "Includes estimates": "Includes estimates",
+     "{{count}} unavailable measurements": "{{count}} unavailable measurements",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
+-    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.failoverDescription": "429 only switches to another key for the current request and does not start a cooldown. Other retryable upstream errors cool the failed key for 60 seconds; it returns to rotation automatically when the cooldown expires.",
++    "share.key.coolingUntil": "Cooling until {{time}}",
+     "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+diff --git a/web/src/i18n/locales/fr.json b/web/src/i18n/locales/fr.json
+index 9afa604..b2d1f49 100644
+--- a/web/src/i18n/locales/fr.json
++++ b/web/src/i18n/locales/fr.json
+@@ -6834,7 +6834,8 @@
+     "Includes estimates": "Inclut des estimations",
+     "{{count}} unavailable measurements": "{{count}} mesures indisponibles",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
+-    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.failoverDescription": "429 only switches to another key for the current request and does not start a cooldown. Other retryable upstream errors cool the failed key for 60 seconds; it returns to rotation automatically when the cooldown expires.",
++    "share.key.coolingUntil": "Cooling until {{time}}",
+     "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+diff --git a/web/src/i18n/locales/ja.json b/web/src/i18n/locales/ja.json
+index d7c901e..4a7adab 100644
+--- a/web/src/i18n/locales/ja.json
++++ b/web/src/i18n/locales/ja.json
+@@ -6834,7 +6834,8 @@
+     "Includes estimates": "推定値を含む",
+     "{{count}} unavailable measurements": "取得不可 {{count}} 件",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
+-    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.failoverDescription": "429 only switches to another key for the current request and does not start a cooldown. Other retryable upstream errors cool the failed key for 60 seconds; it returns to rotation automatically when the cooldown expires.",
++    "share.key.coolingUntil": "Cooling until {{time}}",
+     "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+diff --git a/web/src/i18n/locales/ru.json b/web/src/i18n/locales/ru.json
+index 2282031..2ce0242 100644
+--- a/web/src/i18n/locales/ru.json
++++ b/web/src/i18n/locales/ru.json
+@@ -6834,7 +6834,8 @@
+     "Includes estimates": "Включает оценки",
+     "{{count}} unavailable measurements": "Недоступных измерений: {{count}}",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
+-    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.failoverDescription": "429 only switches to another key for the current request and does not start a cooldown. Other retryable upstream errors cool the failed key for 60 seconds; it returns to rotation automatically when the cooldown expires.",
++    "share.key.coolingUntil": "Cooling until {{time}}",
+     "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+diff --git a/web/src/i18n/locales/vi.json b/web/src/i18n/locales/vi.json
+index 5a61b8e..00e03ed 100644
+--- a/web/src/i18n/locales/vi.json
++++ b/web/src/i18n/locales/vi.json
+@@ -6834,7 +6834,8 @@
+     "Includes estimates": "Bao gồm giá trị ước tính",
+     "{{count}} unavailable measurements": "{{count}} phép đo không khả dụng",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
+-    "share.keyPool.failoverDescription": "Requests follow the pool policy. On retryable upstream errors, the gateway tries another available key in this channel before changing channels.",
++    "share.keyPool.failoverDescription": "429 only switches to another key for the current request and does not start a cooldown. Other retryable upstream errors cool the failed key for 60 seconds; it returns to rotation automatically when the cooldown expires.",
++    "share.key.coolingUntil": "Cooling until {{time}}",
+     "share.keyPool.modeDescription": "Polling follows key weights in sequence; random selects by weight for each request.",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+diff --git a/web/src/i18n/locales/zh-TW.json b/web/src/i18n/locales/zh-TW.json
+index 5d37ce3..460cc6f 100644
+--- a/web/src/i18n/locales/zh-TW.json
++++ b/web/src/i18n/locales/zh-TW.json
+@@ -6834,7 +6834,8 @@
+     "Includes estimates": "包含估算值",
+     "{{count}} unavailable measurements": "{{count}} 項計量不可取得",
+     "share.keyPool.description": "Manage credentials, weights, and availability for this channel.",
+-    "share.keyPool.failoverDescription": "正常請求依照目前的池策略分配；遇到可重試的上游錯誤時，會先嘗試本渠道下一把可用 Key，再切換渠道。",
++    "share.keyPool.failoverDescription": "429 只會在本次請求內切換下一把 Key，不會進入冷卻；其他可重試的上游錯誤會讓故障 Key 冷卻 60 秒，到期後自動恢復輪詢。",
++    "share.key.coolingUntil": "冷卻至 {{time}}",
+     "share.keyPool.modeDescription": "輪詢會依照 Key 權重順序分配；隨機會在每次請求時按權重抽取。",
+     "share.keyPool.apply": "Apply key pool",
+     "share.keyPool.applied": "Key pool applied",
+diff --git a/web/src/i18n/locales/zh.json b/web/src/i18n/locales/zh.json
+index 88691e7..9f6c6cc 100644
+--- a/web/src/i18n/locales/zh.json
++++ b/web/src/i18n/locales/zh.json
+@@ -6834,7 +6834,8 @@
+     "Includes estimates": "包含估算值",
+     "{{count}} unavailable measurements": "{{count}} 项计量不可得",
+     "share.keyPool.description": "管理此渠道的凭据、权重和可用状态。",
+-    "share.keyPool.failoverDescription": "正常请求按当前池策略分配；遇到可重试的上游错误时，会先尝试本渠道下一把可用 Key，再切换渠道。",
++    "share.keyPool.failoverDescription": "429 只会在本次请求内切换下一把 Key，不会进入冷却；其他可重试的上游错误会让故障 Key 冷却 60 秒，到期后自动恢复轮询。",
++    "share.key.coolingUntil": "冷却至 {{time}}",
+     "share.keyPool.modeDescription": "轮询会按 Key 权重依次分配；随机会在每次请求时按权重抽取。",
+     "share.keyPool.apply": "应用 Key 池",
+     "share.keyPool.applied": "Key 池已应用",
+-- 
+2.53.0.windows.1
+
