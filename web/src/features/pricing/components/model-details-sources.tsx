@@ -264,6 +264,8 @@ function SourceCard(props: {
   const sourceName =
     props.source.owner_display_name ||
     t('Provider {{id}}', { id: props.source.owner_user_id })
+  const channelName =
+    props.source.channel_name?.trim() || props.source.channel_public_id
   return (
     <label
       className={`cursor-pointer rounded-xl border p-4 transition-colors ${
@@ -273,14 +275,14 @@ function SourceCard(props: {
       <div className='flex items-start gap-3'>
         <RadioGroupItem
           value={props.source.offering_public_id}
-          aria-label={sourceName}
+          aria-label={channelName}
         />
         <div className='min-w-0 flex-1 space-y-3'>
           <div className='flex flex-wrap items-start justify-between gap-2'>
             <div>
-              <div className='font-medium'>{sourceName}</div>
+              <div className='font-medium'>{channelName}</div>
               <span className='text-muted-foreground text-xs'>
-                {t('Share name')}: {props.source.group_name || '—'}
+                {t('identity.sharer')}: {sourceName}
               </span>
             </div>
             {props.explanation?.selected ? (

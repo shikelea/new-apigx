@@ -35,8 +35,9 @@ export interface PlazaOfferingItem {
   group_name?: string
   /** 分组介绍（不可信文本，按纯文本渲染） */
   group_description?: string
-  /** 分享渠道对外 ID */
+  /** 分享渠道对外 ID 与显示名称 */
   channel_public_id: string
+  channel_name?: string
   /** 分享者用户 ID */
   owner_user_id: number
   /** 分享者公开显示名 */

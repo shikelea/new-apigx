@@ -1821,6 +1821,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	assert.Equal(t, "m-plaza", item["model"])
 	assert.Equal(t, apigxmodel.PlazaAccessKindPublic, item["access_kind"])
 	assert.NotEmpty(t, item["channel_public_id"], "广场必须给出对外可辨识的来源标识")
+	assert.Equal(t, "主线路", item["channel_name"], "来源必须展示分享渠道名称，不能拿分组名冒充")
 
 	// **只启用已完成能力**：只声明了流式的供给，能力里就只有流式；
 	// vision/tools 属"声明了但平台尚不具备"，单独列出而不是混进 capabilities
@@ -1838,6 +1839,7 @@ func TestPlazaOnlyExposesPublishedAndPublic(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	detail, _ := body["data"].(map[string]any)
 	assert.Equal(t, "m-plaza", detail["model"])
+	assert.Equal(t, "主线路", detail["channel_name"])
 
 	// 私有分组：发布后只在所有者自己的“私有资源”范围出现
 	privateGroup := &apigxmodel.ShareGroup{OwnerUserID: owner, Name: "私有组", DefaultVisibility: apigxmodel.ShareGroupVisibilityPrivate, PublishStatus: apigxmodel.ShareGroupPublishPublished}

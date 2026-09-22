@@ -2344,6 +2344,7 @@ func plazaItemToJSON(item apigxmodel.PlazaItem) gin.H {
 		"group_name":                  item.GroupName,
 		"model":                       item.UpstreamModelID,
 		"channel_public_id":           item.ChannelPublicID,
+		"channel_name":                item.ChannelName,
 		"owner_user_id":               item.OwnerUserID,
 		"owner_display_name":          item.OwnerDisplayName,
 		"access_kind":                 item.AccessKind,

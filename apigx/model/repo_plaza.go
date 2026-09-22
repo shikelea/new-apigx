@@ -59,6 +59,7 @@ type PlazaItem struct {
 	OfferingPublicID string
 	UpstreamModelID  string
 	ChannelPublicID  string
+	ChannelName      string
 	OwnerUserID      int64
 	OwnerDisplayName string
 	// AccessKind 把资源稳定归入公开、自己的私有、别人分享给我三类。
@@ -204,6 +205,7 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
 		PublicID            string
 		UpstreamModelID     string
 		ChannelPublicID     string
+		ChannelName         string
 		OwnerUserID         int64
 		GroupVisibility     int
 		Capabilities        string
@@ -213,7 +215,7 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
 	}
 	var rows []row
 	err := query.Select("o.id AS id, o.public_id AS public_id, o.upstream_model_id AS upstream_model_id, " +
-		"c.public_id AS channel_public_id, c.owner_user_id AS owner_user_id, " +
+		"c.public_id AS channel_public_id, c.name AS channel_name, c.owner_user_id AS owner_user_id, " +
 		"g.public_id AS group_public_id, g.name AS group_name, g.description AS group_description, g.default_visibility AS group_visibility, " +
 		"o.capabilities AS capabilities, o.updated_at AS updated_at, cm.api_model_id AS canonical_api_model_id, " +
 		"cm.description AS model_description").
@@ -248,6 +250,7 @@ func ListPlazaItems(db *gorm.DB, viewerUserID int64, limit, offset int) ([]Plaza
 			CanonicalAPIModelID:      r.CanonicalAPIModelID,
 			ModelDescription:         r.ModelDescription,
 			ChannelPublicID:          r.ChannelPublicID,
+			ChannelName:              r.ChannelName,
 			GroupPublicID:            r.GroupPublicID,
 			GroupName:                r.GroupName,
 			GroupDescription:         r.GroupDescription,
@@ -331,6 +334,7 @@ func GetPlazaItem(db *gorm.DB, viewerUserID int64, offeringPublicID string) (*Pl
 		CanonicalAPIModelID:      canonicalAPIModelID,
 		ModelDescription:         modelDescription,
 		ChannelPublicID:          channel.PublicID,
+		ChannelName:              channel.Name,
 		OwnerUserID:              channel.OwnerUserID,
 		AccessKind:               plazaAccessKind(viewerUserID, channel.OwnerUserID, group.DefaultVisibility),
 		GroupPublicID:            group.PublicID,

@@ -33,6 +33,7 @@ func TestPlazaKeepsOneSourcePerChannelAndCanonicalModel(t *testing.T) {
 	require.Len(t, items, 1)
 	assert.Equal(t, first.ID, items[0].OfferingID)
 	assert.Equal(t, canonical.APIModelID, items[0].CanonicalAPIModelID)
+	assert.Equal(t, channel.Name, items[0].ChannelName)
 
 	require.NoError(t, DeleteModelOffering(db, owner, first.ID))
 	items, total, err = ListPlazaItems(db, owner, 20, 0)
