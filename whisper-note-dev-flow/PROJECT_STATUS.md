@@ -4,16 +4,34 @@
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
 ## 当前阶段
-**多 Key 故障冷却已在本地收口：429 只在当前请求内切换 Key；408、5xx 与网络错误冷却故障 Key 60 秒，并在截止后自动恢复。**
+**生产 APIGX 已升级至 `88230c1`：模型身份归并、真实渠道名称和多 Key 故障冷却已进入 `/pan/apigx-test` 运行栈。**
 
-当前 inner commit 为 `88230c1`，第 182 个补丁已从锁定 New API 基线重放，tree `1e1db41ec98f527732c7debbf29c43c691dd4791` 与 fork HEAD 一致。本轮没有连接或部署服务器，也没有推送远端；生产当前是否已包含该提交，需以实际升级结果为准。
+当前 inner commit 为 `88230c1`，第 182 个补丁已从锁定 New API 基线重放，tree `1e1db41ec98f527732c7debbf29c43c691dd4791` 与 fork HEAD 一致。服务器回环 `/api/status` 返回 `v0.0.0-apigx.88230c1`，应用、MySQL、Redis 和 stub 均 healthy；本轮没有推送 GitHub。
 
 ## 当前任务
-[已完成] 区分 429 与其他可重试错误的 Key 冷却。
-- 429 只在当前请求内换 Key，不产生跨请求冷却；下一次请求仍可重新选择原 Key。
-- 408、5xx 与网络错误冷却故障 Key 60 秒；400/404 不冷却，401/403 继续标记鉴权失效。
-- 冷却截止时间同时写入 APIGX 凭据与底座多 Key 状态，按稳定 Key ID 持久化；到期和重启后自动恢复。
-- Key 池说明规则并显示冷却截止时间；Go、三库、前端、生产构建、最终二进制与补丁重放通过。
+[已完成] 将 `88230c1` 升级到“主”服务器 APIGX 运行栈。
+- 实际运行目录为 `/pan/apigx-test`，只重建 `app` 服务，MySQL、Redis 与持久化目录未重启或改动。
+- 升级前备份位于 `/pan/apigx-test/backups/pre-88230c1-20260922T111251Z`，旧镜像另有回滚标签。
+- 应用镜像 `sha256:b7a7c3af…273caf9` healthy，回环状态接口确认版本 `v0.0.0-apigx.88230c1`。
+- 启动日志 64 行中未匹配到 panic、fatal、迁移失败或数据库/Redis 连接错误；未执行故障注入和业务写入测试。
+
+### [047] 2026-09-22 生产服务器升级至 Key 冷却版本
+
+**做了什么**：通过 Xterminal 将已完成本地回归的 APIGX `88230c1` 部署到“主”服务器 `/pan/apigx-test`，只重建应用服务并保留原 MySQL、Redis 与回滚产物。
+
+**涉及模块**：Linux 生产二进制、Docker Compose 应用服务、服务器内发布与回滚目录、部署台账
+
+**改动明细**：
+| 文件 / 位置 | 模块 | 改动说明 |
+|---|---|---|
+| `/pan/apigx-test/releases/88230c1/**` | 发布产物 | 上传并校验 `v0.0.0-apigx.88230c1` Linux ELF 与压缩包 |
+| `/pan/apigx-test/apigx-linux-amd64`、`BUILD_INFO` | 运行版本 | 原子替换应用二进制并记录 commit、tree 与 SHA-256 |
+| `/pan/apigx-test/backups/pre-88230c1-20260922T111251Z/**`、`apigx:rollback-c0c2c84-20260922t111251z` | 回滚 | 保存升级前二进制、Compose、环境配置、BUILD_INFO 和旧应用镜像 |
+| `whisper-note-dev-flow/{PROJECT_STATUS,TASK_LOG}.md` | 流程台账 | 记录生产升级范围、健康证据和剩余风险 |
+
+**验证**：本地重新完成 Rsbuild 生产构建和 Linux amd64 交叉编译，二进制 SHA-256 `8f36c58de217759c0f8baefa25de3ec66bd4e2a09e06950e7ac7d85aca25c561`；远端压缩包与二进制哈希复核通过；仅 `app` 容器于 2026-09-22 19:15（Asia/Shanghai）重建，MySQL/Redis 容器保持原实例和启动时间；四服务 healthy，`/api/status` 返回 APIGX `v0.0.0-apigx.88230c1`，启动日志关键错误匹配数为 0。
+
+**剩余风险**：按用户要求未在生产执行故障注入或业务写入验收，智能路由与多 Key 行为待用户真实测试；启动日志仍提示 `SESSION_COOKIE_SECURE` 未启用且 refresh/logout Origin 校验关闭，需结合最终 HTTPS 反代域名单独收口。
 
 ### [046] 2026-09-22 区分 429 与其他可重试错误的 Key 冷却
 
