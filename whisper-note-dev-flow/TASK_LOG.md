@@ -1,5 +1,23 @@
 # 任务清单
 
+## [进行中] 修复同标准模型别名渠道未进入授权路由候选（2026-09-24）
+
+**本轮目标**：让请求使用标准模型 ID 时，来源授权、智能路由和冷启动回退按 `canonical_model_id` 合并同模型别名渠道，避免只匹配一个上游模型字符串导致所有请求落到已熔断渠道并返回 503。
+**验收标准**：① 标准模型 ID 能解析出同一 `canonical_model_id` 下所有已发布供给；② 资源 ACL、平台 Key 范围和模型限制仍生效；③ 成熟渠道熔断/Key 耗尽后能进入其他同标准模型渠道；④ 上游别名请求仍能找到对应标准模型及全部供给；⑤ Go 定向与全仓测试通过；⑥ 生产只在本地验证后更新 app。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 来源授权 | `new-api/apigx/model/repo_access.go` | 修改 | 按标准模型身份扩展已发布供给查询 |
+| 回归测试 | `new-api/apigx/model/*test.go`、`new-api/apigx/relayhook/*test.go` | 修改 | 覆盖标准 ID/上游别名与跨渠道回退 |
+| 流程台账 | `whisper-note-dev-flow/{PROJECT_STATUS,TASK_LOG}.md` | 修改 | 记录生产日志根因、修复和部署证据 |
+
+**任务清单**：
+- [x] R1 修复授权快照按 canonical model 合并供给 → `new-api/apigx/model/repo_access.go`
+- [x] R2 增加标准 ID、别名和冷启动回退回归 → `new-api/apigx/model/*_test.go`
+- [x] R3 完成本地测试、构建并更新生产 app → 全仓 Go 测试通过；生产版本 `v0.0.0-apigx.8932687`
+- [x] R4 复查生产日志和健康状态 → app/mysql/redis/stub healthy；依赖容器未重启；部署后无新增 no available source 错误
+
 ## [已完成] 部署冷启动跨渠道回退到生产服务器（2026-09-24）
 
 **本轮目标**：将已完成全仓 Go 回归的 `new-api` inner commit `2c8b5a5` 构建并部署到“主”服务器 `/pan/apigx-test`，只更新 `app` 服务，解决成熟渠道 Key 池耗尽后无法回退到冷启动同模型渠道的问题。

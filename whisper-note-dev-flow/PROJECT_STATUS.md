@@ -3,10 +3,27 @@
 > 本文件由开发流程维护（`whisper-note-dev-flow/SKILL.md` §4）。**序号倒序，顶部最新**。
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
-## 当前阶段
-**生产 APIGX 已升级至 `2c8b5a5`：模型身份归并、真实渠道名称、多 Key 故障冷却与成熟渠道耗尽后的冷启动跨渠道回退已进入 `/pan/apigx-test` 运行栈。**
+### [051] 2026-09-24 修复同标准模型别名渠道未进入授权路由候选并部署
 
-当前 inner commit 为 `2c8b5a5`，本地前端构建和 Linux amd64 二进制已完成；生产回环 `/api/status` 返回 `v0.0.0-apigx.2c8b5a5`，app、MySQL、Redis 和 stub 均 healthy。生产更新只重建了 app，MySQL/Redis/stub 容器 ID 与启动时间保持不变；本轮没有推送 GitHub。
+**做了什么**：修复来源授权仅按请求模型字符串精确匹配的问题，使同一 `canonical_model_id` 下的已发布别名供给都能进入智能路由候选；构建并部署 `v0.0.0-apigx.8932687` 到生产 app。
+
+**涉及模块**：`new-api/apigx/model/repo_access.go`、模型/路由回归测试、生产 Docker app 服务。
+
+**改动明细**：
+| 文件 / 位置 | 模块 | 改动说明 |
+|---|---|---|
+| `new-api/apigx/model/repo_access.go` | 来源授权 | 请求模型先解析 canonical 身份，再合并同标准模型的已发布供给；无身份时保留精确 ID 兼容路径 |
+| `new-api/apigx/model/*_test.go` | 回归测试 | 覆盖标准模型 ID、上游别名和同 canonical 渠道候选 |
+| `/pan/apigx-test/releases/8932687/apigx-linux-amd64` | 发布产物 | Linux amd64 二进制 SHA-256 `605c286ce24ab46f8b8370d3cbe333a8fdc06c01a2f37e20ba3141079a57a646` |
+| `/pan/apigx-test/backups/pre-8932687-20260924T140011Z` | 回滚 | 保存更新前 app 二进制、编排文件和构建信息 |
+
+**验证**：本地定向与全仓 Go 测试已通过；生产 `/api/status` 返回 `v0.0.0-apigx.8932687`；四服务 healthy；MySQL/Redis/stub 容器 ID 和启动时间保持不变；部署后日志出现正常 `use_channel` 记录，未见新的 `no available source`。
+
+**剩余风险**：尚未做生产故障注入；需要用户通过反代真实调用 `deepseek-flash` 等模型确认别名渠道切换。
+## 当前阶段
+**生产 APIGX 已升级至 `8932687`：同标准模型别名授权合并已部署。
+
+当前 inner commit 为 `8932687`，生产 `/api/status` 返回 `v0.0.0-apigx.8932687`；本轮只重建 app，MySQL/Redis/stub 未重启。
 
 ## 当前任务
 [已完成] 将成熟渠道失败后的冷启动跨渠道回退版本部署到“主”服务器。
