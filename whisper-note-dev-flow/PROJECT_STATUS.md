@@ -21,15 +21,14 @@
 
 **剩余风险**：尚未做生产故障注入；需要用户通过反代真实调用 `deepseek-flash` 等模型确认别名渠道切换。
 ## 当前阶段
-**生产 APIGX 已升级至 `8932687`：同标准模型别名授权合并已部署。
+**生产 APIGX 已升级至 `8932687`：同标准模型别名授权合并已部署。**
 
 当前 inner commit 为 `8932687`，生产 `/api/status` 返回 `v0.0.0-apigx.8932687`；本轮只重建 app，MySQL/Redis/stub 未重启。
 
-## 当前任务
-[已完成] 将成熟渠道失败后的冷启动跨渠道回退版本部署到“主”服务器。
+## 当前任务`n[已完成] 修复同标准模型别名授权候选并部署到“主”服务器。
 - 实际运行目录为 `/pan/apigx-test`，通过 `docker compose build app` 与 `docker compose up -d --no-deps app` 只重建 `app` 服务。
-- 升级前备份位于 `/pan/apigx-test/backups/pre-2c8b5a5-20260924T104251Z`，新发布暂存于 `/pan/apigx-test/releases/2c8b5a5`。
-- 应用镜像为 `sha256:63d20be7…a40d60d`，二进制 SHA-256 为 `b74ca3ff…8813207`；回环状态接口确认版本 `v0.0.0-apigx.2c8b5a5`。
+- 升级前备份位于 `/pan/apigx-test/backups/pre-8932687-20260924T140011Z`，新发布位于 `/pan/apigx-test/releases/8932687`。
+- 应用镜像已重建；二进制 SHA-256 为 `605c286ce24ab46f8b8370d3cbe333a8fdc06c01a2f37e20ba3141079a57a646`；回环状态接口确认版本 `v0.0.0-apigx.8932687`。
 - app 启动日志无 panic、fatal、迁移失败或 MySQL/Redis 连接错误；未执行故障注入或业务写入测试。
 
 ### [050] 2026-09-24 部署成熟渠道耗尽后的冷启动跨渠道回退
