@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/apigx/routing"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -77,23 +78,49 @@ func EligibleBaseChannelsForStrategy(c *gin.Context, modelName string) ([]int, b
 
 	// 候选包含 Redis 中的当前并发占用，不能缓存最终优胜集合；否则渠道在缓存期内满载后，
 	// 请求仍会不断命中它并在原子预留处 429，而不会改选仍有余量的渠道。
-	channelIDs := computeEligibleBaseChannels(db, modelName, strategy, allowedOfferingIDs)
-	if len(channelIDs) == 0 {
+	primary, fallback := computeEligibleBaseChannelsWithFallback(db, modelName, strategy, allowedOfferingIDs)
+	state := &RouteStrategyState{
+		PrimaryChannelIDs:  append([]int(nil), primary...),
+		FallbackChannelIDs: append([]int(nil), fallback...),
+	}
+	common.SetContextKey(c, constant.ContextKeyRouteStrategyState, state)
+	if len(primary) == 0 {
 		return []int{}, true, nil
 	}
-	return channelIDs, true, nil
+	return primary, true, nil
 }
 
 // computeEligibleBaseChannels 算出"最优名次那一档"对应的底座渠道 ID。
 //
 // 与解释接口、应用接口**共用同一套候选装配与熔断口径**，避免出现
 // "解释里它在候选里、实际选路却不考虑它"这类不一致。
+// RouteStrategyState records the primary route set and the safe fallback set
+// for one request. The fallback is activated only after every primary channel
+// has been excluded by the request retry path.
+type RouteStrategyState struct {
+	PrimaryChannelIDs  []int
+	FallbackChannelIDs []int
+	Expanded           bool
+}
+
+// computeEligibleBaseChannels keeps the historical primary-only helper used by
+// existing callers and tests.
 func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing.Strategy, allowedOfferingIDs map[int64]struct{}) []int {
+	primary, _ := computeEligibleBaseChannelsWithFallback(db, modelName, strategy, allowedOfferingIDs)
+	return primary
+}
+
+// computeEligibleBaseChannelsWithFallback returns the top-ranked channels and
+// the remaining authorized, unsaturated, non-breaker channels. We deliberately
+// do not expose the fallback in the initial allow-list: quality-ranked traffic
+// stays preferred, while a request that exhausts those channels can continue
+// instead of failing with "no available channel".
+func computeEligibleBaseChannelsWithFallback(db *gorm.DB, modelName string, strategy routing.Strategy, allowedOfferingIDs map[int64]struct{}) ([]int, []int) {
 	candidates, _, err := routing.AssembleCandidates(db, capacity.New(common.RDB), modelName, routing.AssembleOptions{
 		AllowedOfferingIDs: allowedOfferingIDs,
 	})
 	if err != nil || len(candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 	now := common.GetTimestamp()
 	for i := range candidates {
@@ -116,28 +143,94 @@ func computeEligibleBaseChannels(db *gorm.DB, modelName string, strategy routing
 		}
 	}
 	decision, err := routing.Decide(strategy, candidates, routing.DefaultOptions())
-	if err != nil || len(decision.Ranked) == 0 {
-		return nil
+	if err != nil {
+		return nil, nil
 	}
-	topRank := decision.Ranked[0].Rank
-	channelIDs := make([]int, 0, len(decision.Ranked))
-	seen := map[int]struct{}{}
-	for i := range decision.Ranked {
-		ranked := decision.Ranked[i]
-		if ranked.Rank != topRank {
-			continue
+	primary := make([]int, 0, len(decision.Ranked))
+	seenPrimary := map[int]struct{}{}
+	if len(decision.Ranked) > 0 {
+		topRank := decision.Ranked[0].Rank
+		for _, ranked := range decision.Ranked {
+			if ranked.Rank != topRank {
+				continue
+			}
+			appendBaseChannelID(db, &primary, seenPrimary, ranked.Candidate.ShareChannelID)
 		}
-		baseChannelID := baseChannelIDForShareChannel(db, ranked.Candidate.ShareChannelID)
-		if baseChannelID <= 0 {
-			continue
-		}
-		if _, dup := seen[baseChannelID]; dup {
-			continue
-		}
-		seen[baseChannelID] = struct{}{}
-		channelIDs = append(channelIDs, baseChannelID)
 	}
-	return channelIDs
+	// If a strategy has no comparable metric, fail open to the eligible set
+	// rather than turning a newly published model into a hard 503. Auto still
+	// uses capacity-ranked cold start when it has no mature candidates.
+	if len(primary) == 0 {
+		for _, candidate := range candidates {
+			if !candidate.Allowed || candidate.Saturated() {
+				continue
+			}
+			appendBaseChannelID(db, &primary, seenPrimary, candidate.ShareChannelID)
+		}
+	}
+	fallback := make([]int, 0, len(candidates))
+	seenFallback := map[int]struct{}{}
+	for _, candidate := range candidates {
+		if !candidate.Allowed || candidate.Saturated() {
+			continue
+		}
+		baseID := baseChannelIDForShareChannel(db, candidate.ShareChannelID)
+		if baseID <= 0 {
+			continue
+		}
+		if _, exists := seenPrimary[baseID]; exists {
+			continue
+		}
+		if _, exists := seenFallback[baseID]; exists {
+			continue
+		}
+		seenFallback[baseID] = struct{}{}
+		fallback = append(fallback, baseID)
+	}
+	return primary, fallback
+}
+
+func appendBaseChannelID(db *gorm.DB, ids *[]int, seen map[int]struct{}, shareChannelID int64) {
+	baseID := baseChannelIDForShareChannel(db, shareChannelID)
+	if baseID <= 0 {
+		return
+	}
+	if _, exists := seen[baseID]; exists {
+		return
+	}
+	seen[baseID] = struct{}{}
+	*ids = append(*ids, baseID)
+}
+
+// ExpandRouteStrategyFallback widens the request allow-list only after every
+// primary channel has been excluded by retry logic. ACL filters remain in place,
+// and the fallback list itself was assembled from published, non-saturated,
+// non-breaker candidates.
+func ExpandRouteStrategyFallback(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	state, ok := common.GetContextKeyType[*RouteStrategyState](c, constant.ContextKeyRouteStrategyState)
+	if !ok || state == nil || state.Expanded || len(state.FallbackChannelIDs) == 0 {
+		return false
+	}
+	constraints, ok := common.GetContextKeyType[*dto.ChannelConstraints](c, constant.ContextKeyChannelConstraints)
+	if !ok || constraints == nil {
+		return false
+	}
+	denied := constraints.DeniedChannelIDSet()
+	for _, id := range state.PrimaryChannelIDs {
+		if _, blocked := denied[id]; !blocked {
+			return false
+		}
+	}
+	combined := append(append([]int(nil), state.PrimaryChannelIDs...), state.FallbackChannelIDs...)
+	if !constraints.ReplaceAllowedChannelIDs(combined) {
+		return false
+	}
+	state.Expanded = true
+	common.SetContextKey(c, constant.ContextKeyRouteStrategyState, state)
+	return true
 }
 
 // baseChannelIDForShareChannel 把我们的分享渠道映射为它绑定的底座渠道 ID。

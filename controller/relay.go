@@ -362,6 +362,10 @@ func excludeChannelFromRetry(c *gin.Context, channelID int) {
 		Kind:             taskdto.FilterDeniedChannelIds,
 		DeniedChannelIds: []int{channelID},
 	})
+	// A route strategy starts with the mature top-ranked set. Once all of
+	// those channels are excluded by this request, widen the allow-list to the
+	// precomputed cold-start fallback before the next cross-channel attempt.
+	relayhook.ExpandRouteStrategyFallback(c)
 }
 
 // The first synchronous attempt historically carried only a lightweight

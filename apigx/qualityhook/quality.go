@@ -39,8 +39,10 @@ func ClassifyOutcome(err *types.NewAPIError, statusCode int) int {
 		types.ErrorCodePreConsumeTokenQuotaFailed, types.ErrorCodeQueryDataError:
 		return apigxmodel.QualityOutcomeRejected
 	}
-	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusForbidden ||
-		statusCode == http.StatusPaymentRequired {
+	// A bare 429 from the relay is normally an upstream rate/TPM limit. Platform
+	// capacity rejections have already been identified by their stable error code
+	// above, so do not classify every HTTP 429 as a platform rejection.
+	if statusCode == http.StatusForbidden || statusCode == http.StatusPaymentRequired {
 		return apigxmodel.QualityOutcomeRejected
 	}
 	// 超时：底座有专门的错误码 `channel:response_time_exceeded`；此外 context 的 deadline

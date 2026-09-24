@@ -80,6 +80,61 @@ func (cc *ChannelConstraints) AddFilter(f ChannelFilter) {
 	cc.Filters = append(cc.Filters, f)
 }
 
+// ReplaceAllowedChannelIDs replaces the request-level allow-list filter in place.
+// There must be one effective allow-list: multiple allow-list filters are
+// conjunctive, so appending a second one would accidentally intersect rather
+// than expand the route fallback set.
+func (cc *ChannelConstraints) ReplaceAllowedChannelIDs(ids []int) bool {
+	if cc == nil {
+		return false
+	}
+	clean := make([]int, 0, len(ids))
+	seen := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		clean = append(clean, id)
+	}
+	found := false
+	for i := range cc.Filters {
+		if cc.Filters[i].Kind != FilterAllowedChannelIds {
+			continue
+		}
+		cc.Filters[i].AllowedChannelIds = append([]int(nil), clean...)
+		found = true
+	}
+	if !found {
+		cc.Filters = append(cc.Filters, ChannelFilter{
+			Kind: FilterAllowedChannelIds, AllowedChannelIds: append([]int(nil), clean...),
+		})
+	}
+	return true
+}
+
+// DeniedChannelIDSet returns all channels excluded by request-level filters.
+func (cc *ChannelConstraints) DeniedChannelIDSet() map[int]struct{} {
+	denied := make(map[int]struct{})
+	if cc == nil {
+		return denied
+	}
+	for _, filter := range cc.Filters {
+		if filter.Kind != FilterDeniedChannelIds {
+			continue
+		}
+		for _, id := range filter.DeniedChannelIds {
+			if id > 0 {
+				denied[id] = struct{}{}
+			}
+		}
+	}
+	return denied
+}
+
 // ResolvedPin returns the winning pin after priority resolution.
 // Lowest Rank wins. Pins that name the same channel are merged (stricter RetryMode).
 // overridden lists pins that lost to a different channel (for warn logging).

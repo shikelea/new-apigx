@@ -1,12 +1,16 @@
 package relayhook
 
 import (
+	"net/http/httptest"
 	"testing"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/routing"
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	basemodel "github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,6 +72,10 @@ func TestComputeEligibleBaseChannelsUsesAutoQualityRanking(t *testing.T) {
 		computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyAuto, allowed))
 	assert.Equal(t, []int{env.baseChannelID},
 		computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyThroughput, allowed))
+	primary, fallback := computeEligibleBaseChannelsWithFallback(env.db, "breaker-model", routing.StrategyAuto, allowed)
+	assert.Equal(t, []int{env.baseChannelID}, primary)
+	assert.Equal(t, []int{int(secondBaseID)}, fallback,
+		"lower-ranked mature channels remain available as fallback after the top channel is exhausted")
 	assert.Empty(t, computeEligibleBaseChannels(env.db, "breaker-model", routing.StrategyAuto, map[int64]struct{}{}),
 		"没有授权供给时必须保持空集合，不能回退到底座随机")
 }
@@ -94,4 +102,20 @@ func TestComputeEligibleBaseChannelsPersistsOpenBreakerBeforeNativeSelection(t *
 	var base basemodel.Channel
 	require.NoError(t, env.db.Where("id = ?", env.baseChannelID).First(&base).Error)
 	assert.Equal(t, common.ChannelStatusAutoDisabled, base.Status)
+}
+
+func TestExpandRouteStrategyFallbackOnlyAfterPrimaryExhausted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	state := &RouteStrategyState{PrimaryChannelIDs: []int{35}, FallbackChannelIDs: []int{41}}
+	common.SetContextKey(c, constant.ContextKeyRouteStrategyState, state)
+	constraints := &dto.ChannelConstraints{Filters: []dto.ChannelFilter{{
+		Kind: dto.FilterAllowedChannelIds, AllowedChannelIds: []int{35},
+	}}}
+	common.SetContextKey(c, constant.ContextKeyChannelConstraints, constraints)
+	assert.False(t, ExpandRouteStrategyFallback(c), "a healthy primary must remain preferred")
+	constraints.AddFilter(dto.ChannelFilter{Kind: dto.FilterDeniedChannelIds, DeniedChannelIds: []int{35}})
+	assert.True(t, ExpandRouteStrategyFallback(c), "all primary channels exhausted should activate fallback")
+	assert.Equal(t, []int{35, 41}, constraints.Filters[0].AllowedChannelIds)
+	assert.False(t, ExpandRouteStrategyFallback(c), "fallback expansion is idempotent")
 }

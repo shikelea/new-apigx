@@ -34,6 +34,11 @@ func TestClassifyOutcomeSeparatesPlatformRejections(t *testing.T) {
 	quotaErr := types.NewErrorWithStatusCode(errors.New("insufficient quota"),
 		types.ErrorCodeInsufficientUserQuota, http.StatusForbidden)
 	assert.Equal(t, apigxmodel.QualityOutcomeRejected, ClassifyOutcome(quotaErr, http.StatusForbidden))
+
+	upstream429 := types.NewErrorWithStatusCode(errors.New("upstream TPM limit"),
+		types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
+	assert.Equal(t, apigxmodel.QualityOutcomeUpstream, ClassifyOutcome(upstream429, http.StatusTooManyRequests),
+		"an upstream rate limit must contribute to source quality failure, not platform rejection")
 }
 
 // 成功、上游失败、超时、取消四类如实区分。
