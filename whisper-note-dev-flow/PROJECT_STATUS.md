@@ -4,17 +4,34 @@
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
 ## 当前阶段
-**生产 APIGX 已升级至 `88230c1`：模型身份归并、真实渠道名称和多 Key 故障冷却已进入 `/pan/apigx-test` 运行栈；2026-09-24 已在本地修复成熟渠道耗尽后的冷启动跨渠道回退，并完成全仓 Go 回归，生产尚未更新。**
+**生产 APIGX 已升级至 `2c8b5a5`：模型身份归并、真实渠道名称、多 Key 故障冷却与成熟渠道耗尽后的冷启动跨渠道回退已进入 `/pan/apigx-test` 运行栈。**
 
-当前 inner commit 为 `88230c1`，第 182 个补丁已从锁定 New API 基线重放，tree `1e1db41ec98f527732c7debbf29c43c691dd4791` 与 fork HEAD 一致。服务器回环 `/api/status` 返回 `v0.0.0-apigx.88230c1`，应用、MySQL、Redis 和 stub 均 healthy；本轮没有推送 GitHub。
+当前 inner commit 为 `2c8b5a5`，本地前端构建和 Linux amd64 二进制已完成；生产回环 `/api/status` 返回 `v0.0.0-apigx.2c8b5a5`，app、MySQL、Redis 和 stub 均 healthy。生产更新只重建了 app，MySQL/Redis/stub 容器 ID 与启动时间保持不变；本轮没有推送 GitHub。
 
 ## 当前任务
-[已完成] 将 `88230c1` 升级到“主”服务器 APIGX 运行栈。
-- 实际运行目录为 `/pan/apigx-test`，只重建 `app` 服务，MySQL、Redis 与持久化目录未重启或改动。
-- 升级前备份位于 `/pan/apigx-test/backups/pre-88230c1-20260922T111251Z`，旧镜像另有回滚标签。
-- 应用镜像 `sha256:b7a7c3af…273caf9` healthy，回环状态接口确认版本 `v0.0.0-apigx.88230c1`。
-- 启动日志 64 行中未匹配到 panic、fatal、迁移失败或数据库/Redis 连接错误；未执行故障注入和业务写入测试。
+[已完成] 将成熟渠道失败后的冷启动跨渠道回退版本部署到“主”服务器。
+- 实际运行目录为 `/pan/apigx-test`，通过 `docker compose build app` 与 `docker compose up -d --no-deps app` 只重建 `app` 服务。
+- 升级前备份位于 `/pan/apigx-test/backups/pre-2c8b5a5-20260924T104251Z`，新发布暂存于 `/pan/apigx-test/releases/2c8b5a5`。
+- 应用镜像为 `sha256:63d20be7…a40d60d`，二进制 SHA-256 为 `b74ca3ff…8813207`；回环状态接口确认版本 `v0.0.0-apigx.2c8b5a5`。
+- app 启动日志无 panic、fatal、迁移失败或 MySQL/Redis 连接错误；未执行故障注入或业务写入测试。
 
+### [050] 2026-09-24 部署成熟渠道耗尽后的冷启动跨渠道回退
+
+**做了什么**：把本地已通过全仓 Go 回归的 inner `2c8b5a5` 发布到“主”服务器 `/pan/apigx-test`。只重建 `app`，让成熟渠道的 Key 池在当前请求内耗尽后可以回退到其他已授权、未满载、未熔断的同模型渠道；MySQL、Redis 和 stub 保持原实例。
+
+**涉及模块**：Linux amd64 构建产物、Docker Compose app 服务、生产备份与健康检查
+
+**改动明细**：
+| 文件 / 位置 | 模块 | 改动说明 |
+|---|---|---|
+| `/pan/apigx-test/releases/2c8b5a5/apigx-linux-amd64` | 发布产物 | 上传并通过 SHA-256 `b74ca3ff64651932a179bc0197257db9188929cf7e66af105d0f701df8813207` 校验 |
+| `/pan/apigx-test/apigx-linux-amd64`、`BUILD_INFO` | 运行版本 | 原子替换为 `v0.0.0-apigx.2c8b5a5` |
+| `/pan/apigx-test/backups/pre-2c8b5a5-20260924T104251Z/**` | 回滚 | 保存旧二进制、Compose、Dockerfile、`.env`、旧镜像 ID 和四容器更新前状态 |
+| `app` 容器 | 运行服务 | 新镜像 `sha256:63d20be7ce436673a0b5bbd615269122c3fa7b5c3e92295104eb96e89a40d60d`，仅 app 重建 |
+
+**验证**：`app/mysql/redis/stub` 四服务 healthy；`/api/status` 返回 `v0.0.0-apigx.2c8b5a5`；app 于 `2026-09-24T10:47:32Z` 启动；启动日志关键错误匹配 0；MySQL/Redis/stub 容器 ID 与 `2026-09-21` 的启动时间保持不变。
+
+**剩余风险**：尚未在生产执行故障注入或专门构造的冷启动回退测试；用户可通过宝塔反代后的真实请求观察 `retry_attempts`、渠道切换和最终响应。
 ### [049] 2026-09-24 成熟渠道耗尽后的冷启动跨渠道回退
 
 **做了什么**：修复自动路由只把最高质量候选写入请求 allow-list 的问题。请求开始时仍优先成熟候选；同一请求内这些候选因多 Key 耗尽而被排除后，动态扩大 allow-list 到已授权、未满载、未熔断的其他同模型渠道，避免直接返回“可用渠道不存在”。同时把真实上游 HTTP 429 从平台拒绝改为上游质量失败。

@@ -1,5 +1,20 @@
 # 任务清单
 
+## [已完成] 部署冷启动跨渠道回退到生产服务器（2026-09-24）
+
+**本轮目标**：将已完成全仓 Go 回归的 `new-api` inner commit `2c8b5a5` 构建并部署到“主”服务器 `/pan/apigx-test`，只更新 `app` 服务，解决成熟渠道 Key 池耗尽后无法回退到冷启动同模型渠道的问题。
+**验收标准**：① 本地前端构建、Linux amd64 二进制构建和哈希记录完成；② 生产更新前备份当前 app 二进制/镜像引用、编排和环境文件；③ 只重建 `app`，不重启或写入 MySQL/Redis；④ `/api/status` 返回新版本且 app 日志无 panic、fatal、迁移或依赖连接错误；⑤ 健康检查失败时只回滚 app；⑥ 不推送 GitHub、不做故障注入或业务写入测试。
+
+**涉及模块**：本地前端/Go 构建、`/pan/apigx-test` app 发布、Docker Compose 健康检查、部署台账。
+
+**任务清单**：
+- [x] D1 本地重建前端与 Linux amd64 二进制，记录版本和 SHA-256 → Rsbuild 构建通过；生成 `v0.0.0-apigx.2c8b5a5`，二进制 SHA-256 `b74ca3ff64651932a179bc0197257db9188929cf7e66af105d0f701df8813207`
+- [x] D2 只读核对生产当前版本、Compose 状态、端口和依赖容器 → 更新前为 `v0.0.0-apigx.88230c1`；`app/mysql/redis/stub` healthy；应用监听 `127.0.0.1:13000`
+- [x] D3 备份当前 app 并上传/校验新发布产物 → 备份 `/pan/apigx-test/backups/pre-2c8b5a5-20260924T104251Z`；发布 `/pan/apigx-test/releases/2c8b5a5`；远端哈希复核通过
+- [x] D4 仅重建 app 并检查状态接口和启动日志 → `docker compose build app` + `docker compose up -d --no-deps app`；`/api/status` 返回 `v0.0.0-apigx.2c8b5a5`；app healthy；启动日志无 panic/fatal/迁移失败/MySQL/Redis 连接错误
+- [x] D5 如健康失败则回滚 app；成功后更新台账并提交本地文档记录 → 无需回滚；MySQL/Redis/stub 容器 ID 与启动时间保持不变；未推送 GitHub、未执行故障注入或业务写入测试
+
+**完成证据**：新 app 镜像 `sha256:63d20be7ce436673a0b5bbd615269122c3fa7b5c3e92295104eb96e89a40d60d`；新 app 容器于 `2026-09-24T10:47:32Z` 启动并 healthy；MySQL/Redis 仍为 `2026-09-21` 启动的原容器。
 ## [已完成] 成熟渠道失败后的冷启动跨渠道兜底（2026-09-24）
 
 **本轮目标**：修复自动路由只把成熟质量候选写入请求 allow-list，导致成熟渠道的 Key 池耗尽后冷启动同模型渠道永远无法接管、最终返回“可用渠道不存在”。
