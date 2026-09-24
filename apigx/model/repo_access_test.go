@@ -256,6 +256,40 @@ func TestResolveSourceAccessSnapshotIdentityMatrix(t *testing.T) {
 	assert.Equal(t, map[int64]bool{public.offering.ID: true, private.offering.ID: true}, allowedIDs(keySnapshot))
 }
 
+func TestResolveSourceAccessSnapshotExpandsCanonicalModelAliases(t *testing.T) {
+	const owner, viewer int64 = 9761, 9762
+	db := newRepoDB(t)
+	canonical := &CanonicalModel{APIModelID: "canonical-flash", Status: 1}
+	require.NoError(t, db.Create(canonical).Error)
+
+	makeOffering := func(name, upstream string, baseID int64) int64 {
+		t.Helper()
+		group := &ShareGroup{
+			OwnerUserID: owner, Name: name, DefaultVisibility: ShareGroupVisibilityPublic,
+			PublishStatus: ShareGroupPublishPublished,
+		}
+		require.NoError(t, CreateShareGroup(db, group))
+		channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: name + "渠道", BaseChannelID: baseID}
+		require.NoError(t, CreateChannel(db, channel))
+		offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: upstream, CanonicalModelID: canonical.ID}
+		require.NoError(t, CreateModelOffering(db, owner, offering))
+		require.NoError(t, db.Model(&ModelOffering{}).Where("id = ?", offering.ID).
+			Updates(map[string]any{"canonical_model_id": canonical.ID, "status": OfferingStatusPublished}).Error)
+		return offering.ID
+	}
+
+	canonicalOffering := makeOffering("标准", "canonical-flash", 91101)
+	aliasOffering := makeOffering("别名", "provider-flash-v1", 91102)
+
+	for _, requestedModel := range []string{"canonical-flash", "provider-flash-v1"} {
+		snapshot, err := ResolveSourceAccessSnapshot(db, viewer, 0, requestedModel, 10_000)
+		require.NoError(t, err)
+		assert.Contains(t, snapshot.AllowedOfferingIDs, canonicalOffering, requestedModel)
+		assert.Contains(t, snapshot.AllowedOfferingIDs, aliasOffering, requestedModel)
+		assert.ElementsMatch(t, []int{91101, 91102}, snapshot.AllowedBaseChannelIDs, requestedModel)
+	}
+}
+
 // 注册邀请（§5 邀请准入）：**补偿回补**必须真的把名额还回去，且类型不得串用（§10.1）。
 //
 // 回补的用途：注册流程里"先核销、后建用户"，建用户失败时要把名额还回去（失败不该消耗邀请码）。

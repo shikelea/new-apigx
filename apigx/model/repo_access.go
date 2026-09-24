@@ -372,17 +372,41 @@ func ResolveSourceAccessSnapshot(db *gorm.DB, viewerUserID, platformKeyID int64,
 	}
 
 	offeringTable := ModelOffering{}.TableName()
+	canonicalTable := CanonicalModel{}.TableName()
 	channelTable := Channel{}.TableName()
 	groupTable := ShareGroup{}.TableName()
+
+	// A request normally carries the public canonical model ID, while each
+	// offering keeps the provider-specific upstream ID that must be sent to
+	// its channel. Resolve the request to canonical identities first so an
+	// exhausted/blocked provider alias does not hide other published sources
+	// of the same model. The upstream-ID match is retained for clients that
+	// still call an alias directly.
+	var canonicalIDs []int64
+	if err := db.Table(offeringTable+" AS o").
+		Joins("JOIN "+canonicalTable+" AS cm ON cm.id = o.canonical_model_id").
+		Where("(cm.api_model_id = ? OR o.upstream_model_id = ?) AND o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ?",
+			upstreamModelID, upstreamModelID, OfferingStatusPublished, AliveFlagAlive).
+		Distinct("o.canonical_model_id").Pluck("o.canonical_model_id", &canonicalIDs).Error; err != nil {
+		return snapshot, err
+	}
+
 	var resources []OfferingAccessResource
-	err := db.Table(offeringTable+" AS o").
+	resourceQuery := db.Table(offeringTable+" AS o").
 		Select("o.id AS offering_id, o.channel_id AS share_channel_id, c.base_channel_id AS base_channel_id, "+
 			"c.owner_user_id AS owner_user_id, g.id AS share_group_id, g.default_visibility AS group_visibility").
 		Joins("JOIN "+channelTable+" AS c ON c.id = o.channel_id AND c.deleted_at IS NULL AND c.alive_flag = ?", AliveFlagAlive).
 		Joins("JOIN "+groupTable+" AS g ON g.id = c.share_group_id AND g.deleted_at IS NULL AND g.alive_flag = ?", AliveFlagAlive).
-		Where("o.upstream_model_id = ? AND o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ? AND g.publish_status = ?",
-			upstreamModelID, OfferingStatusPublished, AliveFlagAlive, ShareGroupPublishPublished).
-		Order("o.id ASC").Scan(&resources).Error
+		Where("o.status = ? AND o.deleted_at IS NULL AND o.alive_flag = ? AND g.publish_status = ?",
+			OfferingStatusPublished, AliveFlagAlive, ShareGroupPublishPublished)
+	if len(canonicalIDs) > 0 {
+		resourceQuery = resourceQuery.Where("o.canonical_model_id IN ?", canonicalIDs)
+	} else {
+		// Legacy rows may predate canonical identity assignment. Preserve the
+		// exact upstream lookup when no canonical identity can be resolved.
+		resourceQuery = resourceQuery.Where("o.upstream_model_id = ?", upstreamModelID)
+	}
+	err := resourceQuery.Order("o.id ASC").Scan(&resources).Error
 	if err != nil {
 		return snapshot, err
 	}
