@@ -25,7 +25,8 @@
 
 当前 inner commit 为 `8932687`，生产 `/api/status` 返回 `v0.0.0-apigx.8932687`；本轮只重建 app，MySQL/Redis/stub 未重启。
 
-## 当前任务`n[已完成] 修复同标准模型别名授权候选并部署到“主”服务器。
+## 当前任务
+[已完成] 修复同标准模型别名授权候选并部署到“主”服务器。
 - 实际运行目录为 `/pan/apigx-test`，通过 `docker compose build app` 与 `docker compose up -d --no-deps app` 只重建 `app` 服务。
 - 升级前备份位于 `/pan/apigx-test/backups/pre-8932687-20260924T140011Z`，新发布位于 `/pan/apigx-test/releases/8932687`。
 - 应用镜像已重建；二进制 SHA-256 为 `605c286ce24ab46f8b8370d3cbe333a8fdc06c01a2f37e20ba3141079a57a646`；回环状态接口确认版本 `v0.0.0-apigx.8932687`。
