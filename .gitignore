@@ -35,3 +35,7 @@ tmp/
 
 # Agent 团队的本地状态（任务看板产物）
 /.agent-teams/
+
+# 本地浏览器与验证输出
+/.playwright-cli/
+/output/
