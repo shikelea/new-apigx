@@ -17,9 +17,9 @@
 | `new-api/web/src/features/share-center/**` | 前端 | 广场搜索、Markdown 详情、有效性投票、我的分享、审核预览和登录前可见开关 |
 | `new-api/web/src/routes/**`、`use-sidebar-data.ts` | 导航 | 接入公开分享中心、个人管理和系统设置审核入口 |
 | `new-api/model/share_post_test.go` | 回归 | 覆盖输入校验、状态生命周期、投票幂等和私有可见性 |
-| `new-api/` subtree | 交付 | 纳入 2666 个底座文件和完整 6837 个提交历史；保留 AGPLv3、LICENSE 与 NOTICE |
+| `new-api/` subtree | 交付 | 纳入 2666 个底座文件和完整 6839 个提交历史；保留 AGPLv3、LICENSE 与 NOTICE |
 
-**验证**：`go test ./model ./router ./controller -count=1` 通过；SQLite 与本地 PostgreSQL 迁移矩阵通过；前端 `tsgo -b`、定向 `oxlint`、`rsbuild build` 通过；`git diff --check` 通过。MySQL 矩阵因本机没有 MySQL/MariaDB 服务未执行，已记录为环境风险。
+**验证**：`go test ./model ./router ./controller -count=1` 通过；分享驳回重提回归通过；SQLite 与本地 PostgreSQL 迁移矩阵通过；前端 `tsgo -b`、定向 `oxlint`、`rsbuild build` 通过；`git diff --check` 通过。MySQL 矩阵因本机没有 MySQL/MariaDB 服务未执行，已记录为环境风险。
 
 **剩余风险**：需要在具备 MySQL 8 实例的 CI 或部署环境补跑 `APIGX_TEST_MYSQL_DSN` 矩阵；分享中心尚未做浏览器端端到端测试和生产故障注入。
 
@@ -47,7 +47,7 @@
 
 ## 当前任务
 [已完成] 交付纯 Markdown 分享中心并完成可上传仓库整理。
-- 根仓库 HEAD 已包含 APIGX subtree；当前总提交数 6837，`new-api/` 文件数 2666。
+- 根仓库 HEAD 已包含 APIGX subtree；当前总提交数 6839，`new-api/` 文件数 2666。
 - 生产服务器未更新，本轮只做本地代码、数据库矩阵与构建验证。
 
 [已完成] 修复同标准模型别名授权候选并部署到“主”服务器。

@@ -21,8 +21,8 @@
 - [x] S2 实现公开广场、详情、作者投稿/编辑/撤回和投票 API → `new-api/controller/share_center.go`、`new-api/router/api-router.go`；Go 接口包编译与测试通过
 - [x] S3 实现管理员审核、登录前可见策略和审计记录 → 管理审核 API、配置项、审计埋点和关键操作限流已接入
 - [x] S4 完成前端广场、详情、我的分享与后台审核交互 → `web/src/features/share-center/**`、路由和导航；tsgo、oxlint、Rsbuild 均通过
-- [x] S5 完成安全 Markdown 渲染、限流、权限与多数据库回归 → 复用 `Markdown` 的 Marked + DOMPurify 安全渲染；写入/投票/审核限流；SQLite 与本地 PostgreSQL 矩阵通过，MySQL 因本机未安装服务未执行
-- [x] S6 完成构建验证、合并底座历史与外层台账，形成可上传仓库 → 根仓库纳入 `new-api` 非压缩 subtree，保留 6837 个提交、2666 个底座文件；README、锁定文件和流程台账已同步
+- [x] S5 完成安全 Markdown 渲染、限流、权限与多数据库回归 → 新增驳回重提回归；复用 `Markdown` 的 Marked + DOMPurify 安全渲染；写入/投票/审核限流；SQLite 与本地 PostgreSQL 矩阵通过，MySQL 因本机未安装服务未执行
+- [x] S6 完成构建验证、合并底座历史与外层台账，形成可上传仓库 → 根仓库纳入 `new-api` 非压缩 subtree，保留 6839 个提交、2666 个底座文件；README、锁定文件和流程台账已同步
 
 
 ## [已完成] 修复同标准模型别名渠道未进入授权路由候选（2026-09-24）
