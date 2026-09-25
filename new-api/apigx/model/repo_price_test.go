@@ -1,0 +1,487 @@
+package apigxmodel
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+// T2.1 价格快照的三条不变量（计划书 §阶段 2 验收）。
+
+// ① 价格未知 ≠ 零：没有快照、快照未被接受、或等待汇率换算，都必须判为「未知」，
+// 且取价接口必须显式返回 ok=false，而不是给出 0 让调用方当成免费。
+func TestPriceUnknownIsNotZero(t *testing.T) {
+	db := newRepoDB(t)
+
+	// 没有任何快照 → ErrNoPriceRule
+	_, _, err := GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+	assert.ErrorIs(t, err, ErrNoPriceRule, "无快照必须显式报「没有价格」")
+
+	// 快照存在但**未被接受** → 仍算未知
+	pending := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9501, Source: PriceRuleSourceModelsDev, Currency: "USD",
+		ValidationState: PriceValidationPending}
+	require.NoError(t, CreatePriceRuleSnapshot(db, pending, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 2500, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+	// **未被接受的快照不生效**：取用时根本看不到它（旧价格继续使用 / 视为未知）
+	_, _, err = GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+	assert.ErrorIs(t, err, ErrNoPriceRule, "待校验的快照不得生效")
+
+	// 接受之后才可用
+	require.NoError(t, db.Model(&PriceRule{}).Where("scope_type = ? AND scope_id = 9501", PriceScopeChannel).
+		Update("validation_state", PriceValidationAccepted).Error)
+	rule, items, err := GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.False(t, IsPriceUnknown(rule, &items[0]))
+	_, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+	require.True(t, ok)
+	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9501, 0)
+	require.NoError(t, err)
+	price, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+	require.True(t, ok)
+	assert.EqualValues(t, 2500, price)
+
+	// 非 USD 币种在**待汇率**时同样算未知
+	cny := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9502, Source: PriceRuleSourceUpstreamQuote, Currency: "CNY",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, CreatePriceRuleSnapshot(db, cny, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 18000, Currency: "CNY", UsdState: UsdStatePendingFx},
+	}))
+	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9502, 0)
+	require.NoError(t, err)
+	assert.True(t, IsPriceUnknown(rule, &items[0]), "非 USD 且待换算时必须算未知")
+	_, ok = EffectiveUSDUnitPriceMicro(rule, &items[0])
+	assert.False(t, ok)
+
+	// 换算完成后可用（用保存的 USD 单价）
+	require.NoError(t, db.Model(&PriceRuleItem{}).Where("id = ?", items[0].ID).
+		Updates(map[string]any{"usd_state": UsdStateConverted, "usd_unit_price_micro": 2500}).Error)
+	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9502, 0)
+	require.NoError(t, err)
+	price, ok = EffectiveUSDUnitPriceMicro(rule, &items[0])
+	require.True(t, ok)
+	assert.EqualValues(t, 2500, price)
+}
+
+// ② 人工覆盖不被同步改写：人工/锁定的快照之后，同步必须放弃。
+func TestPriceSyncCannotOverwriteManualOverride(t *testing.T) {
+	db := newRepoDB(t)
+
+	manual := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9601, Source: PriceRuleSourceManual, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, CreatePriceRuleSnapshot(db, manual, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 9999, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+	assert.True(t, manual.ManualOverride, "人工来源应自动标记 ManualOverride")
+
+	// 同步想改写 → 必须被挡住
+	sync := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9601, Source: PriceRuleSourceModelsDev, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	err := ApplyPriceSync(db, sync, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 1, Currency: "USD", UsdState: UsdStateNotNeeded},
+	})
+	assert.ErrorIs(t, err, ErrPriceLocked, "人工覆盖的价格不得被同步改写")
+
+	// 人工价保持原值，且没有产生新版本
+	rule, items, err := GetEffectivePriceRule(db, PriceScopeChannel, 9601, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 9999, items[0].UnitPriceMicro)
+	assert.EqualValues(t, 1, rule.Version, "被挡下的同步不得产生新版本")
+
+	// 未人工覆盖的作用域可以被同步
+	other := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, ApplyPriceSync(db, other, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 100, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+	// 再次同步 → 追加新版本（历史保留）
+	second := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, ApplyPriceSync(db, second, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 200, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+	rule, items, err = GetEffectivePriceRule(db, PriceScopeChannel, 9602, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, rule.Version)
+	assert.EqualValues(t, 200, items[0].UnitPriceMicro)
+
+	// 锁定之后同步被挡
+	require.NoError(t, SetPriceRuleLock(db, PriceScopeChannel, 9602, true))
+	third := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9602, Source: PriceRuleSourceModelsDev, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	assert.ErrorIs(t, ApplyPriceSync(db, third, nil), ErrPriceLocked, "锁定后同步必须被挡")
+}
+
+func TestManualOfferingPriceRejectsConcurrentOfferingChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(tx *gorm.DB, offering *ModelOffering) error
+	}{
+		{
+			name: "status changed before price attachment",
+			change: func(tx *gorm.DB, offering *ModelOffering) error {
+				return tx.Model(&ModelOffering{}).Where("id = ?", offering.ID).
+					Update("status", OfferingStatusPending).Error
+			},
+		},
+		{
+			name: "revision changed before price attachment",
+			change: func(tx *gorm.DB, offering *ModelOffering) error {
+				return tx.Model(&ModelOffering{}).Where("id = ?", offering.ID).
+					Update("revision", offering.Revision+1).Error
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newRepoDB(t)
+			const owner int64 = 9651
+			_, channel := seedGroupAndChannel(t, db, owner)
+			offering := &ModelOffering{ChannelID: channel.ID, UpstreamModelID: "manual-price-race"}
+			require.NoError(t, CreateModelOffering(db, owner, offering))
+
+			callbackName := "g4:change_offering_before_manual_price_attach:" + tt.name
+			require.NoError(t, db.Callback().Create().After("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+				if tx.Statement.Schema == nil || tx.Statement.Schema.Table != (PriceRule{}).TableName() {
+					return
+				}
+				if err := tt.change(tx.Session(&gorm.Session{NewDB: true}), offering); err != nil {
+					tx.AddError(err)
+				}
+			}))
+			t.Cleanup(func() { _ = db.Callback().Create().Remove(callbackName) })
+
+			created, err := CreateManualOfferingPriceSnapshot(db, owner, offering.ID, []PriceRuleItem{{
+				Dimension: 0, UnitScale: 0, UnitPriceMicro: 1_000_000,
+			}})
+			assert.Nil(t, created)
+			assert.ErrorIs(t, err, ErrInvalidArgument)
+
+			var ruleCount int64
+			require.NoError(t, db.Model(&PriceRule{}).
+				Where("scope_type = ? AND scope_id = ?", PriceScopeOffering, offering.ID).
+				Count(&ruleCount).Error)
+			assert.Zero(t, ruleCount, "stale offering state must roll back the new price snapshot")
+
+			var stored ModelOffering
+			require.NoError(t, db.Where("id = ?", offering.ID).First(&stored).Error)
+			assert.Equal(t, OfferingStatusDraft, stored.Status)
+			assert.EqualValues(t, offering.Revision, stored.Revision,
+				"the injected change is part of the rejected transaction and must roll back")
+			assert.Zero(t, stored.PriceRuleID)
+		})
+	}
+}
+
+// ③ 单渠道同步不污染全局或其他分享者：快照按作用域版本化，互不可见。
+func TestPriceSnapshotScopesAreIsolated(t *testing.T) {
+	db := newRepoDB(t)
+
+	channelA := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9701, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, CreatePriceRuleSnapshot(db, channelA, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 111, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+	channelB := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9702, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, CreatePriceRuleSnapshot(db, channelB, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 222, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+
+	// 同一个 scope_id 但不同 scope_type（例如"渠道"与"供给"）也互不影响
+	offering := &PriceRule{ScopeType: PriceScopeOffering, ScopeID: 9701, Source: PriceRuleSourceManual, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, CreatePriceRuleSnapshot(db, offering, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 333, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+
+	// A 的同步不能改到 B
+	syncA := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9701, Source: PriceRuleSourceUpstreamQuote, Currency: "USD",
+		ValidationState: PriceValidationAccepted}
+	require.NoError(t, ApplyPriceSync(db, syncA, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 999, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+
+	_, itemsB, err := GetEffectivePriceRule(db, PriceScopeChannel, 9702, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 222, itemsB[0].UnitPriceMicro, "另一渠道的价格不得被同步污染")
+
+	_, itemsOffering, err := GetEffectivePriceRule(db, PriceScopeOffering, 9701, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 333, itemsOffering[0].UnitPriceMicro, "不同作用域类型之间同样不得串价")
+
+	// 归零检查：谁都没有被写成 0
+	for _, scope := range []struct {
+		scopeType int
+		scopeID   int64
+	}{{PriceScopeChannel, 9701}, {PriceScopeChannel, 9702}, {PriceScopeOffering, 9701}} {
+		rule, items, err := GetEffectivePriceRule(db, scope.scopeType, scope.scopeID, 0)
+		require.NoError(t, err)
+		price, ok := EffectiveUSDUnitPriceMicro(rule, &items[0])
+		require.True(t, ok)
+		assert.NotZero(t, price, "任何作用域的价格都不得被写成 0")
+	}
+}
+
+// 生效区间与校验：历史版本可回看，非法输入被拒。
+func TestPriceRuleVersioningAndValidation(t *testing.T) {
+	db := newRepoDB(t)
+	base := &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9801, Source: PriceRuleSourceModelsDev, Currency: "USD",
+		ValidationState: PriceValidationAccepted, EffectiveFrom: 1000, EffectiveTo: 2000}
+	require.NoError(t, CreatePriceRuleSnapshot(db, base, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 10, Currency: "USD", UsdState: UsdStateNotNeeded},
+	}))
+	// 区间内可取到
+	rule, _, err := GetEffectivePriceRule(db, PriceScopeChannel, 9801, 1500)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, rule.Version)
+	// 区间外 → 视为没有价格（而不是"取到旧价"）
+	_, _, err = GetEffectivePriceRule(db, PriceScopeChannel, 9801, 2500)
+	assert.ErrorIs(t, err, ErrNoPriceRule)
+
+	// 非法输入
+	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, Currency: "USD"}, nil), ErrInvalidArgument)
+	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9, Currency: ""}, nil), ErrInvalidArgument)
+	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9, Currency: "USD"}, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: 1, Currency: "USD"}, {Dimension: 1, UnitPriceMicro: 2, Currency: "USD"},
+	}), ErrInvalidArgument, "同维度重复必须被拒")
+	assert.ErrorIs(t, CreatePriceRuleSnapshot(db, &PriceRule{ScopeType: PriceScopeChannel, ScopeID: 9, Currency: "USD"}, []PriceRuleItem{
+		{Dimension: 1, UnitPriceMicro: -1, Currency: "USD"},
+	}), ErrInvalidArgument, "负价格必须被拒")
+}
+
+// T2.1 来源价格摄入：可疑数据**留存待确认且不顶掉旧价**（计划书 §阶段 2 验收）。
+func TestIngestSourcePriceKeepsOldPriceOnSuspiciousData(t *testing.T) {
+	db := newRepoDB(t)
+	const scopeType = PriceScopeChannel
+	const scopeID int64 = 9901
+
+	// 先有一条已生效的正常价格（line 1 = 2500 微美元 / 单位）
+	ok := IngestSourcePrice
+	res, err := ok(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceModelsDev,
+		SourceRef: "models.dev/openai/gpt-x", Currency: "USD", ModelKnown: true,
+		Items:     []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 2500}},
+		RawRecord: `{"input":2.5}`,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.Applied)
+	require.NotZero(t, res.RuleID)
+
+	rule, items, err := GetEffectivePriceRule(db, scopeType, scopeID, 0)
+	require.NoError(t, err)
+	price, usable := EffectiveUSDUnitPriceMicro(rule, &items[0])
+	require.True(t, usable)
+	assert.EqualValues(t, 2500, price)
+
+	// ① 模型未知 → 待确认，**旧价继续生效**
+	res, err = ok(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceMoyan,
+		SourceRef: "moyan/unknown-model", Currency: "USD", ModelKnown: false,
+		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 1}},
+	})
+	require.NoError(t, err)
+	assert.False(t, res.Applied)
+	assert.True(t, res.Pending)
+	assert.Equal(t, PricePendingModelUnknown, res.Note)
+
+	rule, items, err = GetEffectivePriceRule(db, scopeType, scopeID, 0)
+	require.NoError(t, err)
+	price, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
+	require.True(t, usable)
+	assert.EqualValues(t, 2500, price, "可疑的新价格不得顶掉旧价格")
+	assert.EqualValues(t, 1, rule.Version, "生效版本应仍是 v1")
+
+	// 待确认版本可被人工看到（不过滤校验状态）
+	all, err := ListPriceRuleSnapshots(db, scopeType, scopeID, 10)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	assert.Equal(t, PriceValidationPending, all[0].ValidationState)
+	assert.Equal(t, PricePendingModelUnknown, all[0].ValidationNote)
+	assert.Equal(t, PriceValidationAccepted, all[1].ValidationState)
+
+	// ② 单位冲突 → 待确认
+	res, err = ok(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceUpstreamQuote,
+		Currency: "USD", ModelKnown: true,
+		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 5, Currency: "CNY"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PricePendingUnitConflict, res.Note)
+	assert.False(t, res.Applied)
+
+	// ③ 币种缺失 → 待确认
+	res, err = ok(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceUpstreamQuote,
+		Currency: "", ModelKnown: true, Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 5}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PricePendingCurrencyMissing, res.Note)
+
+	// ④ 空记录 → 待确认
+	res, err = ok(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceUpstreamQuote,
+		Currency: "USD", ModelKnown: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, PricePendingEmptyRecord, res.Note)
+
+	// 旧价始终没有被改写
+	rule, items, err = GetEffectivePriceRule(db, scopeType, scopeID, 0)
+	require.NoError(t, err)
+	price, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
+	require.True(t, usable)
+	assert.EqualValues(t, 2500, price)
+
+	// ⑤ 人工锁定后，正常数据也不能改写
+	require.NoError(t, SetPriceRuleLock(db, scopeType, scopeID, true))
+	_, err = ok(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: scopeID, Source: PriceRuleSourceModelsDev,
+		Currency: "USD", ModelKnown: true, Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 777}},
+	})
+	assert.ErrorIs(t, err, ErrPriceLocked, "人工锁定后同步必须放弃")
+}
+
+// 非 USD 价格：有保存的汇率则按该汇率归一；没有汇率则**可生效但 USD 未知**（不误算为 0）。
+func TestIngestNonUSDPriceUsesSavedFxRate(t *testing.T) {
+	db := newRepoDB(t)
+	const scopeType = PriceScopeChannel
+
+	// 有汇率：1 USD = 7.2 CNY → FxRateMicro = 7_200_000
+	res, err := IngestSourcePrice(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: 9911, Source: PriceRuleSourceUpstreamQuote,
+		Currency: "CNY", ModelKnown: true, FxRateID: 5, FxRateMicro: 7_200_000,
+		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 18_000}},
+	})
+	require.NoError(t, err)
+	assert.True(t, res.Applied)
+	rule, items, err := GetEffectivePriceRule(db, scopeType, 9911, 0)
+	require.NoError(t, err)
+	assert.True(t, rule.UsdConverted)
+	price, usable := EffectiveUSDUnitPriceMicro(rule, &items[0])
+	require.True(t, usable)
+	assert.EqualValues(t, 2500, price, "18000 CNY / 7.2 = 2500 微美元")
+
+	// 没有汇率：快照生效（原币价可信），但 USD 未知——**不得**返回 0
+	res, err = IngestSourcePrice(db, SourcePriceIngest{
+		ScopeType: scopeType, ScopeID: 9912, Source: PriceRuleSourceUpstreamQuote,
+		Currency: "CNY", ModelKnown: true,
+		Items: []PriceRuleItem{{Dimension: 1, UnitPriceMicro: 18_000}},
+	})
+	require.NoError(t, err)
+	assert.True(t, res.Applied)
+	rule, items, err = GetEffectivePriceRule(db, scopeType, 9912, 0)
+	require.NoError(t, err)
+	assert.Equal(t, UsdStatePendingFx, items[0].UsdState)
+	_, usable = EffectiveUSDUnitPriceMicro(rule, &items[0])
+	assert.False(t, usable, "缺汇率时 USD 价格必须显式未知，而不是 0")
+}
+
+// ---- 汇率快照（T2.3） ----
+
+// 汇率快照只追加且封版上一条：历史价格不会因为汇率更新而改变。
+func TestFxRateSnapshotSealsPreviousVersion(t *testing.T) {
+	db := newRepoDB(t)
+
+	first := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, EffectiveFrom: 1000,
+		SourceLabel: "admin", ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+	require.NoError(t, CreateFxRateSnapshot(db, first))
+
+	// 取到第一条
+	rate, err := GetEffectiveFxRate(db, "CNY", 1500)
+	require.NoError(t, err)
+	assert.EqualValues(t, 7_200_000, rate.RateMicro)
+
+	// 追加第二条（汇率变动）：第一条应被封版
+	second := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_400_000, EffectiveFrom: 2000,
+		SourceLabel: "admin", ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+	require.NoError(t, CreateFxRateSnapshot(db, second))
+
+	// 历史时刻仍取到**当时**的汇率（历史不被改写）
+	rate, err = GetEffectiveFxRate(db, "CNY", 1500)
+	require.NoError(t, err)
+	assert.EqualValues(t, 7_200_000, rate.RateMicro, "历史时刻必须取到当时生效的汇率")
+	assert.EqualValues(t, first.ID, rate.ID)
+
+	// 当前时刻取到新汇率
+	rate, err = GetEffectiveFxRate(db, "CNY", 2500)
+	require.NoError(t, err)
+	assert.EqualValues(t, 7_400_000, rate.RateMicro)
+
+	// 同一币种任何时刻**只有一条**生效，避免"用哪条"变成未定义
+	var active int64
+	require.NoError(t, db.Model(&FxRate{}).Where("quote_currency = ? AND effective_to = 0", "CNY").Count(&active).Error)
+	assert.EqualValues(t, 1, active)
+}
+
+// 没有汇率时必须报"未知"，**绝不退回 1:1**——否则 7.2 CNY 会被当成 7.2 USD。
+func TestFxRateMissingIsNotOneToOne(t *testing.T) {
+	db := newRepoDB(t)
+
+	_, err := GetEffectiveFxRate(db, "JPY", 0)
+	assert.ErrorIs(t, err, ErrNoFxRate)
+
+	// 换算接口对 nil/非法汇率一律返回 ok=false，而不是拿 1:1 硬算
+	usd, ok := QuoteToUSDMicro(nil, 1_000_000)
+	assert.False(t, ok)
+	assert.Zero(t, usd)
+
+	usd, ok = QuoteToUSDMicro(&FxRate{RateMicro: 0}, 1_000_000)
+	assert.False(t, ok)
+
+	// 方向不对也拒绝（防止"乘还是除"的口径分歧被悄悄绕过）
+	usd, ok = QuoteToUSDMicro(&FxRate{RateMicro: 7_200_000, ConversionDirection: 99}, 7_200_000)
+	assert.False(t, ok)
+}
+
+// 换算方向与数值：USD = quote / rate；反向 quote = USD × rate。
+func TestFxRateConversionDirection(t *testing.T) {
+	rate := &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+
+	// 7200000 微人民币 ÷ 7.2 = 1000000 微美元（即 1 USD）
+	usd, ok := QuoteToUSDMicro(rate, 7_200_000)
+	require.True(t, ok)
+	assert.EqualValues(t, 1_000_000, usd)
+
+	// 反向：1 USD → 7.2 CNY
+	quote, ok := USDToQuoteMicro(rate, 1_000_000)
+	require.True(t, ok)
+	assert.EqualValues(t, 7_200_000, quote)
+
+	// 往返一致（取整误差为 0）
+	back, ok := QuoteToUSDMicro(rate, quote)
+	require.True(t, ok)
+	assert.EqualValues(t, 1_000_000, back)
+}
+
+// 非法汇率输入被拒（含"给 USD 配汇率"这种会让 1 USD = ? USD 出现两种答案的情况）。
+func TestCreateFxRateRejectsInvalidInput(t *testing.T) {
+	db := newRepoDB(t)
+	base := func() *FxRate {
+		return &FxRate{QuoteCurrency: "CNY", RateMicro: 7_200_000, ConversionDirection: FxDirectionUSDEqualsQuoteDivRate}
+	}
+
+	bad := base()
+	bad.QuoteCurrency = "CN"
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+
+	bad = base()
+	bad.QuoteCurrency = "USD"
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument, "USD 对自己不需要汇率")
+
+	bad = base()
+	bad.RateMicro = 0
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+
+	bad = base()
+	bad.BaseCurrency = "EUR"
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+
+	bad = base()
+	bad.ConversionDirection = 1
+	assert.ErrorIs(t, CreateFxRateSnapshot(db, bad), ErrInvalidArgument)
+}
