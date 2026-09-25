@@ -5,9 +5,9 @@
 
 ### [054] 2026-09-25 分享中心设置融合版本部署
 
-**做了什么**：将已验证的分享中心中文化、设置融合、导航开关、分享者展示和安全 HTML 渲染版本部署到 /pan/apigx-test，仅更新 pp。
+**做了什么**：将已验证的分享中心中文化、设置融合、导航开关、分享者展示和安全 HTML 渲染版本部署到 /pan/apigx-test，仅更新 app。
 
-**验证**：前端构建、go test ./model ./controller -count=1、git diff --check 通过；生产 SHA-256 7006b854c5ddb4796063bc4ae393ded1df8b2a207c10bb954e714c2cc24c3fb；/api/status 返回 0.0.0-apigx.23aa50f；四服务 healthy；仅 app 于 2026-09-25T14:27:17Z 重建。
+**验证**：前端构建、go test ./model ./controller -count=1、git diff --check 通过；生产 SHA-256 `b7006b854c5ddb4796063bc4ae393ded1df8b2a207c10bb954e714c2cc24c3fb`；/api/status 返回 `v0.0.0-apigx.23aa50f`；四服务 healthy；仅 app 于 2026-09-25T14:27:17Z 重建。
 
 **发布与回滚**：/pan/apigx-test/releases/23aa50fe0；备份 /pan/apigx-test/backups/pre-23aa50fe0-20260925T142221Z。
 
@@ -65,7 +65,7 @@
 ## 当前阶段
 **分享中心版本已部署到生产 app，等待用户通过宝塔反代做页面与业务验收。**
 
-当前本地提交为 23aa50fe0；生产运行 0.0.0-apigx.23aa50f。本轮仅重建 app，MySQL/Redis/stub 未重启。
+当前本地提交为 23aa50fe0；生产运行 v0.0.0-apigx.23aa50f。本轮仅重建 app，MySQL/Redis/stub 未重启。
 
 ## 当前任务
 [已完成] 交付纯 Markdown 分享中心并完成可上传仓库整理。

@@ -14,7 +14,7 @@
 **涉及文件**：`new-api/web/src/features/share-center/**`、`new-api/web/src/routes/**`、`new-api/web/src/hooks/**`、`new-api/web/src/features/system-settings/**`、`new-api/model/share_post.go`、`new-api/controller/share_center.go`、流程台账。## [已完成] 部署分享中心设置融合版本（2026-09-25）
 
 **本轮目标**：把分享中心 UI、系统设置融合、顶部导航/侧边栏开关、分享者展示和安全 HTML 渲染版本更新到 /pan/apigx-test。
-**结果**：仅重建 app；app/mysql/redis/stub healthy；生产版本 0.0.0-apigx.23aa50f；未推送 GitHub。
+**结果**：仅重建 app；app/mysql/redis/stub healthy；生产版本 v0.0.0-apigx.23aa50f；未推送 GitHub。
 
 **任务清单**：
 - [x] 本地前端、后端测试和 Linux amd64 构建通过
@@ -878,7 +878,7 @@
 - [x] T4.6 最终验收：按计划书 §11 阶段 4 的 27 条表格**逐条归档证据** → 同上（表实为 **31 行**；顶部给出状态总览、未闭合项与阻塞条件归类）
   - 追加（MySQL 矩阵，凭据到位后）：**先失败后修复再通过** —— 本机 MySQL 8.0.12 的 default_storage_engine=MyISAM，导致我们的表落成 MyISAM（断言捕获）；已在 `apigx/model/migrate.go` 的 Migrate() 中**显式要求 InnoDB**（只影响 apigx_* 表），重建空库后**连跑两次矩阵全部 PASS**（sqlite/postgres/mysql）。**仍存的服务端问题**：底座自身表在 MyISAM 下建不出来（Error 1071 passkey_credentials 索引超 1000 字节）⇒ 应用在该实例上起不来，与本项目代码无关；建议把 phpStudy 的 my.ini 改为 default-storage-engine=InnoDB（我未改你的配置）。详见台账 §22.1/§22.2。
   - 追加（三库矩阵复核）：SQLite ✅ + PostgreSQL ✅ 实测通过；**MySQL ⛔ 被凭据阻塞**（本机有 MySQL 8.0.12 在 3306，但 root+空密码被拒 Error 1045，我不做爆破）⇒ 按 AGENTS.md **如实报告未执行、不声称已通过 MySQL 验证**；同时更正了 `migrate-pg-matrix.ps1` 里「本机没有 MySQL 实例」的过时说法。详见台账 §22。
-  - 追加（最终确认复跑）：备份/恢复 **12/12 指纹一致**；五个阶段 3 套件 **5/5、5/5、7/7、12/12、16/16 全通过**；image-e2e 与 ideo-task 首次的 2 处失败经隔离重跑/DB 核对**确认为套件状态与时序问题，非产品回归**。详见台账 §21 与 `docs/stage4/README.md` 第六节。
+  - 追加（最终确认复跑）：备份/恢复 **12/12 指纹一致**；五个阶段 3 套件 **5/5、5/5、7/7、12/12、16/16 全通过**；image-e2e 与 video-task 首次的 2 处失败经隔离重跑/DB 核对**确认为套件状态与时序问题，非产品回归**。详见台账 §21 与 `docs/stage4/README.md` 第六节。
   - 补充：已补一页**交接总览** `docs/stage4/README.md`（结论/唯一未闭合项与原因/复验脚本入口/这几轮改动/环境注意事项），便于交接时不必读 500 行台账。
 ## [已完成] 阶段 2：价格与质量路由 (2026-09-17)
 
