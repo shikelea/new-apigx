@@ -75,3 +75,29 @@ func TestSharePostLifecycleReturnsUpdatedState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, private.PublicID, visible.PublicID)
 }
+
+func TestSharePostRejectionCanBeEditedAndResubmitted(t *testing.T) {
+	require.NoError(t, DB.AutoMigrate(&SharePost{}, &SharePostVote{}))
+	DB.Exec("DELETE FROM share_post_votes")
+	DB.Exec("DELETE FROM share_posts")
+
+	post := &SharePost{AuthorID: 21, Title: "待审核分享", Content: "初始内容", Visibility: SharePostVisibilityPublic}
+	require.NoError(t, CreateSharePost(post))
+	pending, err := SubmitOwnedSharePost(post.PublicID, post.AuthorID)
+	require.NoError(t, err)
+	assert.Equal(t, SharePostStatusPending, pending.Status)
+
+	rejected, err := ReviewSharePost(post.PublicID, false, "请补充来源说明")
+	require.NoError(t, err)
+	assert.Equal(t, SharePostStatusRejected, rejected.Status)
+	assert.Equal(t, "请补充来源说明", rejected.RejectReason)
+
+	rejected.Content = "补充后的来源和使用说明"
+	require.NoError(t, UpdateOwnedSharePost(rejected, post.AuthorID))
+	assert.Equal(t, SharePostStatusDraft, rejected.Status)
+	assert.Empty(t, rejected.RejectReason)
+
+	resubmitted, err := SubmitOwnedSharePost(post.PublicID, post.AuthorID)
+	require.NoError(t, err)
+	assert.Equal(t, SharePostStatusPending, resubmitted.Status)
+}
