@@ -12,11 +12,12 @@ import (
 )
 
 const (
-	SharePostStatusDraft     = "draft"
-	SharePostStatusPending   = "pending"
-	SharePostStatusPublished = "published"
-	SharePostStatusRejected  = "rejected"
-	SharePostStatusArchived  = "archived"
+	SharePostStatusDraft          = "draft"
+	ShareCenterRequireLoginOption = "ShareCenterRequireLogin"
+	SharePostStatusPending        = "pending"
+	SharePostStatusPublished      = "published"
+	SharePostStatusRejected       = "rejected"
+	SharePostStatusArchived       = "archived"
 
 	SharePostVisibilityPublic  = "public"
 	SharePostVisibilityLogin   = "login"

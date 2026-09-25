@@ -35,6 +35,35 @@ func SetApiRouter(router *gin.Engine) {
 		//apiRouter.GET("/midjourney", controller.GetMidjourney)
 		apiRouter.GET("/home_page_content", controller.GetHomePageContent)
 		apiRouter.GET("/pricing", middleware.HeaderNavModuleAuth("pricing"), controller.GetPricing)
+
+		// 纯文本 Markdown 分享中心：公开阅读与 APIGX 渠道分享完全隔离。
+		// 先注册带固定路径的 /mine，避免被公开详情的通配符抢先匹配。
+		shareCenterUserRoute := apiRouter.Group("/share-center")
+		shareCenterUserRoute.Use(middleware.UserAuth())
+		{
+			shareCenterUserRoute.GET("/mine", controller.ListMyShareCenterPosts)
+			shareCenterUserRoute.POST("", controller.CreateShareCenterPost)
+			shareCenterUserRoute.PUT("/:publicID", controller.UpdateShareCenterPost)
+			shareCenterUserRoute.POST("/:publicID/submit", controller.SubmitShareCenterPost)
+			shareCenterUserRoute.DELETE("/:publicID", controller.ArchiveShareCenterPost)
+			shareCenterUserRoute.POST("/:publicID/vote", controller.VoteShareCenterPost)
+		}
+		shareCenterAdminRoute := apiRouter.Group("/share-center/admin")
+		shareCenterAdminRoute.Use(middleware.AdminAuth())
+		{
+			shareCenterAdminRoute.GET("/posts", controller.ListShareCenterReviews)
+			shareCenterAdminRoute.POST("/posts/:publicID/approve", controller.ApproveShareCenterPost)
+			shareCenterAdminRoute.POST("/posts/:publicID/reject", controller.RejectShareCenterPost)
+			shareCenterAdminRoute.GET("/config", controller.GetShareCenterConfig)
+			shareCenterAdminRoute.PUT("/config", controller.UpdateShareCenterConfig)
+		}
+		shareCenterPublicRoute := apiRouter.Group("/share-center")
+		shareCenterPublicRoute.Use(middleware.TryUserAuth())
+		{
+			shareCenterPublicRoute.GET("", controller.ListShareCenterPosts)
+			shareCenterPublicRoute.GET("/:publicID", controller.GetShareCenterPost)
+		}
+
 		perfMetricsRoute := apiRouter.Group("/perf-metrics")
 		perfMetricsRoute.Use(middleware.HeaderNavModulePublicOrUserAuth("pricing"))
 		{
