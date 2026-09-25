@@ -21,6 +21,7 @@ import {
   Accessibility,
   Box,
   ClipboardList,
+  BookOpen,
   CreditCard,
   FileText,
   FlaskConical,
@@ -112,6 +113,11 @@ export function useSidebarData(): SidebarData {
             url: '/pricing',
             icon: Store,
           },
+          {
+            title: t('Share center'),
+            url: '/share-center',
+            icon: BookOpen,
+          },
         ],
       },
       {
@@ -187,6 +193,12 @@ export function useSidebarData(): SidebarData {
             url: '/system-settings/site',
             activeUrls: ['/system-settings'],
             icon: Settings,
+          },
+          {
+            title: t('Share center review'),
+            url: '/system-settings/share-center',
+            icon: BookOpen,
+            requiredRole: ROLE.SUPER_ADMIN,
           },
         ],
       },
