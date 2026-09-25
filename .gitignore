@@ -1,15 +1,8 @@
 # 本地便携工具链（Go、Redis 等，由 tools/dev/bootstrap.ps1 下载解压）
 /.toolchain/
 
-# New API 底座：本地按 deploy/base.lock.json 的固定提交获取，不入库。
-#
-# 为什么不用「忽略该层 + 反向放行 apigx 目录」：new-api/ 内含自己的 .git，
-# 外层仓库会把它识别为内嵌仓库（gitlink），反向规则无法让我们的代码进库。
-# 因此采用标准 fork 工作流：
-#   - 我们的代码与相对上游的改动，提交在底座自己的仓库里（分支 apigx）；
-#   - 每次提交后用 git format-patch 导出到 deploy/patches/，随工作区仓库一起入库；
-#   - 当前 fork 状态记录在 deploy/base.lock.json。
-/new-api/
+# APIGX 底座源码已作为 tracked subtree 纳入本仓库，保留完整 fork 历史。
+# 依赖与构建产物仍由 new-api/.gitignore、node_modules/dist 规则过滤。
 
 # 依赖与构建产物
 node_modules/

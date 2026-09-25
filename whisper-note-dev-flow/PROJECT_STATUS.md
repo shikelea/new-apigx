@@ -3,6 +3,26 @@
 > 本文件由开发流程维护（`whisper-note-dev-flow/SKILL.md` §4）。**序号倒序，顶部最新**。
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
+### [052] 2026-09-25 实现纯 Markdown 分享中心并合并 APIGX 底座历史
+
+**做了什么**：在 APIGX/New API 底座中交付独立的纯文本 Markdown 分享中心，完成文章投稿、审核、可见性、投票、前端入口和安全限流；随后将底座仓库以非压缩 subtree 合并进外层仓库，保留真实连续提交历史，满足后续代码任务上传要求。
+
+**涉及模块**：`new-api/model/share_post.go`、`new-api/controller/share_center.go`、`new-api/router/api-router.go`、`new-api/web/src/features/share-center/**`、`new-api/web/src/routes/share-center/**`、`README.md`、`docs/SHARE_CENTER.md`、`deploy/base.lock.json`。
+
+**改动明细**：
+| 文件 / 位置 | 模块 | 改动说明 |
+|---|---|---|
+| `new-api/model/share_post.go`、`model/main.go` | 数据模型 | 新增分享文章、投票、状态流转、可见性和主库迁移；提交/审核接口返回最新状态 |
+| `new-api/controller/share_center.go`、`router/api-router.go` | API 与权限 | 公开列表/详情、作者投稿/编辑/归档/投票、管理员审核与登录前策略；复用认证、审计和现有限流 |
+| `new-api/web/src/features/share-center/**` | 前端 | 广场搜索、Markdown 详情、有效性投票、我的分享、审核预览和登录前可见开关 |
+| `new-api/web/src/routes/**`、`use-sidebar-data.ts` | 导航 | 接入公开分享中心、个人管理和系统设置审核入口 |
+| `new-api/model/share_post_test.go` | 回归 | 覆盖输入校验、状态生命周期、投票幂等和私有可见性 |
+| `new-api/` subtree | 交付 | 纳入 2666 个底座文件和完整 6837 个提交历史；保留 AGPLv3、LICENSE 与 NOTICE |
+
+**验证**：`go test ./model ./router ./controller -count=1` 通过；SQLite 与本地 PostgreSQL 迁移矩阵通过；前端 `tsgo -b`、定向 `oxlint`、`rsbuild build` 通过；`git diff --check` 通过。MySQL 矩阵因本机没有 MySQL/MariaDB 服务未执行，已记录为环境风险。
+
+**剩余风险**：需要在具备 MySQL 8 实例的 CI 或部署环境补跑 `APIGX_TEST_MYSQL_DSN` 矩阵；分享中心尚未做浏览器端端到端测试和生产故障注入。
+
 ### [051] 2026-09-24 修复同标准模型别名渠道未进入授权路由候选并部署
 
 **做了什么**：修复来源授权仅按请求模型字符串精确匹配的问题，使同一 `canonical_model_id` 下的已发布别名供给都能进入智能路由候选；构建并部署 `v0.0.0-apigx.8932687` 到生产 app。
@@ -21,11 +41,15 @@
 
 **剩余风险**：尚未做生产故障注入；需要用户通过反代真实调用 `deepseek-flash` 等模型确认别名渠道切换。
 ## 当前阶段
-**生产 APIGX 已升级至 `8932687`：同标准模型别名授权合并已部署。**
+**分享中心已完成本地交付，外层仓库已纳入完整 APIGX 底座历史；等待用户确认后再重新上传代码任务平台。**
 
-当前 inner commit 为 `8932687`，生产 `/api/status` 返回 `v0.0.0-apigx.8932687`；本轮只重建 app，MySQL/Redis/stub 未重启。
+当前本地 inner commit 为 `71546a4`；生产仍运行 `v0.0.0-apigx.8932687`。本轮未更新生产 app，MySQL/Redis/stub 未重启。
 
 ## 当前任务
+[已完成] 交付纯 Markdown 分享中心并完成可上传仓库整理。
+- 根仓库 HEAD 已包含 APIGX subtree；当前总提交数 6837，`new-api/` 文件数 2666。
+- 生产服务器未更新，本轮只做本地代码、数据库矩阵与构建验证。
+
 [已完成] 修复同标准模型别名授权候选并部署到“主”服务器。
 - 实际运行目录为 `/pan/apigx-test`，通过 `docker compose build app` 与 `docker compose up -d --no-deps app` 只重建 `app` 服务。
 - 升级前备份位于 `/pan/apigx-test/backups/pre-8932687-20260924T140011Z`，新发布位于 `/pan/apigx-test/releases/8932687`。
