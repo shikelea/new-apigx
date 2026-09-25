@@ -42,20 +42,20 @@ func SetApiRouter(router *gin.Engine) {
 		shareCenterUserRoute.Use(middleware.UserAuth())
 		{
 			shareCenterUserRoute.GET("/mine", controller.ListMyShareCenterPosts)
-			shareCenterUserRoute.POST("", controller.CreateShareCenterPost)
-			shareCenterUserRoute.PUT("/:publicID", controller.UpdateShareCenterPost)
-			shareCenterUserRoute.POST("/:publicID/submit", controller.SubmitShareCenterPost)
-			shareCenterUserRoute.DELETE("/:publicID", controller.ArchiveShareCenterPost)
-			shareCenterUserRoute.POST("/:publicID/vote", controller.VoteShareCenterPost)
+			shareCenterUserRoute.POST("", middleware.UserCriticalRateLimit("share-center-write"), controller.CreateShareCenterPost)
+			shareCenterUserRoute.PUT("/:publicID", middleware.UserCriticalRateLimit("share-center-write"), controller.UpdateShareCenterPost)
+			shareCenterUserRoute.POST("/:publicID/submit", middleware.UserCriticalRateLimit("share-center-write"), controller.SubmitShareCenterPost)
+			shareCenterUserRoute.DELETE("/:publicID", middleware.UserCriticalRateLimit("share-center-write"), controller.ArchiveShareCenterPost)
+			shareCenterUserRoute.POST("/:publicID/vote", middleware.UserCriticalRateLimit("share-center-vote"), controller.VoteShareCenterPost)
 		}
 		shareCenterAdminRoute := apiRouter.Group("/share-center/admin")
 		shareCenterAdminRoute.Use(middleware.AdminAuth())
 		{
 			shareCenterAdminRoute.GET("/posts", controller.ListShareCenterReviews)
-			shareCenterAdminRoute.POST("/posts/:publicID/approve", controller.ApproveShareCenterPost)
-			shareCenterAdminRoute.POST("/posts/:publicID/reject", controller.RejectShareCenterPost)
+			shareCenterAdminRoute.POST("/posts/:publicID/approve", middleware.CriticalRateLimit(), controller.ApproveShareCenterPost)
+			shareCenterAdminRoute.POST("/posts/:publicID/reject", middleware.CriticalRateLimit(), controller.RejectShareCenterPost)
 			shareCenterAdminRoute.GET("/config", controller.GetShareCenterConfig)
-			shareCenterAdminRoute.PUT("/config", controller.UpdateShareCenterConfig)
+			shareCenterAdminRoute.PUT("/config", middleware.CriticalRateLimit(), controller.UpdateShareCenterConfig)
 		}
 		shareCenterPublicRoute := apiRouter.Group("/share-center")
 		shareCenterPublicRoute.Use(middleware.TryUserAuth())

@@ -210,11 +210,16 @@ func UpdateOwnedSharePost(post *SharePost, authorID int) error {
 		return err
 	}
 	post.UpdatedAt = common.GetTimestamp()
-	return DB.Model(&SharePost{}).Where("id = ? AND author_id = ? AND status IN (?, ?)", post.ID, authorID, SharePostStatusDraft, SharePostStatusRejected).
+	err := DB.Model(&SharePost{}).Where("id = ? AND author_id = ? AND status IN (?, ?)", post.ID, authorID, SharePostStatusDraft, SharePostStatusRejected).
 		Select("title", "summary", "content", "visibility", "status", "reject_reason", "updated_at").Updates(map[string]any{
 		"title": post.Title, "summary": post.Summary, "content": post.Content, "visibility": post.Visibility,
 		"status": SharePostStatusDraft, "reject_reason": "", "updated_at": post.UpdatedAt,
 	}).Error
+	if err == nil {
+		post.Status = SharePostStatusDraft
+		post.RejectReason = ""
+	}
+	return err
 }
 
 func SubmitOwnedSharePost(publicID string, authorID int) (*SharePost, error) {
@@ -226,9 +231,14 @@ func SubmitOwnedSharePost(publicID string, authorID int) (*SharePost, error) {
 		if post.Status != SharePostStatusDraft && post.Status != SharePostStatusRejected {
 			return errors.New("only draft or rejected share can be submitted")
 		}
-		return tx.Model(&SharePost{}).Where("id = ? AND status IN (?, ?)", post.ID, SharePostStatusDraft, SharePostStatusRejected).Updates(map[string]any{
+		if err := tx.Model(&SharePost{}).Where("id = ? AND status IN (?, ?)", post.ID, SharePostStatusDraft, SharePostStatusRejected).Updates(map[string]any{
 			"status": SharePostStatusPending, "reject_reason": "", "updated_at": common.GetTimestamp(),
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		post.Status = SharePostStatusPending
+		post.RejectReason = ""
+		return nil
 	})
 	return &post, err
 }
@@ -247,6 +257,8 @@ func ReviewSharePost(publicID string, publish bool, rejectReason string) (*Share
 			updates["status"] = SharePostStatusPublished
 			updates["reject_reason"] = ""
 			updates["published_at"] = common.GetTimestamp()
+			post.Status = SharePostStatusPublished
+			post.RejectReason = ""
 		} else {
 			if strings.TrimSpace(rejectReason) == "" {
 				return errors.New("reject reason is required")
@@ -254,8 +266,13 @@ func ReviewSharePost(publicID string, publish bool, rejectReason string) (*Share
 			updates["status"] = SharePostStatusRejected
 			updates["reject_reason"] = strings.TrimSpace(rejectReason)
 			updates["published_at"] = 0
+			post.Status = SharePostStatusRejected
+			post.RejectReason = strings.TrimSpace(rejectReason)
 		}
-		return tx.Model(&SharePost{}).Where("id = ? AND status = ?", post.ID, SharePostStatusPending).Updates(updates).Error
+		if err := tx.Model(&SharePost{}).Where("id = ? AND status = ?", post.ID, SharePostStatusPending).Updates(updates).Error; err != nil {
+			return err
+		}
+		return nil
 	})
 	return &post, err
 }

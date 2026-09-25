@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ func ListShareCenterPosts(c *gin.Context) {
 func GetShareCenterPost(c *gin.Context) {
 	post, err := model.GetVisibleSharePost(c.Param("publicID"), c.GetInt("id"), shareCenterLoginRequired())
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "share not found"})
 			return
 		}
@@ -201,7 +202,7 @@ func UpdateShareCenterConfig(c *gin.Context) {
 }
 
 func shareCenterNotFound(c *gin.Context, err error) {
-	if err == gorm.ErrRecordNotFound {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "share not found"})
 		return
 	}
