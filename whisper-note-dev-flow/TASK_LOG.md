@@ -11,7 +11,18 @@
 - Markdown/HTML 渲染继续经过 DOMPurify 白名单过滤，禁止脚本、事件属性和危险协议；
 - 前端类型检查、lint、生产构建通过，后端相关测试通过。
 
-**涉及文件**：`new-api/web/src/features/share-center/**`、`new-api/web/src/routes/**`、`new-api/web/src/hooks/**`、`new-api/web/src/features/system-settings/**`、`new-api/model/share_post.go`、`new-api/controller/share_center.go`、流程台账。# 任务清单
+**涉及文件**：`new-api/web/src/features/share-center/**`、`new-api/web/src/routes/**`、`new-api/web/src/hooks/**`、`new-api/web/src/features/system-settings/**`、`new-api/model/share_post.go`、`new-api/controller/share_center.go`、流程台账。## [已完成] 部署分享中心设置融合版本（2026-09-25）
+
+**本轮目标**：把分享中心 UI、系统设置融合、顶部导航/侧边栏开关、分享者展示和安全 HTML 渲染版本更新到 /pan/apigx-test。
+**结果**：仅重建 app；app/mysql/redis/stub healthy；生产版本 0.0.0-apigx.23aa50f；未推送 GitHub。
+
+**任务清单**：
+- [x] 本地前端、后端测试和 Linux amd64 构建通过
+- [x] 备份当前 app 并上传发布包
+- [x] 仅重建 app 并检查状态接口、容器和日志
+- [x] 记录发布路径、哈希和剩余反代验收风险
+
+# 任务清单
 
 
 ## [已完成] 实现分享中心（2026-09-25）
