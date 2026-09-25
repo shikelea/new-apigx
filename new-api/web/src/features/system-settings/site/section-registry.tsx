@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { ShareCenterSettingsSection } from '@/features/share-center/components'
+
 import { SystemInfoSection } from '../general/system-info-section'
 import {
   parseHeaderNavModules,
@@ -71,6 +73,11 @@ const SITE_SECTIONS = [
         />
       )
     },
+  },
+  {
+    id: 'share-center',
+    titleKey: 'Share center settings',
+    build: (_settings: SiteSettings) => <ShareCenterSettingsSection />,
   },
   {
     id: 'sidebar-modules',

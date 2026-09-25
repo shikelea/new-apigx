@@ -33,7 +33,7 @@ type SharePost struct {
 	ID           uint           `json:"id" gorm:"primaryKey"`
 	PublicID     string         `json:"public_id" gorm:"size:40;uniqueIndex;not null"`
 	AuthorID     int            `json:"author_id" gorm:"index;not null"`
-	AuthorName   string         `json:"author_name" gorm:"-"`
+	AuthorName   string         `json:"author_name" gorm:"column:author_name;->"`
 	Title        string         `json:"title" gorm:"size:160;not null"`
 	Summary      string         `json:"summary" gorm:"size:500"`
 	Content      string         `json:"content" gorm:"type:text;not null"`

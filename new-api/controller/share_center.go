@@ -49,6 +49,7 @@ func GetShareCenterPost(c *gin.Context) {
 	common.ApiSuccess(c, post)
 }
 
+// Visibility remains accepted for old clients, but platform sharing is public by policy.
 type sharePostInput struct {
 	Title      string `json:"title"`
 	Summary    string `json:"summary"`
@@ -62,7 +63,7 @@ func CreateShareCenterPost(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	post := &model.SharePost{AuthorID: c.GetInt("id"), Title: input.Title, Summary: input.Summary, Content: input.Content, Visibility: input.Visibility}
+	post := &model.SharePost{AuthorID: c.GetInt("id"), Title: input.Title, Summary: input.Summary, Content: input.Content, Visibility: model.SharePostVisibilityPublic}
 	if err := model.CreateSharePost(post); err != nil {
 		common.ApiError(c, err)
 		return
@@ -82,7 +83,7 @@ func UpdateShareCenterPost(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	post.Title, post.Summary, post.Content, post.Visibility = input.Title, input.Summary, input.Content, input.Visibility
+	post.Title, post.Summary, post.Content = input.Title, input.Summary, input.Content
 	if err := model.UpdateOwnedSharePost(post, c.GetInt("id")); err != nil {
 		common.ApiError(c, err)
 		return

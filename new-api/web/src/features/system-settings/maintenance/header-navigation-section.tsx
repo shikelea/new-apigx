@@ -55,6 +55,8 @@ const headerNavSchema = z.object({
   pricingRequireAuth: z.boolean(),
   rankingsEnabled: z.boolean(),
   rankingsRequireAuth: z.boolean(),
+  shareCenterEnabled: z.boolean(),
+  shareCenterRequireAuth: z.boolean(),
   docs: z.boolean(),
   about: z.boolean(),
 })
@@ -89,6 +91,14 @@ const toFormValues = (config: HeaderNavModulesConfig): HeaderNavFormValues => ({
     config.rankings?.requireAuth === undefined
       ? HEADER_NAV_DEFAULT.rankings.requireAuth
       : Boolean(config.rankings.requireAuth),
+  shareCenterEnabled:
+    config.shareCenter?.enabled === undefined
+      ? HEADER_NAV_DEFAULT.shareCenter.enabled
+      : Boolean(config.shareCenter.enabled),
+  shareCenterRequireAuth:
+    config.shareCenter?.requireAuth === undefined
+      ? HEADER_NAV_DEFAULT.shareCenter.requireAuth
+      : Boolean(config.shareCenter.requireAuth),
   docs:
     config.docs === undefined ? HEADER_NAV_DEFAULT.docs : Boolean(config.docs),
   about:
@@ -130,6 +140,11 @@ export function HeaderNavigationSection({
         ...(config.rankings ?? HEADER_NAV_DEFAULT.rankings),
         enabled: values.rankingsEnabled,
         requireAuth: values.rankingsRequireAuth,
+      },
+      shareCenter: {
+        ...(config.shareCenter ?? HEADER_NAV_DEFAULT.shareCenter),
+        enabled: values.shareCenterEnabled,
+        requireAuth: values.shareCenterRequireAuth,
       },
     }
 
@@ -178,7 +193,7 @@ export function HeaderNavigationSection({
   const accessModules: Array<{
     enabledKey: keyof HeaderNavFormValues
     requireAuthKey: keyof HeaderNavFormValues
-    requireAuthDependsOn: 'pricingEnabled' | 'rankingsEnabled'
+    requireAuthDependsOn: 'pricingEnabled' | 'rankingsEnabled' | 'shareCenterEnabled'
     title: string
     description: string
     requireAuthTitle: string
@@ -204,6 +219,17 @@ export function HeaderNavigationSection({
       requireAuthTitle: t('Require login to view rankings'),
       requireAuthDescription: t(
         'Visitors must authenticate before accessing the rankings page.'
+      ),
+    },
+    {
+      enabledKey: 'shareCenterEnabled',
+      requireAuthKey: 'shareCenterRequireAuth',
+      requireAuthDependsOn: 'shareCenterEnabled',
+      title: t('Share center'),
+      description: t('Community text shares and availability feedback.'),
+      requireAuthTitle: t('Require login to view share center'),
+      requireAuthDescription: t(
+        'Visitors must authenticate before accessing the share center.'
       ),
     },
   ]

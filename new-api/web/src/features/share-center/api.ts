@@ -46,7 +46,7 @@ export async function getMyShareCenterPosts(): Promise<SharePostPageResponse> {
 }
 
 export async function createShareCenterPost(
-  input: Pick<SharePost, 'title' | 'summary' | 'content' | 'visibility'>
+  input: Pick<SharePost, 'title' | 'summary' | 'content'>
 ): Promise<SharePostResponse> {
   const res = await api.post('/api/share-center', input)
   return res.data
@@ -54,7 +54,7 @@ export async function createShareCenterPost(
 
 export async function updateShareCenterPost(
   publicID: string,
-  input: Pick<SharePost, 'title' | 'summary' | 'content' | 'visibility'>
+  input: Pick<SharePost, 'title' | 'summary' | 'content'>
 ): Promise<SharePostResponse> {
   const res = await api.put(
     `/api/share-center/${encodeURIComponent(publicID)}`,

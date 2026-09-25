@@ -80,6 +80,12 @@ export function useTopNavLinks(): TopNavLink[] {
   }
 
   // Rankings
+  const shareCenter = modules?.shareCenter
+  if (shareCenter && typeof shareCenter === 'object' && shareCenter.enabled) {
+    const requiresAuth = shareCenter.requireAuth && !isAuthed
+    links.push({ title: t('Share center'), href: '/share-center', requiresAuth })
+  }
+
   const rankings = modules?.rankings
   if (rankings && typeof rankings === 'object' && rankings.enabled) {
     const requiresAuth = rankings.requireAuth && !isAuthed

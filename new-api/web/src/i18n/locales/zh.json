@@ -7168,6 +7168,15 @@
     "identity.modality.video": "视频生成",
     "identity.modality.select": "选择能力类型",
     "identity.modality.search": "搜索能力类型",
-    "identity.modality.empty": "没有匹配的能力类型"
+    "identity.modality.empty": "没有匹配的能力类型",
+    "Share center": "分享中心",
+    "Share center settings": "分享中心设置",
+    "Community text shares and availability feedback.": "社区文字分享与可用性反馈。",
+    "Require login to view share center": "需要登录才能查看分享中心",
+    "Visitors must authenticate before accessing the share center.": "访问分享中心前必须登录。",
+    "General area": "常规区域",
+    "Model plaza and community sharing.": "模型广场与社区分享。",
+    "Browse the unified model catalog.": "浏览统一模型目录。",
+    "Browse community shares and availability feedback.": "浏览社区分享并反馈可用性。"
   }
 }

@@ -195,7 +195,7 @@ export function useSidebarData(): SidebarData {
             icon: Settings,
           },
           {
-            title: t('Share center review'),
+            title: '分享中心审核',
             url: '/system-settings/share-center',
             icon: BookOpen,
             requiredRole: ROLE.SUPER_ADMIN,

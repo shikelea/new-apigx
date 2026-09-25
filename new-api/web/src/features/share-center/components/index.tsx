@@ -24,7 +24,6 @@ import {
   ThumbsUp,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { EmptyState } from '@/components/empty-state'
@@ -37,13 +36,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Markdown } from '@/components/ui/markdown'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -63,7 +55,7 @@ import {
   updateShareCenterPost,
   voteShareCenterPost,
 } from '../api'
-import type { SharePost, SharePostVisibility } from '../types'
+import type { SharePost } from '../types'
 
 function postStatusLabel(status: SharePost['status']) {
   return {
@@ -73,14 +65,6 @@ function postStatusLabel(status: SharePost['status']) {
     rejected: '需修改',
     archived: '已归档',
   }[status]
-}
-
-function visibilityLabel(visibility: SharePostVisibility) {
-  return {
-    public: '公开',
-    login: '登录后可见',
-    private: '仅自己可见',
-  }[visibility]
 }
 
 function voteSummary(post: SharePost) {
@@ -117,9 +101,7 @@ export function SharePostCard({ post }: { post: SharePost }) {
             </Badge>
           </div>
           <div className='text-muted-foreground flex flex-wrap gap-2 text-xs'>
-            <span>{post.author_name || '匿名用户'}</span>
-            <span>·</span>
-            <span>{visibilityLabel(post.visibility)}</span>
+            <span>{post.author_name || '分享者'}</span>
           </div>
         </CardHeader>
         <CardContent>
@@ -134,7 +116,6 @@ export function SharePostCard({ post }: { post: SharePost }) {
 }
 
 export function ShareCenterBrowser() {
-  const { t } = useTranslation()
   const [keyword, setKeyword] = useState('')
   const [submittedKeyword, setSubmittedKeyword] = useState('')
   const query = useQuery({
@@ -150,18 +131,18 @@ export function ShareCenterBrowser() {
   const posts = query.data?.data?.items ?? []
   return (
     <SectionPageLayout>
-      <SectionPageLayout.Title>{t('Share center')}</SectionPageLayout.Title>
+      <SectionPageLayout.Title>分享中心</SectionPageLayout.Title>
       <SectionPageLayout.Actions>
         <Button variant='outline' render={<Link to='/share-center/manage' />}>
           <FileText />
-          {t('My shares')}
+          我的分享
         </Button>
       </SectionPageLayout.Actions>
       <SectionPageLayout.Content>
         <div className='space-y-6'>
           <section className='from-primary/10 via-background to-background rounded-2xl border bg-gradient-to-br p-6 md:p-8'>
             <p className='text-primary mb-2 text-xs font-semibold tracking-[0.18em] uppercase'>
-              APIGX COMMUNITY
+              社区分享
             </p>
             <h1 className='max-w-2xl text-3xl font-semibold tracking-tight md:text-4xl'>
               分享真实可用的信息，让下一位少走弯路。
@@ -252,13 +233,7 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
                 <div>
                   <span className='text-muted-foreground'>分享者</span>
                   <p className='font-medium'>
-                    {post.author_name || '匿名用户'}
-                  </p>
-                </div>
-                <div>
-                  <span className='text-muted-foreground'>可见范围</span>
-                  <p className='font-medium'>
-                    {visibilityLabel(post.visibility)}
+                    {post.author_name || '分享者'}
                   </p>
                 </div>
                 <div>
@@ -313,14 +288,10 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
   const [title, setTitle] = useState(post?.title ?? '')
   const [summary, setSummary] = useState(post?.summary ?? '')
   const [content, setContent] = useState(post?.content ?? '')
-  const [visibility, setVisibility] = useState<SharePostVisibility>(
-    post?.visibility ?? 'public'
-  )
   useEffect(() => {
     setTitle(post?.title ?? '')
     setSummary(post?.summary ?? '')
     setContent(post?.content ?? '')
-    setVisibility(post?.visibility ?? 'public')
   }, [post])
   const save = useMutation({
     mutationFn: () =>
@@ -329,9 +300,8 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
             title,
             summary,
             content,
-            visibility,
           })
-        : createShareCenterPost({ title, summary, content, visibility }),
+        : createShareCenterPost({ title, summary, content }),
     onSuccess: () => {
       toast.success('草稿已保存')
       onSaved()
@@ -365,7 +335,7 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
           />
         </div>
         <div className='space-y-2'>
-          <Label>正文（支持 Markdown）</Label>
+          <Label>正文（支持 Markdown 和安全 HTML）</Label>
           <Textarea
             value={content}
             onChange={(event) => setContent(event.target.value)}
@@ -373,27 +343,9 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
             maxLength={100000}
             className='font-mono text-sm'
             placeholder={
-              '# 使用说明\n\n请写清楚来源、步骤、限制和最后验证时间。'
+              '# 使用说明\n\n请写清楚来源、步骤、限制和最后验证时间。支持常用 HTML 排版，脚本和危险链接会被自动过滤。'
             }
           />
-        </div>
-        <div className='space-y-2'>
-          <Label>可见范围</Label>
-          <Select
-            value={visibility}
-            onValueChange={(value) =>
-              setVisibility((value ?? 'public') as SharePostVisibility)
-            }
-          >
-            <SelectTrigger>
-              <SelectValue>{visibilityLabel(visibility)}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='public'>公开</SelectItem>
-              <SelectItem value='login'>登录后可见</SelectItem>
-              <SelectItem value='private'>仅自己可见</SelectItem>
-            </SelectContent>
-          </Select>
         </div>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onCancel}>
@@ -487,9 +439,6 @@ export function ShareCenterManage() {
                         <Badge variant='outline'>
                           {postStatusLabel(post.status)}
                         </Badge>
-                        <Badge variant='secondary'>
-                          {visibilityLabel(post.visibility)}
-                        </Badge>
                       </div>
                       <p className='text-muted-foreground mt-1 text-sm'>
                         {post.summary || '无摘要'}
@@ -544,20 +493,52 @@ export function ShareCenterManage() {
   )
 }
 
-export function ShareCenterReview() {
-  const queryClient = useQueryClient()
-  const reviews = useQuery({
-    queryKey: ['share-center-reviews'],
-    queryFn: getShareCenterReviews,
-  })
+export function ShareCenterSettingsSection() {
   const config = useQuery({
     queryKey: ['share-center-config'],
     queryFn: getShareCenterConfig,
   })
   const updateConfig = useMutation({
     mutationFn: updateShareCenterConfig,
-    onSuccess: () => toast.success('设置已保存'),
+    onSuccess: () => {
+      toast.success('分享中心设置已保存')
+      void config.refetch()
+    },
     onError: (error) => handleServerError(error),
+  })
+
+  if (config.isPending) return <LoadingState />
+  if (config.isError) return <ErrorState onRetry={() => void config.refetch()} />
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className='text-base'>分享中心访问策略</CardTitle>
+      </CardHeader>
+      <CardContent className='flex items-center justify-between gap-4'>
+        <div>
+          <p className='font-medium'>登录后才能查看分享中心</p>
+          <p className='text-muted-foreground text-sm'>
+            开启后，未登录用户无法打开分享中心和分享详情。分享投稿统一进入审核流程。
+          </p>
+        </div>
+        <Switch
+          checked={config.data?.data?.require_login ?? false}
+          onCheckedChange={(checked) =>
+            updateConfig.mutate({ require_login: checked })
+          }
+          disabled={updateConfig.isPending}
+        />
+      </CardContent>
+    </Card>
+  )
+}
+
+export function ShareCenterReview() {
+  const queryClient = useQueryClient()
+  const reviews = useQuery({
+    queryKey: ['share-center-reviews'],
+    queryFn: getShareCenterReviews,
   })
   const review = useMutation({
     mutationFn: ({
@@ -575,44 +556,16 @@ export function ShareCenterReview() {
     },
     onError: (error) => handleServerError(error),
   })
-  if (reviews.isPending || config.isPending) {
+  if (reviews.isPending) {
     return <LoadingState />
   }
-  if (reviews.isError || config.isError) {
-    return (
-      <ErrorState
-        onRetry={() => {
-          void reviews.refetch()
-          void config.refetch()
-        }}
-      />
-    )
-  }
+  if (reviews.isError) return <ErrorState onRetry={() => void reviews.refetch()} />
   const posts = reviews.data?.data?.items ?? []
   return (
     <SectionPageLayout>
       <SectionPageLayout.Title>分享中心审核</SectionPageLayout.Title>
       <SectionPageLayout.Content>
         <div className='space-y-6'>
-          <Card>
-            <CardHeader>
-              <CardTitle className='text-base'>访问策略</CardTitle>
-            </CardHeader>
-            <CardContent className='flex items-center justify-between gap-4'>
-              <div>
-                <p className='font-medium'>登录前不可见</p>
-                <p className='text-muted-foreground text-sm'>
-                  开启后，分享广场和详情都需要登录才能查看。
-                </p>
-              </div>
-              <Switch
-                checked={config.data?.data?.require_login ?? false}
-                onCheckedChange={(checked) =>
-                  updateConfig.mutate({ require_login: checked })
-                }
-              />
-            </CardContent>
-          </Card>
           {posts.length === 0 ? (
             <EmptyState title='暂无待审核分享' />
           ) : (

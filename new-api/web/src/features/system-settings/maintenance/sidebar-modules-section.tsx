@@ -65,6 +65,10 @@ export function SidebarModulesSection({
   const updateOption = useUpdateOption()
 
   const sectionMeta: Record<string, { title: string; description: string }> = {
+    general: {
+      title: t('General area'),
+      description: t('Model plaza and community sharing.'),
+    },
     chat: {
       title: t('Chat area'),
       description: t('Playground experiments and live conversations.'),
@@ -87,6 +91,16 @@ export function SidebarModulesSection({
     string,
     Record<string, { title: string; description: string }>
   > = {
+    general: {
+      pricing: {
+        title: t('Model Square'),
+        description: t('Browse the unified model catalog.'),
+      },
+      shareCenter: {
+        title: t('Share center'),
+        description: t('Browse community shares and availability feedback.'),
+      },
+    },
     chat: {
       playground: {
         title: t('Playground'),

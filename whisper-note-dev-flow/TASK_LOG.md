@@ -1,4 +1,17 @@
-# 任务清单
+
+## [已完成] 分享中心 UI 与系统设置融合优化（2026-09-25）
+
+**目标**：将分享中心收敛到 APIGX 既有中文设置、顶部导航和侧边栏体系，移除投稿表单中的可见范围选择，展示真实分享者，并评估正文安全 HTML 支持。
+
+**验收标准**：
+- 分享中心主要页面和管理页使用中文文案，避免面向用户出现英文状态/按钮；
+- 顶部导航与侧边栏显示由现有导航配置统一控制，设置入口位于系统设置现有分区；
+- 投稿表单不再让普通用户选择“登录后可见”等范围；
+- 广场详情展示真实分享者，隐藏内部可见范围字段；
+- Markdown/HTML 渲染继续经过 DOMPurify 白名单过滤，禁止脚本、事件属性和危险协议；
+- 前端类型检查、lint、生产构建通过，后端相关测试通过。
+
+**涉及文件**：`new-api/web/src/features/share-center/**`、`new-api/web/src/routes/**`、`new-api/web/src/hooks/**`、`new-api/web/src/features/system-settings/**`、`new-api/model/share_post.go`、`new-api/controller/share_center.go`、流程台账。# 任务清单
 
 
 ## [已完成] 实现分享中心（2026-09-25）
@@ -2791,4 +2804,3 @@ i18next 日志 `missingKey en translation usage.title` ✓ ⇒ **`translation` �
 - **待澄清**：想看的是**哪个粒度**？① 按渠道汇总；② 按 Key 汇总（单 Key 消耗）；③ 按模型/按求；④ 是否要看**被谁调用**（使用者维度）？
 
 **本轮不做任何修改** ✓（用户明确要求先记录）。
-
