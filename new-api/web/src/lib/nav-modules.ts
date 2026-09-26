@@ -22,7 +22,12 @@ import { readCachedStatus, statusQueryOptions } from '@/lib/status-query'
 
 export type ModuleAccess = { enabled: boolean; requireAuth: boolean }
 
-export type HeaderNavModule = 'rankings' | 'pricing' | 'shareCenter'
+export type HeaderNavModule =
+  | 'rankings'
+  | 'pricing'
+  | 'shareCenter'
+  | 'relayShare'
+  | 'tools'
 
 export type HeaderNavModules = {
   home: boolean
@@ -30,6 +35,8 @@ export type HeaderNavModules = {
   pricing: ModuleAccess
   rankings: ModuleAccess
   shareCenter: ModuleAccess
+  relayShare: ModuleAccess
+  tools: ModuleAccess
   docs: boolean
   about: boolean
   [key: string]: boolean | ModuleAccess
@@ -41,6 +48,8 @@ const DEFAULT_HEADER_NAV_MODULES: HeaderNavModules = {
   pricing: { enabled: true, requireAuth: false },
   rankings: { enabled: true, requireAuth: false },
   shareCenter: { enabled: true, requireAuth: false },
+  relayShare: { enabled: true, requireAuth: false },
+  tools: { enabled: true, requireAuth: false },
   docs: true,
   about: true,
 }
@@ -49,6 +58,8 @@ const DEFAULTS: Record<HeaderNavModule, ModuleAccess> = {
   pricing: DEFAULT_HEADER_NAV_MODULES.pricing,
   rankings: DEFAULT_HEADER_NAV_MODULES.rankings,
   shareCenter: DEFAULT_HEADER_NAV_MODULES.shareCenter,
+  relayShare: DEFAULT_HEADER_NAV_MODULES.relayShare,
+  tools: DEFAULT_HEADER_NAV_MODULES.tools,
 }
 
 function cloneHeaderNavDefaults(): HeaderNavModules {
@@ -57,6 +68,8 @@ function cloneHeaderNavDefaults(): HeaderNavModules {
     pricing: { ...DEFAULT_HEADER_NAV_MODULES.pricing },
     rankings: { ...DEFAULT_HEADER_NAV_MODULES.rankings },
     shareCenter: { ...DEFAULT_HEADER_NAV_MODULES.shareCenter },
+    relayShare: { ...DEFAULT_HEADER_NAV_MODULES.relayShare },
+    tools: { ...DEFAULT_HEADER_NAV_MODULES.tools },
   }
 }
 
@@ -126,6 +139,14 @@ export function parseHeaderNavModules(raw: unknown): HeaderNavModules {
     }
     if (key === 'shareCenter') {
       result.shareCenter = parseAccess(value, result.shareCenter)
+      return
+    }
+    if (key === 'relayShare') {
+      result.relayShare = parseAccess(value, result.relayShare)
+      return
+    }
+    if (key === 'tools') {
+      result.tools = parseAccess(value, result.tools)
       return
     }
 

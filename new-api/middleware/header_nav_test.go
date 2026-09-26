@@ -187,3 +187,25 @@ func TestHeaderNavPublicRouteRejectsExpiredInternalAccessToken(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, response.Code)
 	require.Contains(t, response.Body.String(), "AUTH_TOKEN_EXPIRED")
 }
+
+func TestHeaderNavModulePublicOrUserAuthControlsAPIGXPublicModules(t *testing.T) {
+	tests := []struct {
+		name   string
+		module string
+		raw    string
+		code   int
+	}{
+		{name: "relay public by default", module: "relayShare", raw: ``, code: http.StatusOK},
+		{name: "relay requires login", module: "relayShare", raw: `{"relayShare":{"enabled":true,"requireAuth":true}}`, code: http.StatusUnauthorized},
+		{name: "relay disabled requires login", module: "relayShare", raw: `{"relayShare":{"enabled":false,"requireAuth":false}}`, code: http.StatusUnauthorized},
+		{name: "tools public by default", module: "tools", raw: ``, code: http.StatusOK},
+		{name: "tools requires login", module: "tools", raw: `{"tools":{"enabled":true,"requireAuth":true}}`, code: http.StatusUnauthorized},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withHeaderNavModules(t, tt.raw)
+			response := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth(tt.module), false)
+			require.Equal(t, tt.code, response.Code)
+		})
+	}
+}

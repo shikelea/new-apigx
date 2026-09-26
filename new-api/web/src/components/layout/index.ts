@@ -65,3 +65,5 @@ export type {
   TopNavLink,
 } from './types'
 export type { SectionPageLayoutProps } from './components/section-page-layout'
+
+export { PublicPageBackdrop } from './components/public-page-backdrop'

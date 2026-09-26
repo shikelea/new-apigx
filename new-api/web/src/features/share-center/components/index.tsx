@@ -34,6 +34,7 @@ import { toast } from 'sonner'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { PublicLayout } from '@/components/layout/components/public-layout'
+import { PublicPageBackdrop } from '@/components/layout/components/public-page-backdrop'
 import { SectionPageLayout } from '@/components/layout/components/section-page-layout'
 import { LoadingState } from '@/components/loading-state'
 import { PageTransition } from '@/components/page-transition'
@@ -172,23 +173,8 @@ export function ShareCenterBrowser() {
 
   return (
     <PublicLayout showMainContainer={false}>
-      <div className='relative'>
-        <div
-          aria-hidden
-          className='pointer-events-none absolute inset-x-0 top-0 h-[620px] opacity-20 dark:opacity-[0.1]'
-          style={{
-            background: [
-              'radial-gradient(ellipse 60% 50% at 16% 14%, oklch(0.72 0.18 250 / 80%) 0%, transparent 70%)',
-              'radial-gradient(ellipse 52% 42% at 84% 10%, oklch(0.65 0.15 200 / 60%) 0%, transparent 70%)',
-              'radial-gradient(ellipse 42% 38% at 52% 68%, oklch(0.7 0.12 280 / 40%) 0%, transparent 70%)',
-            ].join(', '),
-            maskImage:
-              'linear-gradient(to bottom, black 42%, transparent 100%)',
-            WebkitMaskImage:
-              'linear-gradient(to bottom, black 42%, transparent 100%)',
-          }}
-        />
-        <PageTransition className='relative mx-auto w-full max-w-[1280px] space-y-8 px-4 pt-16 pb-12 sm:px-6 sm:pt-20 xl:px-8'>
+      <PublicPageBackdrop>
+        <PageTransition className='mx-auto w-full max-w-[1280px] space-y-8 px-4 pt-16 pb-12 sm:px-6 sm:pt-20 xl:px-8'>
           <section className='flex flex-wrap items-end justify-between gap-5'>
             <div className='max-w-3xl'>
               <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
@@ -310,7 +296,7 @@ export function ShareCenterBrowser() {
             )}
           </section>
         </PageTransition>
-      </div>
+      </PublicPageBackdrop>
     </PublicLayout>
   )
 }
@@ -343,7 +329,7 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
   const state = postState(post)
   return (
     <PublicLayout showMainContainer={false}>
-      <div className='relative'>
+      <PublicPageBackdrop>
         <PageTransition className='mx-auto w-full max-w-[1180px] space-y-6 px-4 pt-16 pb-12 sm:px-6 sm:pt-20 xl:px-8'>
           <div className='flex flex-wrap items-end justify-between gap-4'>
             <div className='min-w-0'>
@@ -438,7 +424,7 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
             </aside>
           </div>
         </PageTransition>
-      </div>
+      </PublicPageBackdrop>
     </PublicLayout>
   )
 }

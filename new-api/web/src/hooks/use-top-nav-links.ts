@@ -83,12 +83,31 @@ export function useTopNavLinks(): TopNavLink[] {
   const shareCenter = modules?.shareCenter
   if (shareCenter && typeof shareCenter === 'object' && shareCenter.enabled) {
     const requiresAuth = shareCenter.requireAuth && !isAuthed
-    links.push({ title: t('Share center'), href: '/share-center', requiresAuth })
+    links.push({
+      title: t('Share center'),
+      href: '/share-center',
+      requiresAuth,
+    })
   }
 
-  // Public APIGX resources use the same PublicLayout as the model square and share center.
-  links.push({ title: '中转分享', href: '/relay-share' })
-  links.push({ title: '工具', href: '/tools' })
+  // APIGX public resources use the same PublicLayout as the model square and share center.
+  const relayShare = modules?.relayShare
+  if (relayShare && typeof relayShare === 'object' && relayShare.enabled) {
+    links.push({
+      title: '中转分享',
+      href: '/relay-share',
+      requiresAuth: relayShare.requireAuth && !isAuthed,
+    })
+  }
+
+  const tools = modules?.tools
+  if (tools && typeof tools === 'object' && tools.enabled) {
+    links.push({
+      title: '工具',
+      href: '/tools',
+      requiresAuth: tools.requireAuth && !isAuthed,
+    })
+  }
 
   const rankings = modules?.rankings
   if (rankings && typeof rankings === 'object' && rankings.enabled) {

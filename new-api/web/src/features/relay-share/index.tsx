@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import {
@@ -14,6 +32,7 @@ import { toast } from 'sonner'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { PublicLayout } from '@/components/layout/components/public-layout'
+import { PublicPageBackdrop } from '@/components/layout/components/public-page-backdrop'
 import { LoadingState } from '@/components/loading-state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -199,103 +218,105 @@ export function RelayShare() {
   )
   const mine = mineQuery.data?.data?.items ?? []
   return (
-    <PublicLayout>
-      <div className='space-y-8'>
-        <div className='flex flex-wrap items-end justify-between gap-4'>
-          <div>
-            <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
-              社区资源
-            </p>
-            <h1 className='mt-1 text-3xl font-semibold tracking-tight'>
-              中转站分享
-            </h1>
-            <p className='text-muted-foreground mt-2 max-w-2xl text-sm leading-6'>
-              只分公益站和商业站。分享者提交自己的检测 Key
-              后，平台会定期做低成本协议检查；公开页面只展示脱敏状态和投票，不展示
-              Key。
-            </p>
-          </div>
-          <Button onClick={() => setShowForm((value) => !value)}>
-            <RadioTower />
-            分享中转站
-          </Button>
-        </div>
-        {showForm && auth?.user ? (
-          <RelayEditor
-            onSubmit={(input) => create.mutate(input)}
-            pending={create.isPending}
-            onCancel={() => setShowForm(false)}
-          />
-        ) : null}
-        {showForm && !auth?.user ? (
-          <Card>
-            <CardContent className='flex items-center justify-between gap-4 p-5 text-sm'>
-              <span>登录后才能提交中转站和检测 Key。</span>
-              <Button render={<Link to='/sign-in' />}>登录</Button>
-            </CardContent>
-          </Card>
-        ) : null}
-        {auth?.user && mine.length > 0 ? (
-          <section className='space-y-4'>
-            <div className='flex items-center gap-2'>
-              <ShieldCheck className='text-primary size-5' />
-              <h2 className='text-lg font-semibold'>我的中转站</h2>
+    <PublicLayout showMainContainer={false}>
+      <PublicPageBackdrop>
+        <div className='mx-auto w-full max-w-[1280px] space-y-8 px-4 pt-16 pb-12 sm:px-6 sm:pt-20 xl:px-8'>
+          <div className='flex flex-wrap items-end justify-between gap-4'>
+            <div>
+              <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
+                社区资源
+              </p>
+              <h1 className='mt-1 text-3xl font-semibold tracking-tight'>
+                中转站分享
+              </h1>
+              <p className='text-muted-foreground mt-2 max-w-2xl text-sm leading-6'>
+                只分公益站和商业站。分享者提交自己的检测 Key
+                后，平台会定期做低成本协议检查；公开页面只展示脱敏状态和投票，不展示
+                Key。
+              </p>
             </div>
-            <div className='grid gap-4 md:grid-cols-2'>
-              {mine.map((share) => (
+            <Button onClick={() => setShowForm((value) => !value)}>
+              <RadioTower />
+              分享中转站
+            </Button>
+          </div>
+          {showForm && auth?.user ? (
+            <RelayEditor
+              onSubmit={(input) => create.mutate(input)}
+              pending={create.isPending}
+              onCancel={() => setShowForm(false)}
+            />
+          ) : null}
+          {showForm && !auth?.user ? (
+            <Card>
+              <CardContent className='flex items-center justify-between gap-4 p-5 text-sm'>
+                <span>登录后才能提交中转站和检测 Key。</span>
+                <Button render={<Link to='/sign-in' />}>登录</Button>
+              </CardContent>
+            </Card>
+          ) : null}
+          {auth?.user && mine.length > 0 ? (
+            <section className='space-y-4'>
+              <div className='flex items-center gap-2'>
+                <ShieldCheck className='text-primary size-5' />
+                <h2 className='text-lg font-semibold'>我的中转站</h2>
+              </div>
+              <div className='grid gap-4 md:grid-cols-2'>
+                {mine.map((share) => (
+                  <RelayCard
+                    key={share.public_id}
+                    share={share}
+                    mine
+                    onCheck={() => check.mutate(share.public_id)}
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
+          <div className='flex flex-wrap items-center justify-between gap-3'>
+            <div>
+              <h2 className='text-lg font-semibold'>公开资源</h2>
+              <p className='text-muted-foreground mt-1 text-sm'>
+                按最近更新时间浏览，不做综合排名。
+              </p>
+            </div>
+            <div className='flex gap-2'>
+              {(['all', 'charity', 'commercial'] as const).map((value) => (
+                <button
+                  key={value}
+                  type='button'
+                  onClick={() => setKind(value)}
+                  className={`rounded-full border px-3 py-1.5 text-xs ${kind === value ? 'border-primary bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  {value === 'all'
+                    ? '全部'
+                    : value === 'charity'
+                      ? '公益站'
+                      : '商业站'}
+                </button>
+              ))}
+            </div>
+          </div>
+          {items.length === 0 ? (
+            <EmptyState
+              title='还没有公开中转站'
+              description='你可以成为第一个提交者。'
+            />
+          ) : (
+            <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
+              {items.map((share) => (
                 <RelayCard
                   key={share.public_id}
                   share={share}
-                  mine
-                  onCheck={() => check.mutate(share.public_id)}
+                  onVote={(usable) =>
+                    vote.mutate({ id: share.public_id, usable })
+                  }
                 />
               ))}
             </div>
-          </section>
-        ) : null}
-        <div className='flex flex-wrap items-center justify-between gap-3'>
-          <div>
-            <h2 className='text-lg font-semibold'>公开资源</h2>
-            <p className='text-muted-foreground mt-1 text-sm'>
-              按最近更新时间浏览，不做综合排名。
-            </p>
-          </div>
-          <div className='flex gap-2'>
-            {(['all', 'charity', 'commercial'] as const).map((value) => (
-              <button
-                key={value}
-                type='button'
-                onClick={() => setKind(value)}
-                className={`rounded-full border px-3 py-1.5 text-xs ${kind === value ? 'border-primary bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-              >
-                {value === 'all'
-                  ? '全部'
-                  : value === 'charity'
-                    ? '公益站'
-                    : '商业站'}
-              </button>
-            ))}
-          </div>
+          )}
         </div>
-        {items.length === 0 ? (
-          <EmptyState
-            title='还没有公开中转站'
-            description='你可以成为第一个提交者。'
-          />
-        ) : (
-          <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
-            {items.map((share) => (
-              <RelayCard
-                key={share.public_id}
-                share={share}
-                onVote={(usable) =>
-                  vote.mutate({ id: share.public_id, usable })
-                }
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      </PublicPageBackdrop>
     </PublicLayout>
   )
 }

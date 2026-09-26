@@ -73,7 +73,7 @@ func SetApiRouter(router *gin.Engine) {
 			perfMetricsRoute.GET("", controller.GetPerfMetrics)
 		}
 		relayPublicRoute := apiRouter.Group("/relay-shares")
-		relayPublicRoute.Use(middleware.TryUserAuth())
+		relayPublicRoute.Use(middleware.HeaderNavModulePublicOrUserAuth("relayShare"))
 		apigxapi.RegisterRelayPublic(relayPublicRoute, apigxmodel.DefaultDB())
 
 		apiRouter.GET("/rankings", middleware.HeaderNavModuleAuth("rankings"), controller.GetRankings)

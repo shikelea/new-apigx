@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import {
@@ -13,6 +31,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 
 import { PublicLayout } from '@/components/layout/components/public-layout'
+import { PublicPageBackdrop } from '@/components/layout/components/public-page-backdrop'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -98,109 +117,111 @@ export function ToolsPage() {
   const siteItems = sites.data?.data?.items ?? []
 
   return (
-    <PublicLayout>
-      <div className='space-y-8'>
-        <div>
-          <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
-            APIGX 工具
-          </p>
-          <h1 className='mt-1 text-3xl font-semibold tracking-tight'>
-            工具中心
-          </h1>
-          <p className='text-muted-foreground mt-2 max-w-3xl text-sm leading-6'>
-            工具由服务端受控执行，结果只保留脱敏摘要。安全审计中的“需复核”是风险线索，
-            不代表能够绝对证明模型掺水或中转站恶意改写。
-          </p>
-        </div>
-
-        <div className='grid gap-4 md:grid-cols-2'>
-          <Card>
-            <CardHeader>
-              <CardTitle className='flex items-center gap-2 text-base'>
-                <ShieldCheck className='text-primary size-5' />
-                供应商安全审计
-              </CardTitle>
-              <Badge variant='outline'>基础审计已接入</Badge>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <p className='text-muted-foreground text-sm leading-6'>
-                先检查协议和模型列表，再按阶段接入 Token
-                用量、流式完整性、错误泄漏和模型身份探针。
-                攻击性探针默认不会自动发送。
-              </p>
-              <Button
-                onClick={() => setAuditOpen((value) => !value)}
-                disabled={!auth?.user}
-              >
-                <ClipboardCheck />
-                开始审计
-              </Button>
-              {auditOpen && auth?.user ? (
-                <AuditForm
-                  relays={relayItems}
-                  pending={audit.isPending}
-                  onSubmit={(input) => audit.mutate(input)}
-                />
-              ) : null}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className='flex items-center gap-2 text-base'>
-                <Clock3 className='text-primary size-5' />
-                New API 签到
-              </CardTitle>
-              <Badge variant='outline'>固定时间执行</Badge>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <p className='text-muted-foreground text-sm leading-6'>
-                添加你有权使用的 New API
-                站点，平台按你设置的时间代发签到请求。凭据只保存加密引用，
-                页面不会回显。
-              </p>
-              <Button
-                onClick={() => setCheckinOpen((value) => !value)}
-                disabled={!auth?.user}
-              >
-                <KeyRound />
-                添加签到站点
-              </Button>
-              {checkinOpen && auth?.user ? (
-                <CheckinForm
-                  pending={createSite.isPending}
-                  onSubmit={(input) => createSite.mutate(input)}
-                />
-              ) : null}
-            </CardContent>
-          </Card>
-        </div>
-
-        {auth?.user ? (
-          <div className='grid gap-6 lg:grid-cols-2'>
-            <AuditList audits={auditItems} />
-            <CheckinList sites={siteItems} onRun={(id) => run.mutate(id)} />
+    <PublicLayout showMainContainer={false}>
+      <PublicPageBackdrop>
+        <div className='mx-auto w-full max-w-[1280px] space-y-8 px-4 pt-16 pb-12 sm:px-6 sm:pt-20 xl:px-8'>
+          <div>
+            <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
+              APIGX 工具
+            </p>
+            <h1 className='mt-1 text-3xl font-semibold tracking-tight'>
+              工具中心
+            </h1>
+            <p className='text-muted-foreground mt-2 max-w-3xl text-sm leading-6'>
+              工具由服务端受控执行，结果只保留脱敏摘要。安全审计中的“需复核”是风险线索，
+              不代表能够绝对证明模型掺水或中转站恶意改写。
+            </p>
           </div>
-        ) : (
+
+          <div className='grid gap-4 md:grid-cols-2'>
+            <Card>
+              <CardHeader>
+                <CardTitle className='flex items-center gap-2 text-base'>
+                  <ShieldCheck className='text-primary size-5' />
+                  供应商安全审计
+                </CardTitle>
+                <Badge variant='outline'>基础审计已接入</Badge>
+              </CardHeader>
+              <CardContent className='space-y-4'>
+                <p className='text-muted-foreground text-sm leading-6'>
+                  先检查协议和模型列表，再按阶段接入 Token
+                  用量、流式完整性、错误泄漏和模型身份探针。
+                  攻击性探针默认不会自动发送。
+                </p>
+                <Button
+                  onClick={() => setAuditOpen((value) => !value)}
+                  disabled={!auth?.user}
+                >
+                  <ClipboardCheck />
+                  开始审计
+                </Button>
+                {auditOpen && auth?.user ? (
+                  <AuditForm
+                    relays={relayItems}
+                    pending={audit.isPending}
+                    onSubmit={(input) => audit.mutate(input)}
+                  />
+                ) : null}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className='flex items-center gap-2 text-base'>
+                  <Clock3 className='text-primary size-5' />
+                  New API 签到
+                </CardTitle>
+                <Badge variant='outline'>固定时间执行</Badge>
+              </CardHeader>
+              <CardContent className='space-y-4'>
+                <p className='text-muted-foreground text-sm leading-6'>
+                  添加你有权使用的 New API
+                  站点，平台按你设置的时间代发签到请求。凭据只保存加密引用，
+                  页面不会回显。
+                </p>
+                <Button
+                  onClick={() => setCheckinOpen((value) => !value)}
+                  disabled={!auth?.user}
+                >
+                  <KeyRound />
+                  添加签到站点
+                </Button>
+                {checkinOpen && auth?.user ? (
+                  <CheckinForm
+                    pending={createSite.isPending}
+                    onSubmit={(input) => createSite.mutate(input)}
+                  />
+                ) : null}
+              </CardContent>
+            </Card>
+          </div>
+
+          {auth?.user ? (
+            <div className='grid gap-6 lg:grid-cols-2'>
+              <AuditList audits={auditItems} />
+              <CheckinList sites={siteItems} onRun={(id) => run.mutate(id)} />
+            </div>
+          ) : (
+            <Card>
+              <CardContent className='flex items-center justify-between gap-4 p-5 text-sm'>
+                <span>登录后可以运行审计并管理签到站点。</span>
+                <Button render={<Link to='/sign-in' />}>登录</Button>
+              </CardContent>
+            </Card>
+          )}
+
           <Card>
-            <CardContent className='flex items-center justify-between gap-4 p-5 text-sm'>
-              <span>登录后可以运行审计并管理签到站点。</span>
-              <Button render={<Link to='/sign-in' />}>登录</Button>
+            <CardHeader>
+              <CardTitle className='text-base'>检测边界</CardTitle>
+            </CardHeader>
+            <CardContent className='grid gap-3 text-sm leading-6 md:grid-cols-3'>
+              <p>只保存状态、样本数、延迟和脱敏摘要。</p>
+              <p>第三方检测项目作为隔离参考，不把浏览器变成 Key 执行环境。</p>
+              <p>身份替换、越狱、Web3、多模态指纹会在能力接入后单独显示。</p>
             </CardContent>
           </Card>
-        )}
-
-        <Card>
-          <CardHeader>
-            <CardTitle className='text-base'>检测边界</CardTitle>
-          </CardHeader>
-          <CardContent className='grid gap-3 text-sm leading-6 md:grid-cols-3'>
-            <p>只保存状态、样本数、延迟和脱敏摘要。</p>
-            <p>第三方检测项目作为隔离参考，不把浏览器变成 Key 执行环境。</p>
-            <p>身份替换、越狱、Web3、多模态指纹会在能力接入后单独显示。</p>
-          </CardContent>
-        </Card>
-      </div>
+        </div>
+      </PublicPageBackdrop>
     </PublicLayout>
   )
 }

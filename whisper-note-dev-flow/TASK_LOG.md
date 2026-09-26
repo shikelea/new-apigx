@@ -1,4 +1,30 @@
 # 任务清单
+## [已完成] 中转分享与工具访问策略、公共页背景和动态回归（2026-09-26）
+
+**本轮目标**：把中转分享、工具中心纳入现有“顶部导航”设置，支持是否必须登录才能查看，并让两类页面复用分享中心的首屏背景与公共页面视觉；随后完成页面、权限、表单、API、调度和错误流程的本地动态回归。
+
+**验收标准**：
+- 顶部导航设置中可分别开启/关闭中转分享、工具入口，并分别设置是否强制登录；旧配置兼容且默认保持公开；
+- 后端对中转分享公开读取接口和前端路由使用同一访问策略，关闭或强制登录不能只靠前端隐藏；
+- 中转分享、工具中心有与分享中心一致的背景、间距、容器和响应式表现，顶部导航不重复；
+- 未登录、登录、关闭入口、强制登录、资源创建/删除、Key 脱敏、SSRF 拒绝、检测/签到/审计成功与失败路径均有动态验证；
+- 前端类型检查、生产构建、Go 定向测试和本地浏览器流程通过；未完成的高级审计仍明确显示“需复核/未执行”，不伪造完成。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 顶部导航配置 | `new-api/web/src/features/system-settings/maintenance/config.ts`、`header-navigation-section.tsx`、`new-api/web/src/lib/nav-modules.ts` | 修改 | 增加中转分享/工具访问与登录开关，并保持旧配置兼容 |
+| 后端访问控制 | `new-api/middleware/header_nav.go`、`new-api/router/api-router.go` | 修改 | 将中转分享公开 API 接入统一模块策略 |
+| 公共页面视觉 | `new-api/web/src/components/layout/**`、`new-api/web/src/features/{share-center,relay-share,tools}/**` | 修改/新建 | 抽取分享中心首屏背景并复用到中转分享、工具中心 |
+| 路由守卫与导航 | `new-api/web/src/routes/{relay-share,tools}/**`、`new-api/web/src/hooks/use-top-nav-links.ts` | 修改 | 按设置控制页面入口和登录跳转 |
+| 验证与文档 | `new-api/**`、`whisper-note-dev-flow/**` | 修改 | 测试、状态和任务台账同步 |
+
+**任务清单**：
+- [x] 增加顶部导航中转分享/工具模块及登录要求配置 → `HeaderNavModules` 新增 `relayShare/tools`，设置表单、导航入口和路由守卫已接通
+- [x] 接入后端统一访问策略 → `/api/relay-shares` 接入 `HeaderNavModulePublicOrUserAuth("relayShare")`，所有者操作仍强制认证
+- [x] 统一公共页面背景与布局 → `PublicPageBackdrop` 抽取并复用到分享中心、中转分享、工具中心
+- [x] 完成动态回归测试 → Go 4 包、前端类型/构建、Vitest 15/15、API 冒烟和 Playwright 页面/导航/中文/背景回归通过
+- [x] 同步状态文档并提交本地 commit → `PROJECT_STATUS.md` [059]、本轮任务记录和本地 commit 同步
 ## [已完成] 中转站分享、供应商审计与 New API 签到工具（2026-09-26）
 
 **本轮目标**：统一分享/中转/工具公共页面的视觉壳层，增加公益/商业中转站分享与受控 Key 检测契约，接入 New API/Sub2API 基础探测，并为供应商安全审计与 New API 定时签到建立可运行的后端和前端入口。
@@ -81,6 +107,32 @@
 - [x] 本地类型检查、定向测试、生产构建和浏览器流程验证 → `tsgo -b`、Rsbuild、变更文件 oxlint、`go test ./apigx/api ./apigx/model -count=1`、无头 Chrome 三条公共路由通过
 - [x] 调研优秀开源项目/论文并记录可复用与不自造的部分 → `docs/APIGX_TOOLS_PLAN.md`
 # 任务清单
+## [进行中] 中转分享与工具访问策略、公共页背景和动态回归（2026-09-26）
+
+**本轮目标**：把中转分享、工具中心纳入现有“顶部导航”设置，支持是否必须登录才能查看，并让两类页面复用分享中心的首屏背景与公共页面视觉；随后完成页面、权限、表单、API、调度和错误流程的本地动态回归。
+
+**验收标准**：
+- 顶部导航设置中可分别开启/关闭中转分享、工具入口，并分别设置是否强制登录；旧配置兼容且默认保持公开；
+- 后端对中转分享公开读取接口和前端路由使用同一访问策略，关闭或强制登录不能只靠前端隐藏；
+- 中转分享、工具中心有与分享中心一致的背景、间距、容器和响应式表现，顶部导航不重复；
+- 未登录、登录、关闭入口、强制登录、资源创建/删除、Key 脱敏、SSRF 拒绝、检测/签到/审计成功与失败路径均有动态验证；
+- 前端类型检查、生产构建、Go 定向测试和本地浏览器流程通过；未完成的高级审计仍明确显示“需复核/未执行”，不伪造完成。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 顶部导航配置 | `new-api/web/src/features/system-settings/maintenance/config.ts`、`header-navigation-section.tsx`、`new-api/web/src/lib/nav-modules.ts` | 修改 | 增加中转分享/工具访问与登录开关，并保持旧配置兼容 |
+| 后端访问控制 | `new-api/middleware/header_nav.go`、`new-api/router/api-router.go` | 修改 | 将中转分享公开 API 接入统一模块策略 |
+| 公共页面视觉 | `new-api/web/src/components/layout/**`、`new-api/web/src/features/{share-center,relay-share,tools}/**` | 修改/新建 | 抽取分享中心首屏背景并复用到中转分享、工具中心 |
+| 路由守卫与导航 | `new-api/web/src/routes/{relay-share,tools}/**`、`new-api/web/src/hooks/use-top-nav-links.ts` | 修改 | 按设置控制页面入口和登录跳转 |
+| 验证与文档 | `new-api/**`、`whisper-note-dev-flow/**` | 修改 | 测试、状态和任务台账同步 |
+
+**任务清单**：
+- [ ] 增加顶部导航中转分享/工具模块及登录要求配置 → 前后端解析、设置表单、导航入口和路由守卫
+- [ ] 接入后端统一访问策略 → 中转分享公开列表/详情遵守启用与登录要求，保持所有者操作认证
+- [ ] 统一公共页面背景与布局 → 抽取共享背景组件，覆盖中转分享、工具和分享中心
+- [ ] 完成动态回归测试 → 页面、权限、表单、API、调度、错误和响应式流程
+- [ ] 同步状态文档并提交本地 commit → 记录验证结果和剩余风险
 ## [已完成] 分享中心 UI 收敛与工具接入边界 (2026-09-26)
 
 **本轮目标**：参考 New API 排行榜等单页的布局和组件，优化分享中心公共页与详情页的层次、信息密度和响应式体验；核实 llm-verify、hlwy-ai-checker 的复用边界，并保持渠道连通性测试复用 New API 基座。

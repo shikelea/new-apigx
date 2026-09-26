@@ -57,6 +57,10 @@ const headerNavSchema = z.object({
   rankingsRequireAuth: z.boolean(),
   shareCenterEnabled: z.boolean(),
   shareCenterRequireAuth: z.boolean(),
+  relayShareEnabled: z.boolean(),
+  relayShareRequireAuth: z.boolean(),
+  toolsEnabled: z.boolean(),
+  toolsRequireAuth: z.boolean(),
   docs: z.boolean(),
   about: z.boolean(),
 })
@@ -99,6 +103,22 @@ const toFormValues = (config: HeaderNavModulesConfig): HeaderNavFormValues => ({
     config.shareCenter?.requireAuth === undefined
       ? HEADER_NAV_DEFAULT.shareCenter.requireAuth
       : Boolean(config.shareCenter.requireAuth),
+  relayShareEnabled:
+    config.relayShare?.enabled === undefined
+      ? HEADER_NAV_DEFAULT.relayShare.enabled
+      : Boolean(config.relayShare.enabled),
+  relayShareRequireAuth:
+    config.relayShare?.requireAuth === undefined
+      ? HEADER_NAV_DEFAULT.relayShare.requireAuth
+      : Boolean(config.relayShare.requireAuth),
+  toolsEnabled:
+    config.tools?.enabled === undefined
+      ? HEADER_NAV_DEFAULT.tools.enabled
+      : Boolean(config.tools.enabled),
+  toolsRequireAuth:
+    config.tools?.requireAuth === undefined
+      ? HEADER_NAV_DEFAULT.tools.requireAuth
+      : Boolean(config.tools.requireAuth),
   docs:
     config.docs === undefined ? HEADER_NAV_DEFAULT.docs : Boolean(config.docs),
   about:
@@ -145,6 +165,16 @@ export function HeaderNavigationSection({
         ...(config.shareCenter ?? HEADER_NAV_DEFAULT.shareCenter),
         enabled: values.shareCenterEnabled,
         requireAuth: values.shareCenterRequireAuth,
+      },
+      relayShare: {
+        ...(config.relayShare ?? HEADER_NAV_DEFAULT.relayShare),
+        enabled: values.relayShareEnabled,
+        requireAuth: values.relayShareRequireAuth,
+      },
+      tools: {
+        ...(config.tools ?? HEADER_NAV_DEFAULT.tools),
+        enabled: values.toolsEnabled,
+        requireAuth: values.toolsRequireAuth,
       },
     }
 
@@ -193,7 +223,12 @@ export function HeaderNavigationSection({
   const accessModules: Array<{
     enabledKey: keyof HeaderNavFormValues
     requireAuthKey: keyof HeaderNavFormValues
-    requireAuthDependsOn: 'pricingEnabled' | 'rankingsEnabled' | 'shareCenterEnabled'
+    requireAuthDependsOn:
+      | 'pricingEnabled'
+      | 'rankingsEnabled'
+      | 'shareCenterEnabled'
+      | 'relayShareEnabled'
+      | 'toolsEnabled'
     title: string
     description: string
     requireAuthTitle: string
@@ -231,6 +266,24 @@ export function HeaderNavigationSection({
       requireAuthDescription: t(
         'Visitors must authenticate before accessing the share center.'
       ),
+    },
+    {
+      enabledKey: 'relayShareEnabled',
+      requireAuthKey: 'relayShareRequireAuth',
+      requireAuthDependsOn: 'relayShareEnabled',
+      title: '中转分享',
+      description: '公益站与商业站资源分享和可用性反馈。',
+      requireAuthTitle: '登录后才能查看中转分享',
+      requireAuthDescription: '开启后，未登录用户无法查看中转站列表和详情。',
+    },
+    {
+      enabledKey: 'toolsEnabled',
+      requireAuthKey: 'toolsRequireAuth',
+      requireAuthDependsOn: 'toolsEnabled',
+      title: '工具中心',
+      description: '供应商审计、连通性检查和 New API 签到工具。',
+      requireAuthTitle: '登录后才能查看工具中心',
+      requireAuthDescription: '开启后，未登录用户无法打开工具中心页面。',
     },
   ]
 

@@ -27,6 +27,8 @@ export type HeaderNavModulesConfig = {
   pricing: HeaderNavAccessConfig
   rankings: HeaderNavAccessConfig
   shareCenter: HeaderNavAccessConfig
+  relayShare: HeaderNavAccessConfig
+  tools: HeaderNavAccessConfig
   docs: boolean
   about: boolean
   [key: string]: boolean | HeaderNavAccessConfig
@@ -51,6 +53,14 @@ export const HEADER_NAV_DEFAULT: HeaderNavModulesConfig = {
     requireAuth: false,
   },
   shareCenter: {
+    enabled: true,
+    requireAuth: false,
+  },
+  relayShare: {
+    enabled: true,
+    requireAuth: false,
+  },
+  tools: {
     enabled: true,
     requireAuth: false,
   },
@@ -111,6 +121,8 @@ const cloneHeaderNavDefault = (): HeaderNavModulesConfig => ({
   pricing: { ...HEADER_NAV_DEFAULT.pricing },
   rankings: { ...HEADER_NAV_DEFAULT.rankings },
   shareCenter: { ...HEADER_NAV_DEFAULT.shareCenter },
+  relayShare: { ...HEADER_NAV_DEFAULT.relayShare },
+  tools: { ...HEADER_NAV_DEFAULT.tools },
 })
 
 const parseAccessModule = (
@@ -160,6 +172,8 @@ export function parseHeaderNavModules(
       pricing: { ...base.pricing },
       rankings: { ...base.rankings },
       shareCenter: { ...base.shareCenter },
+      relayShare: { ...base.relayShare },
+      tools: { ...base.tools },
     }
 
     Object.entries(parsed).forEach(([key, raw]) => {
@@ -173,6 +187,14 @@ export function parseHeaderNavModules(
       }
       if (key === 'shareCenter') {
         result.shareCenter = parseAccessModule(raw, base.shareCenter)
+        return
+      }
+      if (key === 'relayShare') {
+        result.relayShare = parseAccessModule(raw, base.relayShare)
+        return
+      }
+      if (key === 'tools') {
+        result.tools = parseAccessModule(raw, base.tools)
         return
       }
 

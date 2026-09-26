@@ -1,4 +1,24 @@
 # 项目状态 · apigx（二开 New API）
+### [059] 2026-09-26 中转分享与工具访问策略、公共页背景和动态回归
+
+**做了什么**：将中转分享和工具中心接入现有“顶部导航”配置，分别支持启用/关闭与强制登录；统一复用分享中心的首屏渐变背景，并完成本地 API、浏览器、前端和后端回归。
+
+**涉及模块**：`new-api/middleware`、`new-api/router`、`new-api/web/src/features/system-settings/maintenance`、`new-api/web/src/lib/nav-modules.ts`、`new-api/web/src/hooks/use-top-nav-links.ts`、`new-api/web/src/routes/{relay-share,tools}`、公共布局组件。
+
+**改动明细**：
+| 文件/模块 | 改动说明 |
+|---|---|
+| `new-api/web/src/features/system-settings/maintenance/config.ts`、`header-navigation-section.tsx` | 新增 `relayShare` 与 `tools` 两个访问配置，提供入口开关和“登录后才能查看”开关；旧配置自动回退为公开可用。 |
+| `new-api/web/src/lib/nav-modules.ts`、`hooks/use-top-nav-links.ts` | 前端解析、顶部导航展示和登录提示与后端配置保持同源，移除无条件显示入口。 |
+| `new-api/middleware/header_nav.go`、`router/api-router.go` | `/api/relay-shares` 公开读接口改用 `HeaderNavModulePublicOrUserAuth("relayShare")`；关闭或强制登录时匿名请求被拒绝，所有者写操作仍需认证。 |
+| `new-api/web/src/components/layout/components/public-page-backdrop.tsx` | 抽取分享中心渐变背景和遮罩，复用到分享中心、中转分享、工具中心。 |
+| `new-api/web/src/routes/{relay-share,tools}` | 增加模块启用/登录守卫，关闭模块回首页，强制登录回登录页并保留 redirect。 |
+| `new-api/middleware/header_nav_test.go` | 增加中转分享/工具默认公开、强制登录、关闭入口的中间件回归。 |
+
+**验证**：前端 `tsgo -b` ✅；Rsbuild 生产构建 ✅；Vitest 15/15 ✅；Go `./middleware ./router ./apigx/api ./apigx/model` ✅；运行中的网关重新嵌入前端并监听 3000 ✅；`/api/status`、`/api/relay-shares`、`/relay-share`、`/tools` 返回正常；Playwright 真实浏览器确认中转分享、工具页中文渲染、统一背景和顶部导航入口各出现一次 ✅；截图保存于 `output/playwright/relay-share.png`、`output/playwright/share-center.png`。
+
+**剩余风险**：供应商高级 Token/Prompt/身份/SSE/错误泄漏探针仍保持“需复核/未执行”的诚实状态；本轮未对真实外站签到凭据做生产验证；关闭/强制登录的完整管理员 UI 操作需在登录管理员账号下再做一次人工验收。
+
 ### [058] 2026-09-26 中转站分享、供应商审计与 New API 签到工具收口
 
 **做了什么**：完成中转站公益/商业分享、受控 Key 持续检测、供应商基础审计、New API 外站签到和统一工具页；修复公开列表可能暴露草稿的问题，让签到凭据类型、时区调度、真实分享者展示和删除后的凭据停用真正生效。
