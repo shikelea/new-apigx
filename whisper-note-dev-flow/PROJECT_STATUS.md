@@ -1,4 +1,22 @@
 # 项目状态 · apigx（二开 New API）
+### [056] 2026-09-26 分享中心 UI 收敛与工具候选复核
+
+**做了什么**：参考 New API 排行榜等公共单页的布局模式，重构分享中心列表和详情的视觉层次；复核 `llm-verify` 与 `hlwy-ai-checker` 的许可证、运行方式及接入边界。
+
+**涉及模块**：分享中心公共页、分享中心状态格式化、工具规划文档、开发流程记录。
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `new-api/web/src/features/share-center/components/index.tsx` | 分享中心 UI | 复用 `PublicLayout` 的无容器全宽模式、`PageTransition`、Card/Badge 等现有组件；新增首屏说明、统计摘要、状态筛选、作者/更新时间、有效性反馈和响应式详情侧栏；保留“不做排名”的产品边界 |
+| `new-api/web/src/features/share-center/lib/format.ts` | 分享中心逻辑 | 抽取投票摘要、状态归类、时间戳兼容格式化，供卡片和详情页共享 |
+| `new-api/web/src/features/share-center/__tests__/format.test.ts` | 回归测试 | 覆盖无样本、可用、票数相同、秒/毫秒时间戳四类用户可见状态 |
+| `docs/APIGX_TOOLS_PLAN.md` | 工具接入 | 记录两个候选项目的 MIT/LGPL-2.1 许可、安全边界和“不能替代 New API 渠道测试”的结论 |
+
+**验证**：`pnpm run typecheck` ✅；相关文件 `oxlint` ✅；分享中心状态测试 4/4 ✅；Rsbuild 生产构建 ✅；`git diff --check` ✅。浏览器审查已确认 4173 静态预览仍为旧构建，3000 开发页因本地后端 API 未启动而无法完成真实数据流程；Go/Docker 在当前 Windows 环境不可用，因此未声称端到端通过。
+
+**剩余风险**：分享中心真实数据、投票和 owner 管理流程需要在后端服务启动后继续验收；第三方检测项目尚未接入生产受控任务；本轮未推送远端、未部署生产。
+
 
 > 本文件由开发流程维护（`whisper-note-dev-flow/SKILL.md` §4）。**序号倒序，顶部最新**。
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。

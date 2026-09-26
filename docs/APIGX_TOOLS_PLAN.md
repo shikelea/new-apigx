@@ -7,6 +7,12 @@
 - 分享渠道连通性测试复用 New API 的渠道测试控制器；APIGX 只负责 owner 校验、渠道归属和模型白名单。
 
 ## 工具接入候选
+## 已核实的开源候选
+
+- `mintesnot-teshome/llm-verify`：MIT 许可证，Python/FastAPI 独立服务。支持 OpenAI 兼容和 Anthropic 风格端点，提供基准跑、结果、行为指纹与深度分析接口；需要测试服务的访问令牌以及待测/基线渠道的 Key。它的结论明确是概率性信号，`NO_FRAUD_SIGNALS` 也不等于“已验证真实”。适合隔离部署后由 APIGX 服务端受控调用，不能把 Key 放到浏览器，也不应把“欺诈”直接作为封禁依据。
+- `hanlinwenyuan/hlwy-ai-checker`：LGPL-2.1，Python + HTML 本地工具，使用官方模型标定结果与第三方渠道的统计指纹做比较；README 明确提示结果受随机性、模型版本、采样参数、网络波动和样本数影响，不能作为商业纠纷的绝对事实依据。适合参考测试流程和解释文案；若正式集成，需要遵守 LGPL 条款并优先以独立服务或可替换适配器接入。
+- 两个项目都不是 APIGX 的渠道适配器，不能替换 New API 的 `TestChannel`。分享渠道连通性继续走基座实现；外部项目只用于受控质量检查/指纹任务。
+
 
 - `idemerge/llm-api-bench`：参考自托管、多供应商/兼容 OpenAI 端点的测试任务、并发、健康状态和历史结果模型。
 - `saksham10arora-dotcom/llm-bench`：参考 TTFT、总延迟、流间隔、吞吐、成本和 p50/p95/p99，并区分冷/热请求。
