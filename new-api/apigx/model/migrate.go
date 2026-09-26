@@ -89,6 +89,11 @@ func AllModels() []any {
 		&AuditEvent{},
 		&IdempotencyRecord{},
 		&PlatformSetting{},
+		&RelayShare{},
+		&RelayCredential{},
+		&AuditRun{},
+		&AuditCheck{},
+		&CheckinSite{},
 	}
 }
 
@@ -99,4 +104,4 @@ const TableNamePrefix = TablePrefix
 //
 // 这是一个**契约常量**：新增表时必须同时调整它，并让 migrate_test.go 的断言继续成立；
 // 这样「漏加迁移」会立刻变成测试失败，而不是静默少建一张表。
-const ExpectedTableCount = 29
+const ExpectedTableCount = 34

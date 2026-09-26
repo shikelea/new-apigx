@@ -1,43 +1,411 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, RadioTower } from 'lucide-react'
+import {
+  CheckCircle2,
+  Clock3,
+  KeyRound,
+  RadioTower,
+  ShieldCheck,
+  XCircle,
+} from 'lucide-react'
+import { useState } from 'react'
+import { toast } from 'sonner'
 
+import { EmptyState } from '@/components/empty-state'
+import { ErrorState } from '@/components/error-state'
 import { PublicLayout } from '@/components/layout/components/public-layout'
+import { LoadingState } from '@/components/loading-state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { handleServerError } from '@/lib/handle-server-error'
+import { useAuthStore } from '@/stores/auth-store'
 
-const relayTypes = [
-  { title: '公益中转站', description: '分享公开可用的中转入口、支持模型和使用限制。', status: '规划中' },
-  { title: '个人中转站', description: '分享自建或团队维护的中转服务，保留联系方式和更新时间。', status: '规划中' },
-  { title: '临时福利入口', description: '记录限时活动、试用额度与失效时间，避免把临时信息混进模型广场。', status: '规划中' },
-]
+import {
+  checkRelayShare,
+  createRelayShare,
+  listMyRelayShares,
+  listRelayShares,
+  type RelayCreateInput,
+  type RelayShare,
+  type RelayStatus,
+  voteRelayShare,
+} from './api'
+
+function statusLabel(status: RelayStatus) {
+  return {
+    healthy: '检测通过',
+    degraded: '部分可用',
+    failed: '检测失败',
+    unknown: '尚未检测',
+  }[status]
+}
+function statusIcon(status: RelayStatus) {
+  if (status === 'healthy') return <CheckCircle2 className='size-4' />
+  if (status === 'failed') return <XCircle className='size-4' />
+  return <Clock3 className='size-4' />
+}
+function formatTime(epoch: number) {
+  return epoch ? new Date(epoch * 1000).toLocaleString() : '—'
+}
+
+function RelayCard({
+  share,
+  mine = false,
+  onCheck,
+  onVote,
+}: {
+  share: RelayShare
+  mine?: boolean
+  onCheck?: () => void
+  onVote?: (usable: boolean) => void
+}) {
+  return (
+    <Card className='bg-card/90 h-full'>
+      <CardHeader className='gap-3'>
+        <div className='flex items-start justify-between gap-3'>
+          <div className='min-w-0'>
+            <CardTitle className='truncate text-base'>{share.title}</CardTitle>
+            <p className='text-muted-foreground mt-1 truncate text-xs'>
+              {share.owner_name} · {share.base_url}
+            </p>
+          </div>
+          <Badge variant={share.kind === 'charity' ? 'secondary' : 'outline'}>
+            {share.kind === 'charity' ? '公益站' : '商业站'}
+          </Badge>
+        </div>
+        <div className='text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs'>
+          <span>{share.protocol === 'sub2api' ? 'Sub2API' : 'New API'}</span>
+          <span className='inline-flex items-center gap-1'>
+            {statusIcon(share.check_status)}
+            {statusLabel(share.check_status)}
+          </span>
+        </div>
+      </CardHeader>
+      <CardContent className='space-y-4'>
+        <p className='text-muted-foreground line-clamp-3 text-sm leading-6 whitespace-pre-wrap'>
+          {share.content || '分享者未填写说明。'}
+        </p>
+        <div className='grid grid-cols-3 gap-2 text-xs'>
+          <Metric
+            label='模型'
+            value={share.model_count ? `${share.model_count} 个` : '—'}
+          />
+          <Metric
+            label='延迟'
+            value={share.latency_ms ? `${share.latency_ms} ms` : '—'}
+          />
+          <Metric label='最近检测' value={formatTime(share.last_checked_at)} />
+        </div>
+        <p className='text-muted-foreground text-xs'>
+          {share.check_reason || '平台尚未完成检测。'}
+          {share.updated_at ? ` · 更新于 ${formatTime(share.updated_at)}` : ''}
+        </p>
+        {mine && (
+          <div className='bg-muted/30 flex items-center justify-between rounded-lg border p-3 text-xs'>
+            <span className='inline-flex items-center gap-1.5'>
+              <KeyRound className='size-3.5' />
+              {share.credential_configured
+                ? `检测 Key 已配置 · 尾号 ${share.key_suffix}`
+                : '未配置检测 Key'}
+            </span>
+            <Button size='sm' variant='outline' onClick={onCheck}>
+              立即检测
+            </Button>
+          </div>
+        )}
+        {!mine && onVote && (
+          <div className='flex gap-2 border-t pt-3'>
+            <Button size='sm' variant='outline' onClick={() => onVote(true)}>
+              仍可用 · {share.vote_usable}
+            </Button>
+            <Button size='sm' variant='ghost' onClick={() => onVote(false)}>
+              已失效 · {share.vote_unavailable}
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className='bg-muted/30 rounded-lg p-2'>
+      <p className='text-muted-foreground'>{label}</p>
+      <p className='mt-1 truncate font-medium'>{value}</p>
+    </div>
+  )
+}
 
 export function RelayShare() {
+  const auth = useAuthStore((state) => state.auth)
+  const client = useQueryClient()
+  const [kind, setKind] = useState<'all' | 'charity' | 'commercial'>('all')
+  const [showForm, setShowForm] = useState(false)
+  const publicQuery = useQuery({
+    queryKey: ['relay-shares'],
+    queryFn: listRelayShares,
+  })
+  const mineQuery = useQuery({
+    queryKey: ['relay-shares-mine'],
+    queryFn: listMyRelayShares,
+    enabled: !!auth?.user,
+  })
+  const check = useMutation({
+    mutationFn: checkRelayShare,
+    onSuccess: () => {
+      toast.success('检测已完成')
+      void client.invalidateQueries({ queryKey: ['relay-shares'] })
+      void client.invalidateQueries({ queryKey: ['relay-shares-mine'] })
+    },
+    onError: (error) => handleServerError(error),
+  })
+  const vote = useMutation({
+    mutationFn: ({ id, usable }: { id: string; usable: boolean }) =>
+      voteRelayShare(id, usable),
+    onSuccess: () => {
+      toast.success('感谢反馈')
+      void client.invalidateQueries({ queryKey: ['relay-shares'] })
+    },
+    onError: (error) => handleServerError(error),
+  })
+  const create = useMutation({
+    mutationFn: createRelayShare,
+    onSuccess: () => {
+      toast.success('中转站已提交并开始检测')
+      setShowForm(false)
+      void client.invalidateQueries({ queryKey: ['relay-shares'] })
+      void client.invalidateQueries({ queryKey: ['relay-shares-mine'] })
+    },
+    onError: (error) => handleServerError(error),
+  })
+  if (publicQuery.isPending)
+    return (
+      <PublicLayout>
+        <LoadingState />
+      </PublicLayout>
+    )
+  if (publicQuery.isError)
+    return (
+      <PublicLayout>
+        <ErrorState onRetry={() => void publicQuery.refetch()} />
+      </PublicLayout>
+    )
+  const items = (publicQuery.data?.data?.items ?? []).filter(
+    (item) => kind === 'all' || item.kind === kind
+  )
+  const mine = mineQuery.data?.data?.items ?? []
   return (
     <PublicLayout>
       <div className='space-y-8'>
         <div className='flex flex-wrap items-end justify-between gap-4'>
           <div>
-            <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>社区资料</p>
-            <h1 className='mt-1 text-3xl font-semibold tracking-tight'>中转分享</h1>
-            <p className='text-muted-foreground mt-2 max-w-2xl text-sm leading-6'>分享中转站和代理站的文字资料。这里按内容和最近更新时间浏览，不做排名，也不把中转站包装成官方服务。</p>
+            <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
+              社区资源
+            </p>
+            <h1 className='mt-1 text-3xl font-semibold tracking-tight'>
+              中转站分享
+            </h1>
+            <p className='text-muted-foreground mt-2 max-w-2xl text-sm leading-6'>
+              只分公益站和商业站。分享者提交自己的检测 Key
+              后，平台会定期做低成本协议检查；公开页面只展示脱敏状态和投票，不展示
+              Key。
+            </p>
           </div>
-          <Button render={<Link to='/share-center/manage' />} variant='outline'><ArrowRight />提交分享</Button>
+          <Button onClick={() => setShowForm((value) => !value)}>
+            <RadioTower />
+            分享中转站
+          </Button>
         </div>
-        <section className='from-primary/10 via-background to-background rounded-2xl border bg-gradient-to-br p-6 md:p-8'>
-          <div className='flex items-start gap-4'>
-            <div className='bg-primary/10 text-primary rounded-xl p-3'><RadioTower /></div>
-            <div><h2 className='text-xl font-semibold'>先做清晰的资料页，再接入可用性投票</h2><p className='text-muted-foreground mt-2 text-sm leading-6'>首版只承载 Markdown 文本、服务说明、适用范围和最后验证时间。后续可以复用分享中心的审核、投票、权限和作者体系。</p></div>
+        {showForm && auth?.user ? (
+          <RelayEditor
+            onSubmit={(input) => create.mutate(input)}
+            pending={create.isPending}
+            onCancel={() => setShowForm(false)}
+          />
+        ) : null}
+        {showForm && !auth?.user ? (
+          <Card>
+            <CardContent className='flex items-center justify-between gap-4 p-5 text-sm'>
+              <span>登录后才能提交中转站和检测 Key。</span>
+              <Button render={<Link to='/sign-in' />}>登录</Button>
+            </CardContent>
+          </Card>
+        ) : null}
+        {auth?.user && mine.length > 0 ? (
+          <section className='space-y-4'>
+            <div className='flex items-center gap-2'>
+              <ShieldCheck className='text-primary size-5' />
+              <h2 className='text-lg font-semibold'>我的中转站</h2>
+            </div>
+            <div className='grid gap-4 md:grid-cols-2'>
+              {mine.map((share) => (
+                <RelayCard
+                  key={share.public_id}
+                  share={share}
+                  mine
+                  onCheck={() => check.mutate(share.public_id)}
+                />
+              ))}
+            </div>
+          </section>
+        ) : null}
+        <div className='flex flex-wrap items-center justify-between gap-3'>
+          <div>
+            <h2 className='text-lg font-semibold'>公开资源</h2>
+            <p className='text-muted-foreground mt-1 text-sm'>
+              按最近更新时间浏览，不做综合排名。
+            </p>
           </div>
-        </section>
-        <div className='grid gap-4 md:grid-cols-3'>
-          {relayTypes.map((item) => <Card key={item.title} className='h-full'><CardHeader><div className='flex items-start justify-between gap-3'><CardTitle className='text-lg'>{item.title}</CardTitle><Badge variant='outline'>{item.status}</Badge></div></CardHeader><CardContent><p className='text-muted-foreground text-sm leading-6'>{item.description}</p></CardContent></Card>)}
+          <div className='flex gap-2'>
+            {(['all', 'charity', 'commercial'] as const).map((value) => (
+              <button
+                key={value}
+                type='button'
+                onClick={() => setKind(value)}
+                className={`rounded-full border px-3 py-1.5 text-xs ${kind === value ? 'border-primary bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                {value === 'all'
+                  ? '全部'
+                  : value === 'charity'
+                    ? '公益站'
+                    : '商业站'}
+              </button>
+            ))}
+          </div>
         </div>
-        <Card><CardHeader><CardTitle>发布规则</CardTitle></CardHeader><CardContent className='grid gap-3 text-sm md:grid-cols-3'><Rule title='纯文本 / Markdown' /><Rule title='显示作者与更新时间' /><Rule title='不展示综合排名' /></CardContent></Card>
-        <p className='text-muted-foreground text-xs'>如需查看已经发布的文字分享，请前往 <Link to='/share-center' className='text-primary hover:underline'>分享中心</Link>。</p>
+        {items.length === 0 ? (
+          <EmptyState
+            title='还没有公开中转站'
+            description='你可以成为第一个提交者。'
+          />
+        ) : (
+          <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
+            {items.map((share) => (
+              <RelayCard
+                key={share.public_id}
+                share={share}
+                onVote={(usable) =>
+                  vote.mutate({ id: share.public_id, usable })
+                }
+              />
+            ))}
+          </div>
+        )}
       </div>
     </PublicLayout>
   )
 }
 
-function Rule({ title }: { title: string }) { return <div className='bg-muted/30 rounded-lg border p-3'>{title}</div> }
+function RelayEditor({
+  onSubmit,
+  pending,
+  onCancel,
+}: {
+  onSubmit: (input: RelayCreateInput) => void
+  pending: boolean
+  onCancel: () => void
+}) {
+  const [title, setTitle] = useState('')
+  const [baseURL, setBaseURL] = useState('')
+  const [key, setKey] = useState('')
+  const [content, setContent] = useState('')
+  const [kind, setKind] = useState<'charity' | 'commercial'>('charity')
+  const [protocol, setProtocol] = useState<'new-api' | 'sub2api'>('new-api')
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className='text-base'>分享中转站</CardTitle>
+        <p className='text-muted-foreground text-sm'>
+          Key 只用于服务端检测，保存后不会再次显示。请确认你有权提供此
+          Key，检测可能产生少量上游用量。
+        </p>
+      </CardHeader>
+      <CardContent className='grid gap-4 md:grid-cols-2'>
+        <div className='space-y-2'>
+          <Label>名称</Label>
+          <Input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder='例如：我的公益 New API'
+          />
+        </div>
+        <div className='space-y-2'>
+          <Label>站点地址</Label>
+          <Input
+            value={baseURL}
+            onChange={(event) => setBaseURL(event.target.value)}
+            placeholder='https://example.com'
+          />
+        </div>
+        <div className='space-y-2'>
+          <Label>站点类型</Label>
+          <select
+            value={kind}
+            onChange={(event) => setKind(event.target.value as typeof kind)}
+            className='border-input bg-background h-10 w-full rounded-md border px-3 text-sm'
+          >
+            <option value='charity'>公益站</option>
+            <option value='commercial'>商业站</option>
+          </select>
+        </div>
+        <div className='space-y-2'>
+          <Label>协议</Label>
+          <select
+            value={protocol}
+            onChange={(event) =>
+              setProtocol(event.target.value as typeof protocol)
+            }
+            className='border-input bg-background h-10 w-full rounded-md border px-3 text-sm'
+          >
+            <option value='new-api'>New API</option>
+            <option value='sub2api'>Sub2API</option>
+          </select>
+        </div>
+        <div className='space-y-2 md:col-span-2'>
+          <Label>检测 Key</Label>
+          <Input
+            type='password'
+            value={key}
+            onChange={(event) => setKey(event.target.value)}
+            placeholder='只提交用于检测的 Key'
+          />
+        </div>
+        <div className='space-y-2 md:col-span-2'>
+          <Label>介绍（支持 Markdown）</Label>
+          <Textarea
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            rows={6}
+            placeholder='写清楚站点特色、限制、适合什么模型和最后验证时间。'
+          />
+        </div>
+        <div className='flex justify-end gap-2 md:col-span-2'>
+          <Button variant='outline' onClick={onCancel}>
+            取消
+          </Button>
+          <Button
+            disabled={
+              pending || !title.trim() || !baseURL.trim() || !key.trim()
+            }
+            onClick={() =>
+              onSubmit({
+                title,
+                base_url: baseURL,
+                kind,
+                protocol,
+                content,
+                key,
+              })
+            }
+          >
+            提交并检测
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}

@@ -146,6 +146,17 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	// 避免各自发挥而宣称了没做到的能力（计划书：尚未支持的维度不能在界面宣称已生效）。
 	r.GET("/capabilities", h.listCapabilities)
 
+	// 中转站安全工具：审计与 New API 外站签到。凭据仅通过后端加密存储。
+	r.POST("/audit-runs", h.createAuditRun)
+	r.GET("/audit-runs", h.listAuditRuns)
+	checkinSites := r.Group("/checkin-sites")
+	{
+		checkinSites.GET("", h.listCheckinSites)
+		checkinSites.POST("", h.createCheckinSite)
+		checkinSites.POST("/:id/run", h.runCheckinSite)
+		checkinSites.PATCH("/:id/status", h.updateCheckinSiteStatus)
+	}
+
 	// 可解释路由结果（T2.9）：只读，不写库、不投影
 	r.GET("/route-explain", h.explainRoute)
 	// 应用路由排名（T2.7 生效路径）：把名次写成底座渠道权重。**平台侧动作**——

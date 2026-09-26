@@ -1,4 +1,35 @@
 # 任务清单
+## [已完成] 中转站分享、供应商审计与 New API 签到工具（2026-09-26）
+
+**本轮目标**：统一分享/中转/工具公共页面的视觉壳层，增加公益/商业中转站分享与受控 Key 检测契约，接入 New API/Sub2API 基础探测，并为供应商安全审计与 New API 定时签到建立可运行的后端和前端入口。
+
+**验收标准**：
+- 分享中心、中转站、工具页共用一致的顶部导航、背景、容器宽度和响应式布局；
+- 中转站类型仅有公益站、商业站，分享者可提交 Markdown 介绍和受控检测凭据，公开接口不返回明文 Key；
+- New API/Sub2API 至少能完成协议探测、健康检查、模型列表探测或明确返回不支持，错误信息不泄漏凭据；
+- 供应商审计结果按检查项返回状态、样本数、延迟和脱敏证据，不把概率性掺水判断写成绝对结论；
+- New API 签到站点支持用户保存、测试、启停和定时执行的基础契约，凭据加密存储；
+- 前后端类型/编译、定向测试和本地真实 API 冒烟通过；未完成的真实上游探针明确记录为剩余风险。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 公共页面壳层 | `new-api/web/src/features/{share-center,relay-share,tools}/**`、导航组件 | 修改 | 统一顶部导航、背景和响应式布局 |
+| 中转站分享 | `new-api/apigx/model`、`new-api/apigx/api`、`new-api/web/src/features/relay-share/**` | 新建 | 公益/商业分类、Markdown 内容、受控检测凭据、状态与报告摘要 |
+| 协议探测 | `new-api/apigx`、`new-api/controller` | 新建/复用 | New API/Sub2API 健康、模型列表和连通性探针 |
+| 供应商审计 | `new-api/apigx`、`new-api/web/src/features/tools/**` | 新建 | 脱敏审计任务与分项结果，兼容掺水/身份/流式等检查 |
+| New API 签到 | `new-api/apigx/model`、`new-api/apigx/api`、定时任务、工具页 | 新建 | 加密站点凭据、手动测试、启停和固定时间执行 |
+| 文档与流程 | `docs/APIGX_TOOLS_PLAN.md`、`whisper-note-dev-flow/**` | 修改 | 记录复用边界、威胁模型和验证证据 |
+
+**任务清单**：
+- [x] 梳理并统一三类公共页面的壳层与顶部导航 → `/relay-share`、`/tools` 与公共导航已通过浏览器快照验证
+- [x] 建立中转站分享数据模型、权限和脱敏 API → 公开列表强制已发布，Key 仅加密存储并只返回尾号
+- [x] 建立 New API/Sub2API 协议探测与受控 Key 测试契约 → SSRF、`/v1/models`、状态/延迟/模型数量探针完成
+- [x] 建立供应商审计任务与分项结果契约 → 基础检查完成，未实现项显式返回 `skipped`
+- [x] 建立 New API 签到站点、凭据加密和定时执行基础能力 → Bearer/会话 Cookie 选择已接通，定时 runner 已接入
+- [x] 完成前端工具页、中转站页和真实 API 冒烟验证 → Go 定向测试、前端 typecheck/build、`/api/status`、`/api/relay-shares`、`/relay-share`、`/tools` 通过
+- [x] 更新项目状态与工具规划文档，记录未完成风险 → `PROJECT_STATUS.md`、`TASK_LOG.md` 与 `docs/APIGX_TOOLS_PLAN.md` 已同步；显式保留探针/外站签到风险
+
 ## [已完成] 本地完整前后端启动与真实 API 冒烟验证（2026-09-26）
 
 **本轮目标**：修正上一轮只启动前端、未启动后端的问题，使用当前工作树启动完整本地服务并验证真实 API。

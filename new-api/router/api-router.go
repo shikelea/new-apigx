@@ -1,6 +1,8 @@
 package router
 
 import (
+	apigxapi "github.com/QuantumNous/new-api/apigx/api"
+	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	apigxroute "github.com/QuantumNous/new-api/apigx/route"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
@@ -70,6 +72,10 @@ func SetApiRouter(router *gin.Engine) {
 			perfMetricsRoute.GET("/summary", controller.GetPerfMetricsSummary)
 			perfMetricsRoute.GET("", controller.GetPerfMetrics)
 		}
+		relayPublicRoute := apiRouter.Group("/relay-shares")
+		relayPublicRoute.Use(middleware.TryUserAuth())
+		apigxapi.RegisterRelayPublic(relayPublicRoute, apigxmodel.DefaultDB())
+
 		apiRouter.GET("/rankings", middleware.HeaderNavModuleAuth("rankings"), controller.GetRankings)
 		apiRouter.GET("/verification", middleware.EmailVerificationRateLimit(), middleware.TurnstileCheck(), controller.SendEmailVerification)
 		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)

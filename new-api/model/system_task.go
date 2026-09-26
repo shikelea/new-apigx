@@ -22,6 +22,8 @@ const (
 	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
 	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
 	SystemTaskTypeBreakerProbe   = "apigx_breaker_probe"
+	SystemTaskTypeRelayProbe     = "apigx_relay_probe"
+	SystemTaskTypeCheckin        = "apigx_checkin"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

@@ -10,6 +10,7 @@ import (
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/qualityhook"
 	"github.com/QuantumNous/new-api/apigx/relayhook"
+	"github.com/QuantumNous/new-api/apigx/relayprobe"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
@@ -29,6 +30,8 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 	service.RegisterSystemTaskHandler(breakerProbeHandler{})
+	service.RegisterSystemTaskHandler(relayProbeHandler{})
+	service.RegisterSystemTaskHandler(checkinHandler{})
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and
@@ -366,4 +369,48 @@ func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status mod
 	if err := model.FinishSystemTask(task.TaskID, runnerID, status, result, errorMessage); err != nil {
 		common.SysLog(fmt.Sprintf("system task %s failed to persist result: %v", task.TaskID, err))
 	}
+}
+
+type relayProbeHandler struct{}
+
+func (relayProbeHandler) Type() string { return model.SystemTaskTypeRelayProbe }
+func (relayProbeHandler) Enabled() bool {
+	db := apigxmodel.DefaultDB()
+	if db == nil {
+		return false
+	}
+	var count int64
+	_ = db.Model(&apigxmodel.RelayCredential{}).Where("enabled = ? AND deleted_at IS NULL AND (next_check_at = 0 OR next_check_at <= ?)", true, common.GetTimestamp()).Count(&count).Error
+	return count > 0
+}
+func (relayProbeHandler) Interval() time.Duration { return 15 * time.Minute }
+func (relayProbeHandler) NewPayload() any         { return nil }
+func (relayProbeHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	count, err := relayprobe.RunDue(ctx, apigxmodel.DefaultDB(), common.GetTimestamp(), 20)
+	finishSystemTaskHandler(task, runnerID, mapStatus(err), map[string]any{"checked": count}, err)
+}
+
+type checkinHandler struct{}
+
+func (checkinHandler) Type() string { return model.SystemTaskTypeCheckin }
+func (checkinHandler) Enabled() bool {
+	db := apigxmodel.DefaultDB()
+	if db == nil {
+		return false
+	}
+	sites, err := apigxmodel.ListDueCheckinSites(db, common.GetTimestamp(), 1)
+	return err == nil && len(sites) > 0
+}
+func (checkinHandler) Interval() time.Duration { return 15 * time.Minute }
+func (checkinHandler) NewPayload() any         { return nil }
+func (checkinHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	count, err := relayprobe.RunDueCheckins(ctx, apigxmodel.DefaultDB(), common.GetTimestamp(), 20)
+	finishSystemTaskHandler(task, runnerID, mapStatus(err), map[string]any{"checked": count}, err)
+}
+
+func mapStatus(err error) model.SystemTaskStatus {
+	if err != nil {
+		return model.SystemTaskStatusFailed
+	}
+	return model.SystemTaskStatusSucceeded
 }

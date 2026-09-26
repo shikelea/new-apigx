@@ -1,4 +1,23 @@
 # 项目状态 · apigx（二开 New API）
+### [058] 2026-09-26 中转站分享、供应商审计与 New API 签到工具收口
+
+**做了什么**：完成中转站公益/商业分享、受控 Key 持续检测、供应商基础审计、New API 外站签到和统一工具页；修复公开列表可能暴露草稿的问题，让签到凭据类型、时区调度、真实分享者展示和删除后的凭据停用真正生效。
+
+**涉及模块**：`new-api/apigx/model`、`new-api/apigx/api`、`new-api/apigx/relayprobe`、系统任务 runner、`new-api/web/src/features/relay-share`、`new-api/web/src/features/tools`、导航。
+
+**改动明细**：
+| 文件/模块 | 改动说明 |
+|---|---|
+| `new-api/apigx/model/relay_tools.go` | 中转分享默认直接发布；公开查询始终过滤为存活且已发布资源，个人查询保留本人记录。 |
+| `new-api/apigx/api/relay.go` | 中转提交、检测、投票、审计、签到接口；显示真实分享者；创建与凭据写入同一事务；删除同步停用凭据。 |
+| `new-api/apigx/relayprobe/probe.go` | SSRF 防护、New API/Sub2API 模型列表探测、加密凭据签到和周期任务；会话 Cookie 先刷新 access token。 |
+| `new-api/web/src/features/tools/index.tsx` | 工具页格式化；审计站点选择和签到凭据类型（Bearer/会话 Cookie）可用。 |
+| `new-api/apigx/model/relay_tools_test.go` | 覆盖公开列表不返回草稿/停用站点、类型校验和按时区计算下一次签到。 |
+
+**验证**：`go test ./apigx/model ./apigx/api ./apigx/relayprobe ./controller ./router -count=1` 通过；前端 `tsgo -b` 和 `rsbuild build` 通过；网关重新编译并监听 3000；`/api/status`、`/api/relay-shares`、`/relay-share`、`/tools` 返回正常；Playwright 快照确认顶部导航中“中转分享”“工具”各出现一次且公共页中文渲染。
+
+**剩余风险**：供应商 Token/Prompt/身份/SSE/错误泄漏探针仍是显式 `skipped`；签到流程已实现 New API 刷新态兼容，但未在真实外站凭据上验证；启动日志仍有历史渠道 `model_mapping` 非法转义警告和未显式配置 `TRUSTED_PROXIES`。本轮未推送远端或部署生产。
+
 ### [057] 2026-09-26 本地完整前后端启动与真实 API 冒烟验证
 
 **做了什么**：补齐上一轮遗漏的本地 Go 后端启动，使用当前工作树重新编译的二进制连接项目专用 PostgreSQL/Redis，并验证前端代理能拿到真实 API JSON。
@@ -112,12 +131,12 @@
 
 **剩余风险**：尚未做生产故障注入；需要用户通过反代真实调用 `deepseek-flash` 等模型确认别名渠道切换。
 ## 当前阶段
-**本地完整前后端已启动，已完成真实 API 冒烟验证，下一步进行登录后渠道测试与重试链路验收。**
+**中转站分享、供应商基础审计与 New API 签到工具已完成本地收口，等待登录态和真实外站凭据验收。**
 
-本轮只启动本地服务并做接口验证，未部署生产、未推送远端。
+本轮已重新编译并重启本地网关，仅做本地验证，未部署生产、未推送远端。
 
 ## 当前任务
-[已完成] 完成分享中心公共壳层、渠道连通性测试和中转分享/工具入口。
+[已完成] 完成中转站分享、供应商基础审计与 New API 签到工具。
 - 根仓库 HEAD 已包含 APIGX subtree；当前总提交数 6839，`new-api/` 文件数 2666。
 - 生产服务器未更新，本轮只做本地代码、数据库矩阵与构建验证。
 
