@@ -28,7 +28,8 @@ import { toast } from 'sonner'
 
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
-import { SectionPageLayout } from '@/components/layout'
+import { PublicLayout } from '@/components/layout/components/public-layout'
+import { SectionPageLayout } from '@/components/layout/components/section-page-layout'
 import { LoadingState } from '@/components/loading-state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -123,62 +124,53 @@ export function ShareCenterBrowser() {
     queryFn: () => getShareCenterPosts(submittedKeyword),
   })
 
-  if (query.isPending) {
-    return <LoadingState />
-  }
+  if (query.isPending) return <LoadingState />
   if (query.isError) return <ErrorState onRetry={() => void query.refetch()} />
 
   const posts = query.data?.data?.items ?? []
   return (
-    <SectionPageLayout>
-      <SectionPageLayout.Title>分享中心</SectionPageLayout.Title>
-      <SectionPageLayout.Actions>
-        <Button variant='outline' render={<Link to='/share-center/manage' />}>
-          <FileText />
-          我的分享
-        </Button>
-      </SectionPageLayout.Actions>
-      <SectionPageLayout.Content>
-        <div className='space-y-6'>
-          <section className='from-primary/10 via-background to-background rounded-2xl border bg-gradient-to-br p-6 md:p-8'>
-            <p className='text-primary mb-2 text-xs font-semibold tracking-[0.18em] uppercase'>
-              社区分享
-            </p>
-            <h1 className='max-w-2xl text-3xl font-semibold tracking-tight md:text-4xl'>
-              分享真实可用的信息，让下一位少走弯路。
-            </h1>
-            <p className='text-muted-foreground mt-3 max-w-2xl text-sm leading-6 md:text-base'>
-              这里仅收录文字和 Markdown
-              内容，适合分享白嫖渠道说明、福利羊毛、教程与使用经验。内容是否仍可用，由社区投票和管理员状态共同呈现。
-            </p>
-          </section>
-          <div className='flex flex-col gap-3 sm:flex-row'>
-            <div className='relative flex-1'>
-              <Search className='text-muted-foreground absolute top-2.5 left-3 size-4' />
-              <Input
-                value={keyword}
-                onChange={(event) => setKeyword(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') setSubmittedKeyword(keyword)
-                }}
-                placeholder='搜索标题或摘要'
-                className='pl-9'
-              />
-            </div>
-            <Button onClick={() => setSubmittedKeyword(keyword)}>搜索</Button>
+    <PublicLayout>
+      <div className='space-y-6'>
+        <div className='flex flex-wrap items-center justify-between gap-3'>
+          <div>
+            <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>社区分享</p>
+            <h1 className='mt-1 text-2xl font-semibold tracking-tight md:text-3xl'>分享中心</h1>
           </div>
-          {posts.length === 0 ? (
-            <EmptyState title='暂无已发布分享' />
-          ) : (
-            <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
-              {posts.map((post) => (
-                <SharePostCard key={post.public_id} post={post} />
-              ))}
-            </div>
-          )}
+          <Button variant='outline' render={<Link to='/share-center/manage' />}>
+            <FileText />
+            我的分享
+          </Button>
         </div>
-      </SectionPageLayout.Content>
-    </SectionPageLayout>
+        <section className='from-primary/10 via-background to-background rounded-2xl border bg-gradient-to-br p-6 md:p-8'>
+          <h2 className='max-w-2xl text-2xl font-semibold tracking-tight md:text-3xl'>分享真实可用的信息，让下一位少走弯路。</h2>
+          <p className='text-muted-foreground mt-3 max-w-2xl text-sm leading-6 md:text-base'>
+            这里仅收录文字和 Markdown 内容，适合分享白嫖渠道说明、福利羊毛、教程与使用经验。内容是否仍可用，由社区投票和管理员状态共同呈现。
+          </p>
+        </section>
+        <div className='flex flex-col gap-3 sm:flex-row'>
+          <div className='relative flex-1'>
+            <Search className='text-muted-foreground absolute top-2.5 left-3 size-4' />
+            <Input
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') setSubmittedKeyword(keyword)
+              }}
+              placeholder='搜索标题或摘要'
+              className='pl-9'
+            />
+          </div>
+          <Button onClick={() => setSubmittedKeyword(keyword)}>搜索</Button>
+        </div>
+        {posts.length === 0 ? (
+          <EmptyState title='暂无已发布分享' />
+        ) : (
+          <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
+            {posts.map((post) => <SharePostCard key={post.public_id} post={post} />)}
+          </div>
+        )}
+      </div>
+    </PublicLayout>
   )
 }
 
@@ -208,73 +200,41 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
   }
   const post = query.data.data
   return (
-    <SectionPageLayout>
-      <SectionPageLayout.Title>{post.title}</SectionPageLayout.Title>
-      <SectionPageLayout.Actions>
-        <Button variant='outline' render={<Link to='/share-center' />}>
-          返回分享中心
-        </Button>
-      </SectionPageLayout.Actions>
-      <SectionPageLayout.Content>
+    <PublicLayout>
+      <div className='space-y-6'>
+        <div className='flex flex-wrap items-center justify-between gap-3'>
+          <div>
+            <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>社区分享</p>
+            <h1 className='mt-1 text-2xl font-semibold tracking-tight md:text-3xl'>{post.title}</h1>
+          </div>
+          <Button variant='outline' render={<Link to='/share-center' />}>返回分享中心</Button>
+        </div>
         <div className='mx-auto grid max-w-5xl gap-6 lg:grid-cols-[minmax(0,1fr)_260px]'>
           <Card>
             <CardContent className='p-6 md:p-8'>
-              <Markdown className='prose dark:prose-invert max-w-none'>
-                {post.content}
-              </Markdown>
+              <Markdown className='prose dark:prose-invert max-w-none'>{post.content}</Markdown>
             </CardContent>
           </Card>
           <aside className='space-y-4'>
             <Card>
-              <CardHeader>
-                <CardTitle className='text-base'>分享信息</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle className='text-base'>分享信息</CardTitle></CardHeader>
               <CardContent className='space-y-3 text-sm'>
-                <div>
-                  <span className='text-muted-foreground'>分享者</span>
-                  <p className='font-medium'>
-                    {post.author_name || '分享者'}
-                  </p>
-                </div>
-                <div>
-                  <span className='text-muted-foreground'>当前判断</span>
-                  <p className='font-medium'>{voteSummary(post)}</p>
-                </div>
+                <div><span className='text-muted-foreground'>分享者</span><p className='font-medium'>{post.author_name || '分享者'}</p></div>
+                <div><span className='text-muted-foreground'>当前判断</span><p className='font-medium'>{voteSummary(post)}</p></div>
               </CardContent>
             </Card>
             <Card>
-              <CardHeader>
-                <CardTitle className='text-base'>还能用吗？</CardTitle>
-              </CardHeader>
+              <CardHeader><CardTitle className='text-base'>还能用吗？</CardTitle></CardHeader>
               <CardContent className='space-y-3'>
-                <Button
-                  className='w-full'
-                  disabled={!auth?.user || vote.isPending}
-                  onClick={() => vote.mutate(1)}
-                >
-                  <ThumbsUp />
-                  仍可用
-                </Button>
-                <Button
-                  variant='outline'
-                  className='w-full'
-                  disabled={!auth?.user || vote.isPending}
-                  onClick={() => vote.mutate(-1)}
-                >
-                  <ThumbsDown />
-                  已失效
-                </Button>
-                {!auth?.user ? (
-                  <p className='text-muted-foreground text-xs'>
-                    登录后可以参与投票。
-                  </p>
-                ) : null}
+                <Button className='w-full' disabled={!auth?.user || vote.isPending} onClick={() => vote.mutate(1)}><ThumbsUp />仍可用</Button>
+                <Button variant='outline' className='w-full' disabled={!auth?.user || vote.isPending} onClick={() => vote.mutate(-1)}><ThumbsDown />已失效</Button>
+                {!auth?.user ? <p className='text-muted-foreground text-xs'>登录后可以参与投票。</p> : null}
               </CardContent>
             </Card>
           </aside>
         </div>
-      </SectionPageLayout.Content>
-    </SectionPageLayout>
+      </div>
+    </PublicLayout>
   )
 }
 

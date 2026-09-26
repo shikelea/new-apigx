@@ -22,6 +22,27 @@
 - [x] 仅重建 app 并检查状态接口、容器和日志
 - [x] 记录发布路径、哈希和剩余反代验收风险
 
+## [已完成] 分享中心页面壳层、渠道连通性测试与工具/中转入口规划（2026-09-26）
+
+**本轮目标**：统一分享相关页面的前端壳层与导航体验，在分享渠道详情中复用 APIGX 基座已有连通性测试，并先完成“中转分享”和“工具”单页的可用前端骨架，为后续测速与掺水检测接入保留清晰接口。
+**验收标准**：① 分享中心、我的分享、渠道详情不再在无必要时互相跳到不同壳层；② 分享者添加模型后能在渠道页面触发基座连通性测试并看到明确状态；③ 中转分享和工具有独立单页、中文入口和空状态/说明，不伪造排名或检测结果；④ 本地前端类型检查、定向测试和生产构建通过；⑤ 完成相关开源方案调研并记录边界。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 页面壳层与导航 | `new-api/web/src/routes/**`、`features/share/**`、`features/share-center/**`、`lib/nav-modules.ts` | 修改 | 统一公开页与登录后页的入口和返回路径，减少单页/侧边栏跳转割裂 |
+| 渠道连通性 | `new-api/web/src/features/share/components/channel-detail.tsx`、`features/channels/components/dialogs/channel-test-dialog.tsx`、相关 API | 修改/复用 | 在分享渠道详情复用基座已有测试请求与结果展示 |
+| 中转分享 | `new-api/web/src/routes/relay-share/**`、`features/relay-share/**` | 新建 | 中转站资料分享单页，首版只做文本/配置说明与状态信息，不做排名 |
+| 工具中心 | `new-api/web/src/routes/tools/**`、`features/tools/**` | 新建 | 工具单页与测速入口，首版提供清晰的能力边界和后续检测插槽 |
+| 流程记录 | `whisper-note-dev-flow/{PROJECT_STATUS,TASK_LOG}.md` | 修改 | 记录实现、验证和开源调研边界 |
+
+**任务清单**：
+- [x] 梳理现有路由壳层与导航，统一分享相关页面跳转 → 公共分享中心详情/列表改用 `PublicLayout`；登录后的我的分享和渠道详情继续使用侧边栏壳层；新增 `/relay-share`、`/tools` 公共入口
+- [x] 在分享渠道详情接入基座渠道连通性测试 → 新增 owner-scoped `GET /api/apigx/channels/:id/test`，复用 `controller.TestChannel`，并限制到本人渠道已配置模型
+- [x] 新建中转分享单页与导航入口 → `new-api/web/src/features/relay-share/index.tsx`、`routes/relay-share/index.tsx`
+- [x] 新建工具单页，预留测速/掺水检测能力边界 → `new-api/web/src/features/tools/index.tsx`、`routes/tools/index.tsx`；不伪造结果、不把检测信号当裁决
+- [x] 本地类型检查、定向测试、生产构建和浏览器流程验证 → `tsgo -b`、Rsbuild、变更文件 oxlint、`go test ./apigx/api ./apigx/model -count=1`、无头 Chrome 三条公共路由通过
+- [x] 调研优秀开源项目/论文并记录可复用与不自造的部分 → `docs/APIGX_TOOLS_PLAN.md`
 # 任务清单
 
 

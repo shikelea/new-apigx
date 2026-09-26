@@ -3,6 +3,27 @@
 > 本文件由开发流程维护（`whisper-note-dev-flow/SKILL.md` §4）。**序号倒序，顶部最新**。
 > ⚠️ 说明：本项目在**本次会话之前**的进展未按本流程记录，因此编号从 001 开始；更早的详细过程见 `TASK_LOG.md`。
 
+### [055] 2026-09-26 分享中心公共壳层、渠道连通性测试与工具入口
+
+**做了什么**：统一公共分享页面的顶部导航壳层，在分享渠道详情接入 owner-scoped 的基座渠道连通性测试，并新增中转分享与工具公共单页。
+
+**涉及模块**：分享中心公共路由、分享渠道详情与 API、APIGX owner-scoped API、顶部导航、工具规划文档。
+
+**改动明细**：
+| 文件 | 模块 | 改动说明 |
+|---|---|---|
+| `new-api/web/src/features/share-center/components/index.tsx` | 公共页面 | 分享中心列表/详情使用 `PublicLayout`，保持与模型广场一致的公共导航；管理页仍保留登录后侧边栏 |
+| `new-api/apigx/api/share.go` | 渠道测试 | 增加 `GET /api/apigx/channels/:id/test`；先校验 owner 和模型供给，再委托底座 `controller.TestChannel` |
+| `new-api/web/src/features/share/components/channel-detail.tsx`、`features/share/api.ts` | 分享渠道 | 添加模型选择、连通性测试按钮、响应时间和失败信息展示 |
+| `new-api/web/src/features/relay-share/**`、`routes/relay-share/**` | 中转分享 | 新增不做排名的资料型公共单页和入口 |
+| `new-api/web/src/features/tools/**`、`routes/tools/**` | 工具中心 | 新增测速/吞吐/质量信号/安全检查的能力边界页，不伪造检测结果 |
+| `new-api/web/src/hooks/use-top-nav-links.ts`、`routeTree.gen.ts` | 导航 | 增加“中转分享”“工具”公共顶部入口 |
+| `docs/APIGX_TOOLS_PLAN.md` | 规划 | 记录可复用的基座测试、指标设计、开源候选和“掺水检测”边界 |
+
+**验证**：前端 `tsgo -b`、Rsbuild 生产构建、变更文件 oxlint 通过；后端 `go test ./apigx/api ./apigx/model -count=1` 通过；本地静态 SPA + 无头 Chrome 验证 `/relay-share`、`/tools`、`/share-center` 均成功渲染；`git diff --check` 通过。
+
+**剩余风险**：测速与质量信号目前只有产品边界和页面入口，尚未接入服务端受控测试任务；公共页面的真实 API 数据与登录后管理流程仍需在用户本地完整服务（含后端）启动后验收；本轮未部署生产、未推送远端。
+
 ### [054] 2026-09-25 分享中心设置融合版本部署
 
 **做了什么**：将已验证的分享中心中文化、设置融合、导航开关、分享者展示和安全 HTML 渲染版本部署到 /pan/apigx-test，仅更新 app。
@@ -63,12 +84,12 @@
 
 **剩余风险**：尚未做生产故障注入；需要用户通过反代真实调用 `deepseek-flash` 等模型确认别名渠道切换。
 ## 当前阶段
-**分享中心版本已部署到生产 app，等待用户通过宝塔反代做页面与业务验收。**
+**分享中心公共浏览体验和渠道测试入口已在本地完成，等待用户启动完整后端后验收 owner-scoped 测试请求。**
 
-当前本地提交为 23aa50fe0；生产运行 v0.0.0-apigx.23aa50f。本轮仅重建 app，MySQL/Redis/stub 未重启。
+本轮只修改本地工作树，未部署生产、未推送远端。前端公共页已做静态 SPA + 浏览器渲染验证，后端测试接口已完成包级回归。
 
 ## 当前任务
-[已完成] 交付纯 Markdown 分享中心并完成可上传仓库整理。
+[已完成] 完成分享中心公共壳层、渠道连通性测试和中转分享/工具入口。
 - 根仓库 HEAD 已包含 APIGX subtree；当前总提交数 6839，`new-api/` 文件数 2666。
 - 生产服务器未更新，本轮只做本地代码、数据库矩阵与构建验证。
 

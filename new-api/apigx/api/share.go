@@ -64,6 +64,7 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		channels.GET("/recipes", h.listChannelRecipes)
 		channels.POST("", h.createChannel)
 		channels.GET("/:id", h.getChannel)
+		channels.GET("/:id/test", h.testChannel)
 		channels.DELETE("/:id", h.deleteChannel)
 		channels.POST("/:id/keys", h.createUpstreamKey)
 		channels.POST("/:id/keys/batch", h.createUpstreamKeysBatch)
@@ -667,6 +668,71 @@ func (h *handler) getChannel(c *gin.Context) {
 		"share_group_id": ch.ShareGroupID, "base_url": ch.BaseURL, "key_pool_mode": ch.KeyPoolMode,
 		"health_state": ch.HealthState, "health_reason": ch.HealthReason,
 	})
+}
+
+// testChannel exposes the base channel connectivity probe to the channel owner.
+// It deliberately delegates the actual request construction, billing-safe test
+// user handling and adapter dispatch to New API's controller.TestChannel.
+func (h *handler) testChannel(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	id, valid := paramID(c, "id")
+	if !valid {
+		return
+	}
+	shareChannel, err := apigxmodel.GetChannel(h.db, owner, id)
+	if err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if shareChannel.BaseChannelID <= 0 {
+		fail(c, http.StatusBadRequest, "invalid_channel", "share channel has no base channel")
+		return
+	}
+	if _, err = h.loadOrRepairBaseChannel(shareChannel); err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	// Do not allow an owner to turn this endpoint into an arbitrary-channel
+	// probe. A supplied model must belong to this share channel's offerings.
+	if requested := strings.TrimSpace(c.Query("model")); requested != "" {
+		offerings, listErr := apigxmodel.ListModelOfferingsByChannel(h.db, owner, shareChannel.ID)
+		if listErr != nil {
+			failFromRepo(c, listErr)
+			return
+		}
+		allowed := false
+		for _, offering := range offerings {
+			if strings.EqualFold(strings.TrimSpace(offering.UpstreamModelID), requested) {
+				allowed = true
+				break
+			}
+			if offering.CanonicalModelID > 0 {
+				var canonical apigxmodel.CanonicalModel
+				if h.db.Where("id = ?", offering.CanonicalModelID).First(&canonical).Error == nil &&
+					strings.EqualFold(strings.TrimSpace(canonical.APIModelID), requested) {
+					allowed = true
+					break
+				}
+			}
+		}
+		if !allowed {
+			fail(c, http.StatusBadRequest, "model_not_configured", "requested model is not configured on this share channel")
+			return
+		}
+	}
+	// controller.TestChannel reads the base channel id from c.Param("id").
+	// Replace only the route parameter after owner validation; no admin route or
+	// authorization middleware is reused here.
+	for index := range c.Params {
+		if c.Params[index].Key == "id" {
+			c.Params[index].Value = strconv.FormatInt(shareChannel.BaseChannelID, 10)
+			break
+		}
+	}
+	controller.TestChannel(c)
 }
 
 func (h *handler) deleteChannel(c *gin.Context) {

@@ -76,6 +76,23 @@ export async function getChannel(
   return res.data
 }
 
+export interface ShareChannelTestResponse {
+  success: boolean
+  message?: string
+  time?: number
+  error_code?: string
+}
+
+export async function testShareChannel(
+  channelId: number,
+  params?: { model?: string; endpoint_type?: string; stream?: boolean }
+): Promise<ShareChannelTestResponse> {
+  const res = await api.get(`/api/apigx/channels/${channelId}/test`, {
+    params,
+  })
+  return res.data
+}
+
 export async function getChannelKeys(
   channelId: number
 ): Promise<UpstreamKeyListResponse> {

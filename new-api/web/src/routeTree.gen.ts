@@ -32,9 +32,11 @@ import { Route as AboutIndexRouteImport } from './routes/about/index'
 import { Route as OauthProviderRouteImport } from './routes/oauth/$provider'
 import { Route as PricingIndexRouteImport } from './routes/pricing/index'
 import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
+import { Route as RelayShareIndexRouteImport } from './routes/relay-share/index'
 import { Route as SetupIndexRouteImport } from './routes/setup/index'
 import { Route as ShareCenterIndexRouteImport } from './routes/share-center/index'
 import { Route as ShareCenterPublicIDRouteImport } from './routes/share-center/$publicID'
+import { Route as ToolsIndexRouteImport } from './routes/tools/index'
 import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
 import { Route as AuthenticatedAccessIndexRouteImport } from './routes/_authenticated/access/index'
 import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
@@ -193,6 +195,11 @@ const RankingsIndexRoute = RankingsIndexRouteImport.update({
   path: '/rankings/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RelayShareIndexRoute = RelayShareIndexRouteImport.update({
+  id: '/relay-share/',
+  path: '/relay-share/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SetupIndexRoute = SetupIndexRouteImport.update({
   id: '/setup/',
   path: '/setup/',
@@ -206,6 +213,11 @@ const ShareCenterIndexRoute = ShareCenterIndexRouteImport.update({
 const ShareCenterPublicIDRoute = ShareCenterPublicIDRouteImport.update({
   id: '/share-center/$publicID',
   path: '/share-center/$publicID',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ToolsIndexRoute = ToolsIndexRouteImport.update({
+  id: '/tools/',
+  path: '/tools/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const authUserResetRoute = authUserResetRouteImport.update({
@@ -484,8 +496,10 @@ export interface FileRoutesByFullPath {
   '/about/': typeof AboutIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
+  '/relay-share/': typeof RelayShareIndexRoute
   '/setup/': typeof SetupIndexRoute
   '/share-center/': typeof ShareCenterIndexRoute
+  '/tools/': typeof ToolsIndexRoute
   '/user/reset': typeof authUserResetRoute
   '/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -552,8 +566,10 @@ export interface FileRoutesByTo {
   '/about': typeof AboutIndexRoute
   '/pricing': typeof PricingIndexRoute
   '/rankings': typeof RankingsIndexRoute
+  '/relay-share': typeof RelayShareIndexRoute
   '/setup': typeof SetupIndexRoute
   '/share-center': typeof ShareCenterIndexRoute
+  '/tools': typeof ToolsIndexRoute
   '/user/reset': typeof authUserResetRoute
   '/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -624,8 +640,10 @@ export interface FileRoutesById {
   '/about/': typeof AboutIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
+  '/relay-share/': typeof RelayShareIndexRoute
   '/setup/': typeof SetupIndexRoute
   '/share-center/': typeof ShareCenterIndexRoute
+  '/tools/': typeof ToolsIndexRoute
   '/(auth)/user/reset': typeof authUserResetRoute
   '/_authenticated/chat/$chatId': typeof AuthenticatedChatChatIdRoute
   '/_authenticated/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
@@ -695,8 +713,10 @@ export interface FileRouteTypes {
     | '/about/'
     | '/pricing/'
     | '/rankings/'
+    | '/relay-share/'
     | '/setup/'
     | '/share-center/'
+    | '/tools/'
     | '/user/reset'
     | '/chat/$chatId'
     | '/dashboard/$section'
@@ -763,8 +783,10 @@ export interface FileRouteTypes {
     | '/about'
     | '/pricing'
     | '/rankings'
+    | '/relay-share'
     | '/setup'
     | '/share-center'
+    | '/tools'
     | '/user/reset'
     | '/chat/$chatId'
     | '/dashboard/$section'
@@ -834,8 +856,10 @@ export interface FileRouteTypes {
     | '/about/'
     | '/pricing/'
     | '/rankings/'
+    | '/relay-share/'
     | '/setup/'
     | '/share-center/'
+    | '/tools/'
     | '/(auth)/user/reset'
     | '/_authenticated/chat/$chatId'
     | '/_authenticated/dashboard/$section'
@@ -897,8 +921,10 @@ export interface RootRouteChildren {
   AboutIndexRoute: typeof AboutIndexRoute
   PricingIndexRoute: typeof PricingIndexRoute
   RankingsIndexRoute: typeof RankingsIndexRoute
+  RelayShareIndexRoute: typeof RelayShareIndexRoute
   SetupIndexRoute: typeof SetupIndexRoute
   ShareCenterIndexRoute: typeof ShareCenterIndexRoute
+  ToolsIndexRoute: typeof ToolsIndexRoute
   PricingModelIdIndexRoute: typeof PricingModelIdIndexRoute
 }
 
@@ -1065,6 +1091,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RankingsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/relay-share/': {
+      id: '/relay-share/'
+      path: '/relay-share'
+      fullPath: '/relay-share/'
+      preLoaderRoute: typeof RelayShareIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/setup/': {
       id: '/setup/'
       path: '/setup'
@@ -1084,6 +1117,13 @@ declare module '@tanstack/react-router' {
       path: '/share-center/$publicID'
       fullPath: '/share-center/$publicID'
       preLoaderRoute: typeof ShareCenterPublicIDRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/tools/': {
+      id: '/tools/'
+      path: '/tools'
+      fullPath: '/tools/'
+      preLoaderRoute: typeof ToolsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/(auth)/user/reset': {
@@ -1558,8 +1598,10 @@ const rootRouteChildren: RootRouteChildren = {
   AboutIndexRoute: AboutIndexRoute,
   PricingIndexRoute: PricingIndexRoute,
   RankingsIndexRoute: RankingsIndexRoute,
+  RelayShareIndexRoute: RelayShareIndexRoute,
   SetupIndexRoute: SetupIndexRoute,
   ShareCenterIndexRoute: ShareCenterIndexRoute,
+  ToolsIndexRoute: ToolsIndexRoute,
   PricingModelIdIndexRoute: PricingModelIdIndexRoute,
 }
 export const routeTree = rootRouteImport
