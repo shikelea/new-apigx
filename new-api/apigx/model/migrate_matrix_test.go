@@ -41,6 +41,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertQualityRoutingDialect(t, db)
 		assertStageCAsyncTaskDialect(t, db)
 		assertStageDUsageSummaryDialect(t, db)
+		assertRelayVoteDialect(t, db)
 	})
 
 	t.Run("postgres", func(t *testing.T) {
@@ -69,6 +70,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertQualityRoutingDialect(t, db)
 		assertStageCAsyncTaskDialect(t, db)
 		assertStageDUsageSummaryDialect(t, db)
+		assertRelayVoteDialect(t, db)
 
 		// 存储引擎必须是 InnoDB。这不是洁癖：
 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
@@ -96,6 +98,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	assertQualityRoutingDialect(t, db)
 	assertStageCAsyncTaskDialect(t, db)
 	assertStageDUsageSummaryDialect(t, db)
+	assertRelayVoteDialect(t, db)
 }
 
 var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
@@ -302,6 +305,52 @@ func assertStageCAsyncTaskDialect(t *testing.T, db *gorm.DB) {
 		return errRollbackStageCAsyncTaskMatrix
 	})
 	require.ErrorIs(t, err, errRollbackStageCAsyncTaskMatrix)
+}
+
+var errRollbackRelayVoteMatrix = errors.New("rollback relay vote matrix fixture")
+
+// assertRelayVoteDialect covers the per-user vote dedup on every dialect: the
+// ON CONFLICT DO NOTHING insert, the conditional flip and the clamped
+// decrement must keep counters consistent on SQLite, PostgreSQL and MySQL.
+func assertRelayVoteDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const owner, voterA, voterB int64 = 9_850_001, 9_850_002, 9_850_003
+		share := &RelayShare{OwnerUserID: owner, Title: "vote-matrix", BaseURL: "https://vote-matrix.example", Kind: RelayKindCharity, Protocol: "new-api"}
+		require.NoError(t, CreateRelayShare(tx, share))
+		counts := func() (int64, int64) {
+			var stored RelayShare
+			require.NoError(t, tx.First(&stored, share.ID).Error)
+			return stored.VoteUsable, stored.VoteUnavailable
+		}
+
+		require.NoError(t, AddRelayVote(tx, share.ID, voterA, true))
+		require.NoError(t, AddRelayVote(tx, share.ID, voterA, true), "repeated vote must be a no-op")
+		usable, unavailable := counts()
+		assert.EqualValues(t, 1, usable)
+		assert.EqualValues(t, 0, unavailable)
+
+		require.NoError(t, AddRelayVote(tx, share.ID, voterA, false), "switching side moves the vote")
+		usable, unavailable = counts()
+		assert.EqualValues(t, 0, usable)
+		assert.EqualValues(t, 1, unavailable)
+
+		require.NoError(t, AddRelayVote(tx, share.ID, voterB, false))
+		usable, unavailable = counts()
+		assert.EqualValues(t, 0, usable)
+		assert.EqualValues(t, 2, unavailable)
+
+		mine, voteErr := GetRelayVote(tx, share.ID, voterA)
+		require.NoError(t, voteErr)
+		require.NotNil(t, mine)
+		assert.False(t, *mine)
+		none, voteErr := GetRelayVote(tx, share.ID, owner)
+		require.NoError(t, voteErr)
+		assert.Nil(t, none)
+		assert.ErrorIs(t, AddRelayVote(tx, share.ID, 0, true), ErrInvalidArgument)
+		return errRollbackRelayVoteMatrix
+	})
+	require.ErrorIs(t, err, errRollbackRelayVoteMatrix)
 }
 
 var errRollbackStageDUsageSummaryMatrix = errors.New("rollback stage d usage summary matrix fixture")

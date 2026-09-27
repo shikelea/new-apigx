@@ -29,6 +29,7 @@ import {
   UserRound,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { EmptyState } from '@/components/empty-state'
@@ -46,7 +47,9 @@ import { Label } from '@/components/ui/label'
 import { Markdown } from '@/components/ui/markdown'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { useStatus } from '@/hooks/use-status'
 import { handleServerError } from '@/lib/handle-server-error'
+import { getModuleAccessFromStatus } from '@/lib/nav-modules'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -74,23 +77,25 @@ import type { SharePost } from '../types'
 
 function postStatusLabel(status: SharePost['status']) {
   return {
-    draft: '草稿',
-    pending: '待审核',
-    published: '已发布',
-    rejected: '需修改',
-    archived: '已归档',
+    draft: 'Draft',
+    pending: 'Pending review',
+    published: 'Published',
+    rejected: 'Needs changes',
+    archived: 'Archived',
   }[status]
 }
 
 const SHARE_FILTERS: { id: ShareFilter; label: string }[] = [
-  { id: 'all', label: '全部' },
-  { id: 'usable', label: '仍可用' },
-  { id: 'observing', label: '待观察' },
-  { id: 'invalid', label: '可能失效' },
+  { id: 'all', label: 'All' },
+  { id: 'usable', label: 'Still usable' },
+  { id: 'observing', label: 'Needs observation' },
+  { id: 'invalid', label: 'May be unavailable' },
 ]
 
 export function SharePostCard({ post }: { post: SharePost }) {
+  const { t, i18n } = useTranslation()
   const state = postState(post)
+  const summary = voteSummary(post)
   const badgeVariant = state === 'usable' ? 'secondary' : 'outline'
   return (
     <Link
@@ -112,12 +117,16 @@ export function SharePostCard({ post }: { post: SharePost }) {
                 <div className='text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs'>
                   <span className='inline-flex items-center gap-1'>
                     <UserRound className='size-3.5' />
-                    {post.author_name || '分享者'}
+                    {post.author_name || t('Sharer')}
                   </span>
                   <span aria-hidden>·</span>
                   <span className='inline-flex items-center gap-1'>
                     <CalendarClock className='size-3.5' />
-                    {formatPublishedAt(post.published_at || post.updated_at)}
+                    {formatPublishedAt(
+                      post.published_at || post.updated_at,
+                      i18n.language,
+                      t('Not published yet')
+                    )}
                   </span>
                 </div>
               </div>
@@ -126,7 +135,7 @@ export function SharePostCard({ post }: { post: SharePost }) {
               variant={badgeVariant}
               className='shrink-0 whitespace-nowrap'
             >
-              {voteSummary(post)}
+              {t(summary.key, summary.values)}
             </Badge>
           </div>
         </CardHeader>
@@ -136,9 +145,12 @@ export function SharePostCard({ post }: { post: SharePost }) {
               post.content.replaceAll(/[#*_`>]/g, '').slice(0, 180)}
           </p>
           <div className='text-muted-foreground flex items-center justify-between border-t pt-3 text-xs'>
-            <span>有效性反馈</span>
+            <span>{t('Availability feedback')}</span>
             <span className='text-foreground font-medium tabular-nums'>
-              {post.usable_votes} 可用 · {post.invalid_votes} 失效
+              {t('{{usable}} usable · {{unavailable}} unavailable', {
+                usable: post.usable_votes,
+                unavailable: post.invalid_votes,
+              })}
             </span>
           </div>
         </CardContent>
@@ -148,6 +160,13 @@ export function SharePostCard({ post }: { post: SharePost }) {
 }
 
 export function ShareCenterBrowser() {
+  const { t } = useTranslation()
+  const { status } = useStatus()
+  // Hide the cross-link when an admin turned relay sharing off (its route would 403).
+  const relayShareEnabled = getModuleAccessFromStatus(
+    status as Record<string, unknown> | null,
+    'relayShare'
+  ).enabled
   const [keyword, setKeyword] = useState('')
   const [submittedKeyword, setSubmittedKeyword] = useState('')
   const [filter, setFilter] = useState<ShareFilter>('all')
@@ -178,31 +197,47 @@ export function ShareCenterBrowser() {
           <section className='flex flex-wrap items-end justify-between gap-5'>
             <div className='max-w-3xl'>
               <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
-                社区资料库
+                {t('Community library')}
               </p>
               <h1 className='mt-2 text-[clamp(2rem,4vw,3rem)] leading-[1.1] font-bold tracking-tight'>
-                分享中心
+                {t('Share center')}
               </h1>
               <p className='text-muted-foreground mt-3 max-w-2xl text-sm leading-6 sm:text-base'>
-                分享真实可用的信息，让下一位少走弯路。这里收录白嫖渠道、福利活动、教程和使用经验；可用性由社区反馈和管理员状态共同呈现。
+                {t(
+                  'Share useful, verified information to help the next person. This space collects free offers, promotions, tutorials and usage notes; availability is based on community feedback and admin status.'
+                )}
               </p>
             </div>
             <div className='flex shrink-0 flex-wrap gap-2'>
-              <Button variant='outline' render={<Link to='/relay-share' />}>
-                中转分享
-              </Button>
+              {relayShareEnabled ? (
+                <Button variant='outline' render={<Link to='/relay-share' />}>
+                  {t('Relay sharing')}
+                </Button>
+              ) : null}
               <Button render={<Link to='/share-center/manage' />}>
                 <FileText />
-                我的分享
+                {t('My shares')}
               </Button>
             </div>
           </section>
 
           <section className='grid gap-3 sm:grid-cols-3'>
             {[
-              { label: '已发布分享', value: posts.length, icon: FileText },
-              { label: '当前多数可用', value: usableCount, icon: CircleCheck },
-              { label: '有效性反馈', value: voteCount, icon: ShieldCheck },
+              {
+                label: t('Published shares'),
+                value: posts.length,
+                icon: FileText,
+              },
+              {
+                label: t('Mostly usable'),
+                value: usableCount,
+                icon: CircleCheck,
+              },
+              {
+                label: t('Availability feedback'),
+                value: voteCount,
+                icon: ShieldCheck,
+              },
             ].map(({ label, value, icon: Icon }) => (
               <Card
                 key={label}
@@ -235,18 +270,18 @@ export function ShareCenterBrowser() {
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') setSubmittedKeyword(keyword)
                     }}
-                    placeholder='搜索标题或摘要'
+                    placeholder={t('Search titles or summaries')}
                     className='h-10 pl-9'
                   />
                 </div>
                 <Button onClick={() => setSubmittedKeyword(keyword)}>
-                  搜索分享
+                  {t('Search shares')}
                 </Button>
               </div>
               <div
                 className='flex flex-wrap items-center gap-2'
                 role='tablist'
-                aria-label='分享状态'
+                aria-label={t('Share status')}
               >
                 {SHARE_FILTERS.map((item) => (
                   <button
@@ -262,7 +297,7 @@ export function ShareCenterBrowser() {
                         : 'border-border/70 text-muted-foreground hover:border-primary/40 hover:text-foreground'
                     )}
                   >
-                    {item.label}
+                    {t(item.label)}
                   </button>
                 ))}
               </div>
@@ -273,19 +308,19 @@ export function ShareCenterBrowser() {
             <div className='flex flex-wrap items-center justify-between gap-2'>
               <div>
                 <h2 className='text-lg font-semibold tracking-tight'>
-                  最新分享
+                  {t('Latest shares')}
                 </h2>
                 <p className='text-muted-foreground mt-1 text-sm'>
-                  按更新时间浏览，不做综合排名。
+                  {t('Browse by update time, without an overall ranking.')}
                 </p>
               </div>
               <span className='text-muted-foreground text-xs tabular-nums'>
-                {visiblePosts.length} 条结果
+                {t('{{count}} results', { count: visiblePosts.length })}
               </span>
             </div>
             {visiblePosts.length === 0 ? (
               <div className='bg-card/70 rounded-xl border border-dashed px-6 py-12'>
-                <EmptyState title='没有符合条件的分享' />
+                <EmptyState title={t('No shares match these filters')} />
               </div>
             ) : (
               <div className='grid gap-4 md:grid-cols-2 xl:grid-cols-3'>
@@ -302,6 +337,7 @@ export function ShareCenterBrowser() {
 }
 
 export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
+  const { t, i18n } = useTranslation()
   const auth = useAuthStore((state) => state.auth)
   const queryClient = useQueryClient()
   const query = useQuery({
@@ -311,7 +347,7 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
   const vote = useMutation({
     mutationFn: (value: 1 | -1) => voteShareCenterPost(publicID, value),
     onSuccess: () => {
-      toast.success('感谢你的反馈')
+      toast.success(t('Thanks for your feedback'))
       void queryClient.invalidateQueries({
         queryKey: ['share-center-post', publicID],
       })
@@ -327,6 +363,7 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
   }
   const post = query.data.data
   const state = postState(post)
+  const summary = voteSummary(post)
   return (
     <PublicLayout showMainContainer={false}>
       <PublicPageBackdrop>
@@ -334,7 +371,7 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
           <div className='flex flex-wrap items-end justify-between gap-4'>
             <div className='min-w-0'>
               <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
-                社区分享 · 详情
+                {t('Community share · Details')}
               </p>
               <h1 className='mt-2 text-[clamp(1.75rem,4vw,2.75rem)] leading-[1.12] font-bold tracking-tight'>
                 {post.title}
@@ -342,18 +379,23 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
               <div className='text-muted-foreground mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm'>
                 <span className='inline-flex items-center gap-1.5'>
                   <UserRound className='size-4' />
-                  {post.author_name || '分享者'}
+                  {post.author_name || t('Sharer')}
                 </span>
                 <span aria-hidden>·</span>
                 <span className='inline-flex items-center gap-1.5'>
                   <CalendarClock className='size-4' />
-                  更新于{' '}
-                  {formatPublishedAt(post.updated_at || post.published_at)}
+                  {t('Updated {{date}}', {
+                    date: formatPublishedAt(
+                      post.updated_at || post.published_at,
+                      i18n.language,
+                      t('Not published yet')
+                    ),
+                  })}
                 </span>
               </div>
             </div>
             <Button variant='outline' render={<Link to='/share-center' />}>
-              返回分享中心
+              {t('Back to share center')}
             </Button>
           </div>
 
@@ -368,28 +410,44 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
             <aside className='space-y-4 lg:sticky lg:top-24 lg:self-start'>
               <Card className='bg-card/90'>
                 <CardHeader>
-                  <CardTitle className='text-base'>分享信息</CardTitle>
+                  <CardTitle className='text-base'>
+                    {t('Share information')}
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className='space-y-4 text-sm'>
                   <div>
-                    <span className='text-muted-foreground'>当前判断</span>
-                    <p className='mt-1 font-medium'>{voteSummary(post)}</p>
+                    <span className='text-muted-foreground'>
+                      {t('Current assessment')}
+                    </span>
+                    <p className='mt-1 font-medium'>
+                      {t(summary.key, summary.values)}
+                    </p>
                   </div>
                   <div>
-                    <span className='text-muted-foreground'>发布时间</span>
+                    <span className='text-muted-foreground'>
+                      {t('Published at')}
+                    </span>
                     <p className='mt-1 font-medium'>
-                      {formatPublishedAt(post.published_at)}
+                      {formatPublishedAt(
+                        post.published_at,
+                        i18n.language,
+                        t('Not published yet')
+                      )}
                     </p>
                   </div>
                   <div className='bg-muted/40 rounded-lg p-3 text-xs leading-5'>
                     <Clock3 className='text-primary mb-1 size-4' />
-                    状态会随着社区反馈变化，投票只作为排查线索。
+                    {t(
+                      'Status changes with community feedback; votes are only troubleshooting signals.'
+                    )}
                   </div>
                 </CardContent>
               </Card>
               <Card className='bg-card/90'>
                 <CardHeader>
-                  <CardTitle className='text-base'>还能用吗？</CardTitle>
+                  <CardTitle className='text-base'>
+                    {t('Is it still usable?')}
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className='space-y-3'>
                   <Button
@@ -398,7 +456,7 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
                     onClick={() => vote.mutate(1)}
                   >
                     <ThumbsUp />
-                    仍可用
+                    {t('Still usable')}
                   </Button>
                   <Button
                     variant='outline'
@@ -407,16 +465,16 @@ export function ShareCenterPostDetail({ publicID }: { publicID: string }) {
                     onClick={() => vote.mutate(-1)}
                   >
                     <ThumbsDown />
-                    已失效
+                    {t('Unavailable')}
                   </Button>
                   {!auth?.user ? (
                     <p className='text-muted-foreground text-xs'>
-                      登录后可以参与投票。
+                      {t('Sign in to vote.')}
                     </p>
                   ) : null}
                   {state === 'usable' ? (
                     <p className='text-muted-foreground text-xs'>
-                      目前可用反馈较多。
+                      {t('Most feedback says this is currently available.')}
                     </p>
                   ) : null}
                 </CardContent>
@@ -436,6 +494,7 @@ type EditorProps = {
 }
 
 export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
+  const { t } = useTranslation()
   const [title, setTitle] = useState(post?.title ?? '')
   const [summary, setSummary] = useState(post?.summary ?? '')
   const [content, setContent] = useState(post?.content ?? '')
@@ -454,7 +513,7 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
           })
         : createShareCenterPost({ title, summary, content }),
     onSuccess: () => {
-      toast.success('草稿已保存')
+      toast.success(t('Draft saved'))
       onSaved()
     },
     onError: (error) => handleServerError(error),
@@ -463,30 +522,30 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{post ? '编辑分享' : '新建分享'}</CardTitle>
+        <CardTitle>{post ? t('Edit share') : t('New share')}</CardTitle>
       </CardHeader>
       <CardContent className='space-y-4'>
         <div className='space-y-2'>
-          <Label>标题</Label>
+          <Label>{t('Title')}</Label>
           <Input
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             maxLength={160}
-            placeholder='例如：某平台免费额度申请方法'
+            placeholder={t('e.g. How to apply for a platform free quota')}
           />
         </div>
         <div className='space-y-2'>
-          <Label>摘要</Label>
+          <Label>{t('Summary')}</Label>
           <Textarea
             value={summary}
             onChange={(event) => setSummary(event.target.value)}
             rows={2}
             maxLength={500}
-            placeholder='用一句话说明这条分享解决什么问题'
+            placeholder={t('Briefly describe what this share helps with.')}
           />
         </div>
         <div className='space-y-2'>
-          <Label>正文（支持 Markdown 和安全 HTML）</Label>
+          <Label>{t('Content (Markdown and safe HTML supported)')}</Label>
           <Textarea
             value={content}
             onChange={(event) => setContent(event.target.value)}
@@ -494,19 +553,19 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
             maxLength={100000}
             className='font-mono text-sm'
             placeholder={
-              '# 使用说明\n\n请写清楚来源、步骤、限制和最后验证时间。支持常用 HTML 排版，脚本和危险链接会被自动过滤。'
+              '# Instructions\n\nInclude the source, steps, limitations and last verification date. Common HTML formatting is supported; scripts and unsafe links are filtered.'
             }
           />
         </div>
         <div className='flex justify-end gap-2'>
           <Button variant='outline' onClick={onCancel}>
-            取消
+            {t('Cancel')}
           </Button>
           <Button
             disabled={invalid || save.isPending}
             onClick={() => save.mutate()}
           >
-            保存草稿
+            {t('Save draft')}
           </Button>
         </div>
       </CardContent>
@@ -515,6 +574,7 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
 }
 
 export function ShareCenterManage() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: ['share-center-mine'],
@@ -525,7 +585,7 @@ export function ShareCenterManage() {
   const submit = useMutation({
     mutationFn: submitShareCenterPost,
     onSuccess: () => {
-      toast.success('已提交审核')
+      toast.success(t('Submitted for review.'))
       void queryClient.invalidateQueries({ queryKey: ['share-center-mine'] })
     },
     onError: (error) => handleServerError(error),
@@ -533,7 +593,7 @@ export function ShareCenterManage() {
   const archive = useMutation({
     mutationFn: archiveShareCenterPost,
     onSuccess: () => {
-      toast.success('已归档')
+      toast.success(t('Archived.'))
       void queryClient.invalidateQueries({ queryKey: ['share-center-mine'] })
     },
     onError: (error) => handleServerError(error),
@@ -545,10 +605,10 @@ export function ShareCenterManage() {
   const posts = query.data?.data?.items ?? []
   return (
     <SectionPageLayout>
-      <SectionPageLayout.Title>我的分享</SectionPageLayout.Title>
+      <SectionPageLayout.Title>{t('My shares')}</SectionPageLayout.Title>
       <SectionPageLayout.Actions>
         <Button variant='outline' render={<Link to='/share-center' />}>
-          浏览分享中心
+          {t('Browse share center')}
         </Button>
         <Button
           onClick={() => {
@@ -556,7 +616,7 @@ export function ShareCenterManage() {
             setEditing(null)
           }}
         >
-          新建分享
+          {t('Create share')}
         </Button>
       </SectionPageLayout.Actions>
       <SectionPageLayout.Content>
@@ -578,7 +638,7 @@ export function ShareCenterManage() {
             />
           ) : null}
           {posts.length === 0 ? (
-            <EmptyState title='还没有分享' />
+            <EmptyState title={t('No shares yet.')} />
           ) : (
             <div className='space-y-3'>
               {posts.map((post) => (
@@ -588,15 +648,17 @@ export function ShareCenterManage() {
                       <div className='flex flex-wrap items-center gap-2'>
                         <h2 className='font-semibold'>{post.title}</h2>
                         <Badge variant='outline'>
-                          {postStatusLabel(post.status)}
+                          {t(postStatusLabel(post.status))}
                         </Badge>
                       </div>
                       <p className='text-muted-foreground mt-1 text-sm'>
-                        {post.summary || '无摘要'}
+                        {post.summary || t('No summary')}
                       </p>
                       {post.reject_reason ? (
                         <p className='text-destructive mt-2 text-xs'>
-                          驳回原因：{post.reject_reason}
+                          {t('Rejection reason: {{reason}}', {
+                            reason: post.reject_reason,
+                          })}
                         </p>
                       ) : null}
                     </div>
@@ -610,7 +672,7 @@ export function ShareCenterManage() {
                           setCreating(false)
                         }}
                       >
-                        编辑
+                        {t('Edit')}
                       </Button>
                       <Button
                         size='sm'
@@ -620,7 +682,7 @@ export function ShareCenterManage() {
                         }
                         onClick={() => submit.mutate(post.public_id)}
                       >
-                        提交审核
+                        {t('Submit for review')}
                       </Button>
                       <Button
                         variant='ghost'
@@ -630,7 +692,7 @@ export function ShareCenterManage() {
                         }
                         onClick={() => archive.mutate(post.public_id)}
                       >
-                        归档
+                        {t('Archive')}
                       </Button>
                     </div>
                   </CardContent>
@@ -645,6 +707,7 @@ export function ShareCenterManage() {
 }
 
 export function ShareCenterSettingsSection() {
+  const { t } = useTranslation()
   const config = useQuery({
     queryKey: ['share-center-config'],
     queryFn: getShareCenterConfig,
@@ -652,7 +715,7 @@ export function ShareCenterSettingsSection() {
   const updateConfig = useMutation({
     mutationFn: updateShareCenterConfig,
     onSuccess: () => {
-      toast.success('分享中心设置已保存')
+      toast.success(t('Share center settings saved.'))
       void config.refetch()
     },
     onError: (error) => handleServerError(error),
@@ -666,13 +729,19 @@ export function ShareCenterSettingsSection() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className='text-base'>分享中心访问策略</CardTitle>
+        <CardTitle className='text-base'>
+          {t('Share center access policy')}
+        </CardTitle>
       </CardHeader>
       <CardContent className='flex items-center justify-between gap-4'>
         <div>
-          <p className='font-medium'>登录后才能查看分享中心</p>
+          <p className='font-medium'>
+            {t('Require sign-in to view share center')}
+          </p>
           <p className='text-muted-foreground text-sm'>
-            开启后，未登录用户无法打开分享中心和分享详情。分享投稿统一进入审核流程。
+            {t(
+              'When enabled, signed-out visitors cannot open the share center or details. New submissions always go through review.'
+            )}
           </p>
         </div>
         <Switch
@@ -688,6 +757,7 @@ export function ShareCenterSettingsSection() {
 }
 
 export function ShareCenterReview() {
+  const { t } = useTranslation()
   const queryClient = useQueryClient()
   const reviews = useQuery({
     queryKey: ['share-center-reviews'],
@@ -704,7 +774,7 @@ export function ShareCenterReview() {
       reason?: string
     }) => reviewShareCenterPost(id, action, reason),
     onSuccess: () => {
-      toast.success('审核状态已更新')
+      toast.success(t('Review status updated.'))
       void queryClient.invalidateQueries({ queryKey: ['share-center-reviews'] })
     },
     onError: (error) => handleServerError(error),
@@ -718,11 +788,13 @@ export function ShareCenterReview() {
   const posts = reviews.data?.data?.items ?? []
   return (
     <SectionPageLayout>
-      <SectionPageLayout.Title>分享中心审核</SectionPageLayout.Title>
+      <SectionPageLayout.Title>
+        {t('Share center review')}
+      </SectionPageLayout.Title>
       <SectionPageLayout.Content>
         <div className='space-y-6'>
           {posts.length === 0 ? (
-            <EmptyState title='暂无待审核分享' />
+            <EmptyState title={t('No shares are awaiting review.')} />
           ) : (
             <div className='space-y-4'>
               {posts.map((post) => (
@@ -734,7 +806,8 @@ export function ShareCenterReview() {
                           {post.title}
                         </CardTitle>
                         <p className='text-muted-foreground mt-1 text-sm'>
-                          {post.author_name || `用户 ${post.author_id}`}
+                          {post.author_name ||
+                            t('User {{id}}', { id: post.author_id })}
                         </p>
                       </div>
                       <Badge>{postStatusLabel(post.status)}</Badge>
@@ -751,7 +824,9 @@ export function ShareCenterReview() {
                         variant='outline'
                         disabled={review.isPending}
                         onClick={() => {
-                          const reason = window.prompt('请输入驳回原因')
+                          const reason = window.prompt(
+                            t('Enter a reason for rejection')
+                          )
                           if (reason?.trim()) {
                             review.mutate({
                               id: post.public_id,
@@ -761,7 +836,7 @@ export function ShareCenterReview() {
                           }
                         }}
                       >
-                        驳回
+                        {t('Reject')}
                       </Button>
                       <Button
                         disabled={review.isPending}
@@ -773,7 +848,7 @@ export function ShareCenterReview() {
                         }
                       >
                         <CheckCircle2 />
-                        通过并发布
+                        {t('Approve and publish')}
                       </Button>
                     </div>
                   </CardContent>

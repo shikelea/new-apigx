@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/shopspring/decimal"
@@ -15,8 +16,41 @@ import (
 // retaining transaction/savepoint and other optional GORM interfaces.
 type mysqlMigrationDialector struct{ mysql.Dialector }
 
+// Initialize keeps the driver's version probing and closes its MySQL 8.0 gap:
+// the driver only disables `ALTER TABLE ... DROP CONSTRAINT` for 5.x, but the
+// statement was added in 8.0.19, so 8.0.0-8.0.18 reject it with Error 1064 when
+// a migration removes a unique constraint. The driver's DROP INDEX fallback is
+// valid on every MySQL version.
+func (d mysqlMigrationDialector) Initialize(db *gorm.DB) error {
+	if err := d.Dialector.Initialize(db); err != nil {
+		return err
+	}
+	if mysqlLacksDropConstraint(d.ServerVersion) {
+		d.DontSupportDropConstraint = true
+	}
+	return nil
+}
+
 func (d mysqlMigrationDialector) Migrator(db *gorm.DB) gorm.Migrator {
 	return mysqlSchemaMigrator{d.Dialector.Migrator(db).(mysql.Migrator)}
+}
+
+// mysqlLacksDropConstraint reports whether an Oracle MySQL 8.0 server predates
+// 8.0.19. MariaDB and TiDB version strings are handled by the driver itself.
+func mysqlLacksDropConstraint(version string) bool {
+	if strings.Contains(version, "MariaDB") || strings.Contains(version, "TiDB") {
+		return false
+	}
+	patch, ok := strings.CutPrefix(version, "8.0.")
+	if !ok {
+		return false
+	}
+	digits := patch
+	if end := strings.IndexFunc(patch, func(r rune) bool { return r < '0' || r > '9' }); end >= 0 {
+		digits = patch[:end]
+	}
+	number, err := strconv.Atoi(digits)
+	return err == nil && number < 19
 }
 
 type mysqlSchemaMigrator struct{ mysql.Migrator }

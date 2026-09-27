@@ -2,7 +2,7 @@ package relayprobe
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,9 +12,37 @@ import (
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/service"
 	"gorm.io/gorm"
 )
+
+// Every outbound probe gets its own deadline. The shared protected client has
+// no timeout when RELAY_TIMEOUT=0, so without this a single slow or silent
+// relay could pin the scheduler forever and stall every other check.
+const (
+	probeRequestTimeout = 20 * time.Second
+	streamProbeTimeout  = 45 * time.Second
+	probeInterval       = int64(30 * 60)
+)
+
+func withProbeTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// originOf returns scheme://host for a validated base URL. New API's cookie
+// refresh endpoint rejects cookie requests without a matching Origin when
+// secure session cookies are enabled.
+func originOf(base string) string {
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
 
 type Result struct {
 	Status     string
@@ -51,12 +79,21 @@ func Probe(ctx context.Context, baseURL, protocol, key string) Result {
 	if err != nil {
 		return Result{Status: apigxmodel.RelayCheckFailed, Reason: "目标地址未通过安全校验"}
 	}
-	if protocol == "" {
-		protocol = "openai-compatible"
-	}
-	if protocol != "openai-compatible" && protocol != "new-api" && protocol != "sub2api" {
+	if !supportedProtocol(protocol) {
 		return Result{Status: apigxmodel.RelayCheckFailed, Reason: "暂不支持该协议的自动检测"}
 	}
+	return probeInventory(ctx, service.GetSSRFProtectedHTTPClient(), base, key, started)
+}
+
+func supportedProtocol(protocol string) bool {
+	return protocol == "" || protocol == "openai-compatible" || protocol == "new-api" || protocol == "sub2api"
+}
+
+// probeInventory lists /v1/models with an already validated base URL. The
+// client is injected so the audit and tests share one bounded implementation.
+func probeInventory(ctx context.Context, client *http.Client, base, key string, started time.Time) Result {
+	ctx, cancel := withProbeTimeout(ctx, probeRequestTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
 		return Result{Status: apigxmodel.RelayCheckFailed, Reason: "无法创建检测请求"}
@@ -65,7 +102,6 @@ func Probe(ctx context.Context, baseURL, protocol, key string) Result {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(key))
 	}
 	req.Header.Set("Accept", "application/json")
-	client := service.GetSSRFProtectedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return Result{Status: apigxmodel.RelayCheckFailed, Reason: "连接失败", LatencyMs: time.Since(started).Milliseconds()}
@@ -82,7 +118,7 @@ func Probe(ctx context.Context, baseURL, protocol, key string) Result {
 		return result
 	}
 	var payload modelListResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&payload); err != nil {
+	if err := common.DecodeJson(io.LimitReader(resp.Body, 2<<20), &payload); err != nil {
 		return Result{Status: apigxmodel.RelayCheckDegraded, Reason: "模型列表响应格式无法识别", LatencyMs: result.LatencyMs, HTTPStatus: resp.StatusCode}
 	}
 	result.Models = make([]string, 0, len(payload.Data))
@@ -131,14 +167,33 @@ func RunDue(ctx context.Context, db *gorm.DB, now int64, limit int) (int, error)
 			return checked, ctx.Err()
 		}
 		var share apigxmodel.RelayShare
-		if err := db.Where("id = ? AND deleted_at IS NULL", credentials[i].RelayShareID).First(&share).Error; err != nil {
+		err := db.Where("id = ?", credentials[i].RelayShareID).First(&share).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// The share was deleted without disabling its credential. Retire the
+			// orphan so it no longer sorts first and starves live credentials.
+			if updateErr := db.Model(&apigxmodel.RelayCredential{}).Where("id = ?", credentials[i].ID).
+				Updates(map[string]any{"enabled": false, "updated_at": now}).Error; updateErr != nil {
+				return checked, updateErr
+			}
+			continue
+		}
+		if err != nil {
+			return checked, err
+		}
+		if share.Status != apigxmodel.RelayStatusPublished || share.AliveFlag != apigxmodel.AliveFlagAlive {
+			// Suspended shares keep their credential (they may be restored) but are
+			// not probed; push them back so they do not block the queue.
+			if updateErr := db.Model(&apigxmodel.RelayCredential{}).Where("id = ?", credentials[i].ID).
+				Updates(map[string]any{"next_check_at": now + probeInterval, "updated_at": now}).Error; updateErr != nil {
+				return checked, updateErr
+			}
 			continue
 		}
 		result, probeErr := ProbeCredential(ctx, &share, &credentials[i])
 		if probeErr != nil {
 			result = Result{Status: apigxmodel.RelayCheckFailed, Reason: "检测凭据不可用"}
 		}
-		next := now + 30*60
+		next := now + probeInterval
 		updates := map[string]any{"last_checked_at": now, "next_check_at": next, "updated_at": now, "failure_count": 0}
 		if result.Status == apigxmodel.RelayCheckFailed {
 			updates["failure_count"] = credentials[i].FailureCount + 1
@@ -154,71 +209,132 @@ func RunDue(ctx context.Context, db *gorm.DB, now int64, limit int) (int, error)
 	return checked, nil
 }
 
+// CheckinOutcome carries the owner-facing summary plus, for session_cookie
+// sites, the rotated refresh cookie that must be persisted before the next run.
+type CheckinOutcome struct {
+	Message           string
+	RotatedCredential string
+}
+
 // RunCheckin performs the two credential modes supported by the first scheduler contract.
-func RunCheckin(ctx context.Context, site *apigxmodel.CheckinSite) (string, error) {
+//
+// New API rotates the refresh cookie on every /api/user/auth/refresh call and
+// revokes the whole session when an old cookie is replayed. The rotated cookie
+// is therefore returned even when the later check-in request fails, and the
+// caller must store it; otherwise the next run would log the user out remotely.
+func RunCheckin(ctx context.Context, site *apigxmodel.CheckinSite) (CheckinOutcome, error) {
+	var outcome CheckinOutcome
 	if site == nil {
-		return "", fmt.Errorf("checkin: nil site")
+		return outcome, fmt.Errorf("checkin: nil site")
 	}
 	credential, err := secretbox.Decrypt(site.CredentialRef)
 	if err != nil {
-		return "", err
+		return outcome, err
 	}
 	base, err := ValidateBaseURL(site.BaseURL)
 	if err != nil {
-		return "", err
+		return outcome, err
 	}
 	client := service.GetSSRFProtectedHTTPClient()
-	accessToken := ""
-	cookieHeader := ""
+	bearer := strings.TrimSpace(credential)
 	if site.CredentialKind == "session_cookie" {
-		cookieHeader = strings.TrimSpace(credential)
-		if !strings.Contains(cookieHeader, "=") {
-			cookieHeader = service.RefreshCookieName + "=" + cookieHeader
+		accessToken, rotated, refreshErr := refreshSessionCookie(ctx, client, base, credential)
+		outcome.RotatedCredential = rotated
+		if refreshErr != nil {
+			return outcome, refreshErr
 		}
-		refreshReq, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/user/auth/refresh", nil)
-		if requestErr != nil {
-			return "", requestErr
-		}
-		refreshReq.Header.Set("Cookie", cookieHeader)
-		refreshReq.Header.Set("Accept", "application/json")
-		refreshResp, requestErr := client.Do(refreshReq)
-		if requestErr != nil {
-			return "", fmt.Errorf("登录态刷新连接失败")
-		}
-		defer refreshResp.Body.Close()
-		if refreshResp.StatusCode < 200 || refreshResp.StatusCode >= 300 {
-			return "", fmt.Errorf("登录态刷新返回 HTTP %d", refreshResp.StatusCode)
-		}
-		var refreshPayload struct {
-			Success bool `json:"success"`
-			Data    struct {
-				AccessToken string `json:"access_token"`
-			} `json:"data"`
-		}
-		if decodeErr := json.NewDecoder(io.LimitReader(refreshResp.Body, 1<<20)).Decode(&refreshPayload); decodeErr != nil || !refreshPayload.Success || strings.TrimSpace(refreshPayload.Data.AccessToken) == "" {
-			return "", fmt.Errorf("登录态刷新响应无有效访问令牌")
-		}
-		accessToken = strings.TrimSpace(refreshPayload.Data.AccessToken)
+		bearer = accessToken
 	}
+	ctx, cancel := withProbeTimeout(ctx, probeRequestTimeout)
+	defer cancel()
 	checkinReq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/user/checkin", nil)
 	if err != nil {
-		return "", err
+		return outcome, err
 	}
-	if accessToken != "" {
-		checkinReq.Header.Set("Authorization", "Bearer "+accessToken)
-	} else {
-		checkinReq.Header.Set("Authorization", "Bearer "+credential)
-	}
+	checkinReq.Header.Set("Authorization", "Bearer "+bearer)
 	checkinReq.Header.Set("Accept", "application/json")
 	resp, err := client.Do(checkinReq)
 	if err != nil {
-		return "", fmt.Errorf("签到连接失败")
+		return outcome, fmt.Errorf("签到连接失败")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("签到返回 HTTP %d", resp.StatusCode)
+		return outcome, fmt.Errorf("签到返回 HTTP %d", resp.StatusCode)
 	}
-	return "签到请求已提交", nil
+	// New API answers business failures (already checked in, feature off) with
+	// HTTP 200 and success=false; surface that instead of claiming success.
+	var payload struct {
+		Success *bool  `json:"success"`
+		Message string `json:"message"`
+	}
+	if decodeErr := common.DecodeJson(io.LimitReader(resp.Body, 64<<10), &payload); decodeErr == nil && payload.Success != nil && !*payload.Success {
+		return outcome, fmt.Errorf("站点返回：%s", truncateRunes(strings.TrimSpace(payload.Message), 80))
+	}
+	outcome.Message = "签到请求已提交"
+	if msg := strings.TrimSpace(payload.Message); msg != "" {
+		outcome.Message = "签到完成：" + truncateRunes(msg, 80)
+	}
+	return outcome, nil
+}
+
+func refreshSessionCookie(ctx context.Context, client *http.Client, base, credential string) (accessToken, rotated string, err error) {
+	cookieHeader := strings.TrimSpace(credential)
+	if !strings.Contains(cookieHeader, "=") {
+		cookieHeader = service.RefreshCookieName + "=" + cookieHeader
+	}
+	ctx, cancel := withProbeTimeout(ctx, probeRequestTimeout)
+	defer cancel()
+	refreshReq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/user/auth/refresh", nil)
+	if err != nil {
+		return "", "", err
+	}
+	refreshReq.Header.Set("Cookie", cookieHeader)
+	refreshReq.Header.Set("Accept", "application/json")
+	if origin := originOf(base); origin != "" {
+		refreshReq.Header.Set("Origin", origin)
+	}
+	refreshResp, err := client.Do(refreshReq)
+	if err != nil {
+		return "", "", fmt.Errorf("登录态刷新连接失败")
+	}
+	defer refreshResp.Body.Close()
+	for _, cookie := range refreshResp.Cookies() {
+		if cookie.Name == service.RefreshCookieName && strings.TrimSpace(cookie.Value) != "" && cookie.MaxAge >= 0 {
+			rotated = service.RefreshCookieName + "=" + strings.TrimSpace(cookie.Value)
+		}
+	}
+	if refreshResp.StatusCode < 200 || refreshResp.StatusCode >= 300 {
+		return "", rotated, fmt.Errorf("登录态刷新返回 HTTP %d", refreshResp.StatusCode)
+	}
+	var refreshPayload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			AccessToken string `json:"access_token"`
+		} `json:"data"`
+	}
+	if decodeErr := common.DecodeJson(io.LimitReader(refreshResp.Body, 1<<20), &refreshPayload); decodeErr != nil || !refreshPayload.Success || strings.TrimSpace(refreshPayload.Data.AccessToken) == "" {
+		return "", rotated, fmt.Errorf("登录态刷新响应无有效访问令牌")
+	}
+	return strings.TrimSpace(refreshPayload.Data.AccessToken), rotated, nil
+}
+
+// PersistRotatedCheckinCredential re-encrypts a rotated refresh cookie. It is a
+// no-op when the site did not rotate anything.
+func PersistRotatedCheckinCredential(db *gorm.DB, siteID int64, rotated string, now int64) error {
+	if strings.TrimSpace(rotated) == "" {
+		return nil
+	}
+	envelope, err := secretbox.Encrypt(rotated)
+	if err != nil {
+		return err
+	}
+	fingerprint, err := secretbox.Fingerprint(rotated)
+	if err != nil {
+		return err
+	}
+	return db.Model(&apigxmodel.CheckinSite{}).Where("id = ?", siteID).Updates(map[string]any{
+		"credential_ref": envelope, "credential_fingerprint": fingerprint, "updated_at": now,
+	}).Error
 }
 
 // RunDueCheckins runs only due, enabled site jobs. The scheduler stores a generic
@@ -236,24 +352,42 @@ func RunDueCheckins(ctx context.Context, db *gorm.DB, now int64, limit int) (int
 		if ctx != nil && ctx.Err() != nil {
 			return completed, ctx.Err()
 		}
-		message, runErr := RunCheckin(ctx, &sites[i])
-		status := "success"
-		failures := sites[i].FailureCount
-		if runErr != nil {
-			status = "failed"
-			failures++
-			message = "签到失败"
-		} else {
-			failures = 0
-		}
-		nextRunAt, nextErr := apigxmodel.NextCheckinRunAt(now, sites[i].Timezone, sites[i].ScheduleMinute)
-		if nextErr != nil {
-			nextRunAt = now + 86400
-		}
-		if err := apigxmodel.UpdateCheckinSiteRun(db, sites[i].ID, now, nextRunAt, status, message, failures); err != nil {
+		if err := RecordCheckinRun(ctx, db, &sites[i], now); err != nil {
 			return completed, err
 		}
 		completed++
 	}
 	return completed, nil
+}
+
+// RecordCheckinRun executes one check-in and stores its outcome, failure
+// counter and rotated credential. Manual and scheduled runs share it so both
+// paths keep the same bookkeeping.
+func RecordCheckinRun(ctx context.Context, db *gorm.DB, site *apigxmodel.CheckinSite, now int64) error {
+	outcome, runErr := RunCheckin(ctx, site)
+	if err := PersistRotatedCheckinCredential(db, site.ID, outcome.RotatedCredential, now); err != nil {
+		return err
+	}
+	status, message, failures := "success", outcome.Message, 0
+	if runErr != nil {
+		status, failures = "failed", site.FailureCount+1
+		message = "签到失败：" + truncateRunes(runErr.Error(), 120)
+	}
+	nextRunAt, nextErr := apigxmodel.NextCheckinRunAt(now, site.Timezone, site.ScheduleMinute)
+	if nextErr != nil {
+		nextRunAt = now + 86400
+	}
+	if err := apigxmodel.UpdateCheckinSiteRun(db, site.ID, now, nextRunAt, status, message, failures); err != nil {
+		return err
+	}
+	site.LastStatus, site.LastMessage, site.FailureCount, site.LastRunAt, site.NextRunAt = status, message, failures, now, nextRunAt
+	return nil
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }

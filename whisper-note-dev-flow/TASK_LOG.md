@@ -1,4 +1,37 @@
 # 任务清单
+## [已完成] 三库矩阵回归、近期改动回扫修复与工具中心高级审计（2026-09-27）
+
+**本轮目标**：用本地 MySQL 8 补齐 SQLite/MySQL/PostgreSQL 三库矩阵；回扫 [055]–[059] 的改动并修复发现的 BUG；把工具中心供应商审计里的 Token、Prompt、身份、SSE 流式、错误泄漏五类检测从 `skipped` 做成真实可运行的检查，参考成熟开源项目的方法；同时清理台账重复与陈旧条目。
+
+**验收标准**：
+- 三库矩阵（含 `APIGX_TEST_MYSQL_DSN`、`APIGX_TEST_PG_DSN`）真实执行并通过，记录数据库版本与命令；
+- 回扫发现的问题逐条记录根因并修复，有对应回归测试；
+- 五类高级审计由服务端受控发起，返回状态、样本数、延迟和脱敏证据；结论保持“信号/需复核”口径，不输出绝对判定，不在浏览器或结果中暴露 Key；
+- Go 定向测试、前端类型检查、构建和本地浏览器/API 冒烟通过；
+- 生产部署不在本轮自动执行，需用户确认。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 数据库矩阵 | `new-api/apigx/model`、`new-api/model`、`new-api/apigx/api`、`new-api/apigx/channelpool` | 验证 | 三库迁移与生命周期矩阵 |
+| 回扫修复 | `new-api/apigx/**`、`new-api/middleware`、`new-api/web/src/features/{relay-share,tools,share-center}` | 修改 | 按回扫结果修复 |
+| 高级审计 | `new-api/apigx/relayprobe`、`new-api/apigx/api/relay.go`、`new-api/web/src/features/tools` | 修改 | Token/Prompt/身份/SSE/错误泄漏检查 |
+| 流程台账 | `whisper-note-dev-flow/**` | 修改 | 状态、任务、重复条目清理 |
+
+**任务清单**：
+- [x] 三库矩阵回归（SQLite/MySQL 8.0.12/PostgreSQL 18.4）→ `./model ./apigx/model ./apigx/api ./apigx/channelpool` 三库全过；真实启动迁移各两次：SQLite 全新、PG 全新（73 表）、MySQL 全新（73 表 InnoDB）、MySQL 旧库升级 64→73 表均返回 200 无 FATAL。修复 2 个问题：PG 夹具缺 `AutoMigrate(&Option{})`；MySQL 8.0.0–8.0.18 不支持 `DROP CONSTRAINT`（驱动只对 5.x 关闭）→ `model/migration_dialector.go` 启用 DROP INDEX 回退
+- [x] 回扫 [055]–[059] 改动，列出问题并修复 → 后端：中转投票（`apigx_relay_votes`，`ExpectedTableCount=35`）、签到 DST/时区长度校验、站点名去空格、探针单次请求超时、签到 refresh cookie 轮换持久化、工具中心接入 `HeaderNavModuleEnabled("tools")` 与限流；前端：中转分享投票状态 `my_vote`/`aria-pressed`、未登录投票入口、查询 key 统一失效、加载/错误/空状态不再提前 return、Label/`htmlFor`、`NativeSelect` 替代显示原始值的 base-ui Select、长度限制与提交去空格、去掉不存在的 “Markdown” 承诺；分享中心按 `relayShare` 模块开关隐藏入口；导航/设置文案改 `t()`
+- [x] 调研开源检测方案并确定五类高级审计的实现方法 → 参考 api-relay-audit（AGPL）、veridrop（AGPL）、modelprint（MIT）的方法，服务端重写、未复制代码，注释署名
+- [x] 实现五类高级审计（后端探针 + API + 前端展示）并补回归测试 → `apigx/relayprobe/audit*.go`：Token 用量一致性、隐藏提示词/覆盖、模型自报身份（忽略否定句）、SSE 分块/usage/`[DONE]`、错误响应泄漏（凭据/上游域名/堆栈，全部脱敏）；结果只输出“信号/需复核”；前端 `features/tools/{components,lib}` 拆分为 RHF+Zod 表单与结果卡片；`relayprobe` 11/11、`go test ./apigx/... ./middleware/ ./model/`（含 MySQL/PG DSN）通过；`tsgo -b` 通过；变更文件 oxlint 0 错误、oxfmt 已格式化
+- [x] 全量验证：Go 定向测试、前端 typecheck/build/Vitest、本地 API 与浏览器冒烟 → Go 全包通过；前端 typecheck/build、11/11 受影响用例、lint/format 通过；隔离 SQLite 网关 3137 与真实浏览器页面回归通过
+- [x] 清理台账重复/陈旧条目，同步 PROJECT_STATUS 并本地 commit → [060] 已补记；本地 commit 在本轮完成
+
+**本轮收尾（2026-09-27）**：
+- 已补齐本轮涉及的 135 个工具/中转分享 key，以及分享中心和渠道测试新增 key；en/zh/zh-TW 覆盖扫描通过。
+- 已修复分享渠道测试模型自动回弹、原生 select 和分享中心硬编码中文；新增渠道选择与工具中心纯逻辑回归用例。
+- 生产部署、远端推送和真实外站凭据验证仍需单独安排。
+- 本地环境：MySQL my.ini 默认 MyISAM，DSN 需带 `default_storage_engine=InnoDB`；apigx 账号无 CREATE DATABASE 权限；审计会消耗少量上游额度
+- 未部署生产、未推送、未 commit
 ## [已完成] 中转分享与工具访问策略、公共页背景和动态回归（2026-09-26）
 
 **本轮目标**：把中转分享、工具中心纳入现有“顶部导航”设置，支持是否必须登录才能查看，并让两类页面复用分享中心的首屏背景与公共页面视觉；随后完成页面、权限、表单、API、调度和错误流程的本地动态回归。
@@ -62,7 +95,7 @@
 **结果**：项目专用 PostgreSQL 在 5433 启动，Go 网关在 3000 启动，Rsbuild 开发服务在 3001 启动；`/api/status`、`/api/share-center` 和前端代理请求均返回真实 JSON。
 **剩余工作**：登录后分享者流程、渠道连通性测试和路由重试仍需继续验证。
 
-成] 分享中心 UI 与系统设置融合优化（2026-09-25）
+## [已完成] 分享中心 UI 与系统设置融合优化（2026-09-25）
 
 **目标**：将分享中心收敛到 APIGX 既有中文设置、顶部导航和侧边栏体系，移除投稿表单中的可见范围选择，展示真实分享者，并评估正文安全 HTML 支持。
 
@@ -74,7 +107,9 @@
 - Markdown/HTML 渲染继续经过 DOMPurify 白名单过滤，禁止脚本、事件属性和危险协议；
 - 前端类型检查、lint、生产构建通过，后端相关测试通过。
 
-**涉及文件**：`new-api/web/src/features/share-center/**`、`new-api/web/src/routes/**`、`new-api/web/src/hooks/**`、`new-api/web/src/features/system-settings/**`、`new-api/model/share_post.go`、`new-api/controller/share_center.go`、流程台账。## [已完成] 部署分享中心设置融合版本（2026-09-25）
+**涉及文件**：`new-api/web/src/features/share-center/**`、`new-api/web/src/routes/**`、`new-api/web/src/hooks/**`、`new-api/web/src/features/system-settings/**`、`new-api/model/share_post.go`、`new-api/controller/share_center.go`、流程台账。
+
+## [已完成] 部署分享中心设置融合版本（2026-09-25）
 
 **本轮目标**：把分享中心 UI、系统设置融合、顶部导航/侧边栏开关、分享者展示和安全 HTML 渲染版本更新到 /pan/apigx-test。
 **结果**：仅重建 app；app/mysql/redis/stub healthy；生产版本 v0.0.0-apigx.23aa50f；未推送 GitHub。
@@ -106,33 +141,7 @@
 - [x] 新建工具单页，预留测速/掺水检测能力边界 → `new-api/web/src/features/tools/index.tsx`、`routes/tools/index.tsx`；不伪造结果、不把检测信号当裁决
 - [x] 本地类型检查、定向测试、生产构建和浏览器流程验证 → `tsgo -b`、Rsbuild、变更文件 oxlint、`go test ./apigx/api ./apigx/model -count=1`、无头 Chrome 三条公共路由通过
 - [x] 调研优秀开源项目/论文并记录可复用与不自造的部分 → `docs/APIGX_TOOLS_PLAN.md`
-# 任务清单
-## [进行中] 中转分享与工具访问策略、公共页背景和动态回归（2026-09-26）
 
-**本轮目标**：把中转分享、工具中心纳入现有“顶部导航”设置，支持是否必须登录才能查看，并让两类页面复用分享中心的首屏背景与公共页面视觉；随后完成页面、权限、表单、API、调度和错误流程的本地动态回归。
-
-**验收标准**：
-- 顶部导航设置中可分别开启/关闭中转分享、工具入口，并分别设置是否强制登录；旧配置兼容且默认保持公开；
-- 后端对中转分享公开读取接口和前端路由使用同一访问策略，关闭或强制登录不能只靠前端隐藏；
-- 中转分享、工具中心有与分享中心一致的背景、间距、容器和响应式表现，顶部导航不重复；
-- 未登录、登录、关闭入口、强制登录、资源创建/删除、Key 脱敏、SSRF 拒绝、检测/签到/审计成功与失败路径均有动态验证；
-- 前端类型检查、生产构建、Go 定向测试和本地浏览器流程通过；未完成的高级审计仍明确显示“需复核/未执行”，不伪造完成。
-
-**预计涉及模块**：
-| 模块 | 文件 | 类型 | 说明 |
-|---|---|---|---|
-| 顶部导航配置 | `new-api/web/src/features/system-settings/maintenance/config.ts`、`header-navigation-section.tsx`、`new-api/web/src/lib/nav-modules.ts` | 修改 | 增加中转分享/工具访问与登录开关，并保持旧配置兼容 |
-| 后端访问控制 | `new-api/middleware/header_nav.go`、`new-api/router/api-router.go` | 修改 | 将中转分享公开 API 接入统一模块策略 |
-| 公共页面视觉 | `new-api/web/src/components/layout/**`、`new-api/web/src/features/{share-center,relay-share,tools}/**` | 修改/新建 | 抽取分享中心首屏背景并复用到中转分享、工具中心 |
-| 路由守卫与导航 | `new-api/web/src/routes/{relay-share,tools}/**`、`new-api/web/src/hooks/use-top-nav-links.ts` | 修改 | 按设置控制页面入口和登录跳转 |
-| 验证与文档 | `new-api/**`、`whisper-note-dev-flow/**` | 修改 | 测试、状态和任务台账同步 |
-
-**任务清单**：
-- [ ] 增加顶部导航中转分享/工具模块及登录要求配置 → 前后端解析、设置表单、导航入口和路由守卫
-- [ ] 接入后端统一访问策略 → 中转分享公开列表/详情遵守启用与登录要求，保持所有者操作认证
-- [ ] 统一公共页面背景与布局 → 抽取共享背景组件，覆盖中转分享、工具和分享中心
-- [ ] 完成动态回归测试 → 页面、权限、表单、API、调度、错误和响应式流程
-- [ ] 同步状态文档并提交本地 commit → 记录验证结果和剩余风险
 ## [已完成] 分享中心 UI 收敛与工具接入边界 (2026-09-26)
 
 **本轮目标**：参考 New API 排行榜等单页的布局和组件，优化分享中心公共页与详情页的层次、信息密度和响应式体验；核实 llm-verify、hlwy-ai-checker 的复用边界，并保持渠道连通性测试复用 New API 基座。

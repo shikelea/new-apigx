@@ -188,23 +188,27 @@ func TestHeaderNavPublicRouteRejectsExpiredInternalAccessToken(t *testing.T) {
 	require.Contains(t, response.Body.String(), "AUTH_TOKEN_EXPIRED")
 }
 
-func TestHeaderNavModulePublicOrUserAuthControlsAPIGXPublicModules(t *testing.T) {
+func TestHeaderNavModuleAuthControlsAPIGXModules(t *testing.T) {
 	tests := []struct {
-		name   string
-		module string
-		raw    string
-		code   int
+		name          string
+		handler       gin.HandlerFunc
+		raw           string
+		authenticated bool
+		code          int
 	}{
-		{name: "relay public by default", module: "relayShare", raw: ``, code: http.StatusOK},
-		{name: "relay requires login", module: "relayShare", raw: `{"relayShare":{"enabled":true,"requireAuth":true}}`, code: http.StatusUnauthorized},
-		{name: "relay disabled requires login", module: "relayShare", raw: `{"relayShare":{"enabled":false,"requireAuth":false}}`, code: http.StatusUnauthorized},
-		{name: "tools public by default", module: "tools", raw: ``, code: http.StatusOK},
-		{name: "tools requires login", module: "tools", raw: `{"tools":{"enabled":true,"requireAuth":true}}`, code: http.StatusUnauthorized},
+		{name: "relay public by default", handler: HeaderNavModuleAuth("relayShare"), raw: ``, code: http.StatusOK},
+		{name: "relay requires login", handler: HeaderNavModuleAuth("relayShare"), raw: `{"relayShare":{"enabled":true,"requireAuth":true}}`, code: http.StatusUnauthorized},
+		{name: "relay disabled rejects anonymous", handler: HeaderNavModuleAuth("relayShare"), raw: `{"relayShare":{"enabled":false,"requireAuth":false}}`, code: http.StatusForbidden},
+		{name: "relay disabled rejects logged in", handler: HeaderNavModuleAuth("relayShare"), raw: `{"relayShare":{"enabled":false,"requireAuth":false}}`, authenticated: true, code: http.StatusForbidden},
+		{name: "tools enabled by default", handler: HeaderNavModuleEnabled("tools"), raw: ``, authenticated: true, code: http.StatusOK},
+		{name: "tools require auth flag does not block logged in", handler: HeaderNavModuleEnabled("tools"), raw: `{"tools":{"enabled":true,"requireAuth":true}}`, authenticated: true, code: http.StatusOK},
+		{name: "tools disabled rejects logged in", handler: HeaderNavModuleEnabled("tools"), raw: `{"tools":{"enabled":false,"requireAuth":false}}`, authenticated: true, code: http.StatusForbidden},
+		{name: "tools legacy disabled rejects", handler: HeaderNavModuleEnabled("tools"), raw: `{"tools":false}`, authenticated: true, code: http.StatusForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			withHeaderNavModules(t, tt.raw)
-			response := performHeaderNavRequest(t, HeaderNavModulePublicOrUserAuth(tt.module), false)
+			response := performHeaderNavRequest(t, tt.handler, tt.authenticated)
 			require.Equal(t, tt.code, response.Code)
 		})
 	}

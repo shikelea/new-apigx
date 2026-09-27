@@ -57,6 +57,22 @@ type migrationDecimalV3 struct {
 	Price float64 `gorm:"type:decimal(12,6);not null;default:1.25"`
 }
 
+func TestMySQLLacksDropConstraint(t *testing.T) {
+	for version, expected := range map[string]bool{
+		"8.0.12":                  true,
+		"8.0.18-log":              true,
+		"8.0.19":                  false,
+		"8.0.36-0ubuntu0.22.04.1": false,
+		"8.4.3":                   false,
+		"5.7.44":                  false, // the driver already disables it for 5.x
+		"10.4.32-MariaDB":         false,
+		"8.0.11-TiDB-v7.5.0":      false,
+		"":                        false,
+	} {
+		assert.Equal(t, expected, mysqlLacksDropConstraint(version), version)
+	}
+}
+
 func TestMigrationSchemaStability(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {

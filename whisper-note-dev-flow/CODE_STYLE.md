@@ -116,3 +116,8 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 **5. 相对路径要看当前目录**：在 `new-api/` 里写 `.toolchain\_state\x.cjs` 会写到不存在的位置；
 跨目录产物一律用**绝对路径**（如 `D:\Github\apigx\.toolchain\_state\...`）。
+
+## 前端格式化与表单下拉（2026-09-27）
+
+- **web/ 的格式化器是 oxfmt，不是 Prettier**：`bun run format` 实际调用 `scripts/format-with-protected-headers.mjs`，会剥离许可证头后对**整个 web/ 树**跑 oxfmt。只格式化本轮文件时用 `./node_modules/.bin/oxfmt -c .oxfmtrc.json <文件...>`；裸 Prettier 对 HEAD 原文件也会报格式问题，不要以它为准。
+- **值与显示文本不同的下拉优先用共享 `NativeSelect`**：base-ui `SelectValue` 未传 `items` 时显示原始 value（如 `charity`、`bearer`），且共享 `FormControl` 会把 id/aria 注入子元素；`NativeSelect` 会把这些 props 透传到 `<select>`，与 RHF + `FormControl` 配合无需额外适配。

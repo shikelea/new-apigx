@@ -45,6 +45,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Label } from '@/components/ui/label'
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import {
@@ -57,6 +59,7 @@ import {
   submitOffering,
   testShareChannel,
 } from '../api'
+import { initialConnectivityTestModel } from '../lib/connectivity-test'
 import {
   healthLabelKey,
   keyPoolModeLabelKey,
@@ -77,17 +80,30 @@ export function ChannelDetailView(props: { channelId: number }) {
   )
   const [mappingOffering, setMappingOffering] = useState<Offering | null>(null)
   const [testModel, setTestModel] = useState('')
-  const [testResult, setTestResult] = useState<{ success: boolean; message?: string; time?: number } | null>(null)
+  const [testModelManuallySelected, setTestModelManuallySelected] =
+    useState(false)
+  const [testResult, setTestResult] = useState<{
+    success: boolean
+    message?: string
+    time?: number
+  } | null>(null)
 
   const connectivityTest = useMutation({
-    mutationFn: () => testShareChannel(props.channelId, testModel ? { model: testModel } : undefined),
+    mutationFn: () =>
+      testShareChannel(
+        props.channelId,
+        testModel ? { model: testModel } : undefined
+      ),
     onSuccess: (result) => {
       setTestResult(result)
-      if (result.success) toast.success('连通性测试成功')
-      else toast.error(result.message || '连通性测试失败')
+      if (result.success) toast.success(t('Connectivity test passed'))
+      else toast.error(result.message || t('Connectivity test failed'))
     },
     onError: (error) => {
-      setTestResult({ success: false, message: '请求测试接口失败' })
+      setTestResult({
+        success: false,
+        message: t('Could not reach the connectivity test endpoint'),
+      })
       handleServerError(error)
     },
   })
@@ -156,10 +172,16 @@ export function ChannelDetailView(props: { channelId: number }) {
   })
   const firstTestableModel =
     offeringsQuery.data?.data?.items?.find((offering) => offering.status === 2)
-      ?.upstream_model_id ?? offeringsQuery.data?.data?.items?.[0]?.upstream_model_id ?? ''
+      ?.upstream_model_id ??
+    offeringsQuery.data?.data?.items?.[0]?.upstream_model_id ??
+    ''
   useEffect(() => {
-    if (!testModel && firstTestableModel) setTestModel(firstTestableModel)
-  }, [firstTestableModel, testModel])
+    const initialModel = initialConnectivityTestModel(
+      firstTestableModel,
+      testModelManuallySelected
+    )
+    if (initialModel) setTestModel(initialModel)
+  }, [firstTestableModel, testModelManuallySelected])
 
   if (
     channelQuery.isPending ||
@@ -416,46 +438,88 @@ export function ChannelDetailView(props: { channelId: number }) {
             <CardHeader>
               <div className='flex flex-wrap items-center justify-between gap-3'>
                 <div>
-                  <CardTitle>渠道连通性测试</CardTitle>
-                  <p className='text-muted-foreground mt-1 text-sm'>复用基座渠道测试逻辑，仅测试本渠道已配置的模型。</p>
+                  <CardTitle>{t('Channel connectivity test')}</CardTitle>
+                  <p className='text-muted-foreground mt-1 text-sm'>
+                    {t(
+                      'Uses the built-in channel test and only tests models configured for this channel.'
+                    )}
+                  </p>
                 </div>
                 <Gauge className='text-muted-foreground size-5' />
               </div>
             </CardHeader>
             <CardContent className='space-y-3'>
               <div className='flex flex-col gap-2 sm:flex-row'>
-                <select
-                  value={testModel}
-                  onChange={(event) => {
-                    setTestModel(event.target.value)
-                    setTestResult(null)
-                  }}
-                  className='border-input bg-background h-9 min-w-0 flex-1 rounded-md border px-3 text-sm'
-                  disabled={offerings.length === 0 || connectivityTest.isPending}
-                >
-                  <option value=''>自动选择测试模型</option>
-                  {offerings.map((offering) => (
-                    <option key={offering.id} value={offering.upstream_model_id}>
-                      {offering.upstream_model_id}
-                    </option>
-                  ))}
-                </select>
+                <div className='flex min-w-0 flex-1 flex-col gap-1'>
+                  <Label htmlFor='connectivity-test-model'>
+                    {t('Test model')}
+                  </Label>
+                  <NativeSelect
+                    id='connectivity-test-model'
+                    className='w-full'
+                    value={testModel}
+                    onChange={(event) => {
+                      setTestModelManuallySelected(true)
+                      setTestModel(event.target.value)
+                      setTestResult(null)
+                    }}
+                    disabled={
+                      offerings.length === 0 || connectivityTest.isPending
+                    }
+                  >
+                    <NativeSelectOption value=''>
+                      {t('Automatic model selection')}
+                    </NativeSelectOption>
+                    {offerings.map((offering) => (
+                      <NativeSelectOption
+                        key={offering.id}
+                        value={offering.upstream_model_id}
+                      >
+                        {offering.upstream_model_id}
+                      </NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                </div>
                 <Button
-                  disabled={offerings.length === 0 || connectivityTest.isPending}
+                  disabled={
+                    offerings.length === 0 || connectivityTest.isPending
+                  }
                   onClick={() => connectivityTest.mutate()}
                 >
-                  {connectivityTest.isPending ? <Loader2 className='animate-spin' /> : <Gauge />}
-                  测试连通性
+                  {connectivityTest.isPending ? (
+                    <Loader2 className='animate-spin' />
+                  ) : (
+                    <Gauge />
+                  )}
+                  {t('Test connectivity')}
                 </Button>
               </div>
               {testResult ? (
-                <div className={`rounded-md border px-3 py-2 text-sm ${testResult.success ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-destructive/30 bg-destructive/10'}`}>
-                  <span className='font-medium'>{testResult.success ? '测试通过' : '测试失败'}</span>
-                  {typeof testResult.time === 'number' ? <span className='text-muted-foreground ml-2'>响应 {testResult.time.toFixed(2)} 秒</span> : null}
-                  {testResult.message ? <p className='text-muted-foreground mt-1 break-words'>{testResult.message}</p> : null}
+                <div
+                  className={`rounded-md border px-3 py-2 text-sm ${testResult.success ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-destructive/30 bg-destructive/10'}`}
+                >
+                  <span className='font-medium'>
+                    {testResult.success ? t('Test passed') : t('Test failed')}
+                  </span>
+                  {typeof testResult.time === 'number' ? (
+                    <span className='text-muted-foreground ml-2'>
+                      {t('Response time: {{seconds}} seconds', {
+                        seconds: testResult.time.toFixed(2),
+                      })}
+                    </span>
+                  ) : null}
+                  {testResult.message ? (
+                    <p className='text-muted-foreground mt-1 break-words'>
+                      {testResult.message}
+                    </p>
+                  ) : null}
                 </div>
               ) : null}
-              {offerings.length === 0 ? <p className='text-muted-foreground text-sm'>请先添加至少一个模型供给。</p> : null}
+              {offerings.length === 0 ? (
+                <p className='text-muted-foreground text-sm'>
+                  请先添加至少一个模型供给。
+                </p>
+              ) : null}
             </CardContent>
           </Card>
 

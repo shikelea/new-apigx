@@ -73,7 +73,8 @@ func SetApiRouter(router *gin.Engine) {
 			perfMetricsRoute.GET("", controller.GetPerfMetrics)
 		}
 		relayPublicRoute := apiRouter.Group("/relay-shares")
-		relayPublicRoute.Use(middleware.HeaderNavModulePublicOrUserAuth("relayShare"))
+		// 模块关闭时对所有人返回 403（与前端守卫一致），开启且要求登录时才走 UserAuth。
+		relayPublicRoute.Use(middleware.HeaderNavModuleAuth("relayShare"))
 		apigxapi.RegisterRelayPublic(relayPublicRoute, apigxmodel.DefaultDB())
 
 		apiRouter.GET("/rankings", middleware.HeaderNavModuleAuth("rankings"), controller.GetRankings)

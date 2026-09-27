@@ -147,13 +147,15 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	r.GET("/capabilities", h.listCapabilities)
 
 	// 中转站安全工具：审计与 New API 外站签到。凭据仅通过后端加密存储。
-	r.POST("/audit-runs", h.createAuditRun)
-	r.GET("/audit-runs", h.listAuditRuns)
-	checkinSites := r.Group("/checkin-sites")
+	// 工具中心被后台关闭时，接口对已登录用户也返回 403，避免“入口隐藏但接口仍可用”。
+	toolsGate := middleware.HeaderNavModuleEnabled("tools")
+	r.POST("/audit-runs", toolsGate, middleware.UserCriticalRateLimit("relay_audit_run"), h.createAuditRun)
+	r.GET("/audit-runs", toolsGate, h.listAuditRuns)
+	checkinSites := r.Group("/checkin-sites", toolsGate)
 	{
 		checkinSites.GET("", h.listCheckinSites)
 		checkinSites.POST("", h.createCheckinSite)
-		checkinSites.POST("/:id/run", h.runCheckinSite)
+		checkinSites.POST("/:id/run", middleware.UserCriticalRateLimit("checkin_site_run"), h.runCheckinSite)
 		checkinSites.PATCH("/:id/status", h.updateCheckinSiteStatus)
 	}
 

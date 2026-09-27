@@ -10,16 +10,28 @@ import type { SharePost } from '../types'
 
 export type ShareFilter = 'all' | 'usable' | 'observing' | 'invalid'
 
-export function voteSummary(post: SharePost) {
+export function voteSummary(post: SharePost): {
+  key: string
+  values?: { count: string | number }
+} {
   const total = post.usable_votes + post.invalid_votes
-  if (total === 0) return '暂无有效性样本'
+  if (total === 0) return { key: 'No validity feedback yet' }
   if (post.usable_votes > post.invalid_votes) {
-    return `仍可用 · ${post.usable_votes}/${total}`
+    return {
+      key: 'Still usable · {{count}}',
+      values: { count: `${post.usable_votes}/${total}` },
+    }
   }
   if (post.invalid_votes > post.usable_votes) {
-    return `可能失效 · ${post.invalid_votes}/${total}`
+    return {
+      key: 'May be unavailable · {{count}}',
+      values: { count: `${post.invalid_votes}/${total}` },
+    }
   }
-  return `状态待观察 · ${total} 票`
+  return {
+    key: 'Needs observation · {{count}} votes',
+    values: { count: total },
+  }
 }
 
 export function postState(post: SharePost): ShareFilter {
@@ -29,10 +41,14 @@ export function postState(post: SharePost): ShareFilter {
   return 'observing'
 }
 
-export function formatPublishedAt(timestamp: number) {
-  if (!timestamp) return '尚未发布'
+export function formatPublishedAt(
+  timestamp: number,
+  locale: string,
+  unpublishedLabel: string
+) {
+  if (!timestamp) return unpublishedLabel
   const value = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000
-  return new Intl.DateTimeFormat('zh-CN', {
+  return new Intl.DateTimeFormat(locale, {
     month: 'short',
     day: 'numeric',
   }).format(new Date(value))

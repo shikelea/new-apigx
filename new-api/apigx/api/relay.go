@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
 	"github.com/QuantumNous/new-api/apigx/relayprobe"
@@ -27,7 +28,7 @@ func RegisterRelayPublic(r *gin.RouterGroup, db *gorm.DB) {
 	r.GET("/mine", middleware.UserAuth(), h.listMyRelayShares)
 	r.POST("", middleware.UserAuth(), h.createRelayShare)
 	r.GET("/:publicID", h.getPublicRelayShare)
-	r.POST("/:publicID/check", middleware.UserAuth(), h.checkRelayShare)
+	r.POST("/:publicID/check", middleware.UserAuth(), middleware.UserCriticalRateLimit("relay_share_check"), h.checkRelayShare)
 	r.POST("/:publicID/vote", middleware.UserAuth(), h.voteRelayShare)
 	r.DELETE("/:publicID", middleware.UserAuth(), h.deleteRelayShare)
 }
@@ -43,21 +44,44 @@ func (h *handler) getOwnedRelayByPublicID(owner int64, publicID string) (*apigxm
 	return &share, err
 }
 
-func relayOwnerName(db *gorm.DB, ownerID int64) string {
-	var user basemodel.User
-	if err := db.Select("username", "display_name").First(&user, "id = ?", ownerID).Error; err != nil {
-		return "平台用户"
+const (
+	relayTitleMaxRunes   = 120
+	relayContentMaxRunes = 20000
+	relayNameMaxRunes    = 100
+	relayBaseURLMaxLen   = 512
+)
+
+// relayOwnerNames resolves display names for a page of shares in one query
+// instead of one query per card.
+func relayOwnerNames(db *gorm.DB, shares []apigxmodel.RelayShare) map[int64]string {
+	ids := make([]int64, 0, len(shares))
+	for _, share := range shares {
+		ids = append(ids, share.OwnerUserID)
 	}
-	if strings.TrimSpace(user.DisplayName) != "" {
-		return user.DisplayName
+	names := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return names
 	}
-	if strings.TrimSpace(user.Username) != "" {
-		return user.Username
+	var users []basemodel.User
+	if err := db.Select("id", "username", "display_name").Where("id IN ?", ids).Find(&users).Error; err != nil {
+		return names
 	}
-	return "平台用户"
+	for _, user := range users {
+		switch {
+		case strings.TrimSpace(user.DisplayName) != "":
+			names[int64(user.Id)] = user.DisplayName
+		case strings.TrimSpace(user.Username) != "":
+			names[int64(user.Id)] = user.Username
+		}
+	}
+	return names
 }
 
-func relayShareJSON(db *gorm.DB, share apigxmodel.RelayShare) gin.H {
+func relayShareJSON(share apigxmodel.RelayShare, names map[int64]string) gin.H {
+	owner := names[share.OwnerUserID]
+	if owner == "" {
+		owner = "平台用户"
+	}
 	return gin.H{
 		"public_id": share.PublicID, "title": share.Title, "base_url": share.BaseURL,
 		"kind": share.Kind, "protocol": share.Protocol, "content": share.Content,
@@ -65,24 +89,44 @@ func relayShareJSON(db *gorm.DB, share apigxmodel.RelayShare) gin.H {
 		"last_checked_at": share.LastCheckedAt, "latency_ms": share.LatencyMs,
 		"first_token_ms": share.FirstTokenMs, "model_count": share.ModelCount,
 		"vote_usable": share.VoteUsable, "vote_unavailable": share.VoteUnavailable,
-		"owner_name": relayOwnerName(db, share.OwnerUserID),
+		"owner_name": owner,
 		"created_at": share.CreatedAt, "updated_at": share.UpdatedAt,
 	}
 }
 
+func (h *handler) singleRelayShareJSON(share apigxmodel.RelayShare) gin.H {
+	return relayShareJSON(share, relayOwnerNames(h.db, []apigxmodel.RelayShare{share}))
+}
+
 func (h *handler) listPublicRelayShares(c *gin.Context) {
-	var viewer int64
-	if id := c.GetInt("id"); id > 0 {
-		viewer = int64(id)
-	}
-	shares, err := apigxmodel.ListRelayShares(h.db, viewer, false, 100)
+	shares, err := apigxmodel.ListRelayShares(h.db, 0, false, 100)
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
+	names := relayOwnerNames(h.db, shares)
+	myVotes := map[int64]bool{}
+	if viewer := c.GetInt("id"); viewer > 0 && len(shares) > 0 {
+		ids := make([]int64, 0, len(shares))
+		for _, share := range shares {
+			ids = append(ids, share.ID)
+		}
+		var votes []apigxmodel.RelayVote
+		if err := h.db.Where("user_id = ? AND relay_share_id IN ?", viewer, ids).Find(&votes).Error; err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		for _, vote := range votes {
+			myVotes[vote.RelayShareID] = vote.Usable
+		}
+	}
 	items := make([]gin.H, 0, len(shares))
 	for _, share := range shares {
-		items = append(items, relayShareJSON(h.db, share))
+		item := relayShareJSON(share, names)
+		if usable, voted := myVotes[share.ID]; voted {
+			item["my_vote"] = usable
+		}
+		items = append(items, item)
 	}
 	ok(c, gin.H{"items": items})
 }
@@ -103,7 +147,7 @@ func (h *handler) getPublicRelayShare(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
-	ok(c, relayShareJSON(h.db, share))
+	ok(c, h.singleRelayShareJSON(share))
 }
 
 func (h *handler) listMyRelayShares(c *gin.Context) {
@@ -116,9 +160,10 @@ func (h *handler) listMyRelayShares(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
+	names := relayOwnerNames(h.db, shares)
 	items := make([]gin.H, 0, len(shares))
 	for _, share := range shares {
-		item := relayShareJSON(h.db, share)
+		item := relayShareJSON(share, names)
 		if credential, credErr := apigxmodel.GetRelayCredential(h.db, owner, share.ID); credErr == nil {
 			item["credential_configured"] = true
 			item["key_suffix"] = credential.KeySuffix
@@ -154,6 +199,11 @@ func (h *handler) createRelayShare(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "key_required", "持续检测需要提供一个检测 Key")
 		return
 	}
+	if utf8.RuneCountInString(strings.TrimSpace(req.Title)) > relayTitleMaxRunes ||
+		utf8.RuneCountInString(req.Content) > relayContentMaxRunes || len(strings.TrimSpace(req.BaseURL)) > relayBaseURLMaxLen {
+		fail(c, http.StatusBadRequest, "field_too_long", "名称最多 120 字、介绍最多 20000 字、地址最多 512 字符")
+		return
+	}
 	base, err := relayprobe.ValidateBaseURL(req.BaseURL)
 	if err != nil {
 		fail(c, http.StatusBadRequest, "invalid_base_url", "站点地址未通过安全校验")
@@ -176,11 +226,7 @@ func (h *handler) createRelayShare(c *gin.Context) {
 		fail(c, http.StatusServiceUnavailable, "credential_unavailable", "平台未配置安全凭据存储")
 		return
 	}
-	key := strings.TrimSpace(req.Key)
-	suffix := key
-	if len(suffix) > 4 {
-		suffix = suffix[len(suffix)-4:]
-	}
+	suffix := keySuffix(strings.TrimSpace(req.Key))
 	share := &apigxmodel.RelayShare{OwnerUserID: owner, Title: strings.TrimSpace(req.Title), BaseURL: base, Kind: strings.TrimSpace(req.Kind), Protocol: req.Protocol, Content: req.Content, Status: apigxmodel.RelayStatusPublished}
 	credential := &apigxmodel.RelayCredential{OwnerUserID: owner, SecretRef: encrypted, Fingerprint: fingerprint, KeySuffix: suffix, NextCheckAt: common.GetTimestamp()}
 	err = h.db.Transaction(func(tx *gorm.DB) error {
@@ -194,7 +240,16 @@ func (h *handler) createRelayShare(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
-	ok(c, gin.H{"relay": relayShareJSON(h.db, *share), "credential_configured": true, "key_suffix": suffix})
+	ok(c, gin.H{"relay": h.singleRelayShareJSON(*share), "credential_configured": true, "key_suffix": suffix})
+}
+
+// keySuffix shows the last four characters only when the key is long enough
+// that they do not reveal a meaningful share of the secret.
+func keySuffix(key string) string {
+	if len(key) < 12 {
+		return "****"
+	}
+	return key[len(key)-4:]
 }
 
 func (h *handler) checkRelayShare(c *gin.Context) {
@@ -221,7 +276,10 @@ func (h *handler) checkRelayShare(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
-	_ = h.db.Model(&apigxmodel.RelayCredential{}).Where("id = ?", credential.ID).Updates(map[string]any{"last_checked_at": now, "next_check_at": now + 1800, "updated_at": now})
+	if err := h.db.Model(&apigxmodel.RelayCredential{}).Where("id = ?", credential.ID).Updates(map[string]any{"last_checked_at": now, "next_check_at": now + 1800, "updated_at": now}).Error; err != nil {
+		failFromRepo(c, err)
+		return
+	}
 	if probeErr != nil {
 		fail(c, http.StatusBadGateway, "probe_failed", result.Reason)
 		return
@@ -230,7 +288,8 @@ func (h *handler) checkRelayShare(c *gin.Context) {
 }
 
 func (h *handler) voteRelayShare(c *gin.Context) {
-	if _, valid := h.ownerID(c); !valid {
+	voter, valid := h.ownerID(c)
+	if !valid {
 		return
 	}
 	var share apigxmodel.RelayShare
@@ -245,11 +304,11 @@ func (h *handler) voteRelayShare(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
-	if err := apigxmodel.AddRelayVote(h.db, share.ID, req.Usable); err != nil {
+	if err := apigxmodel.AddRelayVote(h.db, share.ID, voter, req.Usable); err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	ok(c, gin.H{"voted": true})
+	ok(c, gin.H{"voted": true, "usable": req.Usable})
 }
 
 func (h *handler) deleteRelayShare(c *gin.Context) {
@@ -263,16 +322,23 @@ func (h *handler) deleteRelayShare(c *gin.Context) {
 		return
 	}
 	id := share.ID
-	result := h.db.Model(&apigxmodel.RelayShare{}).Where("id = ? AND owner_user_id = ? AND alive_flag = ?", id, owner, apigxmodel.AliveFlagAlive).Updates(map[string]any{"deleted_at": time.Now().UTC(), "alive_flag": apigxmodel.AliveFlagAlive + id, "status": apigxmodel.RelayStatusSuspended, "updated_at": common.GetTimestamp()})
-	if result.Error != nil {
-		failFromRepo(c, result.Error)
+	// Share and credential are retired together; a half-applied delete used to
+	// leave an enabled credential behind that clogged the probe queue.
+	err = h.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		result := tx.Model(&apigxmodel.RelayShare{}).Where("id = ? AND owner_user_id = ? AND alive_flag = ?", id, owner, apigxmodel.AliveFlagAlive).Updates(map[string]any{"deleted_at": now, "alive_flag": apigxmodel.AliveFlagAlive + id, "status": apigxmodel.RelayStatusSuspended, "updated_at": common.GetTimestamp()})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return apigxmodel.ErrNotFound
+		}
+		return tx.Model(&apigxmodel.RelayCredential{}).Where("relay_share_id = ? AND owner_user_id = ? AND deleted_at IS NULL", id, owner).Updates(map[string]any{"enabled": false, "deleted_at": now, "updated_at": common.GetTimestamp()}).Error
+	})
+	if err != nil {
+		failFromRepo(c, err)
 		return
 	}
-	if result.RowsAffected == 0 {
-		fail(c, http.StatusNotFound, "not_found", "relay share not found")
-		return
-	}
-	_ = h.db.Model(&apigxmodel.RelayCredential{}).Where("relay_share_id = ? AND owner_user_id = ? AND deleted_at IS NULL", id, owner).Updates(map[string]any{"enabled": false, "deleted_at": time.Now().UTC(), "updated_at": common.GetTimestamp()})
 	ok(c, gin.H{"deleted": id})
 }
 
@@ -281,6 +347,13 @@ type auditRunRequest struct {
 	RelaySharePublicID string `json:"relay_share_public_id"`
 	Model              string `json:"model"`
 }
+
+// auditCooldownRuns bounds how many paid audits one account can start per
+// minute: every run sends ~12 real (small) completions through the relay.
+const (
+	auditCooldownRuns    = 3
+	auditCooldownSeconds = 60
+)
 
 func (h *handler) createAuditRun(c *gin.Context) {
 	owner, valid := h.ownerID(c)
@@ -292,8 +365,13 @@ func (h *handler) createAuditRun(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
-	if strings.TrimSpace(req.Model) == "" || (req.RelayShareID <= 0 && strings.TrimSpace(req.RelaySharePublicID) == "") {
+	model := strings.TrimSpace(req.Model)
+	if model == "" || (req.RelayShareID <= 0 && strings.TrimSpace(req.RelaySharePublicID) == "") {
 		fail(c, http.StatusBadRequest, "invalid_argument", "relay share and model are required")
+		return
+	}
+	if utf8.RuneCountInString(model) > 191 {
+		fail(c, http.StatusBadRequest, "invalid_argument", "model is too long")
 		return
 	}
 	var share *apigxmodel.RelayShare
@@ -312,42 +390,68 @@ func (h *handler) createAuditRun(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
-	run := &apigxmodel.AuditRun{OwnerUserID: owner, RelayShareID: share.ID, Model: strings.TrimSpace(req.Model), Status: apigxmodel.AuditStatusRunning, StartedAt: common.GetTimestamp()}
+	key, err := secretbox.Decrypt(credential.SecretRef)
+	if err != nil {
+		fail(c, http.StatusServiceUnavailable, "credential_unavailable", "检测凭据不可用")
+		return
+	}
+	var recent int64
+	if err := h.db.Model(&apigxmodel.AuditRun{}).Where("owner_user_id = ? AND created_at >= ?", owner, common.GetTimestamp()-auditCooldownSeconds).Count(&recent).Error; err != nil {
+		failFromRepo(c, err)
+		return
+	}
+	if recent >= auditCooldownRuns {
+		fail(c, http.StatusTooManyRequests, "audit_cooldown", "审计请求过于频繁，请一分钟后再试")
+		return
+	}
+	run := &apigxmodel.AuditRun{OwnerUserID: owner, RelayShareID: share.ID, Model: model, Status: apigxmodel.AuditStatusRunning, StartedAt: common.GetTimestamp()}
 	if err := apigxmodel.CreateAuditRun(h.db, run); err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	result, probeErr := relayprobe.ProbeCredential(c.Request.Context(), share, credential)
-	status := apigxmodel.AuditCheckPassed
-	reason := "模型列表接口可达，未发现协议级异常"
-	if probeErr != nil || result.Status == apigxmodel.RelayCheckFailed {
-		status = apigxmodel.AuditCheckFailed
-		reason = result.Reason
-		if probeErr != nil {
-			reason = "检测凭据不可用"
+	report, auditErr := relayprobe.RunAudit(c.Request.Context(), share.BaseURL, share.Protocol, key, model)
+	finished := common.GetTimestamp()
+	if auditErr != nil {
+		_ = h.db.Model(run).Updates(map[string]any{"status": apigxmodel.AuditStatusFailed, "error_message": auditErr.Error(), "finished_at": finished, "updated_at": finished}).Error
+		fail(c, http.StatusBadRequest, "audit_failed", auditErr.Error())
+		return
+	}
+	samples := 0
+	err = h.db.Transaction(func(tx *gorm.DB) error {
+		for _, check := range report.Checks {
+			samples += check.SampleCount
+			if createErr := apigxmodel.CreateAuditCheck(tx, &apigxmodel.AuditCheck{
+				AuditRunID: run.ID, CheckID: check.ID, Name: check.Name, Category: check.Category,
+				Status: check.Status, SampleCount: check.SampleCount, LatencyMs: check.LatencyMs,
+				EvidenceSummary: check.Evidence, Confidence: check.Confidence, CreatedAt: finished,
+			}); createErr != nil {
+				return createErr
+			}
 		}
+		return tx.Model(run).Updates(map[string]any{
+			"status": apigxmodel.AuditStatusCompleted, "risk_level": report.RiskLevel, "sample_count": samples,
+			"finished_at": finished, "evidence_summary": relayprobe.AuditDisclaimer, "updated_at": finished,
+		}).Error
+	})
+	if err != nil {
+		_ = h.db.Model(run).Updates(map[string]any{"status": apigxmodel.AuditStatusFailed, "error_message": "保存审计结果失败", "finished_at": finished, "updated_at": finished}).Error
+		failFromRepo(c, err)
+		return
 	}
-	checks := []struct {
-		id, name, category, status, reason string
-		samples                            int
-	}{
-		{"protocol", "协议与模型列表", "基础设施", status, reason, 1},
-		{"token_usage", "Token 用量对比", "计量", apigxmodel.AuditCheckSkipped, "需要指定模型请求样本", 0},
-		{"prompt_leakage", "Prompt 提取探测", "安全", apigxmodel.AuditCheckSkipped, "首阶段不自动发送攻击性探针", 0},
-		{"identity", "模型身份一致性", "身份", apigxmodel.AuditCheckSkipped, "需要模型请求样本", 0},
-		{"sse_integrity", "流式完整性", "传输", apigxmodel.AuditCheckSkipped, "需要启用流式审计", 0},
-		{"error_leakage", "错误响应泄漏", "安全", apigxmodel.AuditCheckSkipped, "需要受控错误样本", 0},
+	ok(c, gin.H{
+		"public_id": run.PublicID, "relay_share_id": share.ID, "relay_title": share.Title, "model": model,
+		"status": apigxmodel.AuditStatusCompleted, "risk_level": report.RiskLevel, "sample_count": samples,
+		"started_at": run.StartedAt, "finished_at": finished, "evidence_summary": relayprobe.AuditDisclaimer,
+		"checks": report.Checks,
+	})
+}
+
+func auditCheckJSON(check apigxmodel.AuditCheck) gin.H {
+	return gin.H{
+		"id": check.CheckID, "name": check.Name, "category": check.Category, "status": check.Status,
+		"evidence": check.EvidenceSummary, "confidence": check.Confidence,
+		"sample_count": check.SampleCount, "latency_ms": check.LatencyMs,
 	}
-	for _, check := range checks {
-		_ = apigxmodel.CreateAuditCheck(h.db, &apigxmodel.AuditCheck{AuditRunID: run.ID, CheckID: check.id, Name: check.name, Category: check.category, Status: check.status, SampleCount: check.samples, LatencyMs: result.LatencyMs, EvidenceSummary: check.reason, Confidence: "low"})
-	}
-	run.Status = apigxmodel.AuditStatusCompleted
-	run.RiskLevel = "需复核"
-	run.SampleCount = result.ModelCount
-	run.FinishedAt = common.GetTimestamp()
-	run.EvidenceSummary = "仅保存脱敏摘要；未保存原始 Key、Prompt 或完整响应。"
-	_ = h.db.Model(run).Updates(map[string]any{"status": run.Status, "risk_level": run.RiskLevel, "sample_count": run.SampleCount, "finished_at": run.FinishedAt, "evidence_summary": run.EvidenceSummary, "updated_at": run.FinishedAt})
-	ok(c, gin.H{"id": run.ID, "public_id": run.PublicID, "status": run.Status, "risk_level": run.RiskLevel, "sample_count": run.SampleCount, "checks": checks})
 }
 
 func (h *handler) listAuditRuns(c *gin.Context) {
@@ -356,13 +460,48 @@ func (h *handler) listAuditRuns(c *gin.Context) {
 		return
 	}
 	var runs []apigxmodel.AuditRun
-	if err := h.db.Where("owner_user_id = ? AND deleted_at IS NULL", owner).Order("id DESC").Limit(50).Find(&runs).Error; err != nil {
+	if err := h.db.Where("owner_user_id = ?", owner).Order("id DESC").Limit(50).Find(&runs).Error; err != nil {
 		failFromRepo(c, err)
 		return
 	}
+	runIDs := make([]int64, 0, len(runs))
+	shareIDs := make([]int64, 0, len(runs))
+	for _, run := range runs {
+		runIDs = append(runIDs, run.ID)
+		shareIDs = append(shareIDs, run.RelayShareID)
+	}
+	checksByRun := map[int64][]gin.H{}
+	titles := map[int64]string{}
+	if len(runIDs) > 0 {
+		var checks []apigxmodel.AuditCheck
+		if err := h.db.Where("audit_run_id IN ?", runIDs).Order("id ASC").Find(&checks).Error; err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		for _, check := range checks {
+			checksByRun[check.AuditRunID] = append(checksByRun[check.AuditRunID], auditCheckJSON(check))
+		}
+		var shares []apigxmodel.RelayShare
+		if err := h.db.Unscoped().Select("id", "title").Where("id IN ? AND owner_user_id = ?", shareIDs, owner).Find(&shares).Error; err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		for _, share := range shares {
+			titles[share.ID] = share.Title
+		}
+	}
 	items := make([]gin.H, 0, len(runs))
 	for _, run := range runs {
-		items = append(items, gin.H{"public_id": run.PublicID, "relay_share_id": run.RelayShareID, "model": run.Model, "status": run.Status, "risk_level": run.RiskLevel, "sample_count": run.SampleCount, "started_at": run.StartedAt, "finished_at": run.FinishedAt, "evidence_summary": run.EvidenceSummary})
+		checks := checksByRun[run.ID]
+		if checks == nil {
+			checks = []gin.H{}
+		}
+		items = append(items, gin.H{
+			"public_id": run.PublicID, "relay_share_id": run.RelayShareID, "relay_title": titles[run.RelayShareID],
+			"model": run.Model, "status": run.Status, "risk_level": run.RiskLevel, "sample_count": run.SampleCount,
+			"started_at": run.StartedAt, "finished_at": run.FinishedAt, "evidence_summary": run.EvidenceSummary,
+			"error_message": run.ErrorMessage, "checks": checks,
+		})
 	}
 	ok(c, gin.H{"items": items})
 }
@@ -389,6 +528,10 @@ func (h *handler) createCheckinSite(c *gin.Context) {
 	base, err := relayprobe.ValidateBaseURL(req.BaseURL)
 	if err != nil {
 		fail(c, http.StatusBadRequest, "invalid_base_url", "站点地址未通过安全校验")
+		return
+	}
+	if name := strings.TrimSpace(req.Name); name == "" || utf8.RuneCountInString(name) > relayNameMaxRunes || len(strings.TrimSpace(req.BaseURL)) > relayBaseURLMaxLen {
+		fail(c, http.StatusBadRequest, "invalid_argument", "名称必填且最多 100 字，地址最多 512 字符")
 		return
 	}
 	plain := strings.TrimSpace(req.Key)
@@ -425,12 +568,16 @@ func (h *handler) createCheckinSite(c *gin.Context) {
 	if timezone == "" {
 		timezone = "Asia/Shanghai"
 	}
+	if len(timezone) > 64 {
+		fail(c, http.StatusBadRequest, "invalid_timezone", "时区无效")
+		return
+	}
 	nextRunAt, err := apigxmodel.NextCheckinRunAt(common.GetTimestamp(), timezone, minute)
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	site := &apigxmodel.CheckinSite{OwnerUserID: owner, Name: req.Name, BaseURL: base, CredentialRef: env, CredentialFingerprint: fp, CredentialKind: req.CredentialKind, Timezone: timezone, ScheduleMinute: minute, NextRunAt: nextRunAt}
+	site := &apigxmodel.CheckinSite{OwnerUserID: owner, Name: strings.TrimSpace(req.Name), BaseURL: base, CredentialRef: env, CredentialFingerprint: fp, CredentialKind: req.CredentialKind, Timezone: timezone, ScheduleMinute: minute, NextRunAt: nextRunAt}
 	if err := apigxmodel.CreateCheckinSite(h.db, site); err != nil {
 		failFromRepo(c, err)
 		return
@@ -467,23 +614,15 @@ func (h *handler) runCheckinSite(c *gin.Context) {
 		failFromRepo(c, err)
 		return
 	}
-	message, runErr := relayprobe.RunCheckin(c.Request.Context(), site)
-	now := common.GetTimestamp()
-	status := "success"
-	if runErr != nil {
-		status = "failed"
-		message = "签到失败"
-	}
-	nextRunAt, nextErr := apigxmodel.NextCheckinRunAt(now, site.Timezone, site.ScheduleMinute)
-	if nextErr != nil {
-		nextRunAt = now + 86400
-	}
-	_ = apigxmodel.UpdateCheckinSiteRun(h.db, site.ID, now, nextRunAt, status, message, site.FailureCount)
-	if runErr != nil {
-		fail(c, http.StatusBadGateway, "checkin_failed", message)
+	if err := relayprobe.RecordCheckinRun(c.Request.Context(), h.db, site, common.GetTimestamp()); err != nil {
+		failFromRepo(c, err)
 		return
 	}
-	ok(c, gin.H{"status": status, "message": message})
+	if site.LastStatus != "success" {
+		fail(c, http.StatusBadGateway, "checkin_failed", site.LastMessage)
+		return
+	}
+	ok(c, gin.H{"status": site.LastStatus, "message": site.LastMessage})
 }
 func (h *handler) updateCheckinSiteStatus(c *gin.Context) {
 	owner, valid := h.ownerID(c)

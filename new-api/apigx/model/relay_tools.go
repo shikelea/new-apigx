@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -32,6 +33,9 @@ const (
 	AuditCheckWarning = "warning"
 	AuditCheckFailed  = "failed"
 	AuditCheckSkipped = "skipped"
+	// AuditCheckInconclusive means the probes ran but produced no usable signal
+	// (e.g. every error probe returned 200); it must never be shown as "clean".
+	AuditCheckInconclusive = "inconclusive"
 )
 
 // RelayShare 是中转站资料与检测摘要。它只保存公开资料和脱敏状态，凭据独立存储。
@@ -141,6 +145,19 @@ type CheckinSite struct {
 
 func (CheckinSite) TableName() string { return TablePrefix + "checkin_sites" }
 
+// RelayVote keeps one usability vote per user and relay share so counters on
+// RelayShare cannot be inflated by repeated requests from the same account.
+type RelayVote struct {
+	ID           int64 `gorm:"primaryKey"`
+	RelayShareID int64 `gorm:"bigint;not null;uniqueIndex:idx_apigx_relayvote_share_user,priority:1"`
+	UserID       int64 `gorm:"bigint;not null;uniqueIndex:idx_apigx_relayvote_share_user,priority:2"`
+	Usable       bool  `gorm:"not null"`
+	CreatedAt    int64 `gorm:"bigint;not null;default:0"`
+	UpdatedAt    int64 `gorm:"bigint;not null;default:0"`
+}
+
+func (RelayVote) TableName() string { return TablePrefix + "relay_votes" }
+
 func newRelayPublicID() string { return common.GetRandomString(24) }
 
 func ValidateRelayKind(kind string) bool {
@@ -164,7 +181,9 @@ func NextCheckinRunAt(now int64, timezone string, scheduleMinute int) (int64, er
 	current := time.Unix(now, 0).In(loc)
 	target := time.Date(current.Year(), current.Month(), current.Day(), scheduleMinute/60, scheduleMinute%60, 0, 0, loc)
 	if !target.After(current) {
-		target = target.Add(24 * time.Hour)
+		// Rebuild from the calendar date instead of adding 24h so the local
+		// wall-clock time stays fixed across DST changes.
+		target = time.Date(current.Year(), current.Month(), current.Day()+1, scheduleMinute/60, scheduleMinute%60, 0, 0, loc)
 	}
 	return target.Unix(), nil
 }
@@ -226,12 +245,58 @@ func ListRelayShares(db *gorm.DB, ownerID int64, includeDraft bool, limit int) (
 	var shares []RelayShare
 	return shares, q.Order("updated_at DESC, id DESC").Limit(limit).Find(&shares).Error
 }
-func AddRelayVote(db *gorm.DB, id int64, usable bool) error {
-	field := "vote_unavailable"
+func relayVoteField(usable bool) string {
 	if usable {
-		field = "vote_usable"
+		return "vote_usable"
 	}
-	return db.Model(&RelayShare{}).Where("id = ? AND alive_flag = ?", id, AliveFlagAlive).UpdateColumn(field, gorm.Expr(field+" + ?", 1)).Error
+	return "vote_unavailable"
+}
+
+// AddRelayVote records one vote per user per relay share. Repeating the same
+// vote is a no-op; switching sides moves the count instead of adding another
+// vote, so a single account cannot inflate either counter.
+func AddRelayVote(db *gorm.DB, id, userID int64, usable bool) error {
+	if id <= 0 || userID <= 0 {
+		return fmt.Errorf("%w: relay share and user are required", ErrInvalidArgument)
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		now := common.GetTimestamp()
+		vote := RelayVote{RelayShareID: id, UserID: userID, Usable: usable, CreatedAt: now, UpdatedAt: now}
+		created := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&vote)
+		if created.Error != nil {
+			return created.Error
+		}
+		if created.RowsAffected == 1 {
+			field := relayVoteField(usable)
+			return tx.Model(&RelayShare{}).Where("id = ? AND alive_flag = ?", id, AliveFlagAlive).
+				UpdateColumn(field, gorm.Expr(field+" + ?", 1)).Error
+		}
+		// Only the request that actually flips the stored vote may move the
+		// counters; the conditional update makes concurrent flips race-safe.
+		flipped := tx.Model(&RelayVote{}).Where("relay_share_id = ? AND user_id = ? AND usable = ?", id, userID, !usable).
+			Updates(map[string]any{"usable": usable, "updated_at": now})
+		if flipped.Error != nil || flipped.RowsAffected == 0 {
+			return flipped.Error
+		}
+		add, sub := relayVoteField(usable), relayVoteField(!usable)
+		return tx.Model(&RelayShare{}).Where("id = ? AND alive_flag = ?", id, AliveFlagAlive).UpdateColumns(map[string]any{
+			add: gorm.Expr(add+" + ?", 1),
+			sub: gorm.Expr("CASE WHEN " + sub + " > 0 THEN " + sub + " - 1 ELSE 0 END"),
+		}).Error
+	})
+}
+
+// GetRelayVote returns the viewer's current vote, or nil when they have not voted.
+func GetRelayVote(db *gorm.DB, id, userID int64) (*bool, error) {
+	var vote RelayVote
+	err := db.Where("relay_share_id = ? AND user_id = ?", id, userID).First(&vote).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &vote.Usable, nil
 }
 
 func CreateRelayCredential(db *gorm.DB, credential *RelayCredential) error {
@@ -260,7 +325,9 @@ func CreateAuditRun(db *gorm.DB, run *AuditRun) error {
 	if run.PublicID == "" {
 		run.PublicID = newRelayPublicID()
 	}
-	run.Status = AuditStatusQueued
+	if run.Status == "" {
+		run.Status = AuditStatusQueued
+	}
 	now := common.GetTimestamp()
 	run.CreatedAt = now
 	run.UpdatedAt = now

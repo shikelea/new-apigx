@@ -114,6 +114,7 @@ func TestDefaultSystemNameMigrationOnConfiguredDialects(t *testing.T) {
 				var version string
 				require.NoError(t, db.Raw("SELECT version()").Scan(&version).Error)
 				t.Logf("PostgreSQL version: %s", version)
+				require.NoError(t, db.AutoMigrate(&Option{}))
 				return db
 			},
 		},

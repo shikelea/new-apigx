@@ -122,6 +122,23 @@ func HeaderNavModuleAuth(module string) gin.HandlerFunc {
 	}
 }
 
+// HeaderNavModuleEnabled only enforces the module switch. It is meant for
+// routes that already sit behind UserAuth, so a disabled module is closed for
+// every caller instead of silently staying reachable for logged-in users.
+func HeaderNavModuleEnabled(module string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !getHeaderNavAccess(module).Enabled {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"message": fmt.Sprintf("%s is disabled", module),
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 func HeaderNavModulePublicOrUserAuth(module string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		access := getHeaderNavAccess(module)

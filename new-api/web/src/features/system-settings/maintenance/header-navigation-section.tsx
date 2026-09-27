@@ -271,19 +271,27 @@ export function HeaderNavigationSection({
       enabledKey: 'relayShareEnabled',
       requireAuthKey: 'relayShareRequireAuth',
       requireAuthDependsOn: 'relayShareEnabled',
-      title: '中转分享',
-      description: '公益站与商业站资源分享和可用性反馈。',
-      requireAuthTitle: '登录后才能查看中转分享',
-      requireAuthDescription: '开启后，未登录用户无法查看中转站列表和详情。',
+      title: t('Relay sharing'),
+      description: t(
+        'Sharing of charity and commercial relays with availability feedback.'
+      ),
+      requireAuthTitle: t('Require login to view relay sharing'),
+      requireAuthDescription: t(
+        'Visitors must sign in before viewing the relay list and details.'
+      ),
     },
     {
       enabledKey: 'toolsEnabled',
       requireAuthKey: 'toolsRequireAuth',
       requireAuthDependsOn: 'toolsEnabled',
-      title: '工具中心',
-      description: '供应商审计、连通性检查和 New API 签到工具。',
-      requireAuthTitle: '登录后才能查看工具中心',
-      requireAuthDescription: '开启后，未登录用户无法打开工具中心页面。',
+      title: t('Tool Center'),
+      description: t(
+        'Supplier audits, connectivity checks and New API check-in tools.'
+      ),
+      requireAuthTitle: t('Require login to view the tool center'),
+      requireAuthDescription: t(
+        'Visitors must sign in before opening the tool center.'
+      ),
     },
   ]
 

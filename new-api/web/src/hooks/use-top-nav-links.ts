@@ -94,7 +94,7 @@ export function useTopNavLinks(): TopNavLink[] {
   const relayShare = modules?.relayShare
   if (relayShare && typeof relayShare === 'object' && relayShare.enabled) {
     links.push({
-      title: '中转分享',
+      title: t('Relay sharing'),
       href: '/relay-share',
       requiresAuth: relayShare.requireAuth && !isAuthed,
     })
@@ -103,7 +103,7 @@ export function useTopNavLinks(): TopNavLink[] {
   const tools = modules?.tools
   if (tools && typeof tools === 'object' && tools.enabled) {
     links.push({
-      title: '工具',
+      title: t('Tools'),
       href: '/tools',
       requiresAuth: tools.requireAuth && !isAuthed,
     })

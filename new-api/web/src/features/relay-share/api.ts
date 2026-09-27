@@ -23,6 +23,14 @@ export type RelayShare = {
   updated_at: number
   credential_configured?: boolean
   key_suffix?: string
+  /** Present only for signed-in viewers who already voted. */
+  my_vote?: boolean
+}
+
+export const relayQueryKeys = {
+  public: ['relay-shares'] as const,
+  // Shared with the tool center relay picker.
+  mine: ['relay-shares-mine'] as const,
 }
 
 type Envelope<T> = { success: boolean; data: T; message?: string }
@@ -74,9 +82,8 @@ export async function checkRelayShare(id: string) {
 }
 
 export async function voteRelayShare(id: string, usable: boolean) {
-  const response = await api.post(
-    `/api/relay-shares/${encodeURIComponent(id)}/vote`,
-    { usable }
-  )
+  const response = await api.post<
+    Envelope<{ voted: boolean; usable: boolean }>
+  >(`/api/relay-shares/${encodeURIComponent(id)}/vote`, { usable })
   return response.data
 }

@@ -33,31 +33,35 @@ function post(overrides: Partial<SharePost> = {}): SharePost {
 describe('分享中心状态摘要', () => {
   it('没有投票时归为待观察并明确提示样本不足', () => {
     expect(postState(post())).toBe('observing')
-    expect(voteSummary(post())).toBe('暂无有效性样本')
+    expect(voteSummary(post())).toEqual({ key: 'No validity feedback yet' })
   })
 
   it('可用投票超过失效投票时归为仍可用', () => {
     expect(postState(post({ usable_votes: 3, invalid_votes: 1 }))).toBe(
       'usable'
     )
-    expect(voteSummary(post({ usable_votes: 3, invalid_votes: 1 }))).toBe(
-      '仍可用 · 3/4'
-    )
+    expect(voteSummary(post({ usable_votes: 3, invalid_votes: 1 }))).toEqual({
+      key: 'Still usable · {{count}}',
+      values: { count: '3/4' },
+    })
   })
 
   it('相同票数时保持待观察而不是误标为可用', () => {
     expect(postState(post({ usable_votes: 2, invalid_votes: 2 }))).toBe(
       'observing'
     )
-    expect(voteSummary(post({ usable_votes: 2, invalid_votes: 2 }))).toBe(
-      '状态待观察 · 4 票'
-    )
+    expect(voteSummary(post({ usable_votes: 2, invalid_votes: 2 }))).toEqual({
+      key: 'Needs observation · {{count}} votes',
+      values: { count: 4 },
+    })
   })
 
   it('同时支持秒级和毫秒级时间戳', () => {
-    expect(formatPublishedAt(0)).toBe('尚未发布')
-    expect(formatPublishedAt(1_758_787_200)).toBe(
-      formatPublishedAt(1_758_787_200_000)
+    expect(formatPublishedAt(0, 'en', 'Not published yet')).toBe(
+      'Not published yet'
+    )
+    expect(formatPublishedAt(1_758_787_200, 'zh-CN', '尚未发布')).toBe(
+      formatPublishedAt(1_758_787_200_000, 'zh-CN', '尚未发布')
     )
   })
 })
