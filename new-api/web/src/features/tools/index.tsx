@@ -43,6 +43,7 @@ import {
 import { AuditForm } from './components/audit-panel'
 import { AuditResults } from './components/audit-results'
 import { CheckinForm, CheckinList } from './components/checkin-panel'
+import { IntelligencePanel } from './components/intelligence-panel'
 import { riskLevelKey } from './lib/format'
 
 export function ToolsPage() {
@@ -192,6 +193,8 @@ export function ToolsPage() {
               </CardContent>
             </Card>
           </div>
+
+          <IntelligencePanel />
 
           {signedIn ? (
             <div className='grid gap-6 lg:grid-cols-2'>

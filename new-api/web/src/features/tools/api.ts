@@ -71,6 +71,50 @@ export const toolsQueryKeys = {
   audits: ['apigx-audit-runs'] as const,
   relayOptions: ['relay-shares-mine'] as const,
   checkinSites: ['apigx-checkin-sites'] as const,
+  monitors: ['manxue-monitors'] as const,
+  community: ['manxue-community'] as const,
+}
+
+export type IntelligenceInput = {
+  benchmark: 'candy' | 'pelican'
+  base_url?: string
+  api_key?: string
+  model?: string
+  protocol?: string
+  reasoning_effort?: string
+  html?: string
+}
+
+export type IntelligenceTest = {
+  id: string
+  benchmark: 'candy' | 'pelican'
+  status: string
+  phase?: string
+  expires_at?: string
+  candy?: { status?: string; answer?: string; duration_ms?: number; error?: string }
+  result?: { html?: string; has_html?: boolean }
+  assessment?: { quality?: string; label?: string; reason?: string; source?: string }
+  error?: string
+}
+
+export async function createIntelligenceTest(input: IntelligenceInput) {
+  const res = await api.post<IntelligenceTest>('/api/apigx/intelligence/tests', input)
+  return res.data
+}
+
+export async function getIntelligenceTest(id: string) {
+  const res = await api.get<IntelligenceTest>(`/api/apigx/intelligence/tests/${encodeURIComponent(id)}`)
+  return res.data
+}
+
+export async function getManxueMonitors() {
+  const res = await api.get<Record<string, unknown>>('/api/apigx/intelligence/public/api/public/monitors')
+  return res.data
+}
+
+export async function getManxueCommunity(benchmark: 'candy' | 'pelican') {
+  const res = await api.get<Record<string, unknown>>('/api/apigx/intelligence/public/api/public/community', { params: { benchmark, limit: 20 } })
+  return res.data
 }
 
 export async function createAuditRun(input: {
