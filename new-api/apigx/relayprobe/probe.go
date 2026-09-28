@@ -22,8 +22,11 @@ import (
 // relay could pin the scheduler forever and stall every other check.
 const (
 	probeRequestTimeout = 20 * time.Second
-	streamProbeTimeout  = 45 * time.Second
-	probeInterval       = int64(30 * 60)
+	// maxRequestTimeout caps the token-budget-scaled deadline so one very slow
+	// relay still cannot hold a scheduler slot indefinitely.
+	maxRequestTimeout  = 4 * time.Minute
+	streamProbeTimeout = 45 * time.Second
+	probeInterval      = int64(30 * 60)
 )
 
 func withProbeTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -60,7 +63,7 @@ type modelListResponse struct {
 }
 
 func ValidateBaseURL(raw string) (string, error) {
-	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	raw = normalizeBaseURL(raw)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return "", fmt.Errorf("invalid relay base url")
@@ -69,6 +72,18 @@ func ValidateBaseURL(raw string) (string, error) {
 		return "", err
 	}
 	return raw, nil
+}
+
+// normalizeBaseURL trims the trailing slash and the redundant "/v1".
+//
+// Every prober builds its path as base + "/v1/...", but the address a relay
+// hands out almost always already ends in "/v1". Left alone that produces
+// "/v1/v1/chat/completions" and the run fails with a bare upstream 404 that
+// reads like a broken relay rather than a mistyped field, so the suffix is
+// dropped here once instead of in each caller.
+func normalizeBaseURL(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	return strings.TrimRight(strings.TrimSuffix(raw, "/v1"), "/")
 }
 
 // Probe performs a bounded, low-cost OpenAI-compatible model inventory check.

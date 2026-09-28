@@ -29,6 +29,7 @@ import { Route as errors503RouteImport } from './routes/(errors)/503'
 import { Route as AuthenticatedChat2linkRouteImport } from './routes/_authenticated/chat2link'
 import { Route as AuthenticatedSystemSettingsRouteRouteImport } from './routes/_authenticated/system-settings/route'
 import { Route as AboutIndexRouteImport } from './routes/about/index'
+import { Route as CrowdtestIndexRouteImport } from './routes/crowdtest/index'
 import { Route as OauthProviderRouteImport } from './routes/oauth/$provider'
 import { Route as PricingIndexRouteImport } from './routes/pricing/index'
 import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
@@ -178,6 +179,11 @@ const AuthenticatedSystemSettingsRouteRoute =
 const AboutIndexRoute = AboutIndexRouteImport.update({
   id: '/about/',
   path: '/about/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CrowdtestIndexRoute = CrowdtestIndexRouteImport.update({
+  id: '/crowdtest/',
+  path: '/crowdtest/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OauthProviderRoute = OauthProviderRouteImport.update({
@@ -494,6 +500,7 @@ export interface FileRoutesByFullPath {
   '/oauth/$provider': typeof OauthProviderRoute
   '/share-center/$publicID': typeof ShareCenterPublicIDRoute
   '/about/': typeof AboutIndexRoute
+  '/crowdtest/': typeof CrowdtestIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
   '/relay-share/': typeof RelayShareIndexRoute
@@ -564,6 +571,7 @@ export interface FileRoutesByTo {
   '/oauth/$provider': typeof OauthProviderRoute
   '/share-center/$publicID': typeof ShareCenterPublicIDRoute
   '/about': typeof AboutIndexRoute
+  '/crowdtest': typeof CrowdtestIndexRoute
   '/pricing': typeof PricingIndexRoute
   '/rankings': typeof RankingsIndexRoute
   '/relay-share': typeof RelayShareIndexRoute
@@ -638,6 +646,7 @@ export interface FileRoutesById {
   '/oauth/$provider': typeof OauthProviderRoute
   '/share-center/$publicID': typeof ShareCenterPublicIDRoute
   '/about/': typeof AboutIndexRoute
+  '/crowdtest/': typeof CrowdtestIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
   '/relay-share/': typeof RelayShareIndexRoute
@@ -711,6 +720,7 @@ export interface FileRouteTypes {
     | '/oauth/$provider'
     | '/share-center/$publicID'
     | '/about/'
+    | '/crowdtest/'
     | '/pricing/'
     | '/rankings/'
     | '/relay-share/'
@@ -781,6 +791,7 @@ export interface FileRouteTypes {
     | '/oauth/$provider'
     | '/share-center/$publicID'
     | '/about'
+    | '/crowdtest'
     | '/pricing'
     | '/rankings'
     | '/relay-share'
@@ -854,6 +865,7 @@ export interface FileRouteTypes {
     | '/oauth/$provider'
     | '/share-center/$publicID'
     | '/about/'
+    | '/crowdtest/'
     | '/pricing/'
     | '/rankings/'
     | '/relay-share/'
@@ -919,6 +931,7 @@ export interface RootRouteChildren {
   OauthProviderRoute: typeof OauthProviderRoute
   ShareCenterPublicIDRoute: typeof ShareCenterPublicIDRoute
   AboutIndexRoute: typeof AboutIndexRoute
+  CrowdtestIndexRoute: typeof CrowdtestIndexRoute
   PricingIndexRoute: typeof PricingIndexRoute
   RankingsIndexRoute: typeof RankingsIndexRoute
   RelayShareIndexRoute: typeof RelayShareIndexRoute
@@ -1068,6 +1081,13 @@ declare module '@tanstack/react-router' {
       path: '/about'
       fullPath: '/about/'
       preLoaderRoute: typeof AboutIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/crowdtest/': {
+      id: '/crowdtest/'
+      path: '/crowdtest'
+      fullPath: '/crowdtest/'
+      preLoaderRoute: typeof CrowdtestIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/oauth/$provider': {
@@ -1596,6 +1616,7 @@ const rootRouteChildren: RootRouteChildren = {
   OauthProviderRoute: OauthProviderRoute,
   ShareCenterPublicIDRoute: ShareCenterPublicIDRoute,
   AboutIndexRoute: AboutIndexRoute,
+  CrowdtestIndexRoute: CrowdtestIndexRoute,
   PricingIndexRoute: PricingIndexRoute,
   RankingsIndexRoute: RankingsIndexRoute,
   RelayShareIndexRoute: RelayShareIndexRoute,

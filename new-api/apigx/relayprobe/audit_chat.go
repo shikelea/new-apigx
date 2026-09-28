@@ -23,12 +23,40 @@ type chatResponse struct {
 	Content    string
 	Usage      map[string]any
 	LatencyMs  int64
+	// FinishReason 让调用方区分「答错」和「被 max_tokens 截断」。推理模型常把整个
+	// 预算花在思维链上，正文一个字都没来，那不是答错。
+	FinishReason string
+}
+
+// requestTimeoutFor scales the deadline with the requested output budget.
+//
+// The flat 20 s ceiling fits the short audit probes, but a benchmark that asks
+// for 1600 tokens from a reasoning model routinely needs longer, and cutting it
+// off surfaces as "连接失败或超时" — indistinguishable from a dead relay. The
+// budget is read back out of the marshalled body so callers do not each have to
+// thread a timeout through.
+func requestTimeoutFor(body []byte) time.Duration {
+	var payload struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	if err := common.Unmarshal(body, &payload); err != nil || payload.MaxTokens <= 0 {
+		return probeRequestTimeout
+	}
+	// 约 6 token/s 的保守下限，再留 15 秒给排队和首 token。
+	timeout := time.Duration(payload.MaxTokens/6)*time.Second + 15*time.Second
+	if timeout < probeRequestTimeout {
+		return probeRequestTimeout
+	}
+	if timeout > maxRequestTimeout {
+		return maxRequestTimeout
+	}
+	return timeout
 }
 
 // postJSON sends one bounded request. Only the relay key is attached; the
 // caller decides the path so error probes can hit unknown routes too.
 func (t auditTarget) postJSON(ctx context.Context, path, contentType string, body []byte, auth bool) (*chatResponse, error) {
-	ctx, cancel := withProbeTimeout(ctx, probeRequestTimeout)
+	ctx, cancel := withProbeTimeout(ctx, requestTimeoutFor(body))
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.base+path, bytes.NewReader(body))
 	if err != nil {
@@ -72,7 +100,8 @@ func (t auditTarget) chat(ctx context.Context, payload map[string]any) (*chatRes
 		Model   string         `json:"model"`
 		Usage   map[string]any `json:"usage"`
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content any `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
@@ -83,6 +112,7 @@ func (t auditTarget) chat(ctx context.Context, payload map[string]any) (*chatRes
 	resp.ID, resp.Model, resp.Usage = parsed.ID, parsed.Model, parsed.Usage
 	if len(parsed.Choices) > 0 {
 		resp.Content = contentText(parsed.Choices[0].Message.Content)
+		resp.FinishReason = parsed.Choices[0].FinishReason
 	}
 	return resp, nil
 }

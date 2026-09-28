@@ -30,6 +30,11 @@ func RegisterRelayPublic(r *gin.RouterGroup, db *gorm.DB) {
 	r.GET("/:publicID", h.getPublicRelayShare)
 	r.POST("/:publicID/check", middleware.UserAuth(), middleware.UserCriticalRateLimit("relay_share_check"), h.checkRelayShare)
 	r.POST("/:publicID/vote", middleware.UserAuth(), h.voteRelayShare)
+	// 持续检测设置只有主人能读写；采样列表对访客开放，但只给公开项。
+	r.GET("/:publicID/checks", middleware.UserAuth(), h.getRelayChecks)
+	r.PUT("/:publicID/checks", middleware.UserAuth(), h.setRelayChecks)
+	// TryUserAuth 让主人能在同一个接口里多看到自己的私有采样，访客仍然只拿公开项。
+	r.GET("/:publicID/samples", middleware.TryUserAuth(), h.listRelaySamples)
 	r.DELETE("/:publicID", middleware.UserAuth(), h.deleteRelayShare)
 }
 
@@ -58,6 +63,12 @@ func relayOwnerNames(db *gorm.DB, shares []apigxmodel.RelayShare) map[int64]stri
 	for _, share := range shares {
 		ids = append(ids, share.OwnerUserID)
 	}
+	return displayNamesByUserID(db, ids)
+}
+
+// displayNamesByUserID resolves display names for a page of rows in one query
+// instead of one query per row.
+func displayNamesByUserID(db *gorm.DB, ids []int64) map[int64]string {
 	names := make(map[int64]string, len(ids))
 	if len(ids) == 0 {
 		return names
@@ -183,6 +194,8 @@ type createRelayShareRequest struct {
 	Protocol string `json:"protocol"`
 	Content  string `json:"content"`
 	Key      string `json:"key"`
+	// Checks 是可选的持续检测设置。不给就用默认值：只开公开可用率，降智与掺水关闭。
+	Checks *checkSettingsRequest `json:"checks"`
 }
 
 func (h *handler) createRelayShare(c *gin.Context) {
@@ -229,18 +242,29 @@ func (h *handler) createRelayShare(c *gin.Context) {
 	suffix := keySuffix(strings.TrimSpace(req.Key))
 	share := &apigxmodel.RelayShare{OwnerUserID: owner, Title: strings.TrimSpace(req.Title), BaseURL: base, Kind: strings.TrimSpace(req.Kind), Protocol: req.Protocol, Content: req.Content, Status: apigxmodel.RelayStatusPublished}
 	credential := &apigxmodel.RelayCredential{OwnerUserID: owner, SecretRef: encrypted, Fingerprint: fingerprint, KeySuffix: suffix, NextCheckAt: common.GetTimestamp()}
+	config := defaultCheckConfig(owner, 0)
+	if req.Checks != nil {
+		if applyErr := req.Checks.applyTo(config); applyErr != nil {
+			failFromRepo(c, applyErr)
+			return
+		}
+	}
 	err = h.db.Transaction(func(tx *gorm.DB) error {
 		if createErr := apigxmodel.CreateRelayShare(tx, share); createErr != nil {
 			return createErr
 		}
 		credential.RelayShareID = share.ID
-		return apigxmodel.CreateRelayCredential(tx, credential)
+		if createErr := apigxmodel.CreateRelayCredential(tx, credential); createErr != nil {
+			return createErr
+		}
+		config.RelayShareID = share.ID
+		return apigxmodel.UpsertRelayCheckConfig(tx, config)
 	})
 	if err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	ok(c, gin.H{"relay": h.singleRelayShareJSON(*share), "credential_configured": true, "key_suffix": suffix})
+	ok(c, gin.H{"relay": h.singleRelayShareJSON(*share), "credential_configured": true, "key_suffix": suffix, "checks": checkConfigJSON(config)})
 }
 
 // keySuffix shows the last four characters only when the key is long enough

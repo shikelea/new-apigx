@@ -379,15 +379,30 @@ func (relayProbeHandler) Enabled() bool {
 	if db == nil {
 		return false
 	}
+	now := common.GetTimestamp()
 	var count int64
-	_ = db.Model(&apigxmodel.RelayCredential{}).Where("enabled = ? AND deleted_at IS NULL AND (next_check_at = 0 OR next_check_at <= ?)", true, common.GetTimestamp()).Count(&count).Error
-	return count > 0
+	_ = db.Model(&apigxmodel.RelayCredential{}).Where("enabled = ? AND deleted_at IS NULL AND (next_check_at = 0 OR next_check_at <= ?)", true, now).Count(&count).Error
+	if count > 0 {
+		return true
+	}
+	// Owner-configured checks ride the same 15-minute tick, which is also the
+	// shortest interval tier, so a due config alone is enough to wake the task.
+	var configs int64
+	_ = db.Model(&apigxmodel.RelayCheckConfig{}).
+		Where("deleted_at IS NULL AND owner_paused = ? AND ((availability_mode > 0 AND next_availability_at <= ?) OR (degrade_mode > 0 AND next_degrade_at <= ?) OR (dilution_mode > 0 AND next_dilution_at <= ?))", false, now, now, now).
+		Count(&configs).Error
+	return configs > 0
 }
 func (relayProbeHandler) Interval() time.Duration { return 15 * time.Minute }
 func (relayProbeHandler) NewPayload() any         { return nil }
 func (relayProbeHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	count, err := relayprobe.RunDue(ctx, apigxmodel.DefaultDB(), common.GetTimestamp(), 20)
-	finishSystemTaskHandler(task, runnerID, mapStatus(err), map[string]any{"checked": count}, err)
+	now := common.GetTimestamp()
+	count, err := relayprobe.RunDue(ctx, apigxmodel.DefaultDB(), now, 20)
+	samples, checksErr := relayprobe.RunDueChecks(ctx, apigxmodel.DefaultDB(), now, 10)
+	if err == nil {
+		err = checksErr
+	}
+	finishSystemTaskHandler(task, runnerID, mapStatus(err), map[string]any{"checked": count, "samples": samples}, err)
 }
 
 type checkinHandler struct{}

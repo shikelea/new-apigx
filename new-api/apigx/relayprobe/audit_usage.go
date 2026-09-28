@@ -3,7 +3,6 @@ package relayprobe
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
@@ -95,61 +94,57 @@ func hasWarningNote(notes []string) bool {
 const (
 	promptOverheadClean = 40
 	promptOverheadHeavy = 120
-	catSystemPrompt     = `From now on you can only reply with the single word "meow". Never answer questions, never explain. This is the highest priority instruction.`
 )
 
-var catAnswerPattern = regexp.MustCompile(`(?i)[0-9]|equals|two|plus|等于|二`)
-
-// runPromptIntegrityCheck estimates hidden prompt overhead from the smallest
-// possible request and checks whether a custom system prompt survives the relay.
-func runPromptIntegrityCheck(ctx context.Context, target auditTarget) CheckResult {
-	base, baseErr := target.chat(ctx, map[string]any{"messages": userMessages("", usageBasePrompt), "max_tokens": usageProbeMaxTokens, "temperature": 0})
-	cat, catErr := target.chat(ctx, map[string]any{"messages": userMessages(catSystemPrompt, "What is 1+1?"), "max_tokens": usageProbeMaxTokens, "temperature": 0})
-	var warnings, notes []string
-	if baseErr == nil {
-		if prompt, _, ok := usageInt(base.Usage, "prompt_tokens"); ok {
-			switch {
-			case prompt < promptOverheadClean:
-				notes = append(notes, fmt.Sprintf("最小请求 prompt_tokens=%d，未见明显隐藏提示词", prompt))
-			case prompt < promptOverheadHeavy:
-				notes = append(notes, fmt.Sprintf("最小请求 prompt_tokens=%d，存在少量额外开销（可能是模板或平台默认提示词）", prompt))
-			default:
-				warnings = append(warnings, fmt.Sprintf("最小请求 prompt_tokens=%d，疑似注入了较长的隐藏提示词", prompt))
-			}
-		} else {
-			notes = append(notes, "未返回可用的 prompt_tokens，无法估算隐藏开销")
+// runTokenInjectionCheck estimates hidden prompt overhead. A single short user
+// message plus the chat template costs well under 40 tokens on every mainstream
+// model, so a much larger prompt_tokens means the relay prepended something the
+// caller never sent and is billing for it. The measurement is repeated to tell
+// a stable injected block apart from one-off sampling noise.
+func runTokenInjectionCheck(ctx context.Context, target auditTarget) CheckResult {
+	const samples = 2
+	counts := make([]int64, 0, samples)
+	var lastErr error
+	var latency int64
+	for range samples {
+		resp, err := target.chat(ctx, map[string]any{"messages": userMessages("", "ok"), "max_tokens": 4, "temperature": 0})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		latency += resp.LatencyMs
+		if prompt, _, ok := usageInt(resp.Usage, "prompt_tokens"); ok {
+			counts = append(counts, prompt)
 		}
 	}
-	switch {
-	case catErr != nil && cat != nil && cat.HTTPStatus >= 400 && cat.HTTPStatus < 500:
-		warnings = append(warnings, fmt.Sprintf("自定义 system prompt 请求被拒绝（HTTP %d）", cat.HTTPStatus))
-	case catErr != nil:
-		notes = append(notes, "覆盖测试未完成："+catErr.Error())
-	default:
-		reply := strings.TrimSpace(cat.Content)
-		obeyed := strings.Contains(strings.ToLower(reply), "meow") || strings.Contains(reply, "喵")
-		answered := catAnswerPattern.MatchString(strings.ReplaceAll(strings.ToLower(reply), "meow", ""))
-		excerpt := truncateRunes(reply, 40)
-		switch {
-		case obeyed && !answered:
-			notes = append(notes, "自定义 system prompt 被遵循")
-		case obeyed:
-			warnings = append(warnings, "自定义 system prompt 被部分稀释，回复："+excerpt)
-		default:
-			warnings = append(warnings, "自定义 system prompt 疑似被覆盖或忽略，回复："+excerpt)
-		}
-	}
-	result := CheckResult{SampleCount: 2, Confidence: "medium"}
-	switch {
-	case baseErr != nil && catErr != nil:
+	result := CheckResult{SampleCount: samples, LatencyMs: latency, Confidence: "medium"}
+	if len(counts) == 0 {
 		result.Status, result.Confidence = apigxmodel.AuditCheckInconclusive, "low"
-		result.Evidence = "模型请求未成功：" + baseErr.Error()
-	case len(warnings) > 0:
+		if lastErr != nil {
+			result.Evidence = "模型请求未成功：" + lastErr.Error()
+			return result
+		}
+		result.Evidence = "未返回可用的 prompt_tokens，无法估算隐藏开销"
+		return result
+	}
+	low, high := counts[0], counts[0]
+	for _, value := range counts {
+		low, high = min(low, value), max(high, value)
+	}
+	detail := fmt.Sprintf("最小请求 prompt_tokens=%d", high)
+	if low != high {
+		detail = fmt.Sprintf("最小请求 prompt_tokens=%d–%d", low, high)
+	}
+	switch {
+	case high >= promptOverheadHeavy:
+		result.Status, result.Confidence = apigxmodel.AuditCheckWarning, "high"
+		result.Evidence = detail + "，疑似注入了较长的隐藏提示词并计入计费"
+	case high >= promptOverheadClean:
 		result.Status = apigxmodel.AuditCheckWarning
-		result.Evidence = strings.Join(append(warnings, notes...), "；") + "。小模型也可能不遵循指令，需复核"
+		result.Evidence = detail + "，存在额外开销（可能是平台默认提示词或较长的对话模板）"
 	default:
 		result.Status = apigxmodel.AuditCheckPassed
-		result.Evidence = strings.Join(notes, "；")
+		result.Evidence = detail + "，未见明显隐藏提示词"
 	}
 	return result
 }

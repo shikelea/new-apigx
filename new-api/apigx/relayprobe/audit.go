@@ -20,17 +20,26 @@ import (
 // Every result is a signal that needs human review, never a verdict: upstream
 // versions, routing and sampling all move these numbers.
 const (
-	CheckProtocol        = "protocol"
-	CheckTokenUsage      = "token_usage"
-	CheckPromptIntegrity = "prompt_leakage"
-	CheckIdentity        = "identity"
-	CheckSSEIntegrity    = "sse_integrity"
-	CheckErrorLeakage    = "error_leakage"
+	CheckProtocol            = "protocol"
+	CheckTokenUsage          = "token_usage"
+	CheckTokenInjection      = "token_injection"
+	CheckPromptExtraction    = "prompt_leakage"
+	CheckInstructionConflict = "instruction_conflict"
+	CheckIdentity            = "identity"
+	CheckContextWindow       = "context_window"
+	CheckToolRewrite         = "tool_rewrite"
+	CheckSSEIntegrity        = "sse_integrity"
+	CheckErrorLeakage        = "error_leakage"
+	CheckWeb3Injection       = "web3_injection"
+	CheckLatencyVariance     = "latency_variance"
 
-	auditTotalTimeout = 90 * time.Second
+	auditTotalTimeout = 150 * time.Second
 	maxResponseBytes  = 256 << 10
 	maxStreamBytes    = 1 << 20
 	maxEvidenceRunes  = 480
+	// Ten model-facing checks against one upstream would trip per-key rate
+	// limits, so they run a few at a time instead of all at once.
+	auditConcurrency = 4
 )
 
 // AuditDisclaimer is shown with every report.
@@ -65,12 +74,20 @@ type auditSpec struct {
 	run                func(context.Context, auditTarget) CheckResult
 }
 
+// auditSpecs covers the ten supplier-audit items as one combined run. Order is
+// the display order; the IDs are persisted, so they must stay stable.
 var auditSpecs = []auditSpec{
 	{CheckTokenUsage, "Token 用量一致性", "计量", runTokenUsageCheck},
-	{CheckPromptIntegrity, "Prompt 注入与覆盖", "安全", runPromptIntegrityCheck},
-	{CheckIdentity, "模型身份一致性", "身份", runIdentityCheck},
-	{CheckSSEIntegrity, "SSE 流式完整性", "传输", runSSEIntegrityCheck},
-	{CheckErrorLeakage, "错误响应泄漏", "安全", runErrorLeakageCheck},
+	{CheckTokenInjection, "Token 注入", "计量", runTokenInjectionCheck},
+	{CheckPromptExtraction, "Prompt 提取", "安全", runPromptExtractionCheck},
+	{CheckInstructionConflict, "指令冲突", "安全", runInstructionConflictCheck},
+	{CheckIdentity, "越狱与身份", "身份", runIdentityCheck},
+	{CheckContextWindow, "上下文窗口", "能力", runContextWindowCheck},
+	{CheckToolRewrite, "工具改写", "安全", runToolRewriteCheck},
+	{CheckErrorLeakage, "错误泄漏", "安全", runErrorLeakageCheck},
+	{CheckSSEIntegrity, "流式完整性", "传输", runSSEIntegrityCheck},
+	{CheckWeb3Injection, "Web3 注入", "安全", runWeb3InjectionCheck},
+	{CheckLatencyVariance, "延迟方差", "性能", runLatencyVarianceCheck},
 }
 
 // RunAudit validates the target against the SSRF policy and runs every check
@@ -112,11 +129,14 @@ func runAudit(ctx context.Context, target auditTarget) AuditReport {
 	}
 
 	results := make([]CheckResult, len(auditSpecs))
+	slots := make(chan struct{}, auditConcurrency)
 	var wg sync.WaitGroup
 	for i, spec := range auditSpecs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					results[i] = CheckResult{Status: apigxmodel.AuditCheckInconclusive, Evidence: "检查过程异常，已中止该项", Confidence: "low"}

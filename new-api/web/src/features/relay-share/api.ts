@@ -31,6 +31,34 @@ export const relayQueryKeys = {
   public: ['relay-shares'] as const,
   // Shared with the tool center relay picker.
   mine: ['relay-shares-mine'] as const,
+  samples: (id: string) => ['relay-share-samples', id] as const,
+  checks: (id: string) => ['relay-share-checks', id] as const,
+}
+
+/** Continuous-check settings. Visibility: 0 off, 1 owner only, 2 public. */
+export type RelayCheckSettings = {
+  availability_mode: number
+  availability_interval: number
+  degrade_mode: number
+  degrade_interval: number
+  degrade_models: string[]
+  dilution_mode: number
+  dilution_interval: number
+  dilution_models: string[]
+  paused: boolean
+  intervals: number[]
+}
+
+export type RelayProbeSample = {
+  kind: 'availability' | 'degrade' | 'dilution' | 'speed'
+  model: string
+  status: RelayStatus
+  score: number
+  latency_ms: number
+  first_token_ms: number
+  output_tps: number
+  evidence: string
+  probed_at: number
 }
 
 type Envelope<T> = { success: boolean; data: T; message?: string }
@@ -48,6 +76,10 @@ export async function listMyRelayShares() {
   return response.data
 }
 
+export type RelayCheckInput = Partial<
+  Omit<RelayCheckSettings, 'intervals' | 'paused'>
+> & { paused?: boolean }
+
 export type RelayCreateInput = {
   title: string
   base_url: string
@@ -55,6 +87,30 @@ export type RelayCreateInput = {
   protocol: 'new-api' | 'sub2api'
   content: string
   key: string
+  checks?: RelayCheckInput
+}
+
+export async function getRelayChecks(id: string) {
+  const response = await api.get<Envelope<RelayCheckSettings>>(
+    `/api/relay-shares/${encodeURIComponent(id)}/checks`
+  )
+  return response.data
+}
+
+export async function setRelayChecks(id: string, input: RelayCheckInput) {
+  const response = await api.put<Envelope<RelayCheckSettings>>(
+    `/api/relay-shares/${encodeURIComponent(id)}/checks`,
+    input
+  )
+  return response.data
+}
+
+export async function listRelaySamples(id: string, kind?: string) {
+  const query = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+  const response = await api.get<
+    Envelope<{ items: RelayProbeSample[]; viewer_is_owner: boolean }>
+  >(`/api/relay-shares/${encodeURIComponent(id)}/samples${query}`)
+  return response.data
 }
 
 export async function createRelayShare(input: RelayCreateInput) {

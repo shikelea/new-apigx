@@ -44,6 +44,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertStageDUsageSummaryDialect(t, db)
 		assertRelayVoteDialect(t, db)
 		assertLongSecretRefDialect(t, db)
+		assertRelayCheckDialect(t, db)
 	})
 
 	t.Run("postgres", func(t *testing.T) {
@@ -74,6 +75,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertStageDUsageSummaryDialect(t, db)
 		assertRelayVoteDialect(t, db)
 		assertLongSecretRefDialect(t, db)
+		assertRelayCheckDialect(t, db)
 
 		// 存储引擎必须是 InnoDB。这不是洁癖：
 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
@@ -103,6 +105,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	assertStageDUsageSummaryDialect(t, db)
 	assertRelayVoteDialect(t, db)
 	assertLongSecretRefDialect(t, db)
+	assertRelayCheckDialect(t, db)
 }
 
 var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
@@ -490,3 +493,134 @@ func informationSchemaApigxTables(t *testing.T, db *gorm.DB, column string) []st
 // 说明：sqlite 驱动在此文件被引用是为了保证 matrix 测试在只跑本文件时也能编译；
 // 真正的 SQLite 用例在 migrate_test.go。
 var _ = sqlite.Open
+
+var errRollbackRelayCheckMatrix = errors.New("rollback relay check matrix fixture")
+
+// assertRelayCheckDialect 固定住持续检测与众测三张表的跨方言语义：
+//   - 多选模型列表是 TEXT + common.Marshal，不能被截断；
+//   - 到期推进用条件更新，重复调用不得把下一次时间推两倍（多调度节点场景）；
+//   - 采样按「中转 + 模型 + 类型」分行，非主人只能读到公开项；
+//   - 众测公布是单向的，且不属于自己的记录返回 ErrNotFound 而不是暴露存在性。
+func assertRelayCheckDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const owner, other int64 = 9_860_001, 9_860_002
+		share := &RelayShare{OwnerUserID: owner, Title: "check-matrix", BaseURL: "https://check-matrix.example", Kind: RelayKindCharity, Protocol: "new-api"}
+		require.NoError(t, CreateRelayShare(tx, share))
+
+		config := &RelayCheckConfig{
+			RelayShareID: share.ID, OwnerUserID: owner,
+			AvailabilityMode: CheckVisibilityPublic, AvailabilityInterval: CheckInterval15Min,
+			DegradeMode: CheckVisibilityPublic, DegradeInterval: CheckInterval1Hour,
+			DilutionMode: CheckVisibilityOwner, DilutionInterval: CheckInterval3Hour,
+		}
+		require.NoError(t, config.SetModels(ProbeKindDegrade, []string{"gpt-4o", "gpt-4o", "  ", "gpt-4.1"}))
+		require.NoError(t, config.SetModels(ProbeKindDilution, []string{"gpt-4o"}))
+		require.NoError(t, UpsertRelayCheckConfig(tx, config))
+		// 去重与去空必须在写入前完成。
+		assert.Equal(t, []string{"gpt-4o", "gpt-4.1"}, config.Models(ProbeKindDegrade))
+
+		stored, getErr := GetRelayCheckConfig(tx, share.ID)
+		require.NoError(t, getErr)
+		assert.Equal(t, []string{"gpt-4o", "gpt-4.1"}, stored.Models(ProbeKindDegrade))
+		assert.Equal(t, CheckInterval15Min, stored.AvailabilityInterval)
+
+		// 间隔只接受四个挡位；开了检测但没选模型必须报错。
+		bad := *config
+		bad.AvailabilityInterval = 600
+		assert.ErrorIs(t, UpsertRelayCheckConfig(tx, &bad), ErrInvalidArgument)
+		empty := &RelayCheckConfig{RelayShareID: share.ID, OwnerUserID: owner, AvailabilityMode: CheckVisibilityOff,
+			AvailabilityInterval: CheckInterval30Min, DegradeMode: CheckVisibilityPublic, DegradeInterval: CheckInterval1Hour,
+			DilutionMode: CheckVisibilityOff, DilutionInterval: CheckInterval3Hour}
+		assert.ErrorIs(t, UpsertRelayCheckConfig(tx, empty), ErrInvalidArgument)
+
+		now := common.GetTimestamp()
+		due, dueErr := ListDueCheckConfigs(tx, ProbeKindAvailability, now, 10)
+		require.NoError(t, dueErr)
+		require.NotEmpty(t, due)
+
+		require.NoError(t, MarkCheckRan(tx, stored.ID, ProbeKindAvailability, now, CheckInterval15Min))
+		afterFirst, getErr := GetRelayCheckConfig(tx, share.ID)
+		require.NoError(t, getErr)
+		assert.EqualValues(t, now+CheckInterval15Min, afterFirst.NextAvailabilityAt)
+		// 第二个调度节点重复标记时，条件不再成立，到期时间不得被推第二次。
+		require.NoError(t, MarkCheckRan(tx, stored.ID, ProbeKindAvailability, now, CheckInterval15Min))
+		afterSecond, getErr := GetRelayCheckConfig(tx, share.ID)
+		require.NoError(t, getErr)
+		assert.EqualValues(t, afterFirst.NextAvailabilityAt, afterSecond.NextAvailabilityAt)
+
+		// 主人一键暂停后，调度不再取到这条配置。
+		require.NoError(t, tx.Model(&RelayCheckConfig{}).Where("id = ?", stored.ID).
+			UpdateColumns(map[string]any{"owner_paused": true, "next_availability_at": 0}).Error)
+		paused, dueErr := ListDueCheckConfigs(tx, ProbeKindAvailability, now, 10)
+		require.NoError(t, dueErr)
+		for _, item := range paused {
+			assert.NotEqual(t, stored.ID, item.ID, "owner-paused config must not be scheduled")
+		}
+		_, dueErr = ListDueCheckConfigs(tx, "nope", now, 10)
+		assert.ErrorIs(t, dueErr, ErrInvalidArgument)
+
+		// 采样按模型分行；非主人只能读到公开项。
+		for _, sample := range []*RelayProbeSample{
+			{RelayShareID: share.ID, Kind: ProbeKindDegrade, Model: "gpt-4o", Status: RelayCheckHealthy, Score: 90, Visibility: CheckVisibilityPublic, Evidence: "ok"},
+			{RelayShareID: share.ID, Kind: ProbeKindDegrade, Model: "gpt-4.1", Status: RelayCheckFailed, Score: 10, Visibility: CheckVisibilityOwner, Evidence: "wrong answer"},
+			{RelayShareID: share.ID, Kind: ProbeKindSpeed, Model: "gpt-4o", Status: RelayCheckHealthy, FirstTokenMs: 420, OutputTPS: 63, Visibility: CheckVisibilityPublic},
+		} {
+			require.NoError(t, CreateRelayProbeSample(tx, sample))
+			assert.Positive(t, sample.ProbedAt)
+		}
+		assert.ErrorIs(t, CreateRelayProbeSample(tx, &RelayProbeSample{RelayShareID: share.ID, Kind: ProbeKindDegrade}), ErrInvalidArgument)
+
+		ownerView, listErr := ListRelayProbeSamples(tx, share.ID, ProbeKindDegrade, true, 50)
+		require.NoError(t, listErr)
+		assert.Len(t, ownerView, 2)
+		publicView, listErr := ListRelayProbeSamples(tx, share.ID, ProbeKindDegrade, false, 50)
+		require.NoError(t, listErr)
+		require.Len(t, publicView, 1)
+		assert.Equal(t, "gpt-4o", publicView[0].Model)
+
+		// 众测：只属于提交者，草稿可公布一次，公布后锁定；他人公布返回 ErrNotFound。
+		test := &Crowdtest{SubmitterUserID: owner, Benchmark: BenchmarkPelican, Model: "gpt-4o",
+			Score: 100, Artifact: "<svg viewBox=\"0 0 1 1\"><circle r=\"1\"/></svg>", Visibility: CrowdtestVisibilityDraft}
+		require.NoError(t, CreateCrowdtest(tx, test))
+		assert.Zero(t, test.PublishedAt)
+		assert.ErrorIs(t, CreateCrowdtest(tx, &Crowdtest{SubmitterUserID: owner, Benchmark: "sudoku", Model: "gpt-4o"}), ErrInvalidArgument)
+		assert.ErrorIs(t, CreateCrowdtest(tx, &Crowdtest{SubmitterUserID: owner, Benchmark: BenchmarkCandy}), ErrInvalidArgument)
+
+		hidden, listErr := ListPublicCrowdtests(tx, "", 50)
+		require.NoError(t, listErr)
+		assert.Empty(t, hidden, "draft crowdtests must stay private")
+		// 草稿对提交者自己仍然可见，否则测完还没公布就找不回来了。
+		mine, listErr := ListMyCrowdtests(tx, owner, 50)
+		require.NoError(t, listErr)
+		require.Len(t, mine, 1)
+
+		assert.ErrorIs(t, PublishCrowdtest(tx, test.PublicID, other), ErrNotFound)
+		require.NoError(t, PublishCrowdtest(tx, test.PublicID, owner))
+		published, listErr := ListPublicCrowdtests(tx, BenchmarkPelican, 50)
+		require.NoError(t, listErr)
+		require.Len(t, published, 1)
+		assert.Positive(t, published[0].PublishedAt)
+		// SVG 原文要能原样穿过 TEXT 列，众测页面靠它渲染图片。
+		assert.Contains(t, published[0].Artifact, "<circle")
+		// 题型过滤生效：糖果题的列表里不该出现这条鹈鹕记录。
+		otherKind, listErr := ListPublicCrowdtests(tx, BenchmarkCandy, 50)
+		require.NoError(t, listErr)
+		assert.Empty(t, otherKind)
+		_, listErr = ListPublicCrowdtests(tx, "sudoku", 50)
+		assert.ErrorIs(t, listErr, ErrInvalidArgument)
+		// 再次公布是空操作而不是二次写入：已公布记录对任何人只读。
+		assert.ErrorIs(t, PublishCrowdtest(tx, test.PublicID, owner), ErrNotFound)
+
+		byUser, countErr := CountCrowdtestsSince(tx, 0, owner)
+		require.NoError(t, countErr)
+		assert.EqualValues(t, 1, byUser)
+		stranger, countErr := CountCrowdtestsSince(tx, 0, other)
+		require.NoError(t, countErr)
+		assert.Zero(t, stranger, "crowdtest quota is per submitter")
+		_, countErr = CountCrowdtestsSince(tx, 0, 0)
+		assert.ErrorIs(t, countErr, ErrInvalidArgument)
+		return errRollbackRelayCheckMatrix
+	})
+	require.ErrorIs(t, err, errRollbackRelayCheckMatrix)
+}

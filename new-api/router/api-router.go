@@ -76,11 +76,10 @@ func SetApiRouter(router *gin.Engine) {
 		// 模块关闭时对所有人返回 403（与前端守卫一致），开启且要求登录时才走 UserAuth。
 		relayPublicRoute.Use(middleware.HeaderNavModuleAuth("relayShare"))
 		apigxapi.RegisterRelayPublic(relayPublicRoute, apigxmodel.DefaultDB())
-		// manxue 监控/访客结果是只读公开数据，不要求 APIGX 登录；但仍遵守工具中心的开关与“需登录”设置，
-		// 全局 API 限流之外，处理器只放行白名单参数并做 30s 缓存，避免被当作匿名开放代理放大请求。
-		manxuePublicRoute := apiRouter.Group("")
-		manxuePublicRoute.Use(middleware.HeaderNavModuleAuth("tools"))
-		apigxapi.RegisterManxuePublic(manxuePublicRoute)
+
+		// 众测是个人自测 + 可选公开结果，不依赖中转模块，所以单独挂一组：
+		// 读接口对访客开放，写接口在 handler 内部要求登录并受工具中心开关约束。
+		apigxapi.RegisterCrowdtestRoutes(apiRouter, apigxmodel.DefaultDB())
 
 		apiRouter.GET("/rankings", middleware.HeaderNavModuleAuth("rankings"), controller.GetRankings)
 		apiRouter.GET("/verification", middleware.EmailVerificationRateLimit(), middleware.TurnstileCheck(), controller.SendEmailVerification)

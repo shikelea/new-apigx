@@ -148,3 +148,20 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 - **New API 性能守卫读的是 `os.TempDir()` 所在盘**：系统盘占用超过 `MonitorDiskThreshold`（默认 95%）时
   **所有** relay 返回 503 `system_disk_overloaded`。本地起网关做动态验证时，把进程的 `TMP/TEMP`
   指到空间充足的盘（如 `.toolchain/` 下被 gitignore 的目录），不要去改阈值——改了就验证不到真实配置下的行为。
+
+## 探测真实上游时的四个陷阱（2026-09-28，动态验证一次撞齐）
+
+- **base URL 的 `/v1` 必须在入口削掉一次**：中转对外给的地址几乎都以 `/v1` 结尾，而探测代码自己会拼
+  `/v1/chat/completions`、`/v1/models`。两者相加变成 `/v1/v1/...`，上游回 404，表现为"这个中转是坏的"。
+  统一在 `ValidateBaseURL` 里过一遍 `normalizeBaseURL`，不要让每个调用方各削一次。
+
+- **推理模型的输出先走 `reasoning_content`**：只统计 `delta.content` 会得出"未收到任何分片"，而实际上游
+  一直在流。流式统计要把 `reasoning_content` / `reasoning` 单独计数，TTFT 取**任意**首个 token，
+  伪流式判定也要把推理分片算进分片数，否则推理模型会被误判成伪流式。`completion_tokens` 本身已含推理 token。
+
+- **固定请求超时会把慢模型误报成"连接失败"**：20 秒对短探测够用，对 `max_tokens=1600` 的推理模型不够。
+  按请求体里的 `max_tokens` 折算超时（保守取约 6 token/s 再加排队余量），并设一个绝对上限，
+  免得一个极慢上游长期占住调度槽位。
+
+- **`finish_reason == "length"` 不等于答错**：思维链吃掉整个预算时正文一个字都没来。这种样本要判
+  `unknown`（众测记 `pending`），不能判 failed/degraded——否则降智曲线上会出现一段没有依据的"降智"。

@@ -71,3 +71,50 @@ export function riskLevelVariant(level: string): BadgeTone {
   if (level === '未发现明显异常') return 'secondary'
   return 'outline'
 }
+
+// Dilution verdicts come back as stable English enum values from modelfp.
+const dilutionVerdictMeta: Record<
+  string,
+  { label: string; variant: BadgeTone }
+> = {
+  match: { label: 'Consistent', variant: 'secondary' },
+  mismatch: { label: 'Does not match', variant: 'destructive' },
+  suspect: { label: 'Needs review', variant: 'outline' },
+  inconclusive: { label: 'Insufficient evidence', variant: 'outline' },
+}
+
+export function dilutionVerdict(verdict: string) {
+  return dilutionVerdictMeta[verdict] ?? dilutionVerdictMeta.inconclusive
+}
+
+// Probe sample and crowdtest statuses share the relay check vocabulary.
+const checkStatusMeta: Record<string, { label: string; variant: BadgeTone }> = {
+  healthy: { label: 'Healthy', variant: 'secondary' },
+  degraded: { label: 'Degraded', variant: 'outline' },
+  failed: { label: 'Failed', variant: 'destructive' },
+  unknown: { label: 'Insufficient evidence', variant: 'outline' },
+  scored: { label: 'Scored', variant: 'secondary' },
+  pending: { label: 'Pending', variant: 'outline' },
+  rejected: { label: 'Rejected', variant: 'destructive' },
+}
+
+export function checkStatus(status: string) {
+  return checkStatusMeta[status] ?? checkStatusMeta.unknown
+}
+
+/** Fixed monitoring tiers, in seconds, mirroring the backend's allowed values. */
+export const CHECK_INTERVALS = [900, 1800, 3600, 10800] as const
+
+export function intervalLabelKey(seconds: number): string {
+  if (seconds === 900) return 'Every 15 minutes'
+  if (seconds === 1800) return 'Every 30 minutes'
+  if (seconds === 3600) return 'Every hour'
+  return 'Every 3 hours'
+}
+
+/** Share of samples that came back healthy, or null when nothing was sampled. */
+export function availabilityRate(samples: { status: string }[]): number | null {
+  if (samples.length === 0) return null
+  const healthy = samples.filter((item) => item.status === 'healthy').length
+  return Math.round((healthy / samples.length) * 100)
+}

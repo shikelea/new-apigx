@@ -1,4 +1,29 @@
 # 项目状态 · apigx（二开 New API）
+### [063] 2026-09-28 下线 manxue，自建众测/速度/掺水三件套与中转持续检测
+
+**做了什么**：弃用 manxue 外部依赖，参照 helpaio.com 的 `/transit/{crowdtest,bench,availability}` 自建三个工具（服务商测试合并 10 项、Token 速度测试、8 维模型掺水检测）、中转分享的四挡持续检测，以及不与中转绑定的个人众测 + 可选公开看板。
+
+**涉及模块**：`new-api/apigx/relayprobe`、`new-api/apigx/model`、`new-api/apigx/api`、`new-api/controller`、`new-api/router`、`new-api/web/src/features/{tools,crowdtest,relay-share}`、前端语言包、流程台账。
+
+**改动明细**：
+| 文件/模块 | 改动说明 |
+|---|---|
+| `apigx/relayprobe/benchmark.go` | 新建：糖果题参数 `crypto/rand` 随机、答案服务端计算、取回复末位整数判分；鹈鹕按 6 条加权结构规则打分，不安全 SVG 判 0 分且丢弃原文（要展示给他人）。 |
+| `apigx/relayprobe/checks.go` | 新建：按主人挡位驱动 `RelayCheckConfig`，每模型一行 `RelayProbeSample`；顺序「可用率→降智→掺水」由便宜到贵，每类上限 10，失败也必 `MarkCheckRan` 防风暴。 |
+| `apigx/relayprobe/{probe,audit_chat,audit_stream,speed}.go` | 动态验证后修：`normalizeBaseURL` 统一削 `/v1`；`requestTimeoutFor` 按 `max_tokens` 折算超时（上限 4 分钟）；`streamStats` 单独统计 `reasoning_content` 分片；速度测试把推理分片计入输出并在 note 点明。 |
+| `apigx/model/relay_checks.go` | 众测去掉 `Domain`/`RelayShareID`，改 `ListPublicCrowdtests`/`ListMyCrowdtests`；`RelayCheckConfig` 补 `Mode(kind)`/`Interval(kind)` 访问器（未知类型回落到关闭/3 小时）。 |
+| `apigx/api/checks.go` | 新建：众测（密钥只在内存用一次）、速度与掺水工具接口、检测配置读写与采样列表；访客视图不含地址与凭据；截断结果记 `pending` 不记 `scored`。 |
+| `controller/system_task_handlers.go` | `relayProbeHandler` 复用 15 分钟 tick 同时驱动 `RunDue` 与 `RunDueChecks`，不新增 `SystemTaskType`。 |
+| `web/src/features/tools/**` | 新增 `lib/probe-target.ts`（目标 schema 与映射）、`components/{probe-target-fields,speed-panel,dilution-panel,crowdtest-panel}.tsx`，工具页三张新卡片。 |
+| `web/src/features/{crowdtest,relay-share}/**` | 新增公开众测看板与路由；中转分享表单加检测设置，卡片加按需加载的 `monitor-panel.tsx`（可用率 + 每模型降智/掺水）。 |
+| 语言包 | en/zh/zh-TW 各手工新增 83 键（未跑 `i18n:sync`）。 |
+
+**设计取舍**：众测刻意不记地址也不可复跑 —— 一是别人的上游额度不该被陌生人消耗，二是一旦记地址，公开的众测表就等于一份可用中转清单；降智与掺水默认关闭，因为它们花的是主人的额度；掺水 `inconclusive` 映射 `unknown` 而非健康或降级，前者会给出没有依据的安全感，后者会冤枉中转。
+
+**验证**：`go build`/`go vet`/`gofmt -l` 干净；`go test ./apigx/... ./middleware/ ./model/` 15 包全过（带 MySQL 与 PG DSN）；前端 oxfmt `--check`、oxlint 0、`tsgo -b`、工具与中转 Vitest 通过、Rsbuild 构建 59.5 MB。动态验证（本地网关 13111 + SQLite + 真实上游 tokenrhythm `neohorse-1-9b`）：糖果众测 100 分并公开、鹈鹕草稿可单向公开且二次公开 404、速度测试 TTFT 中位 258 ms / 输出 62.6 TPS、掺水检测 8 维返回 `mismatch` 14 分、带检测配置建中转后调度 tick 在约 1 分钟内落三行采样、匿名访客只看到 `mode=public` 的可用率与降智两行（私有掺水行不可见）、`/checks` 对匿名 401。过程中暴露并修掉 4 个真实缺陷（`/v1` 双写 404、推理模型被判无输出、大 token 预算被 20 秒超时切断、截断被当答错），均补了回归测试。
+
+**剩余风险**：持续检测会消耗主人的上游额度，挡位越密花得越多（默认只开可用率）；鹈鹕按结构规则打分必然粗糙，只作信号；推理模型在 400/1600 token 预算下常被截断，此时判 `unknown` 而非降智，曲线上会出现无分记录；前端 `plugin-changelog-panel.test.tsx` 2 个失败为既有问题（本轮未触碰该文件）；本轮未做浏览器交互回归；生产部署与远端推送未执行。
+
 ### [062] 2026-09-28 manxue 接入安全收尾、长 Key 修复与真实动态验证
 
 **做了什么**：回扫他人新增的 manxue 智商测试接入并修复 10 个安全/质量问题；修复长 Key 无法新建渠道或追加 Key；补做 [061] 欠下的真实动态验证（含真实上游模型接口、非流式与 SSE 转发）。

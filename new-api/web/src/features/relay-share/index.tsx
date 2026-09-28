@@ -43,6 +43,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Textarea } from '@/components/ui/textarea'
+import { CHECK_INTERVALS, intervalLabelKey } from '@/features/tools/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -57,6 +58,7 @@ import {
   type RelayStatus,
   voteRelayShare,
 } from './api'
+import { MonitorPanel } from './components/monitor-panel'
 
 const statusLabels: Record<RelayStatus, string> = {
   healthy: 'Check passed',
@@ -143,6 +145,7 @@ function RelayCard({
             ? ` · ${t('Updated {{time}}', { time: formatTime(share.updated_at) })}`
             : ''}
         </p>
+        <MonitorPanel publicID={share.public_id} />
         {mine ? (
           <div className='bg-muted/30 flex items-center justify-between gap-2 rounded-lg border p-3 text-xs'>
             <span className='inline-flex items-center gap-1.5'>
@@ -442,6 +445,100 @@ function PublicRelayList({
 const RELAY_TITLE_MAX = 120
 const RELAY_CONTENT_MAX = 20000
 
+// Visibility tiers, matching the backend. "Only me" exists because a check that
+// runs but is hidden still burns quota, so it has to be a deliberate choice
+// rather than a side effect of switching display off.
+const CHECK_OFF = 0
+const CHECK_OWNER = 1
+const CHECK_PUBLIC = 2
+
+/** One check's visibility, cadence and (where relevant) model list. */
+function CheckRow({
+  idPrefix,
+  intervalId,
+  modelsId,
+  label,
+  hint,
+  mode,
+  onModeChange,
+  interval,
+  onIntervalChange,
+  models,
+  onModelsChange,
+}: {
+  idPrefix: string
+  intervalId: string
+  modelsId?: string
+  label: string
+  hint: string
+  mode: number
+  onModeChange: (value: number) => void
+  interval: number
+  onIntervalChange: (value: number) => void
+  models?: string
+  onModelsChange?: (value: string) => void
+}) {
+  const { t } = useTranslation()
+  return (
+    <div className='space-y-2 border-t pt-3 first:border-t-0 first:pt-0'>
+      <div className='grid gap-2 sm:grid-cols-2'>
+        <div className='space-y-1'>
+          <Label htmlFor={idPrefix}>{label}</Label>
+          <NativeSelect
+            id={idPrefix}
+            className='w-full'
+            value={String(mode)}
+            onChange={(event) => onModeChange(Number(event.target.value))}
+          >
+            <NativeSelectOption value={String(CHECK_OFF)}>
+              {t('Off')}
+            </NativeSelectOption>
+            <NativeSelectOption value={String(CHECK_OWNER)}>
+              {t('Only me')}
+            </NativeSelectOption>
+            <NativeSelectOption value={String(CHECK_PUBLIC)}>
+              {t('Show publicly')}
+            </NativeSelectOption>
+          </NativeSelect>
+        </div>
+        <div className='space-y-1'>
+          <Label htmlFor={intervalId}>{t('Interval')}</Label>
+          <NativeSelect
+            id={intervalId}
+            className='w-full'
+            disabled={mode === CHECK_OFF}
+            value={String(interval)}
+            onChange={(event) => onIntervalChange(Number(event.target.value))}
+          >
+            {CHECK_INTERVALS.map((seconds) => (
+              <NativeSelectOption key={seconds} value={String(seconds)}>
+                {t(intervalLabelKey(seconds))}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </div>
+      </div>
+      {modelsId && onModelsChange ? (
+        <div className='space-y-1'>
+          <Label htmlFor={modelsId}>{t('Models (comma separated)')}</Label>
+          <Input
+            id={modelsId}
+            autoComplete='off'
+            disabled={mode === CHECK_OFF}
+            value={models ?? ''}
+            onChange={(event) => onModelsChange(event.target.value)}
+            placeholder='gpt-4o, gpt-4.1'
+          />
+          <p className='text-muted-foreground text-xs'>
+            {t('Up to 8 models. Each model is sampled separately.')}
+          </p>
+        </div>
+      ) : null}
+      <p className='text-muted-foreground text-xs leading-5'>{hint}</p>
+    </div>
+  )
+}
+
 function RelayEditor({
   onSubmit,
   pending,
@@ -459,6 +556,17 @@ function RelayEditor({
   const [content, setContent] = useState('')
   const [kind, setKind] = useState<'charity' | 'commercial'>('charity')
   const [protocol, setProtocol] = useState<'new-api' | 'sub2api'>('new-api')
+  // Continuous checks. Availability is on and public by default because it is
+  // cheap and it is what visitors actually want to know. Degrade and dilution
+  // each spend upstream quota per model, so they start off.
+  const [availability, setAvailability] = useState(CHECK_PUBLIC)
+  const [availabilityInterval, setAvailabilityInterval] = useState(1800)
+  const [degrade, setDegrade] = useState(CHECK_OFF)
+  const [degradeInterval, setDegradeInterval] = useState(3600)
+  const [degradeModels, setDegradeModels] = useState('')
+  const [dilution, setDilution] = useState(CHECK_OFF)
+  const [dilutionInterval, setDilutionInterval] = useState(10800)
+  const [dilutionModels, setDilutionModels] = useState('')
   const ids = {
     title: `${fieldId}-title`,
     base: `${fieldId}-base`,
@@ -466,7 +574,25 @@ function RelayEditor({
     protocol: `${fieldId}-protocol`,
     key: `${fieldId}-key`,
     content: `${fieldId}-content`,
+    availability: `${fieldId}-availability`,
+    availabilityInterval: `${fieldId}-availability-interval`,
+    degrade: `${fieldId}-degrade`,
+    degradeInterval: `${fieldId}-degrade-interval`,
+    degradeModels: `${fieldId}-degrade-models`,
+    dilution: `${fieldId}-dilution`,
+    dilutionInterval: `${fieldId}-dilution-interval`,
+    dilutionModels: `${fieldId}-dilution-models`,
   }
+  const parseModels = (raw: string) =>
+    raw
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+  // Turning a check on without naming a model is rejected server-side, so keep
+  // the submit button honest about it rather than letting the request fail.
+  const modelsMissing =
+    (degrade !== CHECK_OFF && parseModels(degradeModels).length === 0) ||
+    (dilution !== CHECK_OFF && parseModels(dilutionModels).length === 0)
   return (
     <Card>
       <CardHeader>
@@ -553,13 +679,67 @@ function RelayEditor({
             )}
           />
         </div>
+        <div className='space-y-4 rounded-lg border p-3 md:col-span-2'>
+          <div>
+            <p className='text-sm font-medium'>{t('Continuous checks')}</p>
+            <p className='text-muted-foreground mt-1 text-xs leading-5'>
+              {t(
+                'Each check runs on the schedule you pick using the detection key above. "Only me" still spends quota but hides the result from visitors.'
+              )}
+            </p>
+          </div>
+          <CheckRow
+            idPrefix={ids.availability}
+            intervalId={ids.availabilityInterval}
+            label={t('Availability')}
+            hint={t('Checks that the relay answers and lists models.')}
+            mode={availability}
+            onModeChange={setAvailability}
+            interval={availabilityInterval}
+            onIntervalChange={setAvailabilityInterval}
+          />
+          <CheckRow
+            idPrefix={ids.degrade}
+            intervalId={ids.degradeInterval}
+            modelsId={ids.degradeModels}
+            label={t('Degradation (candy test)')}
+            hint={t(
+              'Sends a freshly generated multi-step arithmetic problem and checks the answer.'
+            )}
+            mode={degrade}
+            onModeChange={setDegrade}
+            interval={degradeInterval}
+            onIntervalChange={setDegradeInterval}
+            models={degradeModels}
+            onModelsChange={setDegradeModels}
+          />
+          <CheckRow
+            idPrefix={ids.dilution}
+            intervalId={ids.dilutionInterval}
+            modelsId={ids.dilutionModels}
+            label={t('Model substitution')}
+            hint={t(
+              'Compares eight dimensions against the claimed model. The most expensive check.'
+            )}
+            mode={dilution}
+            onModeChange={setDilution}
+            interval={dilutionInterval}
+            onIntervalChange={setDilutionInterval}
+            models={dilutionModels}
+            onModelsChange={setDilutionModels}
+          />
+        </div>
         <div className='flex justify-end gap-2 md:col-span-2'>
           <Button variant='outline' onClick={onCancel}>
             {t('Cancel')}
           </Button>
           <Button
             disabled={
-              pending || !title.trim() || !baseURL.trim() || !key.trim()
+              pending ||
+              !title.trim() ||
+              !baseURL.trim() ||
+              !key.trim() ||
+              modelsMissing
             }
             onClick={() =>
               onSubmit({
@@ -569,6 +749,16 @@ function RelayEditor({
                 protocol,
                 content: content.trim(),
                 key: key.trim(),
+                checks: {
+                  availability_mode: availability,
+                  availability_interval: availabilityInterval,
+                  degrade_mode: degrade,
+                  degrade_interval: degradeInterval,
+                  degrade_models: parseModels(degradeModels),
+                  dilution_mode: dilution,
+                  dilution_interval: dilutionInterval,
+                  dilution_models: parseModels(dilutionModels),
+                },
               })
             }
           >

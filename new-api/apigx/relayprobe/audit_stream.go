@@ -23,20 +23,25 @@ const (
 )
 
 type streamStats struct {
-	contentType    string
-	dataEvents     int
-	contentChunks  int
-	invalidJSON    int
-	wrongObject    int
-	nonSSELines    int
-	afterDone      int
-	done           bool
-	usage          map[string]any
-	text           strings.Builder
-	firstChunkMs   int64
-	totalMs        int64
-	gaps           []int64
-	truncatedBytes bool
+	contentType   string
+	dataEvents    int
+	contentChunks int
+	invalidJSON   int
+	wrongObject   int
+	nonSSELines   int
+	afterDone     int
+	done          bool
+	usage         map[string]any
+	text          strings.Builder
+	// reasoningChunks 单独计数：推理模型会先吐一长串 reasoning_content 才给正文，
+	// 这些分片同样是真实输出，用来判断上游是否在流、以及首 token 何时到达。
+	reasoningChunks int
+	reasoningLen    int
+	firstTokenMs    int64
+	firstChunkMs    int64
+	totalMs         int64
+	gaps            []int64
+	truncatedBytes  bool
 }
 
 func runSSEIntegrityCheck(ctx context.Context, target auditTarget) CheckResult {
@@ -106,9 +111,14 @@ func runSSEIntegrityCheck(ctx context.Context, target auditTarget) CheckResult {
 }
 
 func (t auditTarget) stream(ctx context.Context) (*streamStats, int, error) {
+	return t.streamPrompt(ctx, streamPrompt, streamMaxTokens)
+}
+
+// streamPrompt 收集一次流式响应的格式与时序统计，供流式完整性与速度测试共用。
+func (t auditTarget) streamPrompt(ctx context.Context, prompt string, maxTokens int) (*streamStats, int, error) {
 	payload := map[string]any{
 		"model": t.model, "stream": true, "stream_options": map[string]any{"include_usage": true},
-		"messages": userMessages("", streamPrompt), "max_tokens": streamMaxTokens, "temperature": 0,
+		"messages": userMessages("", prompt), "max_tokens": maxTokens, "temperature": 0,
 	}
 	body, err := common.Marshal(payload)
 	if err != nil {
@@ -161,7 +171,9 @@ func (t auditTarget) stream(ctx context.Context) (*streamStats, int, error) {
 			Usage   map[string]any `json:"usage"`
 			Choices []struct {
 				Delta struct {
-					Content any `json:"content"`
+					Content          any `json:"content"`
+					ReasoningContent any `json:"reasoning_content"`
+					Reasoning        any `json:"reasoning"`
 				} `json:"delta"`
 			} `json:"choices"`
 		}
@@ -176,6 +188,17 @@ func (t auditTarget) stream(ctx context.Context) (*streamStats, int, error) {
 			stats.usage = chunk.Usage
 		}
 		for _, choice := range chunk.Choices {
+			reasoning := contentText(choice.Delta.ReasoningContent)
+			if reasoning == "" {
+				reasoning = contentText(choice.Delta.Reasoning)
+			}
+			if reasoning != "" {
+				stats.reasoningChunks++
+				stats.reasoningLen += len(reasoning)
+				if stats.firstTokenMs == 0 {
+					stats.firstTokenMs = time.Since(started).Milliseconds()
+				}
+			}
 			text := contentText(choice.Delta.Content)
 			if text == "" {
 				continue
@@ -185,6 +208,9 @@ func (t auditTarget) stream(ctx context.Context) (*streamStats, int, error) {
 				stats.firstChunkMs = now.Sub(started).Milliseconds()
 			} else {
 				stats.gaps = append(stats.gaps, now.Sub(last).Milliseconds())
+			}
+			if stats.firstTokenMs == 0 {
+				stats.firstTokenMs = stats.firstChunkMs
 			}
 			last = now
 			stats.contentChunks++

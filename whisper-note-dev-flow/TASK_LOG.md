@@ -1,5 +1,33 @@
 # 任务清单
 
+## [已完成] 下线 manxue，自建众测/速度/掺水三件套与中转持续检测（2026-09-28）
+
+**本轮目标**：弃用 manxue 外部依赖，参照 helpaio.com 的 `/transit/{crowdtest,bench,availability}` 自建能力：工具页提供「服务商测试（10 项合并一次）」「Token 速度测试（TTFT + 输出 TPS）」「模型掺水检测（8 维）」三个独立工具；中转分享支持四挡（15/30 分钟、1/3 小时）持续检测可用率与降智；众测只作个人自测 + 可选公开，不与中转绑定。
+
+**验收标准**：糖果题参数随机且答案服务端计算；公开的鹈鹕 SVG 经过不安全构造过滤；众测不存地址、不可被他人复跑、不按域名分组；持续检测按主人选择的挡位跑且默认不消耗额度；Go 三库矩阵与前端全套检查通过；接真实上游做动态验证。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| 评测内核 | `new-api/apigx/relayprobe/{benchmark,checks,speed,dilution}.go` | 新建/修改 | 糖果/鹈鹕打分、调度驱动、速度与掺水 |
+| 数据与接口 | `new-api/apigx/model/relay_checks.go`、`new-api/apigx/api/checks.go` | 新建/修改 | 检测配置、采样、众测与三个工具接口 |
+| 前端 | `new-api/web/src/features/{tools,crowdtest,relay-share}/**` | 新建/修改 | 三个工具卡片、众测看板、检测设置与检测记录 |
+
+**任务清单**：
+- [x] 移除 manxue 依赖，自建糖果/鹈鹕评测 → `relayprobe/benchmark.go`：糖果题用 `crypto/rand` 随机参数、答案服务端算、取回复末位整数判分；鹈鹕按 6 条加权结构规则打分，命中脚本/事件处理器/`foreignObject`/`use`/外链一律 0 分并丢弃原文
+- [x] 众测改为个人自测 + 可选公开 → 删掉 `Domain`/`RelayShareID` 两列，接口既不收也不回地址，访客视图不含 `base_url`/`key`/`relay_share_id`/`visibility`/`protocol`，他人 publicID 一律 404，公开后不可撤回也不可复跑
+- [x] 中转持续检测四挡 → `relay_checks.go` + `relayprobe/checks.go`：可用率/降智/掺水各自独立挡位与可见度，降智与掺水默认关闭（要花主人额度），失败也落 `failed` 行避免曲线空洞，掺水 inconclusive 映射 `unknown` 不进健康桶
+- [x] 复用 15 分钟系统任务 tick → `controller/system_task_handlers.go` 同时驱动 `RunDue` 与 `RunDueChecks`，不新增 `SystemTaskType`
+- [x] 前端三个工具 + 众测看板 + 检测记录 → `probe-target-fields.tsx` 统一目标选择（自有中转或一次性地址+密钥）、`speed/dilution/crowdtest-panel.tsx`、`features/crowdtest` 公开看板、`relay-share` 检测设置与按需加载的 `monitor-panel.tsx`；en/zh/zh-TW 各手工补 83 键
+- [x] 动态验证暴露并修掉 4 个真实缺陷 → 见下方「动态验证发现」
+- [x] 静态全量验证 → `go build`/`go vet`/`gofmt -l` 干净；`go test ./apigx/... ./middleware/ ./model/` 15 包全过（带 MySQL 与 PG DSN）；前端 oxfmt/oxlint/tsgo/Vitest/Rsbuild 构建通过
+
+**动态验证发现（本地网关 13111 + 真实上游 tokenrhythm `neohorse-1-9b`）**：
+1. `/v1` 双写导致全部 404 —— 中转给出的地址几乎都带 `/v1`，而每个探测器自己会再拼一次 `/v1/...`，实际请求变成 `/v1/v1/chat/completions`。修法：`normalizeBaseURL` 在 `ValidateBaseURL` 里统一削一次。
+2. 速度测试对推理模型判「未收到任何内容分片」—— 该模型先吐一长串 `reasoning_content` 才给正文，200 token 预算全花在思维链上。修法：`streamStats` 单独统计推理分片，TTFT 取任意首个 token，伪流式判定也计入推理分片，并在 note 里点明。
+3. 鹈鹕测试报「连接失败或超时」—— 20 秒固定超时对 1600 token 的推理模型不够。修法：`requestTimeoutFor` 按 `max_tokens` 折算（约 6 token/s + 15 秒余量，上限 4 分钟），基准测试总预算单列 5 分钟。
+4. 被 `max_tokens` 截断被当成答错 —— 会污染降智曲线。修法：读 `finish_reason`，截断判 `unknown` 且众测记 `pending` 而非 `scored`。
+
 ## [已完成] 工具中心接入智商测试与公开检测同步 (2026-09-27)
 
 **本轮目标**：接入 manxue.ai 的糖果/鹈鹕检测、监控状态和访客公开结果，并在工具中心提供安全的交互与状态展示。

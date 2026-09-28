@@ -158,13 +158,6 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		checkinSites.POST("/:id/run", middleware.UserCriticalRateLimit("checkin_site_run"), h.runCheckinSite)
 		checkinSites.PATCH("/:id/status", h.updateCheckinSiteStatus)
 	}
-	intelligence := r.Group("/intelligence", toolsGate)
-	{
-		intelligence.POST("/tests", middleware.UserCriticalRateLimit("intelligence_test"), h.createManxueTest)
-		intelligence.GET("/tests/:id", h.getManxueTest)
-		intelligence.DELETE("/tests/:id", h.cancelManxueTest)
-	}
-
 	// 可解释路由结果（T2.9）：只读，不写库、不投影
 	r.GET("/route-explain", h.explainRoute)
 	// 应用路由排名（T2.7 生效路径）：把名次写成底座渠道权重。**平台侧动作**——
