@@ -454,6 +454,43 @@ func TestRunSpeedTestRejectsLocalTarget(t *testing.T) {
 	require.NotContains(t, err.Error(), testRelayKey)
 }
 
+// 6 次采样必须短长各半，且两档分别汇总——只报一个总平均值会把「长文本掉速」藏起来。
+func TestRunSpeedTestSplitsShortAndLongTiers(t *testing.T) {
+	server := httptest.NewServer(&fakeRelay{honest: true, model: "claude-sonnet-4"})
+	t.Cleanup(server.Close)
+	report, err := runSpeedTest(context.Background(), auditTarget{client: server.Client(), base: server.URL, key: testRelayKey, model: "claude-sonnet-4"})
+	require.NoError(t, err)
+	require.Len(t, report.Samples, speedSamples)
+
+	tiers := map[string]int{}
+	for _, sample := range report.Samples {
+		tiers[sample.Tier]++
+	}
+	assert.Equal(t, speedSamples/2, tiers[SpeedTierShort])
+	assert.Equal(t, speedSamples/2, tiers[SpeedTierLong])
+	assert.Equal(t, speedSamples/2, report.Short.Samples)
+	assert.Equal(t, speedSamples/2, report.Long.Samples)
+	assert.Zero(t, report.Short.Failed)
+	assert.Zero(t, report.Long.Failed)
+	// 顶层指标取短档，保持与改版前口径一致。
+	assert.Equal(t, report.Short.TTFTMs, report.TTFTMs)
+	assert.InDelta(t, report.Short.OutputTPS, report.OutputTPS, 0.001)
+}
+
+// 题面必须每次不同，否则上游或中间层的缓存会让测出来的是缓存速度。
+func TestSpeedPromptsVaryBetweenRuns(t *testing.T) {
+	seen := make(map[string]bool, 20)
+	for round := range 20 {
+		seen[speedPromptFor(round%2 == 1, round)] = true
+	}
+	assert.Greater(t, len(seen), 15, "题面重复太多，缓存会污染结果")
+
+	long := speedPromptFor(true, 0)
+	short := speedPromptFor(false, 0)
+	assert.Contains(t, long, "700 words")
+	assert.Contains(t, short, "120 words")
+}
+
 // 掺水检测：诚实的 gpt-4o 中转应当判定为与公开特征一致。
 func TestRunDilutionTestAcceptsHonestRelay(t *testing.T) {
 	server := httptest.NewServer(&fakeRelay{honest: true, model: "gpt-4o"})

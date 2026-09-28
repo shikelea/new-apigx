@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	apigxmodel "github.com/QuantumNous/new-api/apigx/model"
+	"github.com/QuantumNous/new-api/apigx/modelfp"
 	"github.com/QuantumNous/new-api/apigx/relayprobe"
 	"github.com/QuantumNous/new-api/apigx/secretbox"
 	"github.com/QuantumNous/new-api/common"
@@ -44,9 +45,32 @@ func RegisterCrowdtestRoutes(r *gin.RouterGroup, db *gorm.DB) {
 
 	tools := r.Group("/tools", middleware.UserAuth(), toolsGate)
 	{
+		tools.GET("/dilution-models", h.listDilutionModels)
 		tools.POST("/speed-test", middleware.UserCriticalRateLimit("relay_speed_test"), h.runSpeedTest)
 		tools.POST("/dilution-test", middleware.UserCriticalRateLimit("relay_dilution_test"), h.runDilutionTest)
 	}
+}
+
+// listDilutionModels 返回掺水检测的收录型号名单。前端据此渲染型号卡片选择器，而不是让
+// 用户自由填一个我们根本没有基准的型号名。
+func (h *handler) listDilutionModels(c *gin.Context) {
+	entries := modelfp.Registry()
+	models := make([]gin.H, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, gin.H{
+			"id":             entry.ID,
+			"display_name":   entry.DisplayName,
+			"vendor":         entry.Vendor,
+			"request_names":  entry.RequestNames,
+			"baseline_state": entry.BaselineState,
+			"baseline_meta":  entry.BaselineMeta,
+		})
+	}
+	ok(c, gin.H{
+		"models":         models,
+		"baseline_ready": modelfp.BaselineReady(),
+		"disclaimer":     relayprobe.DilutionDisclaimer,
+	})
 }
 
 const (

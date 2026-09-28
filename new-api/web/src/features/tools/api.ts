@@ -186,10 +186,7 @@ export async function listPublicCrowdtests(benchmark?: string) {
   return res.data
 }
 
-export async function createAuditRun(input: {
-  relay_share_public_id: string
-  model: string
-}) {
+export async function createAuditRun(input: ProbeTargetInput) {
   const res = await api.post<Envelope<AuditRun>>('/api/apigx/audit-runs', input)
   return res.data
 }

@@ -1,0 +1,10 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "apigx-local",
+      "url": "http://localhost:13111",
+      "port": 13111
+    }
+  ]
+}

@@ -160,6 +160,8 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 	}
 	// 可解释路由结果（T2.9）：只读，不写库、不投影
 	r.GET("/route-explain", h.explainRoute)
+	// 模型指纹注册表：用于掺水检测的已知模型列表及其特征
+	r.GET("/model-registry", h.getModelRegistry)
 	// 应用路由排名（T2.7 生效路径）：把名次写成底座渠道权重。**平台侧动作**——
 	// 跨分享者的排序不能由某个分享者决定。
 	r.POST("/route-apply", h.applyRouteRanking)

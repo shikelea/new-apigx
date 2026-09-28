@@ -37,6 +37,7 @@ import { Route as RelayShareIndexRouteImport } from './routes/relay-share/index'
 import { Route as SetupIndexRouteImport } from './routes/setup/index'
 import { Route as ShareCenterIndexRouteImport } from './routes/share-center/index'
 import { Route as ShareCenterPublicIDRouteImport } from './routes/share-center/$publicID'
+import { Route as ShareCenterMineRouteImport } from './routes/share-center/mine'
 import { Route as ToolsIndexRouteImport } from './routes/tools/index'
 import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
 import { Route as AuthenticatedAccessIndexRouteImport } from './routes/_authenticated/access/index'
@@ -52,7 +53,6 @@ import { Route as AuthenticatedPlaygroundIndexRouteImport } from './routes/_auth
 import { Route as AuthenticatedProfileIndexRouteImport } from './routes/_authenticated/profile/index'
 import { Route as AuthenticatedRedemptionCodesIndexRouteImport } from './routes/_authenticated/redemption-codes/index'
 import { Route as AuthenticatedSecurityIndexRouteImport } from './routes/_authenticated/security/index'
-import { Route as AuthenticatedShareCenterManageRouteImport } from './routes/_authenticated/share-center/manage'
 import { Route as AuthenticatedShareIndexRouteImport } from './routes/_authenticated/share/index'
 import { Route as AuthenticatedShareChannelIdRouteImport } from './routes/_authenticated/share/$channelId'
 import { Route as AuthenticatedSubscriptionsIndexRouteImport } from './routes/_authenticated/subscriptions/index'
@@ -221,6 +221,11 @@ const ShareCenterPublicIDRoute = ShareCenterPublicIDRouteImport.update({
   path: '/share-center/$publicID',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ShareCenterMineRoute = ShareCenterMineRouteImport.update({
+  id: '/share-center/mine',
+  path: '/share-center/mine',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ToolsIndexRoute = ToolsIndexRouteImport.update({
   id: '/tools/',
   path: '/tools/',
@@ -305,12 +310,6 @@ const AuthenticatedSecurityIndexRoute =
   AuthenticatedSecurityIndexRouteImport.update({
     id: '/security/',
     path: '/security/',
-    getParentRoute: () => AuthenticatedRouteRoute,
-  } as any)
-const AuthenticatedShareCenterManageRoute =
-  AuthenticatedShareCenterManageRouteImport.update({
-    id: '/share-center/manage',
-    path: '/share-center/manage',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedShareIndexRoute = AuthenticatedShareIndexRouteImport.update({
@@ -499,6 +498,7 @@ export interface FileRoutesByFullPath {
   '/chat2link': typeof AuthenticatedChat2linkRoute
   '/oauth/$provider': typeof OauthProviderRoute
   '/share-center/$publicID': typeof ShareCenterPublicIDRoute
+  '/share-center/mine': typeof ShareCenterMineRoute
   '/about/': typeof AboutIndexRoute
   '/crowdtest/': typeof CrowdtestIndexRoute
   '/pricing/': typeof PricingIndexRoute
@@ -512,7 +512,6 @@ export interface FileRoutesByFullPath {
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/models/$section': typeof AuthenticatedModelsSectionRoute
-  '/share-center/manage': typeof AuthenticatedShareCenterManageRoute
   '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
   '/system-settings/share-center': typeof AuthenticatedSystemSettingsShareCenterRoute
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
@@ -570,6 +569,7 @@ export interface FileRoutesByTo {
   '/chat2link': typeof AuthenticatedChat2linkRoute
   '/oauth/$provider': typeof OauthProviderRoute
   '/share-center/$publicID': typeof ShareCenterPublicIDRoute
+  '/share-center/mine': typeof ShareCenterMineRoute
   '/about': typeof AboutIndexRoute
   '/crowdtest': typeof CrowdtestIndexRoute
   '/pricing': typeof PricingIndexRoute
@@ -583,7 +583,6 @@ export interface FileRoutesByTo {
   '/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
   '/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/models/$section': typeof AuthenticatedModelsSectionRoute
-  '/share-center/manage': typeof AuthenticatedShareCenterManageRoute
   '/share/$channelId': typeof AuthenticatedShareChannelIdRoute
   '/system-settings/share-center': typeof AuthenticatedSystemSettingsShareCenterRoute
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
@@ -645,6 +644,7 @@ export interface FileRoutesById {
   '/_authenticated/chat2link': typeof AuthenticatedChat2linkRoute
   '/oauth/$provider': typeof OauthProviderRoute
   '/share-center/$publicID': typeof ShareCenterPublicIDRoute
+  '/share-center/mine': typeof ShareCenterMineRoute
   '/about/': typeof AboutIndexRoute
   '/crowdtest/': typeof CrowdtestIndexRoute
   '/pricing/': typeof PricingIndexRoute
@@ -658,7 +658,6 @@ export interface FileRoutesById {
   '/_authenticated/dashboard/$section': typeof AuthenticatedDashboardSectionRoute
   '/_authenticated/errors/$error': typeof AuthenticatedErrorsErrorRoute
   '/_authenticated/models/$section': typeof AuthenticatedModelsSectionRoute
-  '/_authenticated/share-center/manage': typeof AuthenticatedShareCenterManageRoute
   '/_authenticated/share/$channelId': typeof AuthenticatedShareChannelIdRoute
   '/_authenticated/system-settings/share-center': typeof AuthenticatedSystemSettingsShareCenterRoute
   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
@@ -719,6 +718,7 @@ export interface FileRouteTypes {
     | '/chat2link'
     | '/oauth/$provider'
     | '/share-center/$publicID'
+    | '/share-center/mine'
     | '/about/'
     | '/crowdtest/'
     | '/pricing/'
@@ -732,7 +732,6 @@ export interface FileRouteTypes {
     | '/dashboard/$section'
     | '/errors/$error'
     | '/models/$section'
-    | '/share-center/manage'
     | '/share/$channelId'
     | '/system-settings/share-center'
     | '/usage-logs/$section'
@@ -790,6 +789,7 @@ export interface FileRouteTypes {
     | '/chat2link'
     | '/oauth/$provider'
     | '/share-center/$publicID'
+    | '/share-center/mine'
     | '/about'
     | '/crowdtest'
     | '/pricing'
@@ -803,7 +803,6 @@ export interface FileRouteTypes {
     | '/dashboard/$section'
     | '/errors/$error'
     | '/models/$section'
-    | '/share-center/manage'
     | '/share/$channelId'
     | '/system-settings/share-center'
     | '/usage-logs/$section'
@@ -864,6 +863,7 @@ export interface FileRouteTypes {
     | '/_authenticated/chat2link'
     | '/oauth/$provider'
     | '/share-center/$publicID'
+    | '/share-center/mine'
     | '/about/'
     | '/crowdtest/'
     | '/pricing/'
@@ -877,7 +877,6 @@ export interface FileRouteTypes {
     | '/_authenticated/dashboard/$section'
     | '/_authenticated/errors/$error'
     | '/_authenticated/models/$section'
-    | '/_authenticated/share-center/manage'
     | '/_authenticated/share/$channelId'
     | '/_authenticated/system-settings/share-center'
     | '/_authenticated/usage-logs/$section'
@@ -930,6 +929,7 @@ export interface RootRouteChildren {
   errors503Route: typeof errors503Route
   OauthProviderRoute: typeof OauthProviderRoute
   ShareCenterPublicIDRoute: typeof ShareCenterPublicIDRoute
+  ShareCenterMineRoute: typeof ShareCenterMineRoute
   AboutIndexRoute: typeof AboutIndexRoute
   CrowdtestIndexRoute: typeof CrowdtestIndexRoute
   PricingIndexRoute: typeof PricingIndexRoute
@@ -1139,6 +1139,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShareCenterPublicIDRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/share-center/mine': {
+      id: '/share-center/mine'
+      path: '/share-center/mine'
+      fullPath: '/share-center/mine'
+      preLoaderRoute: typeof ShareCenterMineRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/tools/': {
       id: '/tools/'
       path: '/tools'
@@ -1242,13 +1249,6 @@ declare module '@tanstack/react-router' {
       path: '/security'
       fullPath: '/security/'
       preLoaderRoute: typeof AuthenticatedSecurityIndexRouteImport
-      parentRoute: typeof AuthenticatedRouteRoute
-    }
-    '/_authenticated/share-center/manage': {
-      id: '/_authenticated/share-center/manage'
-      path: '/share-center/manage'
-      fullPath: '/share-center/manage'
-      preLoaderRoute: typeof AuthenticatedShareCenterManageRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/share/': {
@@ -1543,7 +1543,6 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedDashboardSectionRoute: typeof AuthenticatedDashboardSectionRoute
   AuthenticatedErrorsErrorRoute: typeof AuthenticatedErrorsErrorRoute
   AuthenticatedModelsSectionRoute: typeof AuthenticatedModelsSectionRoute
-  AuthenticatedShareCenterManageRoute: typeof AuthenticatedShareCenterManageRoute
   AuthenticatedShareChannelIdRoute: typeof AuthenticatedShareChannelIdRoute
   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
@@ -1574,7 +1573,6 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedDashboardSectionRoute: AuthenticatedDashboardSectionRoute,
   AuthenticatedErrorsErrorRoute: AuthenticatedErrorsErrorRoute,
   AuthenticatedModelsSectionRoute: AuthenticatedModelsSectionRoute,
-  AuthenticatedShareCenterManageRoute: AuthenticatedShareCenterManageRoute,
   AuthenticatedShareChannelIdRoute: AuthenticatedShareChannelIdRoute,
   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
@@ -1615,6 +1613,7 @@ const rootRouteChildren: RootRouteChildren = {
   errors503Route: errors503Route,
   OauthProviderRoute: OauthProviderRoute,
   ShareCenterPublicIDRoute: ShareCenterPublicIDRoute,
+  ShareCenterMineRoute: ShareCenterMineRoute,
   AboutIndexRoute: AboutIndexRoute,
   CrowdtestIndexRoute: CrowdtestIndexRoute,
   PricingIndexRoute: PricingIndexRoute,

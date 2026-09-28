@@ -38,8 +38,11 @@ export type ProbeTargetValues = {
   model: string
 }
 
+// Default to the one-off target. Most people arrive here to check somebody
+// else's endpoint, and defaulting to "one of your own relays" leaves anyone
+// without a saved relay staring at an empty dropdown.
 export const PROBE_TARGET_DEFAULTS: ProbeTargetValues = {
-  source: PROBE_SOURCE_RELAY,
+  source: PROBE_SOURCE_MANUAL,
   relay_share_public_id: '',
   base_url: '',
   key: '',

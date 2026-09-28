@@ -366,10 +366,11 @@ func (h *handler) deleteRelayShare(c *gin.Context) {
 	ok(c, gin.H{"deleted": id})
 }
 
+// auditRunRequest 支持两种目标来源：自己的中转（走库里加密凭据），或者临时填一组
+// 地址 + Key。临时目标的 Key 只在内存里用一次，不入库、不进日志、不回响应。
 type auditRunRequest struct {
-	RelayShareID       int64  `json:"relay_share_id"`
-	RelaySharePublicID string `json:"relay_share_public_id"`
-	Model              string `json:"model"`
+	RelayShareID int64 `json:"relay_share_id"`
+	probeTargetRequest
 }
 
 // auditCooldownRuns bounds how many paid audits one account can start per
@@ -389,36 +390,21 @@ func (h *handler) createAuditRun(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
-	model := strings.TrimSpace(req.Model)
-	if model == "" || (req.RelayShareID <= 0 && strings.TrimSpace(req.RelaySharePublicID) == "") {
-		fail(c, http.StatusBadRequest, "invalid_argument", "relay share and model are required")
+	// 兼容老的数字 ID 入参：换算成 publicID 后统一走 resolveProbeTarget，
+	// 免得凭据解密逻辑在两处各写一遍。
+	if req.RelayShareID > 0 && strings.TrimSpace(req.RelaySharePublicID) == "" {
+		share, err := apigxmodel.GetRelayShareByOwner(h.db, owner, req.RelayShareID)
+		if err != nil {
+			failFromRepo(c, err)
+			return
+		}
+		req.RelaySharePublicID = share.PublicID
+	}
+	target, valid := h.resolveProbeTarget(c, owner, req.probeTargetRequest)
+	if !valid {
 		return
 	}
-	if utf8.RuneCountInString(model) > 191 {
-		fail(c, http.StatusBadRequest, "invalid_argument", "model is too long")
-		return
-	}
-	var share *apigxmodel.RelayShare
-	var err error
-	if strings.TrimSpace(req.RelaySharePublicID) != "" {
-		share, err = h.getOwnedRelayByPublicID(owner, req.RelaySharePublicID)
-	} else {
-		share, err = apigxmodel.GetRelayShareByOwner(h.db, owner, req.RelayShareID)
-	}
-	if err != nil {
-		failFromRepo(c, err)
-		return
-	}
-	credential, err := apigxmodel.GetRelayCredential(h.db, owner, share.ID)
-	if err != nil {
-		failFromRepo(c, err)
-		return
-	}
-	key, err := secretbox.Decrypt(credential.SecretRef)
-	if err != nil {
-		fail(c, http.StatusServiceUnavailable, "credential_unavailable", "检测凭据不可用")
-		return
-	}
+	model := target.model
 	var recent int64
 	if err := h.db.Model(&apigxmodel.AuditRun{}).Where("owner_user_id = ? AND created_at >= ?", owner, common.GetTimestamp()-auditCooldownSeconds).Count(&recent).Error; err != nil {
 		failFromRepo(c, err)
@@ -428,12 +414,13 @@ func (h *handler) createAuditRun(c *gin.Context) {
 		fail(c, http.StatusTooManyRequests, "audit_cooldown", "审计请求过于频繁，请一分钟后再试")
 		return
 	}
-	run := &apigxmodel.AuditRun{OwnerUserID: owner, RelayShareID: share.ID, Model: model, Status: apigxmodel.AuditStatusRunning, StartedAt: common.GetTimestamp()}
+	// 临时目标没有 share 记录可挂，RelayShareID 留 0；历史列表里会显示成「临时目标」。
+	run := &apigxmodel.AuditRun{OwnerUserID: owner, RelayShareID: target.shareID, Model: model, Status: apigxmodel.AuditStatusRunning, StartedAt: common.GetTimestamp()}
 	if err := apigxmodel.CreateAuditRun(h.db, run); err != nil {
 		failFromRepo(c, err)
 		return
 	}
-	report, auditErr := relayprobe.RunAudit(c.Request.Context(), share.BaseURL, share.Protocol, key, model)
+	report, auditErr := relayprobe.RunAudit(c.Request.Context(), target.baseURL, target.protocol, target.key, model)
 	finished := common.GetTimestamp()
 	if auditErr != nil {
 		_ = h.db.Model(run).Updates(map[string]any{"status": apigxmodel.AuditStatusFailed, "error_message": auditErr.Error(), "finished_at": finished, "updated_at": finished}).Error
@@ -441,7 +428,7 @@ func (h *handler) createAuditRun(c *gin.Context) {
 		return
 	}
 	samples := 0
-	err = h.db.Transaction(func(tx *gorm.DB) error {
+	err := h.db.Transaction(func(tx *gorm.DB) error {
 		for _, check := range report.Checks {
 			samples += check.SampleCount
 			if createErr := apigxmodel.CreateAuditCheck(tx, &apigxmodel.AuditCheck{
@@ -463,11 +450,24 @@ func (h *handler) createAuditRun(c *gin.Context) {
 		return
 	}
 	ok(c, gin.H{
-		"public_id": run.PublicID, "relay_share_id": share.ID, "relay_title": share.Title, "model": model,
+		"public_id": run.PublicID, "relay_share_id": target.shareID, "relay_title": h.relayTitle(owner, target.shareID), "model": model,
 		"status": apigxmodel.AuditStatusCompleted, "risk_level": report.RiskLevel, "sample_count": samples,
 		"started_at": run.StartedAt, "finished_at": finished, "evidence_summary": relayprobe.AuditDisclaimer,
 		"checks": report.Checks,
 	})
+}
+
+// relayTitle 查中转标题用于回显。临时目标（shareID 为 0）没有标题，返回空串，
+// 前端据此显示「临时目标」。
+func (h *handler) relayTitle(owner, shareID int64) string {
+	if shareID <= 0 {
+		return ""
+	}
+	var share apigxmodel.RelayShare
+	if err := h.db.Unscoped().Select("title").Where("id = ? AND owner_user_id = ?", shareID, owner).First(&share).Error; err != nil {
+		return ""
+	}
+	return share.Title
 }
 
 func auditCheckJSON(check apigxmodel.AuditCheck) gin.H {

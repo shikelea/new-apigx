@@ -35,10 +35,13 @@ func honestObservations() Observations {
 		ClaimedCutoffYear:  2023,
 		FutureEventProbes:  2,
 		KnewFutureEvents:   0,
-		RandomPicks:        []int{42, 42, 42, 42, 47},
-		LogicAnswers:       []string{"5", "5", "5"},
-		LogicCorrect:       "5",
-		StructureOK:        2, StructureTries: 2,
+		ProbeAnswers: map[string]ProbeCounts{
+			ProbeIntegerPick: {"42": 5, "47": 1},
+			ProbeFruitPick:   {"apple": 4, "banana": 2},
+		},
+		LogicAnswers: []string{"5", "5", "5"},
+		LogicCorrect: "5",
+		StructureOK:  2, StructureTries: 2,
 		HierarchyOK: 2, HierarchyTries: 2,
 		StreamChunks: 40, StreamDone: true, StreamTokens: 120,
 		CompletionTokens:   120,
@@ -55,12 +58,29 @@ func TestEvaluateAcceptsAnHonestGPTRelay(t *testing.T) {
 		assert.NotEmpty(t, finding.Name, finding.ID)
 		assert.NotEmpty(t, finding.Evidence, finding.ID)
 	}
-	for _, id := range []string{DimProtocol, DimKnowledge, DimFingerprint, DimLogic, DimStructure, DimHierarchy, DimStreaming, DimReasoning} {
+	for _, id := range []string{DimProtocol, DimKnowledge, DimLogic, DimStructure, DimHierarchy, DimStreaming, DimReasoning} {
 		assert.Equal(t, VerdictMatch, byID[id].Verdict, "%s: %s", id, byID[id].Evidence)
 	}
+	// 分布指纹在有实测基准之前必须是证据不足，不能凭空给「一致」。
+	assert.Equal(t, VerdictInconclusive, byID[DimFingerprint].Verdict, byID[DimFingerprint].Evidence)
 	assert.Equal(t, VerdictMatch, report.Verdict)
 	assert.Equal(t, 100, report.Score)
 	assert.NotEmpty(t, report.Disclaimer)
+}
+
+// 收录名单里还没有任何实测基准，所以指纹维度只能报证据不足，且要说清原因。
+func TestEvaluateFingerprintWaitsForMeasuredBaselines(t *testing.T) {
+	require.False(t, BaselineReady(), "还没实测基准，BaselineReady 不应为真")
+	finding := findingByID(t, Evaluate("gpt-4o", honestObservations()), DimFingerprint)
+	assert.Equal(t, VerdictInconclusive, finding.Verdict)
+	assert.Contains(t, finding.Evidence, "基准")
+}
+
+// 不在收录名单里的型号，指纹维度不参与判定。
+func TestEvaluateFingerprintSkipsUnlistedModels(t *testing.T) {
+	finding := findingByID(t, Evaluate("neohorse-1-9b", honestObservations()), DimFingerprint)
+	assert.Equal(t, VerdictInconclusive, finding.Verdict)
+	assert.Contains(t, finding.Evidence, "收录名单")
 }
 
 func TestEvaluateFlagsASubstitutedBackend(t *testing.T) {
@@ -113,6 +133,46 @@ func TestEvaluateDropsFingerprintWhenTemperatureIsOverridden(t *testing.T) {
 	finding := findingByID(t, Evaluate("gpt-4o", obs), DimFingerprint)
 	assert.Equal(t, VerdictInconclusive, finding.Verdict)
 	assert.Contains(t, finding.Evidence, "采样参数")
+}
+
+// 请求名反查：更长更具体的名字优先，带厂商前缀也要能认出来。
+func TestResolveRequestNamePrefersTheMoreSpecificName(t *testing.T) {
+	glm, ok := ResolveRequestName("glm-4.6")
+	require.True(t, ok)
+	assert.Equal(t, "zhipu-glm-4-6", glm.ID)
+
+	prefixed, ok := ResolveRequestName("openai/gpt-4o-2024-08-06")
+	require.True(t, ok)
+	assert.Equal(t, "openai-gpt-4o", prefixed.ID)
+
+	_, ok = ResolveRequestName("neohorse-1-9b")
+	assert.False(t, ok)
+
+	_, ok = ResolveRequestName("  ")
+	assert.False(t, ok)
+}
+
+// 收录项必须有完整元信息，且在没实测之前一律是 pending——避免有人填了半份基准就上线。
+func TestRegistryEntriesAreWellFormed(t *testing.T) {
+	entries := Registry()
+	require.NotEmpty(t, entries)
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		assert.NotEmpty(t, entry.ID)
+		assert.NotEmpty(t, entry.DisplayName, entry.ID)
+		assert.NotEmpty(t, entry.Vendor, entry.ID)
+		assert.NotEmpty(t, entry.RequestNames, entry.ID)
+		assert.False(t, seen[entry.ID], "重复的收录 ID：%s", entry.ID)
+		seen[entry.ID] = true
+		if entry.BaselineState == BaselineStateReady {
+			assert.NotEmpty(t, entry.Baseline, "%s 标为 ready 却没有基准", entry.ID)
+			assert.NotEmpty(t, entry.BaselineMeta.MeasuredAt, "%s 缺实测日期", entry.ID)
+			assert.Positive(t, entry.BaselineMeta.SamplesPerProbe, "%s 缺实测次数", entry.ID)
+			continue
+		}
+		assert.Equal(t, BaselineStatePending, entry.BaselineState, entry.ID)
+		assert.Empty(t, entry.Baseline, "%s 还是 pending 却带了基准", entry.ID)
+	}
 }
 
 // 无法识别的型号不能被判成掺水：没有公开特征可比，只能是证据不足。

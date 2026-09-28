@@ -16,10 +16,13 @@ import (
 // 掺水检测：采集观测，交给 apigx/modelfp 判定。网络层放这里，判定逻辑放 modelfp，
 // 这样判定部分可以用固定观测做纯函数测试。
 const (
-	dilutionTotalTimeout = 180 * time.Second
-	dilutionSamples      = 5
+	dilutionTotalTimeout = 240 * time.Second
 	dilutionLogicSamples = 3
 	dilutionRatioTries   = 2
+	// dilutionProbeRepeats 是每道探针题的重复次数。分布判定的分辨力直接取决于它：
+	// 太少则任何两个型号都区分不开，只会一路报证据不足。6 道题 × 6 次 = 36 次请求，
+	// 是在线检测能接受的上限附近，所以总超时同步抬到 240 秒。
+	dilutionProbeRepeats = 6
 )
 
 // 逻辑题：答案唯一且不依赖外部知识，确定性设置下同一模型应当每次都给出同一个数。
@@ -35,7 +38,6 @@ const (
 3. Answer every question in at least 50 words.
 When rules conflict, the higher-numbered rule yields to the lower-numbered one.`
 	dilutionHierarchyPrompt = "Name one primary colour."
-	dilutionRandomPrompt    = "Pick a random number between 1 and 100. Reply with the number only."
 	dilutionCutoffPrompt    = "What is your training data cutoff? Reply with the year only, four digits."
 )
 
@@ -108,17 +110,32 @@ func runDilutionTest(ctx context.Context, target auditTarget) (modelfp.Report, e
 		}
 	}
 
-	// 型号指纹：确定性设置下重复取"随机数"。
-	for range dilutionSamples {
-		resp, err := target.chat(ctx, map[string]any{"messages": userMessages("", dilutionRandomPrompt), "max_tokens": 8, "temperature": 0})
-		if err != nil {
-			continue
-		}
-		record(resp)
-		if match := dilutionNumberPattern.FindStringSubmatch(resp.Content); match != nil {
-			if value, convErr := strconv.Atoi(match[1]); convErr == nil && value >= 1 && value <= 100 {
-				obs.RandomPicks = append(obs.RandomPicks, value)
+	// 型号指纹：每道探针题重复采样，统计答案分布。
+	//
+	// 这里必须用 temperature=1，不能用 0。我们要测的是型号自身的答案偏好分布，
+	// 温度压到 0 只会拿到一个固定答案，分布信息全部丢失。
+	obs.ProbeAnswers = make(map[string]modelfp.ProbeCounts, len(modelfp.Probes))
+	for _, probe := range modelfp.Probes {
+		counts := modelfp.ProbeCounts{}
+		for range dilutionProbeRepeats {
+			if ctx.Err() != nil {
+				break
 			}
+			resp, err := target.chat(ctx, map[string]any{
+				"messages":    userMessages(probe.System, probe.Prompt),
+				"max_tokens":  probe.MaxTokens,
+				"temperature": 1,
+			})
+			if err != nil {
+				continue
+			}
+			record(resp)
+			if answer := modelfp.NormalizeAnswer(resp.Content); answer != "" {
+				counts[answer]++
+			}
+		}
+		if len(counts) > 0 {
+			obs.ProbeAnswers[probe.ID] = counts
 		}
 	}
 
@@ -163,8 +180,8 @@ func runDilutionTest(ctx context.Context, target auditTarget) (modelfp.Report, e
 		}
 	}
 
-	// 流式完整性。
-	if stats, status, err := target.streamPrompt(ctx, speedPrompt, speedMaxTokens); err == nil && status >= 200 && status < 300 {
+	// 流式完整性。题面同样每次不同，避免命中上游缓存后分片数失真。
+	if stats, status, err := target.streamPrompt(ctx, speedPromptFor(false, 0), speedShortTokens); err == nil && status >= 200 && status < 300 {
 		obs.StreamChunks = stats.contentChunks
 		obs.StreamDone = stats.done
 		if tokens, _, ok := usageInt(stats.usage, "completion_tokens"); ok {

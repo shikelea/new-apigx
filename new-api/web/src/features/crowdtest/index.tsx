@@ -61,7 +61,7 @@ export function CrowdtestPage() {
             </h1>
             <p className='text-muted-foreground mt-2 max-w-3xl text-sm leading-6'>
               {t(
-                'Results people chose to publish. Each entry shows the model, the score and the notes only — no address and no key — so these cannot be re-run by anyone else.'
+                'Scores that testers published themselves. An entry carries the model, the score and any notes, but never the address or the key.'
               )}
             </p>
           </div>

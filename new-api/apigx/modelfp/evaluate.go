@@ -49,8 +49,9 @@ type Observations struct {
 	ClaimedCutoffYear int
 	KnewFutureEvents  int
 	FutureEventProbes int
-	// 型号指纹：多次"1-100 随机数"回答。
-	RandomPicks []int
+	// 型号指纹：每道探针题的答案计数（probe ID -> 归一化答案 -> 次数），由 probes.go 的
+	// 题集重复采样得到。判定走 evidence.go 的 Dirichlet-multinomial 证据比较。
+	ProbeAnswers map[string]ProbeCounts
 	// 逻辑稳定性：同一道题重复问的答案。
 	LogicAnswers []string
 	LogicCorrect string
@@ -82,7 +83,7 @@ func Evaluate(model string, obs Observations) Report {
 	byID := map[string]Finding{
 		DimProtocol:    evaluateProtocol(profile, known, obs),
 		DimKnowledge:   evaluateKnowledge(profile, known, obs),
-		DimFingerprint: evaluateFingerprint(obs),
+		DimFingerprint: evaluateFingerprint(model, obs),
 		DimLogic:       evaluateLogic(obs),
 		DimStructure:   evaluateRatio(obs.StructureOK, obs.StructureTries, "严格 JSON schema", "结构化输出达标率偏低，是量化或小模型替换的常见表现"),
 		DimHierarchy:   evaluateRatio(obs.HierarchyOK, obs.HierarchyTries, "嵌套优先级指令", "指令层级遵循率偏低，可能是能力更弱的替换模型"),
@@ -170,31 +171,40 @@ func evaluateKnowledge(profile Profile, known bool, obs Observations) Finding {
 	return Finding{Verdict: verdict, Evidence: strings.Join(notes, "；") + "，未见明显偏离"}
 }
 
-// evaluateFingerprint 看「1-100 选一个随机数」的选择分布。语言模型做不到均匀随机，
-// 会强烈偏好少数几个数字，这构成一个弱指纹。样本量小，只能作为辅助信号，绝不单独定论。
-func evaluateFingerprint(obs Observations) Finding {
-	if len(obs.RandomPicks) < 4 {
-		return Finding{Verdict: VerdictInconclusive, Evidence: "有效采样不足，无法评估选择分布"}
+// evaluateFingerprint 把探针答案分布与收录型号的实测基准做证据比较。
+//
+// 前提是：语言模型不是随机数发生器。让它「随便选一个」，同一型号会给出一个可复现的答案
+// 偏好分布。把观测分布拿去和各型号基准算 Dirichlet-multinomial 预测证据，谁的证据最高
+// 就最像谁——但只有当首选唯一、且相对次优候选的优势过判定线时才给结论。
+//
+// 这一维只在有实测基准时才工作。没测过基准就明确说没有，不拿空基准硬算。
+func evaluateFingerprint(model string, obs Observations) Finding {
+	if len(obs.ProbeAnswers) == 0 {
+		return Finding{Verdict: VerdictInconclusive, Evidence: "未采集到探针答案，无法做分布指纹"}
 	}
 	if !obs.TemperatureHonored {
 		return Finding{Verdict: VerdictInconclusive, Evidence: "中转覆盖了采样参数，分布指纹不可用"}
 	}
-	counts := make(map[int]int, len(obs.RandomPicks))
-	for _, pick := range obs.RandomPicks {
-		counts[pick]++
+	entry, listed := ResolveRequestName(model)
+	if !listed {
+		return Finding{Verdict: VerdictInconclusive, Evidence: "目标型号不在收录名单内，没有可比对的实测基准"}
 	}
-	top, topCount := 0, 0
-	for value, count := range counts {
-		if count > topCount || (count == topCount && value < top) {
-			top, topCount = value, count
+	candidates := fingerprintCandidates()
+	if len(candidates) < 3 {
+		return Finding{Verdict: VerdictInconclusive, Evidence: "收录名单里已实测基准的型号不足两个，暂时无法做分布比对"}
+	}
+	if entry.BaselineState != BaselineStateReady {
+		return Finding{
+			Verdict:  VerdictInconclusive,
+			Evidence: fmt.Sprintf("%s 尚无实测基准，本维度暂不支持该型号", entry.DisplayName),
 		}
 	}
-	detail := fmt.Sprintf("%d 次采样取到 %d 个不同数值，最高频为 %d（%d 次）", len(obs.RandomPicks), len(counts), top, topCount)
-	// temperature=0 下同一模型应当高度集中；分散反而说明后端在多个模型间轮转。
-	if len(counts)*2 > len(obs.RandomPicks) {
-		return Finding{Verdict: VerdictSuspect, Evidence: detail + "，确定性采样下仍高度分散，后端可能在多个模型间轮转"}
+	outcome, ok := ScoreFingerprint(obs.ProbeAnswers, candidates)
+	if !ok {
+		return Finding{Verdict: VerdictInconclusive, Evidence: "有效答案过少，无法算出分布证据"}
 	}
-	return Finding{Verdict: VerdictMatch, Evidence: detail + "，选择分布集中，符合单一后端的确定性行为"}
+	verdict, evidence := describeOutcome(entry.ID, outcome, thresholdFor(entry))
+	return Finding{Verdict: verdict, Evidence: evidence}
 }
 
 func evaluateLogic(obs Observations) Finding {

@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { Link } from '@tanstack/react-router'
 import { Loader2, Play } from 'lucide-react'
 import { useMemo } from 'react'
 import { useForm } from 'react-hook-form'
@@ -35,29 +34,29 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
-import { Input } from '@/components/ui/input'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 
-import type { RelayOption } from '../api'
+import type { ProbeTargetInput, RelayOption } from '../api'
+import {
+  PROBE_TARGET_DEFAULTS,
+  type ProbeTargetValues,
+  probeTargetSchema,
+  toProbeTarget,
+} from '../lib/probe-target'
+import { ProbeTargetFields } from './probe-target-fields'
 
-export type AuditFormValues = {
-  relay_share_public_id: string
-  model: string
+export type AuditFormValues = ProbeTargetValues & {
   consent: boolean
 }
 
 function auditSchema(t: (key: string) => string) {
-  return z.object({
-    relay_share_public_id: z.string().min(1, t('Select a relay')),
-    model: z
-      .string()
-      .trim()
-      .min(1, t('Enter a model ID'))
-      .max(191, t('Model ID is too long')),
-    consent: z.boolean().refine((value) => value, {
-      message: t('Confirm the audit cost before running'),
-    }),
-  })
+  return z.intersection(
+    probeTargetSchema(t),
+    z.object({
+      consent: z.boolean().refine((value) => value, {
+        message: t('Confirm the audit cost before running'),
+      }),
+    })
+  )
 }
 
 export function AuditForm({
@@ -67,88 +66,27 @@ export function AuditForm({
 }: {
   relays: RelayOption[]
   pending: boolean
-  onSubmit: (input: { relay_share_public_id: string; model: string }) => void
+  onSubmit: (input: ProbeTargetInput) => void
 }) {
   const { t } = useTranslation()
   const schema = useMemo(() => auditSchema(t), [t])
   const form = useForm<AuditFormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { relay_share_public_id: '', model: '', consent: false },
+    defaultValues: { ...PROBE_TARGET_DEFAULTS, consent: false },
   })
-  // Audits decrypt the stored detection key server-side; relays without one would 400.
-  const usable = relays.filter((item) => item.credential_configured)
-
-  if (usable.length === 0) {
-    return (
-      <div className='bg-muted/20 space-y-3 rounded-lg border p-3 text-sm'>
-        <p className='text-muted-foreground'>
-          {t(
-            'Share a relay with a detection key first; audits only run against your own relays.'
-          )}
-        </p>
-        <Button size='sm' variant='outline' render={<Link to='/relay-share' />}>
-          {t('Go to relay sharing')}
-        </Button>
-      </div>
-    )
-  }
+  const source = form.watch('source')
 
   return (
     <Form {...form}>
       <form
         noValidate
         className='bg-muted/20 grid gap-3 rounded-lg border p-3'
-        onSubmit={form.handleSubmit((values) =>
-          onSubmit({
-            relay_share_public_id: values.relay_share_public_id,
-            model: values.model.trim(),
-          })
-        )}
+        onSubmit={form.handleSubmit((values) => onSubmit(toProbeTarget(values)))}
       >
-        <FormField
+        <ProbeTargetFields
           control={form.control}
-          name='relay_share_public_id'
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('Relay')}</FormLabel>
-              <FormControl>
-                <NativeSelect className='w-full' {...field}>
-                  <NativeSelectOption value='' disabled>
-                    {t('Select a relay with a detection key')}
-                  </NativeSelectOption>
-                  {usable.map((item) => (
-                    <NativeSelectOption
-                      key={item.public_id}
-                      value={item.public_id}
-                    >
-                      {item.title} ·{' '}
-                      {item.kind === 'charity'
-                        ? t('Charity relay')
-                        : t('Commercial relay')}
-                    </NativeSelectOption>
-                  ))}
-                </NativeSelect>
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-        <FormField
-          control={form.control}
-          name='model'
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{t('Model ID')}</FormLabel>
-              <FormControl>
-                <Input
-                  autoComplete='off'
-                  placeholder={t('e.g. deepseek-chat')}
-                  {...field}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
+          source={source}
+          relays={relays}
         />
         <FormField
           control={form.control}
@@ -167,7 +105,7 @@ export function AuditForm({
                 </FormControl>
                 <FormLabel className='text-muted-foreground text-xs leading-5 font-normal'>
                   {t(
-                    'I understand the audit sends about 10 small requests with my detection key and may consume a little upstream quota.'
+                    'I understand the audit sends about 10 small requests and will use a little upstream quota.'
                   )}
                 </FormLabel>
               </div>

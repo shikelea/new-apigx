@@ -190,7 +190,7 @@ export function ToolsPage() {
             </h1>
             <p className='text-muted-foreground mt-2 max-w-3xl text-sm leading-6'>
               {t(
-                'Tools run on the server under strict limits and only keep masked summaries. A "needs review" result is a lead, not proof that a model is diluted or a relay rewrites traffic.'
+                'Everything runs server-side under rate limits, and only masked summaries are kept. Your key never reaches the browser. Treat a "needs review" result as a lead worth chasing, not as proof.'
               )}
             </p>
           </div>
@@ -207,7 +207,7 @@ export function ToolsPage() {
               <CardContent className='space-y-4'>
                 <p className='text-muted-foreground text-sm leading-6'>
                   {t(
-                    'Checks protocol and model list, token usage consistency, prompt injection and override, model identity, SSE stream integrity and error-response leakage. No jailbreak or attack payloads are sent.'
+                    'Checks protocol and model list, token usage consistency, prompt injection and override, model identity, SSE stream integrity and error-response leakage. Works on one of your saved relays or on an address you paste in once. No jailbreak or attack payloads are sent.'
                   )}
                 </p>
                 <Button
@@ -234,12 +234,12 @@ export function ToolsPage() {
                   <Gauge className='text-primary size-5' />
                   {t('Speed test')}
                 </CardTitle>
-                <Badge variant='outline'>{t('TTFT + output TPS')}</Badge>
+                <Badge variant='outline'>{t('6 samples, two lengths')}</Badge>
               </CardHeader>
               <CardContent className='space-y-4'>
                 <p className='text-muted-foreground text-sm leading-6'>
                   {t(
-                    'Measures first-token latency and output tokens per second over three streamed samples, and flags relays that buffer the whole answer and replay it as one chunk.'
+                    'Six streamed samples split between short and long output, with a different prompt each time so upstream caches cannot flatter the result. Reports first-token latency, output tokens per second, and whether the answer arrives as one buffered chunk.'
                   )}
                 </p>
                 <Button
@@ -272,7 +272,7 @@ export function ToolsPage() {
               <CardContent className='space-y-4'>
                 <p className='text-muted-foreground text-sm leading-6'>
                   {t(
-                    'Compares knowledge cutoff, model fingerprint, reasoning stability, structured-output compliance, instruction hierarchy, protocol fields, stream integrity and reasoning effort against the claimed model.'
+                    'Pick a model from the supported list, then the check compares protocol fields, knowledge cutoff, answer-choice distribution, reasoning stability, structured output, instruction hierarchy, stream integrity and reasoning effort against what that model actually does.'
                   )}
                 </p>
                 <Button
@@ -307,17 +307,22 @@ export function ToolsPage() {
               <CardContent className='space-y-4'>
                 <p className='text-muted-foreground text-sm leading-6'>
                   {t(
-                    'Run the candy or pelican benchmark for yourself, then decide whether to publish the result. Published entries show the score only, so nobody can re-run your target.'
+                    'Runs the candy or pelican benchmark against your own target. Publishing is up to you, and published entries carry the score without the address or key.'
                   )}
                 </p>
-                <Button
-                  aria-expanded={crowdtestOpen}
-                  onClick={() => setCrowdtestOpen((value) => !value)}
-                  disabled={!signedIn}
-                >
-                  <Beaker />
-                  {t('Open crowdtest')}
-                </Button>
+                <div className='flex flex-wrap gap-2'>
+                  <Button
+                    aria-expanded={crowdtestOpen}
+                    onClick={() => setCrowdtestOpen((value) => !value)}
+                    disabled={!signedIn}
+                  >
+                    <Beaker />
+                    {t('Open crowdtest')}
+                  </Button>
+                  <Button variant='outline' render={<Link to='/crowdtest' />}>
+                    {t('See published results')}
+                  </Button>
+                </div>
                 {crowdtestOpen && signedIn ? (
                   <CrowdtestForm
                     relays={relayItems}
@@ -397,31 +402,6 @@ export function ToolsPage() {
               </CardContent>
             </Card>
           )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle className='text-base'>
-                {t('Audit boundaries')}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className='grid gap-3 text-sm leading-6 md:grid-cols-3'>
-              <p>
-                {t(
-                  'Only status, sample counts, latency and masked summaries are stored; your key never reaches the browser.'
-                )}
-              </p>
-              <p>
-                {t(
-                  'Self-reported identity can be forged by a system prompt, and small models may ignore instructions, so single results need review.'
-                )}
-              </p>
-              <p>
-                {t(
-                  'Methods follow public relay-audit research (api-relay-audit, veridrop, modelprint) and are re-implemented server-side.'
-                )}
-              </p>
-            </CardContent>
-          </Card>
         </div>
       </PublicPageBackdrop>
     </PublicLayout>

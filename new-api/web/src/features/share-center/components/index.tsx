@@ -17,11 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import {
+  ArrowLeft,
   CalendarClock,
   CheckCircle2,
   CircleCheck,
   Clock3,
   FileText,
+  Plus,
   Search,
   ShieldCheck,
   ThumbsDown,
@@ -47,9 +49,7 @@ import { Label } from '@/components/ui/label'
 import { Markdown } from '@/components/ui/markdown'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { useStatus } from '@/hooks/use-status'
 import { handleServerError } from '@/lib/handle-server-error'
-import { getModuleAccessFromStatus } from '@/lib/nav-modules'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -161,12 +161,6 @@ export function SharePostCard({ post }: { post: SharePost }) {
 
 export function ShareCenterBrowser() {
   const { t } = useTranslation()
-  const { status } = useStatus()
-  // Hide the cross-link when an admin turned relay sharing off (its route would 403).
-  const relayShareEnabled = getModuleAccessFromStatus(
-    status as Record<string, unknown> | null,
-    'relayShare'
-  ).enabled
   const [keyword, setKeyword] = useState('')
   const [submittedKeyword, setSubmittedKeyword] = useState('')
   const [filter, setFilter] = useState<ShareFilter>('all')
@@ -209,14 +203,20 @@ export function ShareCenterBrowser() {
               </p>
             </div>
             <div className='flex shrink-0 flex-wrap gap-2'>
-              {relayShareEnabled ? (
-                <Button variant='outline' render={<Link to='/relay-share' />}>
-                  {t('Relay sharing')}
-                </Button>
-              ) : null}
-              <Button render={<Link to='/share-center/manage' />}>
+              <Button
+                variant='outline'
+                render={<Link to='/share-center/mine' />}
+              >
                 <FileText />
                 {t('My shares')}
+              </Button>
+              <Button
+                render={
+                  <Link to='/share-center/mine' search={{ compose: true }} />
+                }
+              >
+                <Plus />
+                {t('Post a share')}
               </Button>
             </div>
           </section>
@@ -573,7 +573,12 @@ export function SharePostEditor({ post, onSaved, onCancel }: EditorProps) {
   )
 }
 
-export function ShareCenterManage() {
+// My shares lives under the share center, not under the personal-center shell:
+// it is the other half of the same public page, and mounting it inside the
+// console menu made "My shares" look like it navigated somewhere unrelated.
+// `compose` in the URL opens the editor straight away, so the share center's
+// post button can land here ready to write.
+export function ShareCenterManage({ compose = false }: { compose?: boolean }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const query = useQuery({
@@ -581,7 +586,7 @@ export function ShareCenterManage() {
     queryFn: getMyShareCenterPosts,
   })
   const [editing, setEditing] = useState<SharePost | null>(null)
-  const [creating, setCreating] = useState(false)
+  const [creating, setCreating] = useState(compose)
   const submit = useMutation({
     mutationFn: submitShareCenterPost,
     onSuccess: () => {
@@ -604,105 +609,125 @@ export function ShareCenterManage() {
   if (query.isError) return <ErrorState onRetry={() => void query.refetch()} />
   const posts = query.data?.data?.items ?? []
   return (
-    <SectionPageLayout>
-      <SectionPageLayout.Title>{t('My shares')}</SectionPageLayout.Title>
-      <SectionPageLayout.Actions>
-        <Button variant='outline' render={<Link to='/share-center' />}>
-          {t('Browse share center')}
-        </Button>
-        <Button
-          onClick={() => {
-            setCreating(true)
-            setEditing(null)
-          }}
-        >
-          {t('Create share')}
-        </Button>
-      </SectionPageLayout.Actions>
-      <SectionPageLayout.Content>
-        <div className='space-y-6'>
-          {creating || editing ? (
-            <SharePostEditor
-              post={editing ?? undefined}
-              onSaved={() => {
-                setCreating(false)
-                setEditing(null)
-                void queryClient.invalidateQueries({
-                  queryKey: ['share-center-mine'],
-                })
-              }}
-              onCancel={() => {
-                setCreating(false)
-                setEditing(null)
-              }}
-            />
-          ) : null}
-          {posts.length === 0 ? (
-            <EmptyState title={t('No shares yet.')} />
-          ) : (
-            <div className='space-y-3'>
-              {posts.map((post) => (
-                <Card key={post.public_id}>
-                  <CardContent className='flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between'>
-                    <div className='min-w-0'>
-                      <div className='flex flex-wrap items-center gap-2'>
-                        <h2 className='font-semibold'>{post.title}</h2>
-                        <Badge variant='outline'>
-                          {t(postStatusLabel(post.status))}
-                        </Badge>
-                      </div>
-                      <p className='text-muted-foreground mt-1 text-sm'>
-                        {post.summary || t('No summary')}
-                      </p>
-                      {post.reject_reason ? (
-                        <p className='text-destructive mt-2 text-xs'>
-                          {t('Rejection reason: {{reason}}', {
-                            reason: post.reject_reason,
-                          })}
-                        </p>
-                      ) : null}
-                    </div>
-                    <div className='flex shrink-0 gap-2'>
-                      <Button
-                        variant='outline'
-                        size='sm'
-                        disabled={!['draft', 'rejected'].includes(post.status)}
-                        onClick={() => {
-                          setEditing(post)
-                          setCreating(false)
-                        }}
-                      >
-                        {t('Edit')}
-                      </Button>
-                      <Button
-                        size='sm'
-                        disabled={
-                          !['draft', 'rejected'].includes(post.status) ||
-                          submit.isPending
-                        }
-                        onClick={() => submit.mutate(post.public_id)}
-                      >
-                        {t('Submit for review')}
-                      </Button>
-                      <Button
-                        variant='ghost'
-                        size='sm'
-                        disabled={
-                          post.status === 'archived' || archive.isPending
-                        }
-                        onClick={() => archive.mutate(post.public_id)}
-                      >
-                        {t('Archive')}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
+    <PublicLayout showMainContainer={false}>
+      <PublicPageBackdrop>
+        <PageTransition className='mx-auto w-full max-w-[1000px] space-y-6 px-4 pt-16 pb-12 sm:px-6 sm:pt-20 xl:px-8'>
+          <section className='flex flex-wrap items-end justify-between gap-4'>
+            <div>
+              <p className='text-primary text-xs font-semibold tracking-[0.18em] uppercase'>
+                {t('Share center')}
+              </p>
+              <h1 className='mt-2 text-3xl font-semibold tracking-tight'>
+                {t('My shares')}
+              </h1>
+              <p className='text-muted-foreground mt-2 max-w-2xl text-sm leading-6'>
+                {t(
+                  'Your own posts and where each one stands. A share goes live once an admin approves it.'
+                )}
+              </p>
             </div>
-          )}
-        </div>
-      </SectionPageLayout.Content>
-    </SectionPageLayout>
+            <div className='flex shrink-0 flex-wrap gap-2'>
+              <Button variant='outline' render={<Link to='/share-center' />}>
+                <ArrowLeft />
+                {t('Back to share center')}
+              </Button>
+              <Button
+                onClick={() => {
+                  setCreating(true)
+                  setEditing(null)
+                }}
+              >
+                <Plus />
+                {t('Post a share')}
+              </Button>
+            </div>
+          </section>
+          <div className='space-y-6'>
+            {creating || editing ? (
+              <SharePostEditor
+                post={editing ?? undefined}
+                onSaved={() => {
+                  setCreating(false)
+                  setEditing(null)
+                  void queryClient.invalidateQueries({
+                    queryKey: ['share-center-mine'],
+                  })
+                }}
+                onCancel={() => {
+                  setCreating(false)
+                  setEditing(null)
+                }}
+              />
+            ) : null}
+            {posts.length === 0 ? (
+              <EmptyState title={t('No shares yet.')} />
+            ) : (
+              <div className='space-y-3'>
+                {posts.map((post) => (
+                  <Card key={post.public_id}>
+                    <CardContent className='flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between'>
+                      <div className='min-w-0'>
+                        <div className='flex flex-wrap items-center gap-2'>
+                          <h2 className='font-semibold'>{post.title}</h2>
+                          <Badge variant='outline'>
+                            {t(postStatusLabel(post.status))}
+                          </Badge>
+                        </div>
+                        <p className='text-muted-foreground mt-1 text-sm'>
+                          {post.summary || t('No summary')}
+                        </p>
+                        {post.reject_reason ? (
+                          <p className='text-destructive mt-2 text-xs'>
+                            {t('Rejection reason: {{reason}}', {
+                              reason: post.reject_reason,
+                            })}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className='flex shrink-0 gap-2'>
+                        <Button
+                          variant='outline'
+                          size='sm'
+                          disabled={
+                            !['draft', 'rejected'].includes(post.status)
+                          }
+                          onClick={() => {
+                            setEditing(post)
+                            setCreating(false)
+                          }}
+                        >
+                          {t('Edit')}
+                        </Button>
+                        <Button
+                          size='sm'
+                          disabled={
+                            !['draft', 'rejected'].includes(post.status) ||
+                            submit.isPending
+                          }
+                          onClick={() => submit.mutate(post.public_id)}
+                        >
+                          {t('Submit for review')}
+                        </Button>
+                        <Button
+                          variant='ghost'
+                          size='sm'
+                          disabled={
+                            post.status === 'archived' || archive.isPending
+                          }
+                          onClick={() => archive.mutate(post.public_id)}
+                        >
+                          {t('Archive')}
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </div>
+        </PageTransition>
+      </PublicPageBackdrop>
+    </PublicLayout>
   )
 }
 

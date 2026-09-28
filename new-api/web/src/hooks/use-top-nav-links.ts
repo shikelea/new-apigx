@@ -107,6 +107,14 @@ export function useTopNavLinks(): TopNavLink[] {
       href: '/tools',
       requiresAuth: tools.requireAuth && !isAuthed,
     })
+    // The published crowdtest board rides the same module switch as the tools
+    // page but needs its own entry: it is a read-only board for visitors, and
+    // without a link the only way in was typing the URL.
+    links.push({
+      title: t('Crowdtest board'),
+      href: '/crowdtest',
+      requiresAuth: tools.requireAuth && !isAuthed,
+    })
   }
 
   const rankings = modules?.rankings
