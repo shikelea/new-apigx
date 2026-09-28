@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -42,6 +43,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertStageCAsyncTaskDialect(t, db)
 		assertStageDUsageSummaryDialect(t, db)
 		assertRelayVoteDialect(t, db)
+		assertLongSecretRefDialect(t, db)
 	})
 
 	t.Run("postgres", func(t *testing.T) {
@@ -71,6 +73,7 @@ func TestMigrateMatrixOnConfiguredDialects(t *testing.T) {
 		assertStageCAsyncTaskDialect(t, db)
 		assertStageDUsageSummaryDialect(t, db)
 		assertRelayVoteDialect(t, db)
+		assertLongSecretRefDialect(t, db)
 
 		// 存储引擎必须是 InnoDB。这不是洁癖：
 		//  - 预留、额度原子扣减、幂等记录都依赖**事务与行锁**，MyISAM 没有事务，这些保证会静默失效；
@@ -99,6 +102,7 @@ func assertPostgresMatrix(t *testing.T, db *gorm.DB) {
 	assertStageCAsyncTaskDialect(t, db)
 	assertStageDUsageSummaryDialect(t, db)
 	assertRelayVoteDialect(t, db)
+	assertLongSecretRefDialect(t, db)
 }
 
 var errRollbackOfferingReviewMatrix = errors.New("rollback offering review matrix fixture")
@@ -351,6 +355,48 @@ func assertRelayVoteDialect(t *testing.T, db *gorm.DB) {
 		return errRollbackRelayVoteMatrix
 	})
 	require.ErrorIs(t, err, errRollbackRelayVoteMatrix)
+}
+
+var errRollbackLongSecretRefMatrix = errors.New("rollback long secret ref matrix fixture")
+
+// assertLongSecretRefDialect 固定住「长 Key 也能新建渠道 / 添加 Key」这个回归。
+//
+// 背景：secret_ref 存的是信封（前缀 + base64(nonce) + ":" + base64(密文+tag)），长度约为明文的
+// 1.36 倍再加 34 字节。该列曾是 varchar(255)，于是超过约 155 字节的明文（Google 服务账号 JSON、
+// 长 JWT 等）在 MySQL 上会因超长而写入失败，在 SQLite 上则静默写入、但与 MySQL 行为不一致。
+// 这里用远超 255 字节的信封长度直接验证列宽，并读回比对，确保三种方言语义一致。
+func assertLongSecretRefDialect(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	err := db.Transaction(func(tx *gorm.DB) error {
+		const owner int64 = 9_860_001
+		group := &ShareGroup{
+			OwnerUserID: owner, Name: "long-secret-matrix",
+			DefaultVisibility: ShareGroupVisibilityPublic, PublishStatus: ShareGroupPublishPublished,
+		}
+		require.NoError(t, CreateShareGroup(tx, group))
+		channel := &Channel{OwnerUserID: owner, ShareGroupID: group.ID, Name: "long-secret-matrix", BaseChannelID: 9_860_001}
+		require.NoError(t, CreateChannel(tx, channel))
+
+		// 2 KiB 明文对应的信封约 2.8 KiB，远超旧上限；用固定长度而不是随机值，便于定位。
+		envelope := "apigxv1:" + strings.Repeat("A", 2776)
+		require.Greater(t, len(envelope), 255)
+		key := &UpstreamKey{
+			ChannelID: channel.ID, Name: "long-secret", StableKeyID: "key-long-secret",
+			SecretRef: envelope, SecretFingerprint: strings.Repeat("b", 64),
+		}
+		require.NoError(t, CreateUpstreamKey(tx, owner, key), "长信封必须能写入 secret_ref")
+
+		var stored UpstreamKey
+		require.NoError(t, tx.First(&stored, key.ID).Error)
+		assert.Equal(t, envelope, stored.SecretRef, "读回的信封不能被截断")
+
+		// 历史版本表镜像同一个信封，列宽必须一致。
+		var credential UpstreamKeyCredential
+		require.NoError(t, tx.Where("upstream_key_id = ?", key.ID).First(&credential).Error)
+		assert.Equal(t, envelope, credential.SecretRef, "凭据历史表的信封也不能被截断")
+		return errRollbackLongSecretRefMatrix
+	})
+	require.ErrorIs(t, err, errRollbackLongSecretRefMatrix)
 }
 
 var errRollbackStageDUsageSummaryMatrix = errors.New("rollback stage d usage summary matrix fixture")

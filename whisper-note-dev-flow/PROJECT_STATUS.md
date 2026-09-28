@@ -1,4 +1,27 @@
 # 项目状态 · apigx（二开 New API）
+### [062] 2026-09-28 manxue 接入安全收尾、长 Key 修复与真实动态验证
+
+**做了什么**：回扫他人新增的 manxue 智商测试接入并修复 10 个安全/质量问题；修复长 Key 无法新建渠道或追加 Key；补做 [061] 欠下的真实动态验证（含真实上游模型接口、非流式与 SSE 转发）。
+
+**涉及模块**：`new-api/apigx/api`、`new-api/apigx/model`、`new-api/router`、`new-api/web/src/features/tools`、前端语言包、流程台账。
+
+**改动明细**：
+| 文件/模块 | 改动说明 |
+|---|---|
+| `new-api/apigx/api/manxue.go` | 重写：公开资源改白名单 map（杜绝前缀匹配穿越）、query 只放行 `benchmark`/`limit` 并重编码、测试结果按创建者归属（越权 404）、请求体与 HTML 上限、上游错误分级映射且 Key 脱敏、改用 `common.Marshal/DecodeJson`、30s 公开缓存。 |
+| `new-api/router/api-router.go` | manxue 公开路由改挂 `HeaderNavModuleAuth("tools")`，不再是匿名开放代理；不加 `CriticalRateLimit`（默认 20/20min 会锁死正常用户），依赖全局限流 + 缓存。 |
+| `new-api/apigx/api/share.go` | 删除重复的 `intelligence.GET("/public/*path")` 路由。 |
+| `new-api/apigx/model/models_identity.go` | `UpstreamKey.SecretRef`、`UpstreamKeyCredential.SecretRef` 由 `size:255` 改 `type:text`。 |
+| `new-api/web/src/features/tools/**` | 智商测试面板改 RHF+Zod，新增取消、轮询上限（3s×100）、FormLabel、NativeSelect、第三方告知勾选、匿名登录引导；纯逻辑抽到 `lib/intelligence.ts` 以过 `only-export-components`。 |
+| 测试 | 新增 `manxue_test.go`；`migrate_matrix_test.go` 三库断言长信封不截断；`share_test.go` 长 Key 建渠道/追加/解密还原；工具 Vitest 补 3 例。 |
+| 语言包 | en/zh/zh-TW 各新增 28 键（手工添加，未跑 `i18n:sync`）。 |
+
+**根因记录（长 Key）**：`secret_ref` 存的是 AES-GCM 信封而非明文，长度 ≈ 明文 1.36 倍 + 34 字节，`varchar(255)` 只能容纳约 155 字节明文；MySQL `STRICT_TRANS_TABLES` 下超长直接 `ERROR 1406 Data too long`，表现为“新建渠道/添加 Key 失败”。
+
+**验证**：`go build`/`go vet`/`gofmt -l` 干净；`go test ./apigx/... ./middleware/ ./model/ -count=1` 13 包全过（同时带 MySQL 8.0.12 与 PG 18.4 DSN）；前端 oxlint 0、`tsgo -b`、工具 Vitest 7/7、Rsbuild 构建通过。真实动态验证（网关接真实 MySQL 跑 3000，manxue 上游指向本地桩）：白名单放行且 query 被重编码、非白名单/穿越 404、非法参数 400、30s 缓存两段实测、匿名 401、跨用户 404、上游错误脱敏、长 Key 1207 字符建渠道与追加均 200 且落库信封 1655/1664 字节未截断；真实上游 tokenrhythm 的 `fetch-models`、渠道测试 200/0.699s、非流式 relay 返回 `pong`、SSE 18 帧以 `[DONE]` 收尾、用量与额度正确扣减。
+
+**剩余风险**：C 盘 99% 占用会触发性能守卫使所有 relay 返回 503（守卫读 `os.TempDir()` 所在盘，本轮把网关 TMP 指到 D 盘忽略目录后在默认阈值 95 下跑通）；既有部署需真正执行 AutoMigrate 才会把 `secret_ref` 扩成 `text`；`bun run i18n:sync` 不可运行；前端 `plugin-changelog-panel.test.tsx` 2 个失败为既有问题；未做本轮浏览器交互回归；生产部署与远端推送未执行。
+
 ### [061] 2026-09-27 工具中心接入智商测试与公开检测同步
 
 **做了什么**：接入 manxue.ai 糖果/鹈鹕异步检测、监控状态和访客公开结果，并在工具中心提供安全表单、轮询和结果展示。

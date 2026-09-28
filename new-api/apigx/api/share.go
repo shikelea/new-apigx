@@ -163,7 +163,6 @@ func Register(r *gin.RouterGroup, db *gorm.DB) {
 		intelligence.POST("/tests", middleware.UserCriticalRateLimit("intelligence_test"), h.createManxueTest)
 		intelligence.GET("/tests/:id", h.getManxueTest)
 		intelligence.DELETE("/tests/:id", h.cancelManxueTest)
-		intelligence.GET("/public/*path", h.proxyManxueGET)
 	}
 
 	// 可解释路由结果（T2.9）：只读，不写库、不投影

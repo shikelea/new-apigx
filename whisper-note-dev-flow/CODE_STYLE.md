@@ -121,3 +121,30 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 - **web/ 的格式化器是 oxfmt，不是 Prettier**：`bun run format` 实际调用 `scripts/format-with-protected-headers.mjs`，会剥离许可证头后对**整个 web/ 树**跑 oxfmt。只格式化本轮文件时用 `./node_modules/.bin/oxfmt -c .oxfmtrc.json <文件...>`；裸 Prettier 对 HEAD 原文件也会报格式问题，不要以它为准。
 - **值与显示文本不同的下拉优先用共享 `NativeSelect`**：base-ui `SelectValue` 未传 `items` 时显示原始 value（如 `charity`、`bearer`），且共享 `FormControl` 会把 id/aria 注入子元素；`NativeSelect` 会把这些 props 透传到 `<select>`，与 RHF + `FormControl` 配合无需额外适配。
+
+## 加密凭据列、公开代理与 i18n 同步（2026-09-28）
+
+- **存信封的列必须是 `text`，不能是 `varchar(255)`**：`secret_ref` / `credential_ref` 存的是 secretbox 信封
+  （`前缀 + base64(nonce) + ":" + base64(密文+GCM tag)`），长度 ≈ 明文 **1.36 倍 + 34 字节**。
+  `varchar(255)` 只能容纳约 155 字节明文，长 Key（Google 服务账号 JSON、长 JWT）会在 MySQL
+  `STRICT_TRANS_TABLES` 下直接 `ERROR 1406 Data too long`，表现为"新建渠道/添加 Key 失败"。
+  新增任何存密文的字段一律 `gorm:"type:text"`，并在三库矩阵测试里断言长值读回不截断。
+
+- **代理第三方的"公开"接口要用白名单 map，不要前缀匹配**：`strings.HasPrefix` + `*path` 会被
+  `..` 和同前缀路径绕过。资源用 `map[string]bool` 精确匹配，query 逐键校验后**重新 `Encode()`**
+  再发给上游（不要透传 `RawQuery`），并对返回值做 TTL 缓存限制放大。同时必须挂模块开关中间件，
+  否则就是一个匿名开放代理。
+  注意：**不要给公开页接口加 `CriticalRateLimit()`**，它默认 20 次/20 分钟/IP，而页面一次加载就打 2 个请求。
+
+- **代理上游的错误不能原文回显**：先区分"网络失败"与"上游返回了业务错误"，前者统一 502 并只写服务端日志，
+  后者按状态码分级映射，且文本必须过一遍 Key 脱敏再返回。
+
+- **越权一律返回 404 而不是 403**：按创建者归属校验资源（如按 userID 绑定的异步任务 id），
+  返回 403 会泄漏"该 id 存在"。
+
+- **`bun run i18n:sync` 不要跑**：它会把"键最多的语言"当基准（现在是 zh-TW），
+  把中文值灌进 fr/ja/ru/vi，还会改写 en.json 里的转义键。新增键**手工**加到 en/zh/zh-TW 三份。
+
+- **New API 性能守卫读的是 `os.TempDir()` 所在盘**：系统盘占用超过 `MonitorDiskThreshold`（默认 95%）时
+  **所有** relay 返回 503 `system_disk_overloaded`。本地起网关做动态验证时，把进程的 `TMP/TEMP`
+  指到空间充足的盘（如 `.toolchain/` 下被 gitignore 的目录），不要去改阈值——改了就验证不到真实配置下的行为。

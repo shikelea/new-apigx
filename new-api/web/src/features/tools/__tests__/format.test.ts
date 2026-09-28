@@ -8,6 +8,7 @@ the Free Software Foundation, either version 3 of the License, or
 */
 import { describe, expect, it } from 'vitest'
 
+import { isIntelligenceTerminal } from '../api'
 import {
   auditStatus,
   formatEpoch,
@@ -16,6 +17,7 @@ import {
   riskLevelKey,
   riskLevelVariant,
 } from '../lib/format'
+import { toIntelligenceInput as toInput } from '../lib/intelligence'
 
 describe('tool center formatting', () => {
   it('parses valid local check-in times and rejects invalid values', () => {
@@ -46,5 +48,44 @@ describe('tool center formatting', () => {
     expect(riskLevelKey('unknown')).toBe('unknown')
     expect(riskLevelVariant('高风险信号')).toBe('destructive')
     expect(riskLevelVariant('未发现明显异常')).toBe('secondary')
+  })
+})
+
+describe('intelligence test payload', () => {
+  const base = {
+    base_url: ' https://api.example.com/v1 ',
+    api_key: ' sk-secret ',
+    model: ' deepseek-chat ',
+    html: '<svg />',
+    consent: true,
+  }
+
+  it('never sends credentials in HTML mode', () => {
+    expect(toInput({ ...base, mode: 'pelican-html' })).toEqual({
+      benchmark: 'pelican',
+      html: '<svg />',
+    })
+  })
+
+  it('trims API-mode fields and drops an empty model', () => {
+    expect(toInput({ ...base, mode: 'candy' })).toEqual({
+      benchmark: 'candy',
+      base_url: 'https://api.example.com/v1',
+      api_key: 'sk-secret',
+      model: 'deepseek-chat',
+    })
+    expect(toInput({ ...base, mode: 'pelican-api', model: '  ' })).toEqual({
+      benchmark: 'pelican',
+      base_url: 'https://api.example.com/v1',
+      api_key: 'sk-secret',
+      model: undefined,
+    })
+  })
+
+  it('treats only terminal statuses as finished', () => {
+    expect(isIntelligenceTerminal('succeeded')).toBe(true)
+    expect(isIntelligenceTerminal('cancelled')).toBe(true)
+    expect(isIntelligenceTerminal('running')).toBe(false)
+    expect(isIntelligenceTerminal('queued')).toBe(false)
   })
 })

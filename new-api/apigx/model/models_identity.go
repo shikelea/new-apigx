@@ -241,7 +241,11 @@ type UpstreamKey struct {
 	// Name 展示名。
 	Name string `gorm:"size:64;not null;default:''"`
 	// SecretRef 指向受保护凭据存储的引用，不含明文；主密钥与数据库分离（§10.3）。
-	SecretRef string `gorm:"size:255;not null;default:''"`
+	//
+	// 必须是 text：信封 = 前缀 + base64(nonce) + ":" + base64(密文+GCM tag)，长度约为明文的
+	// 1.36 倍再加 34 字节。varchar(255) 只能放下约 155 字节的明文，会让长 Key（Google 服务账号
+	// JSON、长 JWT 等）在新建渠道或添加 Key 时直接失败。
+	SecretRef string `gorm:"type:text;not null"`
 	// SecretFingerprint 是凭据的 HMAC 指纹，仅用于查重（见 apigx/secretbox.Fingerprint）：
 	// AES-GCM 用随机 nonce，同一明文每次密文都不同，重复导入只能靠指纹发现。
 	// 与 channel_id、alive_flag 组成唯一索引：存活期间同渠道内不得重复，软删除后可重新导入。
@@ -288,10 +292,11 @@ func (UpstreamKey) TableName() string { return TablePrefix + "upstream_keys" }
 // UpstreamKeyCredential 保存每一版上游凭据的受保护引用。当前版本仍镜像在 UpstreamKey，
 // 历史版本只允许已绑定的异步任务按 key_id + credential_version 读取，轮换或软删除 Key 不清理。
 type UpstreamKeyCredential struct {
-	ID                int64  `gorm:"primaryKey"`
-	UpstreamKeyID     int64  `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:1"`
-	CredentialVersion int64  `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:2"`
-	SecretRef         string `gorm:"size:255;not null;default:''"`
+	ID                int64 `gorm:"primaryKey"`
+	UpstreamKeyID     int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:1"`
+	CredentialVersion int64 `gorm:"bigint;not null;default:0;uniqueIndex:idx_apigx_upkey_credential_version,priority:2"`
+	// SecretRef 与 UpstreamKey.SecretRef 同为信封，必须是 text（见那里的说明）。
+	SecretRef         string `gorm:"type:text;not null"`
 	SecretFingerprint string `gorm:"type:char(64);not null;default:''"`
 	StartedAt         int64  `gorm:"bigint;not null;default:0"`
 	RetiredAt         int64  `gorm:"bigint;not null;default:0"`

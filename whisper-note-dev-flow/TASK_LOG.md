@@ -1,6 +1,6 @@
 # 任务清单
 
-## [进行中] 工具中心接入智商测试与公开检测同步 (2026-09-27)
+## [已完成] 工具中心接入智商测试与公开检测同步 (2026-09-27)
 
 **本轮目标**：接入 manxue.ai 的糖果/鹈鹕检测、监控状态和访客公开结果，并在工具中心提供安全的交互与状态展示。
 **验收标准**：后端完成参数校验、上游代理、异步轮询及公开分页接口；前端完成模式切换、结果展示和错误/加载状态；Go、Bun 类型检查、Vitest、构建、动态 API 和真实浏览器验证通过。
@@ -15,8 +15,38 @@
 **任务清单**：
 - [x] 实现 manxue 服务端代理和公开同步接口 → `new-api/apigx/api/manxue.go`，固定上游地址、参数互斥校验、密钥不落库
 - [x] 实现工具中心智商测试、监控及访客检测 UI → `new-api/web/src/features/tools/**`，三种模式、异步轮询、公开状态摘要
-- [x] 完成 Go/前端测试、动态 API 冒烟和浏览器验收 → Go/Vitest/typecheck/build 通过；动态 API/浏览器因当前无 `127.0.0.1:3000` 监听未执行
+- [x] 完成 Go/前端测试、动态 API 冒烟和浏览器验收 → Go/Vitest/typecheck/build 通过；动态 API 已于 2026-09-28 在 `127.0.0.1:3000` 真实执行（见下方补充轮次）
 - [x] 更新项目状态并提交本地 commit → 本轮完成本地提交，未推送
+
+## [已完成] manxue 接入安全收尾、长 Key 修复与真实动态验证（2026-09-28）
+
+**本轮目标**：回扫他人新增的 manxue 智商测试接入并修复其中的安全问题；修复“Key 较长时无法新建渠道或添加 Key”；补做上一轮欠下的真实动态验证（含真实上游模型接口）。
+
+**验收标准**：manxue 代理不再是匿名开放代理，测试结果按创建者归属；长 Key 可建渠道并追加，落库不截断且能解密；网关真实启动后 API 动态验证通过；生产部署不自动执行。
+
+**预计涉及模块**：
+| 模块 | 文件 | 类型 | 说明 |
+|---|---|---|---|
+| manxue 代理 | `new-api/apigx/api/manxue.go`、`share.go`、`new-api/router/api-router.go` | 修改 | 路径白名单、归属校验、错误脱敏 |
+| 凭据存储 | `new-api/apigx/model/models_identity.go` | 修改 | `secret_ref` 改 `text` |
+| 前端工具中心 | `new-api/web/src/features/tools/**` | 修改 | RHF+Zod、取消、轮询上限、i18n |
+| 测试 | `new-api/apigx/api/manxue_test.go`、`share_test.go`、`model/migrate_matrix_test.go` | 新建/修改 | 安全与长 Key 回归 |
+
+**任务清单**：
+- [x] 回扫 manxue 接入并修复 10 个问题 → 匿名开放代理（公开路由改挂 `HeaderNavModuleAuth("tools")`）、前缀匹配导致路径穿越（改白名单 map）、测试 GET/DELETE 无归属校验（`manxueOwners` + 24h TTL，越权返回 404 不泄漏存在性）、query 原样透传（改白名单重编码，仅 `benchmark`/`limit`）、重复公开路由、`encoding/json` 改 `common.*`、无请求体上限（`MaxBytesReader` 3MiB/HTML 2MiB）、上游错误原文回显（分级映射 + Key 脱敏）、缺第三方告知（勾选同意并点名 manxue.ai）、前端无 i18n/无 label/轮询无上限/无取消/匿名 401
+- [x] 修复长 Key 无法新建渠道与追加 Key → 根因：`SecretRef gorm:"size:255"` 存的是 AES-GCM 信封（≈明文 1.36 倍 + 34 字节），明文上限仅约 155 字节，MySQL `STRICT_TRANS_TABLES` 下直接 `ERROR 1406 Data too long`；`models_identity.go` 两处 `SecretRef` 改 `type:text`，AutoMigrate 自动扩宽既有库
+- [x] 补安全与长 Key 回归测试 → `manxue_test.go` 新建（httptest 假上游，归属/校验/脱敏/白名单 4 组）；`migrate_matrix_test.go` 三库断言 2784 字符信封不截断；`share_test.go` 长 Key 建渠道 + 追加 + 解密还原
+- [x] 静态全量验证 → `go build`/`go vet`/`gofmt -l` 干净；`go test ./apigx/... ./middleware/ ./model/ -count=1` 13 包全过（同时带 MySQL 与 PG DSN）；前端 oxlint 0、`tsgo -b`、工具 Vitest 7/7、Rsbuild 构建通过
+- [x] 真实动态验证（本轮补做欠账）→ 网关接真实本地 MySQL 跑在 3000；manxue 上游指向本地桩（未向 manxue.ai 发任何请求）：白名单 200 且 query 被重编码、非白名单/路径穿越 404、枚举越界/未知/重复参数 400、30s 缓存实测（5 次 0 回源，过期后 2 次仅 1 回源）；匿名测试接口 401、A 建 B 查/取消 404、非法 id 400、HTML 与 Key 混用 400、上游 422→400 且日志无 Key；长 Key（1207 字符）建渠道 200 + 追加 200，MySQL 实测三表 `secret_ref` 已是 `text`、落库信封 1655/1664 字节；真实上游（tokenrhythm）`fetch-models` 拉回真实列表、渠道测试 200/0.699s、非流式 relay 返回 `pong`、SSE 18 帧且以 `[DONE]` 收尾、用量与额度正确扣减
+- [x] 更新台账并本地 commit → 本轮完成，未推送
+
+**本轮补充说明（2026-09-28）**：
+- 环境问题（非代码）：C 盘 99% 占用会触发 New API 性能守卫 `MonitorDiskThreshold`（默认 95%），所有 relay 返回 503 `system_disk_overloaded`。该守卫读的是 `os.TempDir()` 所在盘，因此把网关的 `TMP/TEMP` 指到 `D:` 下的忽略目录即可在默认阈值 95 下正常跑通，无需改阈值。
+- `bun run i18n:sync` 有害：会把键最多的语言当基准、向 fr/ja/ru/vi 灌中文并改写 en.json 的转义键；新增键只手工加 en/zh/zh-TW。
+- 既有部署升级时需真正执行 AutoMigrate，`secret_ref` 才会从 `varchar(255)` 扩成 `text`。
+- 前端 `plugin-changelog-panel.test.tsx` 2 个失败在干净 HEAD 复现，与本轮无关。
+- 真实外站凭据仅用于本次动态验证，未写入仓库任何文件；生产部署与远端推送均未执行。
+
 ## [已完成] 三库矩阵回归、近期改动回扫修复与工具中心高级审计（2026-09-27）
 
 **本轮目标**：用本地 MySQL 8 补齐 SQLite/MySQL/PostgreSQL 三库矩阵；回扫 [055]–[059] 的改动并修复发现的 BUG；把工具中心供应商审计里的 Token、Prompt、身份、SSE 流式、错误泄漏五类检测从 `skipped` 做成真实可运行的检查，参考成熟开源项目的方法；同时清理台账重复与陈旧条目。

@@ -194,7 +194,7 @@ export function ToolsPage() {
             </Card>
           </div>
 
-          <IntelligencePanel />
+          <IntelligencePanel signedIn={signedIn} />
 
           {signedIn ? (
             <div className='grid gap-6 lg:grid-cols-2'>

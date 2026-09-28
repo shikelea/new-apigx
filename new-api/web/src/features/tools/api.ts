@@ -91,29 +91,69 @@ export type IntelligenceTest = {
   status: string
   phase?: string
   expires_at?: string
-  candy?: { status?: string; answer?: string; duration_ms?: number; error?: string }
+  candy?: {
+    status?: string
+    answer?: string
+    duration_ms?: number
+    error?: string
+  }
   result?: { html?: string; has_html?: boolean }
-  assessment?: { quality?: string; label?: string; reason?: string; source?: string }
+  assessment?: {
+    quality?: string
+    label?: string
+    reason?: string
+    source?: string
+  }
   error?: string
 }
 
 export async function createIntelligenceTest(input: IntelligenceInput) {
-  const res = await api.post<IntelligenceTest>('/api/apigx/intelligence/tests', input)
+  const res = await api.post<IntelligenceTest>(
+    '/api/apigx/intelligence/tests',
+    input
+  )
   return res.data
 }
 
 export async function getIntelligenceTest(id: string) {
-  const res = await api.get<IntelligenceTest>(`/api/apigx/intelligence/tests/${encodeURIComponent(id)}`)
+  const res = await api.get<IntelligenceTest>(
+    `/api/apigx/intelligence/tests/${encodeURIComponent(id)}`
+  )
   return res.data
 }
 
+export async function cancelIntelligenceTest(id: string) {
+  const res = await api.delete<IntelligenceTest>(
+    `/api/apigx/intelligence/tests/${encodeURIComponent(id)}`
+  )
+  return res.data
+}
+
+// 终态集合：用于停止轮询与切换按钮状态。
+export const intelligenceTerminalStatuses = [
+  'succeeded',
+  'failed',
+  'cancelled',
+  'canceled',
+  'expired',
+] as const
+
+export function isIntelligenceTerminal(status: string) {
+  return (intelligenceTerminalStatuses as readonly string[]).includes(status)
+}
+
 export async function getManxueMonitors() {
-  const res = await api.get<Record<string, unknown>>('/api/apigx/intelligence/public/api/public/monitors')
+  const res = await api.get<Record<string, unknown>>(
+    '/api/manxue/public/api/public/monitors'
+  )
   return res.data
 }
 
 export async function getManxueCommunity(benchmark: 'candy' | 'pelican') {
-  const res = await api.get<Record<string, unknown>>('/api/apigx/intelligence/public/api/public/community', { params: { benchmark, limit: 20 } })
+  const res = await api.get<Record<string, unknown>>(
+    '/api/manxue/public/api/public/community',
+    { params: { benchmark, limit: 20 } }
+  )
   return res.data
 }
 

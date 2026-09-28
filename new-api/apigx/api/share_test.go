@@ -1069,6 +1069,25 @@ func TestSelfServeChannelLifecycleOnConfiguredDialects(t *testing.T) {
 				baseID := shareChannel.BaseChannelID
 				assertOfferingPublishProjectionAtomic(t, env, owner, owner+99, channelID, "b3-matrix-publish-"+tc.name)
 
+				// 长 Key 回归：secret_ref 曾是 varchar(255)，而信封约为明文的 1.36 倍再加 34 字节，
+				// 于是超过约 155 字节的 Key（Google 服务账号 JSON、长 JWT 等）在 MySQL 严格模式下
+				// 直接建不出渠道。这里用 1 KiB 明文覆盖“新建渠道”与“再添加一把 Key”两条路径。
+				longKey := "sk-long-" + strings.Repeat("L", 1024)
+				longBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
+					`,"name":"三库长密钥线路","recipe_id":"openai-compatible","base_url":"https://example.com/v1","upstream_key":"` + longKey + `"}`
+				rec, body = env.doWithRole(t, http.MethodPost, "/api/channels", owner, longBody, common.RoleCommonUser)
+				require.Equal(t, http.StatusOK, rec.Code, "长 Key 必须能新建渠道：%s", rec.Body.String())
+				longChannelID := int64(body["data"].(map[string]any)["id"].(float64))
+				rec, _ = env.doWithRole(t, http.MethodPost,
+					"/api/channels/"+strconv.FormatInt(longChannelID, 10)+"/keys", owner,
+					`{"name":"长密钥二","key":"`+longKey+`-second"}`, common.RoleCommonUser)
+				require.Equal(t, http.StatusOK, rec.Code, "长 Key 必须能追加：%s", rec.Body.String())
+				var storedLong apigxmodel.UpstreamKey
+				require.NoError(t, tx.Where("channel_id = ?", longChannelID).Order("id asc").First(&storedLong).Error)
+				plain, decErr := secretbox.Decrypt(storedLong.SecretRef)
+				require.NoError(t, decErr, "落库的长信封必须能解开（未被截断）")
+				assert.Equal(t, longKey, plain)
+
 				taskBody := `{"share_group_id":` + strconv.FormatInt(groupID, 10) +
 					`,"name":"三库视频线路","recipe_id":"kling-video","base_url":"https://api.klingai.com","upstream_key":"matrix-access|matrix-secret"}`
 				rec, body = env.doWithRole(t, http.MethodPost, "/api/channels", owner, taskBody, common.RoleCommonUser)
