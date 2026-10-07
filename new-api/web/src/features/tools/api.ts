@@ -129,6 +129,23 @@ export type ProbeTargetInput = {
   protocol?: string
   key?: string
   model: string
+  tier?: string
+  concurrency?: number
+}
+
+export type ModelRegistryEntry = {
+  id: string
+  display_name: string
+  vendor: string
+  request_names: string[]
+  baseline_state: 'ready' | 'pending'
+  baseline_meta?: {
+    measured_at: string
+    source: string
+    samples_per_probe: number
+  }
+  ready_tiers?: string[]
+  threshold?: number
 }
 
 type Envelope<T> = { success: boolean; data: T; message?: string }
@@ -139,12 +156,36 @@ export const toolsQueryKeys = {
   checkinSites: ['apigx-checkin-sites'] as const,
   myCrowdtests: ['apigx-crowdtests-mine'] as const,
   publicCrowdtests: ['apigx-crowdtests-public'] as const,
+  modelRegistry: ['apigx-model-registry'] as const,
+}
+
+export async function listModelRegistry(): Promise<Envelope<ModelRegistryEntry[]>> {
+  try {
+    const res = await api.get<any>('/api/tools/dilution-models')
+    const models = res.data?.data?.models || res.data?.data
+    if (Array.isArray(models) && models.length > 0) {
+      return { success: true, data: models }
+    }
+  } catch {
+    // fallback to apigx endpoint
+  }
+  try {
+    const res = await api.get<any>('/api/apigx/model-registry')
+    const models = Array.isArray(res.data?.data) ? res.data.data : []
+    return { success: true, data: models }
+  } catch {
+    return { success: false, data: [] }
+  }
 }
 
 export async function runSpeedTest(input: ProbeTargetInput) {
   const res = await api.post<Envelope<SpeedReport>>(
     '/api/tools/speed-test',
-    input
+    input,
+    {
+      timeout: 150000, // 150s：后端 runSpeedTest 的预算是 speedSamples/2 × 3 × 45s = 135s，
+      // 比它短的客户端超时会把还在正常跑的检测先掐掉，报成网络错误。
+    }
   )
   return res.data
 }
@@ -152,7 +193,10 @@ export async function runSpeedTest(input: ProbeTargetInput) {
 export async function runDilutionTest(input: ProbeTargetInput) {
   const res = await api.post<Envelope<DilutionReport>>(
     '/api/tools/dilution-test',
-    input
+    input,
+    {
+      timeout: 1200000, // 20min：后端 Meow 采样 540s + 其余维度重新起算 600s（见 relayprobe/dilution.go）
+    }
   )
   return res.data
 }
@@ -160,7 +204,9 @@ export async function runDilutionTest(input: ProbeTargetInput) {
 export async function createCrowdtest(
   input: ProbeTargetInput & { benchmark: 'candy' | 'pelican'; publish: boolean }
 ) {
-  const res = await api.post<Envelope<Crowdtest>>('/api/crowdtests', input)
+  const res = await api.post<Envelope<Crowdtest>>('/api/crowdtests', input, {
+    timeout: 600000, // 10min, same as dilution test
+  })
   return res.data
 }
 
@@ -187,7 +233,9 @@ export async function listPublicCrowdtests(benchmark?: string) {
 }
 
 export async function createAuditRun(input: ProbeTargetInput) {
-  const res = await api.post<Envelope<AuditRun>>('/api/apigx/audit-runs', input)
+  const res = await api.post<Envelope<AuditRun>>('/api/apigx/audit-runs', input, {
+    timeout: 180000, // 180s, backend audit timeout is 150s
+  })
   return res.data
 }
 

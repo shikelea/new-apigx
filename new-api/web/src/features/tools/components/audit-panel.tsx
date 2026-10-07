@@ -118,7 +118,7 @@ export function AuditForm({
         />
         <Button type='submit' disabled={pending}>
           {pending ? <Loader2 className='animate-spin' /> : <Play />}
-          {pending ? t('Auditing, up to 90 seconds') : t('Run audit')}
+          {pending ? t('Auditing, up to 2.5 minutes') : t('Run audit')}
         </Button>
       </form>
     </Form>

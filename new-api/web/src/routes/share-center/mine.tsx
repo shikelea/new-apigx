@@ -15,8 +15,9 @@ import { useAuthStore } from '@/stores/auth-store'
 // A sub-page of the share center rather than a console section. Writing needs an
 // account, so this route always requires sign-in even when browsing is public.
 export const Route = createFileRoute('/share-center/mine')({
-  validateSearch: (search: Record<string, unknown>) => ({
-    compose: search.compose === true || search.compose === 'true',
+  validateSearch: (search: Record<string, unknown>): { compose?: boolean } => ({
+    compose:
+      search.compose === true || search.compose === 'true' ? true : undefined,
   }),
   beforeLoad: async ({ context, location }) => {
     const access = await getModuleAccessForGuard(

@@ -68,8 +68,11 @@ export function CrowdtestPage() {
 
           <div className='flex flex-wrap items-center justify-between gap-3'>
             <ToggleGroup
-              value={[benchmark]}
-              onValueChange={(values) => setBenchmark(values[0] ?? '')}
+              multiple={false}
+              value={benchmark ? [benchmark] : []}
+              onValueChange={(values) => {
+                setBenchmark(values[0] || '')
+              }}
               variant='outline'
               size='sm'
               aria-label={t('Benchmark')}

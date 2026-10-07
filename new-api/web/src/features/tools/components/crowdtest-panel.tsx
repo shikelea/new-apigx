@@ -161,7 +161,7 @@ export function CrowdtestForm({
         />
         <Button type='submit' disabled={pending}>
           {pending ? <Loader2 className='animate-spin' /> : <Beaker />}
-          {pending ? t('Testing, up to 2 minutes') : t('Run crowdtest')}
+          {pending ? t('Testing, up to 10 minutes') : t('Run crowdtest')}
         </Button>
       </form>
     </Form>

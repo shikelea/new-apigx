@@ -36,6 +36,8 @@ export type ProbeTargetValues = {
   base_url: string
   key: string
   model: string
+  tier?: string
+  concurrency?: number
 }
 
 // Default to the one-off target. Most people arrive here to check somebody
@@ -47,6 +49,8 @@ export const PROBE_TARGET_DEFAULTS: ProbeTargetValues = {
   base_url: '',
   key: '',
   model: '',
+  tier: 'high',
+  concurrency: 2,
 }
 
 /** Validates whichever source the user picked; the other side stays optional. */
@@ -62,6 +66,8 @@ export function probeTargetSchema(t: (key: string) => string) {
         .trim()
         .min(1, t('Enter a model ID'))
         .max(191, t('Model ID is too long')),
+      tier: z.string().optional(),
+      concurrency: z.number().min(1).max(8).optional(),
     })
     .superRefine((values, ctx) => {
       if (values.source === PROBE_SOURCE_RELAY) {
@@ -93,15 +99,21 @@ export function probeTargetSchema(t: (key: string) => string) {
 
 /** Strips the fields the chosen source does not use so the request stays minimal. */
 export function toProbeTarget(values: ProbeTargetValues): ProbeTargetInput {
+  const extra = {
+    ...(values.tier ? { tier: values.tier } : {}),
+    ...(typeof values.concurrency === 'number' ? { concurrency: values.concurrency } : {}),
+  }
   if (values.source === PROBE_SOURCE_RELAY) {
     return {
       relay_share_public_id: values.relay_share_public_id,
       model: values.model.trim(),
+      ...extra,
     }
   }
   return {
     base_url: values.base_url.trim(),
     key: values.key.trim(),
     model: values.model.trim(),
+    ...extra,
   }
 }

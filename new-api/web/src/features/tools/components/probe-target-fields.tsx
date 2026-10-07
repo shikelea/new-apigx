@@ -46,11 +46,13 @@ export function ProbeTargetFields<T extends FieldValues>({
   source,
   relays,
   allowManual = true,
+  hideModel = false,
 }: {
   control: Control<T>
   source: ProbeSource
   relays: RelayOption[]
   allowManual?: boolean
+  hideModel?: boolean
 }) {
   const { t } = useTranslation()
   // Relay-sourced runs decrypt the stored detection key, so relays without one
@@ -66,14 +68,14 @@ export function ProbeTargetFields<T extends FieldValues>({
           name={name('source')}
           render={({ field }) => (
             <FormItem>
-              <FormLabel>{t('Target')}</FormLabel>
+              <FormLabel>{t('Probe Target', '检测目标')}</FormLabel>
               <FormControl>
                 <NativeSelect className='w-full' {...field}>
                   <NativeSelectOption value={PROBE_SOURCE_RELAY}>
-                    {t('One of my shared relays')}
+                    {t('One of my shared relays', '我分享的中转')}
                   </NativeSelectOption>
                   <NativeSelectOption value={PROBE_SOURCE_MANUAL}>
-                    {t('Enter a base URL and key once')}
+                    {t('Enter a base URL and key once', '临时填一次地址和密钥')}
                   </NativeSelectOption>
                 </NativeSelect>
               </FormControl>
@@ -159,23 +161,40 @@ export function ProbeTargetFields<T extends FieldValues>({
         </>
       )}
 
-      <FormField
-        control={control}
-        name={name('model')}
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>{t('Model ID')}</FormLabel>
-            <FormControl>
-              <Input
-                autoComplete='off'
-                placeholder={t('e.g. gpt-4o')}
-                {...field}
-              />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
+      {!hideModel ? (
+        <FormField
+          control={control}
+          name={name('model')}
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>{t('Model ID')}</FormLabel>
+              <FormControl>
+                <div>
+                  <Input
+                    autoComplete='off'
+                    list='common-probe-models'
+                    placeholder={t('e.g. gpt-4o')}
+                    {...field}
+                  />
+                  <datalist id='common-probe-models'>
+                    <option value='deepseek-flash' />
+                    <option value='deepseek-chat' />
+                    <option value='deepseek-reasoner' />
+                    <option value='gpt-4o' />
+                    <option value='gpt-4o-mini' />
+                    <option value='claude-3-7-sonnet' />
+                    <option value='claude-3-5-sonnet-20241022' />
+                    <option value='glm-4.6' />
+                    <option value='mimo-v2.6-pro' />
+                    <option value='qwen-max' />
+                  </datalist>
+                </div>
+              </FormControl>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      ) : null}
     </>
   )
 }

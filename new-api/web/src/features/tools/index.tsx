@@ -20,8 +20,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import {
   Beaker,
+  ChevronUp,
   ClipboardCheck,
   Clock3,
+  ExternalLink,
   FlaskConical,
   Gauge,
   KeyRound,
@@ -43,7 +45,6 @@ import {
   createAuditRun,
   createCheckinSite,
   createCrowdtest,
-  listAuditRuns,
   listCheckinSites,
   listMyCrowdtests,
   listRelayOptions,
@@ -56,7 +57,6 @@ import {
   type SpeedReport,
 } from './api'
 import { AuditForm } from './components/audit-panel'
-import { AuditResults } from './components/audit-results'
 import { CheckinForm, CheckinList } from './components/checkin-panel'
 import { CrowdtestCard, CrowdtestForm } from './components/crowdtest-panel'
 import { DilutionForm, DilutionResult } from './components/dilution-panel'
@@ -80,11 +80,6 @@ export function ToolsPage() {
     null
   )
 
-  const audits = useQuery({
-    queryKey: toolsQueryKeys.audits,
-    queryFn: listAuditRuns,
-    enabled: signedIn,
-  })
   const relays = useQuery({
     queryKey: toolsQueryKeys.relayOptions,
     queryFn: listRelayOptions,
@@ -107,9 +102,6 @@ export function ToolsPage() {
       setAuditOpen(false)
     },
     onError: (error) => handleServerError(error),
-    // A failed run is still recorded server-side, so refresh either way.
-    onSettled: () =>
-      void client.invalidateQueries({ queryKey: toolsQueryKeys.audits }),
   })
   const run = useMutation({
     mutationFn: runCheckinSite,
@@ -122,17 +114,29 @@ export function ToolsPage() {
   })
   const speed = useMutation({
     mutationFn: runSpeedTest,
+    onMutate: () => {
+      setSpeedReport(null)
+    },
     onSuccess: (res) => {
       if (res.data) setSpeedReport(res.data)
     },
-    onError: (error) => handleServerError(error),
+    onError: (error) => {
+      handleServerError(error)
+      setSpeedReport(null)
+    },
   })
   const dilution = useMutation({
     mutationFn: runDilutionTest,
+    onMutate: () => {
+      setDilutionReport(null)
+    },
     onSuccess: (res) => {
       if (res.data) setDilutionReport(res.data)
     },
-    onError: (error) => handleServerError(error),
+    onError: (error) => {
+      handleServerError(error)
+      setDilutionReport(null)
+    },
   })
   const crowdtest = useMutation({
     mutationFn: createCrowdtest,
@@ -173,7 +177,6 @@ export function ToolsPage() {
 
   const relayItems = relays.data?.data?.items ?? []
   const crowdtestItems = myCrowdtests.data?.data?.items ?? []
-  const auditItems = audits.data?.data?.items ?? []
   const siteItems = sites.data?.data?.items ?? []
   const runningId = run.isPending ? (run.variables ?? null) : null
 
@@ -195,8 +198,8 @@ export function ToolsPage() {
             </p>
           </div>
 
-          <div className='grid gap-4 md:grid-cols-2'>
-            <Card>
+          <div className='grid gap-6 md:grid-cols-2 items-start'>
+            <Card className='rounded-xl border shadow-sm transition-all'>
               <CardHeader>
                 <CardTitle className='flex items-center gap-2 text-base'>
                   <ShieldCheck className='text-primary size-5' />
@@ -211,12 +214,13 @@ export function ToolsPage() {
                   )}
                 </p>
                 <Button
+                  variant={auditOpen ? 'secondary' : 'default'}
                   aria-expanded={auditOpen}
                   onClick={() => setAuditOpen((value) => !value)}
                   disabled={!signedIn}
                 >
-                  <ClipboardCheck />
-                  {t('Start audit')}
+                  {auditOpen ? <ChevronUp className='size-4' /> : <ClipboardCheck className='size-4' />}
+                  {auditOpen ? (t('Collapse') || '收起审计') : (t('Start audit') || '展开审计测试')}
                 </Button>
                 {auditOpen && signedIn ? (
                   <AuditForm
@@ -228,7 +232,7 @@ export function ToolsPage() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card className='rounded-xl border shadow-sm transition-all'>
               <CardHeader>
                 <CardTitle className='flex items-center gap-2 text-base'>
                   <Gauge className='text-primary size-5' />
@@ -243,12 +247,13 @@ export function ToolsPage() {
                   )}
                 </p>
                 <Button
+                  variant={speedOpen ? 'secondary' : 'default'}
                   aria-expanded={speedOpen}
                   onClick={() => setSpeedOpen((value) => !value)}
                   disabled={!signedIn}
                 >
-                  <Gauge />
-                  {t('Open speed test')}
+                  {speedOpen ? <ChevronUp className='size-4' /> : <Gauge className='size-4' />}
+                  {speedOpen ? (t('Collapse') || '收起测速') : (t('Open speed test') || '展开速度测试')}
                 </Button>
                 {speedOpen && signedIn ? (
                   <SpeedForm
@@ -261,7 +266,7 @@ export function ToolsPage() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card className='rounded-xl border shadow-sm transition-all'>
               <CardHeader>
                 <CardTitle className='flex items-center gap-2 text-base'>
                   <FlaskConical className='text-primary size-5' />
@@ -276,12 +281,13 @@ export function ToolsPage() {
                   )}
                 </p>
                 <Button
+                  variant={dilutionOpen ? 'secondary' : 'default'}
                   aria-expanded={dilutionOpen}
                   onClick={() => setDilutionOpen((value) => !value)}
                   disabled={!signedIn}
                 >
-                  <FlaskConical />
-                  {t('Open substitution check')}
+                  {dilutionOpen ? <ChevronUp className='size-4' /> : <FlaskConical className='size-4' />}
+                  {dilutionOpen ? (t('Collapse') || '收起掺水检测') : (t('Open substitution check') || '展开掺水检测')}
                 </Button>
                 {dilutionOpen && signedIn ? (
                   <DilutionForm
@@ -296,7 +302,7 @@ export function ToolsPage() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card className='rounded-xl border shadow-sm transition-all'>
               <CardHeader>
                 <CardTitle className='flex items-center gap-2 text-base'>
                   <Beaker className='text-primary size-5' />
@@ -310,17 +316,19 @@ export function ToolsPage() {
                     'Runs the candy or pelican benchmark against your own target. Publishing is up to you, and published entries carry the score without the address or key.'
                   )}
                 </p>
-                <div className='flex flex-wrap gap-2'>
+                <div className='flex flex-wrap gap-2.5'>
                   <Button
+                    variant={crowdtestOpen ? 'secondary' : 'default'}
                     aria-expanded={crowdtestOpen}
                     onClick={() => setCrowdtestOpen((value) => !value)}
                     disabled={!signedIn}
                   >
-                    <Beaker />
-                    {t('Open crowdtest')}
+                    {crowdtestOpen ? <ChevronUp className='size-4' /> : <Beaker className='size-4' />}
+                    {crowdtestOpen ? (t('Collapse') || '收起众测') : (t('Open crowdtest') || '展开众测')}
                   </Button>
                   <Button variant='outline' render={<Link to='/crowdtest' />}>
-                    {t('See published results')}
+                    <ExternalLink className='size-3.5' />
+                    {t('See published results') || '看公开的结果'}
                   </Button>
                 </div>
                 {crowdtestOpen && signedIn ? (
@@ -383,15 +391,12 @@ export function ToolsPage() {
           </div>
 
           {signedIn ? (
-            <div className='grid gap-6 lg:grid-cols-2'>
-              <AuditResults audits={auditItems} loading={audits.isPending} />
-              <CheckinList
-                sites={siteItems}
-                loading={sites.isPending}
-                runningId={runningId}
-                onRun={(id) => run.mutate(id)}
-              />
-            </div>
+            <CheckinList
+              sites={siteItems}
+              loading={sites.isPending}
+              runningId={runningId}
+              onRun={(id) => run.mutate(id)}
+            />
           ) : (
             <Card>
               <CardContent className='flex items-center justify-between gap-4 p-5 text-sm'>
