@@ -4,7 +4,7 @@
 
 **本轮目标**：把「模型掺水检测」从「任何 ID 都能测」改成「只收录测过基准的型号」，自建 Dirichlet-multinomial 证据判定与基准注册表；同时修分享中心 500 与入口错挂、补众测公开看板入口、速度测试扩到 6 样本并加长文本与随机题面、删审计边界、重写 AI 味文案。
 
-**验收标准**：掺水检测只允许选择注册表内的型号，未测基准的型号明确显示「暂不支持」而不是给一个编造的判断；判定算法用固定观测做纯函数测试；基准数据来源可核查并登记许可（原定「不搬 PolyForm-Noncommercial 数据」，2026-10-07 用户改判为照原样收录，见下方许可一行）；速度测试 6 样本含长文本档且题面每次不同；分享中心可正常打开、我的分享是分享中心子页；众测公开看板可从导航到达；Go 三库矩阵与前端全套检查通过。
+**验收标准**：掺水检测只允许选择「注册表内有校准基准 ∩ 目标接口实际提供」的型号（2026-10-07 由「只允许注册表内」加严，见下方缺陷 9），未测基准的型号明确显示「暂不支持」而不是给一个编造的判断；型号名或凭据不存在时必须在一次请求内失败并带上上游自己的原因，不许烧掉几百次采样才回一句笼统错误；判定算法用固定观测做纯函数测试；基准数据来源可核查并登记许可（原定「不搬 PolyForm-Noncommercial 数据」，2026-10-07 用户改判为照原样收录，见下方许可一行）；速度测试 6 样本含长文本档且题面每次不同；分享中心可正常打开、我的分享是分享中心子页；众测公开看板可从导航到达；Go 三库矩阵与前端全套检查通过。
 
 **预计涉及模块**：
 | 模块 | 文件 | 类型 | 说明 |
@@ -24,9 +24,11 @@
 - [x] 修分享中心 500 与 search 参数校验，我的分享改为分享中心子页，去掉中转分享按钮
 - [x] 众测公开看板补导航入口
 - [x] 删审计边界，重写 AI 味文案，工具中心栅格优化（items-start 消除拉伸）
-- [ ] Go 三库矩阵 + 前端 oxfmt/oxlint/tsgo/vitest/build 全绿（Go 侧已全绿：`gofmt -l` 无输出、`go build ./...`、`go vet ./apigx/... ./cmd/...` 干净、`go test -count=1 ./apigx/...` 13 包全 ok。前端跑不了：`new-api/web` 没有 `node_modules`，本机也不装，oxfmt/oxlint/tsgo/vitest 一项都无法执行，不声称通过）
+- [x] Go 与前端检查**在本机实跑**（2026-10-07 更正：我之前两轮写「web 没有 node_modules、前端一项都跑不了」是**错的**，`web/node_modules` 一直存在且工具齐全）。Go：`gofmt -l apigx/` 无输出、`go build ./...`、`go vet ./apigx/... ./cmd/...` 干净、`go test -count=1 ./apigx/...` 13 包全 ok（**默认单库**，sqlite/mysql/pg 三库矩阵本轮没跑）。前端：`tsgo -b` **0 错**、`oxlint -c .oxlintrc.json src/features/tools` **0 错 0 警**、`oxfmt --check src/features/tools` **全合规**、`vitest run src/features/tools` **4/4**、`rsbuild build` 成功（新 `async/949.8a97c13d8f.js` 内含 `apigx-target-models`）并把 dist embed 进 `output/apigx-verify/apigx.exe`
+- [ ] 全量前端套件**没有全绿**（如实记录）：166 个文件 165 通过、1799 个用例 1797 通过，2 例失败在 `src/features/task-plugins/__tests__/plugin-changelog-panel.test.tsx`（找不到 role=link 的 `safe`／`source`，即 Markdown 链接渲染与 sanitizer 那两条）。隔离重跑**确定性失败**，不是时序抖动；该测试文件与 `src/components/ui/markdown.tsx` 自 `23aa50fe0` 起未再改动、且不 import `features/tools`，**属本轮之前就存在的失败，本轮没有顺手改它**（要不要修请用户定）。另有 ~47 个既有文件不合 `oxfmt`（含底座文件），本轮只格式化自己动过的 5 个 tools 文件，避免把无关重排混进本轮
 - [x] 接真实上游做动态验证（2026-10-04～10-07，用户提供的 tokenrhythm 中转，自称直连官方；Key 只走环境变量 `FINGERPRINT_API_KEY`，未落盘）→ 见下方「动态验证发现」
 - [x] 登记内嵌基准数据的许可：`meow-*` 四个官方参考包按 PolyForm-Noncommercial-1.0.0 收录（用户 2026-10-07 决定照原样提交），自采包另列一行；两处都写进 `new-api/THIRD-PARTY-LICENSES.md` 的 Bundled Data Sets 与 License Texts，并标明「带这些数据的构建只能非商业分发，商用前要用 `cmd/fingerprint` 自采替换」
+- [x] 修「什么都测不出来、光报错」：型号卡片改为「有校准基准 ∩ 目标实际提供」双条件预筛（新增 `POST /api/tools/target-models`），开跑前加一次最小请求预检，档位名单按基准包现算，删掉前端硬编码兜底名单（缺陷 9–12，2026-10-07）。同一中转实测可点卡片 11 → 4，坏型号 288ms 内带原因失败
 
 **动态验证发现（真实上游 tokenrhythm + 本地临时活测 harness）**：
 1. 推理型号误判两个方向 —— `profile.go` 缺 R1 独立条目，`deepseek-reasoner` 落到通用 DeepSeek（`Reasoning: false`）：诚实的 R1 中转因返回 `reasoning_tokens` 被判「可能换成了推理模型」，把 R1 换成 V3 的中转却因「无推理开销」被判相符。修法：R1 单列一条，判定用 `LookupProfile` 的实际请求名而不是收录表里那个只展示不参与计算的 `Profile`。
@@ -37,10 +39,20 @@
 6. 档位静默退化 —— 未知 `tier` 不报错，只会让基准计划变空集，检测悄悄退回旧探针路径，用户看到的结果和自己选的档位无关。修法：接口层 `modelfp.ValidMeowTier` 拦掉，返回 400。
 7. 客户端超时短于后端预算 —— 速度测试后端预算 135 秒而前端写 30 秒，还在正常跑就被掐成「网络错误」；掺水检测 Meow 采样 540 秒 + 其余维度重新起算 600 秒，前端写 300 秒。修法：`api.ts` 提到 150 秒 / 1200 秒。
 8. 文案自相矛盾 —— `samples_incomplete` 既可能因总体也可能因**单题**未过六成触发（`meow_score.go` 逐格检查），头部明明显示 291/340，理由却写「有效样本未达计划的 60%」。修法：改成「总体或单题的有效样本未达其计划的 60%」。
+9. **型号卡片不看目标提不提供** —— 这是用户这次「什么都测不出来、光报错」的直接原因。名单只按「我们测过基准」筛，于是给出 11 张可点的卡片；而那台中转只提供 24 个型号名里的 4 个，其余 8 张（`gpt-6-sol`／`claude-sonnet-5` 等）一点下去就是稳定 HTTP 400「模型不可用」，几百次采样全败，最后只剩一句「所有检测请求均未成功」——用户分不清是自己名字填错还是中转坏了，而这两件事的处理方式正好相反。**原版没这个问题的原因**：它代理目标自己的型号清单（`meow-reference/gpt56_vnext/server.py:117`），并且拒绝一个不在基准包里的 `claimed_model`（`:200`），从不承诺自己没验过的名字。修法：把这两道闸门口都搬过来 —— 新增 `POST /api/tools/target-models`（复用 `relayprobe.Probe` 的 `/v1/models` 结果，SSRF 保护客户端不变），前端可选型号 = 有校准基准 ∩ 该目标真的提供；再加开跑前一次最小请求的预检 `dilutionPreflight`，型号名不存在或凭据无效就立刻带上上游自己的原因失败，不再白烧几百次。活测：`gpt-6-sol` 288ms 报「该中转不提供型号「gpt-6-sol」：模型不可用：gpt-6-sol」，无效 Key 169ms 报 HTTP 401，请求数都是 1。
+10. 收录表把没有基准包的型号标成可选 —— `deepseek-v4.1-flash` 在表里 `baseline_state=ready`，但 Meow 分布计划是空集（只有手填旧基准），选了它永远出不了结论。修法：`modelfp.MeowReadyTiers` 按基准包现算，展开不出计划的请求名一律不列（多条请求名时取档位交集，宁可少列一档）。
+11. 低/中档是假的 —— `ready_tiers` 写死在收录项里，而 `selectMeowPackages` 在低档没有校准包时会**静默升档**：用户选 low，实际跑 high 的几百次题量，结果和所选档位无关。修法：只列真正有校准档位的档（`pkg.calibrated[tier]` 且 `plan()` 出得来），`PlanMeowAll 非空`不能当判据。
+12. 前端自备了一份会说谎的名单 —— `FALLBACK_MODEL_GROUPS` 硬编码 11 个「ready」型号，后端一慢或一错就渲染它；`listModelRegistry` 还会回落到未过滤的 `/api/apigx/model-registry`（那份连档位都没有）。修法：删掉兜底名单，只打 `GET /api/tools/dilution-models` 一个端点；地址/Key 停下 600ms 才去查目标清单（否则每敲一个字符都打到上游一次），缓存键里不放 Key，可用型号为空时禁用提交按钮。
 
 **复测（全部修法落地后，同一中转同一型号 deepseek-flash）**：整体 `verdict=match / score=100`；逻辑求解、结构约束（2/2）、协议字段、推理强度四维记相符，知识时效、指令层级、流式完整性三维证据不足（该型号无可核对的官方知识截止时间，后两维本次没有对应样本），型号指纹一维证据不足（有效样本 291/340，未过逐题六成，最像 deepseek-flash 匹配度 0.596／阈值 0.547）。活测文件 `relayprobe/zz_live_tmp_test.go` 是本地临时 harness，跑完已删除，没有进提交。
 
-**尚未消除的限制（如实记录，不当作已修）**：09-28 那份分布基准今天不可复现（现测最像 deepseek-flash 匹配度 0.596／阈值 0.547，且个别题目未过单题六成，指纹维度仍偏证据不足）；手填 Ready 基准只有 1 份，旧探针 `< 3` 候选的门槛永远不会出结论；流式维度忽略纯 `reasoning_content` 分片；`Observations.TemperatureHonored` 恒为 true，那条降级分支是死的；三阶段时限各自重算，最坏约 29 分钟，没有客户端超时能覆盖；`GET /api/apigx/tools/dilution-models` 现为无鉴权公开（与已公开的 model-registry 一致）。
+**复测 2（缺陷 9–12 修法落地后，2026-10-07 15:43，同一中转同一型号 deepseek-flash，高档，571 秒）**：整体仍 `verdict=match / score=100`；逻辑求解（同题 3 次只有 1 个答案且全对）、结构约束 2/2、协议字段、推理强度（`reasoning_tokens=22467` 记「可推理型号正常上报」）四维相符；知识时效（无公开截止时间）、指令层级与流式（本次没采到对应样本）、型号指纹（有效 267/340，73 次失败来自上游 429 窗口，最像 deepseek-flash 匹配度 0.574／阈值 0.547）四维证据不足。三件事单独验证过：`gpt-6-sol` 在 288ms 内带「该中转不提供型号…：模型不可用：gpt-6-sol」失败且**只发一次请求**；无效 Key 169ms 报 HTTP 401；界面可点卡片由 11 张降为该目标真实提供的 4 张（deepseek-flash、kimi-k3、glm-5.3、qwen3.8-max，来自 24 个型号名与基准名单的交集）。
+
+**更正上一条台账里的一处错误判定**：我在前两轮反复写「`new-api/web` 没有 `node_modules`，oxfmt／oxlint／tsgo／vitest 一项都跑不了」——**这是错的**，`web/node_modules` 一直存在（823 个包，bun 装的 `.bin/*.exe` 齐全），前端全套检查本机就能跑。本轮实际跑了：`tsgo -b` **0 错**、`oxlint`（tools 目录）**0 错 0 警**、`vitest src/features/tools` **4/4**、`rsbuild build` 成功并把新 bundle（`async/949.8a97c13d8f.js` 含 `apigx-target-models`）embed 进 `apigx.exe`。顺带查出前两个提交里的 5 个 tools 文件**从没被 oxfmt 格式化过**（`api.ts`／`dilution-panel.tsx`／`audit-panel.tsx`／`index.tsx`／`probe-target.ts`），本轮只格式化这 5 个自己动过的文件；仓库范围内另有 ~47 个既有文件同样不合 oxfmt（含底座文件），未一并改动，避免把本轮混进无关重排。
+
+**尚未消除的限制（如实记录，不当作已修）**：09-28 那份分布基准今天不可复现（现测最像 deepseek-flash 匹配度 0.596／阈值 0.547，且个别题目未过单题六成，指纹维度仍偏证据不足）；手填 Ready 基准只有 1 份，旧探针 `< 3` 候选的门槛永远不会出结论；流式维度忽略纯 `reasoning_content` 分片；`Observations.TemperatureHonored` 恒为 true，那条降级分支是死的；三阶段时限各自重算，最坏约 29 分钟，没有客户端超时能覆盖；`GET /api/apigx/tools/dilution-models` 现为无鉴权公开（与已公开的 model-registry 一致）。本轮新增三条：目标不提供 `/v1/models` 时预筛失效，卡片退回「只按基准」的列表，此时全靠开跑前那一次预检兜底；查型号清单的缓存键里故意不放 Key（不污染 QueryClient 的键），所以只改 Key 不改地址时不会重查清单；预检只花一次请求，能识别「型号名不存在／凭据无效」，识别不了「型号名存在但被中转偷偷换成别的」——那仍然是几百次采样才能判的事。
+
+**界面侧的验证状态（本轮已推翻上一轮的错误结论）**：`new-api/web/node_modules` 是存在的，`tsgo -b`／`oxlint`／`oxfmt`／`vitest`／`rsbuild build` 本轮全部实跑过，结果见任务清单那两行；前两个提交留下的 5 个 tools 文件从未被 oxfmt 格式化，本轮补齐。仍未做的：全量 vitest 有 2 例既有失败（`task-plugins/plugin-changelog-panel`）没修，Go 三库矩阵没跑，浏览器里没有真点过一遍界面（`rsbuild dev` 未启动验证交互）。
 
 ## [已完成] 下线 manxue，自建众测/速度/掺水三件套与中转持续检测（2026-09-28）
 
