@@ -198,7 +198,7 @@ export function ToolsPage() {
             </p>
           </div>
 
-          <div className='grid gap-6 md:grid-cols-2 items-start'>
+          <div className='grid items-start gap-6 md:grid-cols-2'>
             <Card className='rounded-xl border shadow-sm transition-all'>
               <CardHeader>
                 <CardTitle className='flex items-center gap-2 text-base'>
@@ -219,8 +219,14 @@ export function ToolsPage() {
                   onClick={() => setAuditOpen((value) => !value)}
                   disabled={!signedIn}
                 >
-                  {auditOpen ? <ChevronUp className='size-4' /> : <ClipboardCheck className='size-4' />}
-                  {auditOpen ? (t('Collapse') || '收起审计') : (t('Start audit') || '展开审计测试')}
+                  {auditOpen ? (
+                    <ChevronUp className='size-4' />
+                  ) : (
+                    <ClipboardCheck className='size-4' />
+                  )}
+                  {auditOpen
+                    ? t('Collapse') || '收起审计'
+                    : t('Start audit') || '展开审计测试'}
                 </Button>
                 {auditOpen && signedIn ? (
                   <AuditForm
@@ -252,8 +258,14 @@ export function ToolsPage() {
                   onClick={() => setSpeedOpen((value) => !value)}
                   disabled={!signedIn}
                 >
-                  {speedOpen ? <ChevronUp className='size-4' /> : <Gauge className='size-4' />}
-                  {speedOpen ? (t('Collapse') || '收起测速') : (t('Open speed test') || '展开速度测试')}
+                  {speedOpen ? (
+                    <ChevronUp className='size-4' />
+                  ) : (
+                    <Gauge className='size-4' />
+                  )}
+                  {speedOpen
+                    ? t('Collapse') || '收起测速'
+                    : t('Open speed test') || '展开速度测试'}
                 </Button>
                 {speedOpen && signedIn ? (
                   <SpeedForm
@@ -286,8 +298,14 @@ export function ToolsPage() {
                   onClick={() => setDilutionOpen((value) => !value)}
                   disabled={!signedIn}
                 >
-                  {dilutionOpen ? <ChevronUp className='size-4' /> : <FlaskConical className='size-4' />}
-                  {dilutionOpen ? (t('Collapse') || '收起掺水检测') : (t('Open substitution check') || '展开掺水检测')}
+                  {dilutionOpen ? (
+                    <ChevronUp className='size-4' />
+                  ) : (
+                    <FlaskConical className='size-4' />
+                  )}
+                  {dilutionOpen
+                    ? t('Collapse') || '收起掺水检测'
+                    : t('Open substitution check') || '展开掺水检测'}
                 </Button>
                 {dilutionOpen && signedIn ? (
                   <DilutionForm
@@ -323,8 +341,14 @@ export function ToolsPage() {
                     onClick={() => setCrowdtestOpen((value) => !value)}
                     disabled={!signedIn}
                   >
-                    {crowdtestOpen ? <ChevronUp className='size-4' /> : <Beaker className='size-4' />}
-                    {crowdtestOpen ? (t('Collapse') || '收起众测') : (t('Open crowdtest') || '展开众测')}
+                    {crowdtestOpen ? (
+                      <ChevronUp className='size-4' />
+                    ) : (
+                      <Beaker className='size-4' />
+                    )}
+                    {crowdtestOpen
+                      ? t('Collapse') || '收起众测'
+                      : t('Open crowdtest') || '展开众测'}
                   </Button>
                   <Button variant='outline' render={<Link to='/crowdtest' />}>
                     <ExternalLink className='size-3.5' />

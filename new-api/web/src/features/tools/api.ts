@@ -237,9 +237,13 @@ export async function listPublicCrowdtests(benchmark?: string) {
 }
 
 export async function createAuditRun(input: ProbeTargetInput) {
-  const res = await api.post<Envelope<AuditRun>>('/api/apigx/audit-runs', input, {
-    timeout: 180000, // 180s, backend audit timeout is 150s
-  })
+  const res = await api.post<Envelope<AuditRun>>(
+    '/api/apigx/audit-runs',
+    input,
+    {
+      timeout: 180000, // 180s, backend audit timeout is 150s
+    }
+  )
   return res.data
 }
 

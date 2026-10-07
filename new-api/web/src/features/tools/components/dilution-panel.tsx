@@ -76,7 +76,7 @@ const VENDOR_CN_MAP: Record<string, string> = {
   Anthropic: 'Anthropic',
   Moonshot: '月之暗面 (Kimi)',
   '智谱 / Z.ai': '智谱 AI (GLM)',
-  '阿里云百炼': '阿里云百炼 (通义千问)',
+  阿里云百炼: '阿里云百炼 (通义千问)',
   '小米 MiMo': '小米 MiMo',
 }
 
@@ -141,7 +141,9 @@ export function DilutionForm({
     return () => clearTimeout(timer)
   }, [targetSignature])
   const targetComplete =
-    source === PROBE_SOURCE_RELAY ? !!relayID : !!baseURL.trim() && !!manualKey.trim()
+    source === PROBE_SOURCE_RELAY
+      ? !!relayID
+      : !!baseURL.trim() && !!manualKey.trim()
   const targetReady = targetComplete && settledSignature === targetSignature
   const servedQuery = useQuery({
     queryKey: ['apigx-target-models', targetSignature],
@@ -158,27 +160,37 @@ export function DilutionForm({
 
   // 可选型号 = 有校准基准 ∩ 该中转真的提供，再按所选档位过滤。
   const vendorGroups = useMemo(() => {
-    const map = new Map<string, { id: string; name: string; request: string; ready_tiers: string[] }[]>()
+    const map = new Map<
+      string,
+      { id: string; name: string; request: string; ready_tiers: string[] }[]
+    >()
     for (const item of registryQuery.data ?? []) {
       if (item.baseline_state !== 'ready') {
         continue
       }
       const rawVendor = item.vendor || '其他'
       const vendor = VENDOR_CN_MAP[rawVendor] || rawVendor
-      if (!map.has(vendor)) {
-        map.set(vendor, [])
-      }
-      const names = item.request_names && item.request_names.length > 0 ? item.request_names : [item.id]
-      const readyTiers = item.ready_tiers && item.ready_tiers.length > 0 ? item.ready_tiers : []
+      const bucket = map.get(vendor) ?? []
+      const names =
+        item.request_names && item.request_names.length > 0
+          ? item.request_names
+          : [item.id]
+      const readyTiers =
+        item.ready_tiers && item.ready_tiers.length > 0 ? item.ready_tiers : []
       for (const req of names) {
-        const displayName = MODEL_CN_MAP[req] || MODEL_CN_MAP[item.id] || item.display_name || item.id
-        map.get(vendor)!.push({
+        const displayName =
+          MODEL_CN_MAP[req] ||
+          MODEL_CN_MAP[item.id] ||
+          item.display_name ||
+          item.id
+        bucket.push({
           id: `${item.id}-${req}`,
           name: displayName,
           request: req,
           ready_tiers: readyTiers,
         })
       }
+      map.set(vendor, bucket)
     }
     // 拿到了清单就取交集：有基准但这台中转不提供的名字，点了只会几百次全部失败。没拿到
     // （中转不支持 /models）时不清空列表，后端开跑前那一次探测会给出明确原因。
@@ -187,13 +199,14 @@ export function DilutionForm({
       served && served.length > 0
         ? new Set(served.map((name) => name.trim().toLowerCase()))
         : null
-    return Array.from(map.entries())
+    return [...map.entries()]
       .map(([vendor, models]) => ({
         vendor,
         models: models.filter(
           (m) =>
             m.ready_tiers.includes(selectedTier) &&
-            (servedSet === null || servedSet.has(m.request.trim().toLowerCase()))
+            (servedSet === null ||
+              servedSet.has(m.request.trim().toLowerCase()))
         ),
       }))
       .filter((group) => group.models.length > 0)
@@ -215,6 +228,22 @@ export function DilutionForm({
     }
   }, [form, selectableModels])
 
+  // 一句人话告诉用户「为什么这个能选／为什么现在一个都选不了」。读不到目标清单时不能假装
+  // 筛过了——列表此时只按基准过滤，真正兜底的是开跑前那一次预检。
+  let modelHint: string
+  if (targetReady && servedQuery.isFetching) {
+    modelHint = '正在读取该目标的型号清单…'
+  } else if (servedQuery.isError) {
+    modelHint =
+      '读不到该目标的型号清单（目标不提供 /v1/models，或请求过于频繁）。列表没能按它实际提供什么来过滤，开跑前仍会先用一次请求确认你选的这个型号在不在。'
+  } else if (selectableModels.length === 0) {
+    modelHint = targetReady
+      ? '这个中转没有提供「既有实测基准、又确实存在」的型号，换一个型号名或换一台目标再试。'
+      : '填好检测目标后，这里只会列出该目标确实提供、且我们采过基准的型号。'
+  } else {
+    modelHint = `按 ${selectedTier} 档可比对的型号有 ${selectableModels.length} 个；不在列表里的名字一律测不出结论，因为缺少同协议同档位的基准数据。`
+  }
+
   return (
     <Form {...form}>
       <form
@@ -228,7 +257,7 @@ export function DilutionForm({
           control={form.control}
           source={source}
           relays={relays}
-          hideModel={true}
+          hideModel
         />
 
         {/* 挡位与并发数配置 */}
@@ -243,7 +272,8 @@ export function DilutionForm({
                 <FormControl>
                   <NativeSelect className='w-full' {...field}>
                     <NativeSelectOption value='high'>
-                      {t('High / Accurate (Recommended)') || '高档 / 精准 (推荐)'}
+                      {t('High / Accurate (Recommended)') ||
+                        '高档 / 精准 (推荐)'}
                     </NativeSelectOption>
                     <NativeSelectOption value='medium'>
                       {t('Medium / Balanced') || '中档 / 平衡'}
@@ -277,13 +307,16 @@ export function DilutionForm({
                     {...field}
                     value={field.value ?? 2}
                     onChange={(e) => {
-                      const val = parseInt(e.target.value, 10)
-                      field.onChange(isNaN(val) ? 2 : Math.max(1, Math.min(8, val)))
+                      const val = Number.parseInt(e.target.value, 10)
+                      field.onChange(
+                        Number.isNaN(val) ? 2 : Math.max(1, Math.min(8, val))
+                      )
                     }}
                   />
                 </FormControl>
                 <FormDescription className='text-xs'>
-                  并发探针请求数（默认 2，建议 1～4；并发过高易触碰上游 429 限流）。
+                  并发探针请求数（默认 2，建议 1～4；并发过高易触碰上游 429
+                  限流）。
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -311,15 +344,7 @@ export function DilutionForm({
                   ))}
                 </NativeSelect>
               </FormControl>
-              <FormDescription className='text-xs'>
-                {targetReady && servedQuery.isFetching
-                  ? '正在读取该目标的型号清单…'
-                  : selectableModels.length === 0
-                    ? targetReady
-                      ? '这个中转没有提供「既有实测基准、又确实存在」的型号，换一个型号名或换一台目标再试。'
-                      : '填好检测目标后，这里只会列出该目标确实提供、且我们采过基准的型号。'
-                    : `按 ${selectedTier} 档可比对的型号有 ${selectableModels.length} 个；不在列表里的名字一律测不出结论，因为缺少同协议同档位的基准数据。`}
-              </FormDescription>
+              <FormDescription className='text-xs'>{modelHint}</FormDescription>
               <FormMessage />
             </FormItem>
           )}
@@ -330,10 +355,15 @@ export function DilutionForm({
           disabled={pending || selectableModels.length === 0}
           className='w-full sm:w-auto'
         >
-          {pending ? <Loader2 className='size-4 animate-spin' /> : <FlaskConical className='size-4' />}
+          {pending ? (
+            <Loader2 className='size-4 animate-spin' />
+          ) : (
+            <FlaskConical className='size-4' />
+          )}
           {pending
-            ? (t('Checking, up to 10 minutes') || '正在进行全项检测，至多需要数分钟...')
-            : (t('Run substitution check') || '开始掺水检测')}
+            ? t('Checking, up to 10 minutes') ||
+              '正在进行全项检测，至多需要数分钟...'
+            : t('Run substitution check') || '开始掺水检测'}
         </Button>
       </form>
     </Form>
@@ -372,21 +402,24 @@ function getVerdictBadge(verdict: DilutionVerdict) {
         label: '一致',
         variant: 'secondary' as const,
         icon: CheckCircle2,
-        badgeClass: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
+        badgeClass:
+          'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
       }
     case 'mismatch':
       return {
         label: '不一致',
         variant: 'destructive' as const,
         icon: XCircle,
-        badgeClass: 'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30',
+        badgeClass:
+          'bg-rose-500/15 text-rose-700 dark:text-rose-300 border-rose-500/30',
       }
     case 'suspect':
       return {
         label: '待复核',
         variant: 'outline' as const,
         icon: AlertTriangle,
-        badgeClass: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
+        badgeClass:
+          'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/30',
       }
     case 'inconclusive':
     default:
@@ -422,7 +455,11 @@ function AuthenticityRing({
     strokeColor = 'text-rose-500 stroke-rose-500'
     ringBg = 'stroke-rose-500/15'
     textColor = 'text-rose-600 dark:text-rose-400'
-  } else if (verdict === 'suspect' || verdict === 'inconclusive' || clamped < 80) {
+  } else if (
+    verdict === 'suspect' ||
+    verdict === 'inconclusive' ||
+    clamped < 80
+  ) {
     strokeColor = 'text-amber-500 stroke-amber-500'
     ringBg = 'stroke-amber-500/15'
     textColor = 'text-amber-600 dark:text-amber-400'
@@ -452,10 +489,12 @@ function AuthenticityRing({
         />
       </svg>
       <div className='absolute flex flex-col items-center justify-center text-center'>
-        <span className={`text-xl sm:text-2xl font-bold tracking-tight ${textColor} tabular-nums`}>
+        <span
+          className={`text-xl font-bold tracking-tight sm:text-2xl ${textColor} tabular-nums`}
+        >
           {clamped}%
         </span>
-        <span className='text-[10px] sm:text-xs text-muted-foreground font-medium'>
+        <span className='text-muted-foreground text-[10px] font-medium sm:text-xs'>
           真实性
         </span>
       </div>
@@ -479,31 +518,39 @@ export function DilutionResult({ report }: { report: DilutionReport }) {
   }
 
   return (
-    <div className='space-y-4 rounded-xl border bg-card p-4 sm:p-5 shadow-sm'>
+    <div className='bg-card space-y-4 rounded-xl border p-4 shadow-sm sm:p-5'>
       {/* 真实性百分比圆环 + 综合结论 */}
-      <div className='flex flex-col sm:flex-row items-center gap-4 sm:gap-6 border-b pb-4'>
+      <div className='flex flex-col items-center gap-4 border-b pb-4 sm:flex-row sm:gap-6'>
         <AuthenticityRing score={report.score} verdict={report.verdict} />
 
-        <div className='flex flex-1 flex-col items-center sm:items-start text-center sm:text-left gap-1.5'>
-          <div className='flex flex-wrap items-center justify-center sm:justify-start gap-2'>
-            <Badge variant='outline' className='font-mono font-medium text-xs px-2.5 py-0.5'>
+        <div className='flex flex-1 flex-col items-center gap-1.5 text-center sm:items-start sm:text-left'>
+          <div className='flex flex-wrap items-center justify-center gap-2 sm:justify-start'>
+            <Badge
+              variant='outline'
+              className='px-2.5 py-0.5 font-mono text-xs font-medium'
+            >
               {report.model}
             </Badge>
-            <Badge variant={overall.variant} className={`gap-1 px-2.5 py-0.5 text-xs font-semibold ${overall.badgeClass}`}>
+            <Badge
+              variant={overall.variant}
+              className={`gap-1 px-2.5 py-0.5 text-xs font-semibold ${overall.badgeClass}`}
+            >
               <overall.icon className='size-3.5' />
               {overallTitle}
             </Badge>
           </div>
 
-          <p className='text-xs text-muted-foreground mt-0.5'>
+          <p className='text-muted-foreground mt-0.5 text-xs'>
             {report.family
               ? `对照 ${report.family} 官方公开特征与基线比对`
               : '对照所声称型号特征与指纹基线比对'}
           </p>
 
-          <div className='flex items-center gap-3 text-xs text-muted-foreground'>
-            <span className='font-medium text-foreground'>
-              综合一致性得分: <span className='tabular-nums font-semibold'>{report.score}</span> / 100
+          <div className='text-muted-foreground flex items-center gap-3 text-xs'>
+            <span className='text-foreground font-medium'>
+              综合一致性得分:{' '}
+              <span className='font-semibold tabular-nums'>{report.score}</span>{' '}
+              / 100
             </span>
           </div>
         </div>
@@ -511,8 +558,10 @@ export function DilutionResult({ report }: { report: DilutionReport }) {
 
       {/* 8 个维度矩阵：紧凑栅格，只展示真实性与状态，无底下小字 */}
       <div className='space-y-2'>
-        <div className='flex items-center justify-between text-xs text-muted-foreground px-0.5'>
-          <span className='font-medium text-foreground'>多维特征核验 (8项)</span>
+        <div className='text-muted-foreground flex items-center justify-between px-0.5 text-xs'>
+          <span className='text-foreground font-medium'>
+            多维特征核验 (8项)
+          </span>
           <span>状态核验</span>
         </div>
 
@@ -525,17 +574,27 @@ export function DilutionResult({ report }: { report: DilutionReport }) {
             return (
               <div
                 key={finding.id}
-                title={finding.evidence ? `${finding.name}: ${finding.evidence}` : finding.name}
-                className='flex flex-col justify-between rounded-lg border bg-muted/10 p-2.5 transition-colors hover:bg-muted/20 cursor-default'
+                title={
+                  finding.evidence
+                    ? `${finding.name}: ${finding.evidence}`
+                    : finding.name
+                }
+                className='bg-muted/10 hover:bg-muted/20 flex cursor-default flex-col justify-between rounded-lg border p-2.5 transition-colors'
               >
                 <div className='flex items-center gap-1.5 text-xs'>
-                  <Icon className='size-3.5 shrink-0 text-muted-foreground' />
-                  <span className='truncate font-medium text-foreground' title={finding.name}>
+                  <Icon className='text-muted-foreground size-3.5 shrink-0' />
+                  <span
+                    className='text-foreground truncate font-medium'
+                    title={finding.name}
+                  >
                     {meta.title}
                   </span>
                 </div>
                 <div className='mt-2.5 flex items-center justify-end'>
-                  <Badge variant={tone.variant} className={`text-[11px] px-1.5 py-0.5 gap-1 ${tone.badgeClass}`}>
+                  <Badge
+                    variant={tone.variant}
+                    className={`gap-1 px-1.5 py-0.5 text-[11px] ${tone.badgeClass}`}
+                  >
                     <tone.icon className='size-3' />
                     {t(tone.label)}
                   </Badge>

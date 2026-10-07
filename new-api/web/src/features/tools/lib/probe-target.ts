@@ -101,7 +101,9 @@ export function probeTargetSchema(t: (key: string) => string) {
 export function toProbeTarget(values: ProbeTargetValues): ProbeTargetInput {
   const extra = {
     ...(values.tier ? { tier: values.tier } : {}),
-    ...(typeof values.concurrency === 'number' ? { concurrency: values.concurrency } : {}),
+    ...(typeof values.concurrency === 'number'
+      ? { concurrency: values.concurrency }
+      : {}),
   }
   if (values.source === PROBE_SOURCE_RELAY) {
     return {

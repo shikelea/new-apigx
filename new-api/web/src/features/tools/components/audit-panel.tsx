@@ -81,7 +81,9 @@ export function AuditForm({
       <form
         noValidate
         className='bg-muted/20 grid gap-3 rounded-lg border p-3'
-        onSubmit={form.handleSubmit((values) => onSubmit(toProbeTarget(values)))}
+        onSubmit={form.handleSubmit((values) =>
+          onSubmit(toProbeTarget(values))
+        )}
       >
         <ProbeTargetFields
           control={form.control}
