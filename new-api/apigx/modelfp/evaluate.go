@@ -52,6 +52,9 @@ type Observations struct {
 	// 型号指纹：每道探针题的答案计数（probe ID -> 归一化答案 -> 次数），由 probes.go 的
 	// 题集重复采样得到。判定走 evidence.go 的 Dirichlet-multinomial 证据比较。
 	ProbeAnswers map[string]ProbeCounts
+	// Meow 非空时，型号指纹维度完全改用 meow-llm-detector 官方基准包判定（见 meow.go），
+	// ProbeAnswers 不再参与。
+	Meow *MeowObservation
 	// 逻辑稳定性：同一道题重复问的答案。
 	LogicAnswers []string
 	LogicCorrect string
@@ -79,6 +82,11 @@ func Evaluate(model string, obs Observations) Report {
 	report := Report{Model: model, Family: profile.Family, Disclaimer: Disclaimer}
 	if !known {
 		report.Family = "未知型号"
+		// 没有公开特征表、但 Meow 基准包收录了该型号时，标题用包里的型号名；
+		// 协议字段、推理强度等依赖公开特征的维度仍按「无法识别」处理。
+		if name := MeowDisplayName(model); name != "" {
+			report.Family = name
+		}
 	}
 	byID := map[string]Finding{
 		DimProtocol:    evaluateProtocol(profile, known, obs),
@@ -146,6 +154,10 @@ func evaluateKnowledge(profile Profile, known bool, obs Observations) Finding {
 	if !known || profile.KnowledgeCutoffYear == 0 {
 		return Finding{Verdict: VerdictInconclusive, Evidence: "该型号没有可核对的公开知识截止时间"}
 	}
+	// 一次都没答上（正文被截断、请求全失败）时不能报「未见明显偏离」：那是拿没数据当数据。
+	if obs.ClaimedCutoffYear == 0 && obs.FutureEventProbes == 0 {
+		return Finding{Verdict: VerdictInconclusive, Evidence: "未采集到可用的知识时效回答"}
+	}
 	notes := make([]string, 0, 2)
 	verdict := VerdictMatch
 	if obs.ClaimedCutoffYear > 0 {
@@ -179,6 +191,9 @@ func evaluateKnowledge(profile Profile, known bool, obs Observations) Finding {
 //
 // 这一维只在有实测基准时才工作。没测过基准就明确说没有，不拿空基准硬算。
 func evaluateFingerprint(model string, obs Observations) Finding {
+	if obs.Meow != nil {
+		return evaluateMeowFingerprint(*obs.Meow)
+	}
 	if len(obs.ProbeAnswers) == 0 {
 		return Finding{Verdict: VerdictInconclusive, Evidence: "未采集到探针答案，无法做分布指纹"}
 	}
@@ -278,6 +293,12 @@ func evaluateReasoning(profile Profile, known bool, obs Observations) Finding {
 		return Finding{Verdict: VerdictInconclusive, Evidence: "未采集到 usage，无法评估推理强度"}
 	}
 	switch {
+	case profile.ReasoningOptional:
+		// 混合推理型号：有推理开销属正常，没有也不能反证，因为思维链常被折叠掉。
+		if obs.ReasoningTokens > 0 {
+			return Finding{Verdict: VerdictMatch, Evidence: fmt.Sprintf("可推理型号，reasoning_tokens=%d 属正常上报", obs.ReasoningTokens)}
+		}
+		return Finding{Verdict: VerdictInconclusive, Evidence: "可推理型号本次未见推理开销，两个方向都不作为判据"}
 	case profile.Reasoning && !obs.ReasoningPresent:
 		return Finding{Verdict: VerdictMismatch, Evidence: "推理型号应返回 reasoning_tokens，实际缺失，后端可能不是推理模型"}
 	case profile.Reasoning && obs.ReasoningTokens == 0:

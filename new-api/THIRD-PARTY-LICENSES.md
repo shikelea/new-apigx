@@ -145,6 +145,24 @@ Transitive dependencies should be audited before a final external release.
 | electron    | development | npm       | `electron`                                            | `39.8.5`                             | MIT                                                |
 | electron    | development | npm       | `electron-builder`                                    | `26.7.0`                             | MIT                                                |
 
+## Bundled Data Sets
+
+Not code dependencies, but they ship inside the binary the same way, so they are registered here.
+
+| Area   | Scope     | Ecosystem   | Data set                                              | Version                                | License                   |
+|--------|-----------|-------------|-------------------------------------------------------|----------------------------------------|---------------------------|
+| backend | embedded | JSON (go:embed) | `meow-llm-detector` official baseline packages (`apigx/modelfp/meowdata/meow-*.meow.json`) | `4.5.4-chat.20260924.1`, `4.5.4-chat.20260924.2`, `4.5.4-predictive.20260924.1`, `4.5.4-predictive.20260924.2` | PolyForm-Noncommercial-1.0.0 |
+| backend | embedded | JSON (go:embed) | self-collected baseline packages (`apigx/modelfp/meowdata/{ab763b91fa29b8a6,f44a29d558ce6899}*`) | `0.1.0-formal-main` | Project-owned, measured through the relay |
+
+The four `meow-*` packages are the reference project's published GPT and Claude
+behavioural baselines (author `chen-006`, declared in each file's `metadata.license`).
+They are used only as comparison data by the model fingerprint dimension. Because
+PolyForm-Noncommercial permits distribution only for noncommercial purposes, a build
+that ships these files must stay noncommercial, or the packages must be replaced with
+self-collected equivalents (the CLI is `cmd/fingerprint`) before any commercial release.
+The self-collected packages cover the DeepSeek, Qwen, GLM and Kimi request names and
+carry no third-party restriction.
+
 ## License Texts
 
 ### Apache-2.0
@@ -307,6 +325,16 @@ https://openfontlicense.org/open-font-license-official-text/
 
 When distributing font files, preserve the OFL license text, copyright notices,
 and reserved font name restrictions supplied by the upstream font project.
+
+### PolyForm-Noncommercial-1.0.0
+
+PolyForm Noncommercial License 1.0.0
+
+Applies to the bundled baseline data listed under Bundled Data Sets. The license grants
+use, reproduction and distribution only for noncommercial purposes, and requires that the
+license text and copyright notices stay with any copy or derivative of the data. The full
+license text is available at:
+https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 ### Proprietary/Internal - owned by project maintainer
 

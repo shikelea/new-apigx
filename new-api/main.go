@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/QuantumNous/new-api/apigx/modelfp"
 	apigxstartup "github.com/QuantumNous/new-api/apigx/startup"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -380,6 +381,15 @@ func InitResources() error {
 	}
 
 	service.StartAuthArtifactCleanup()
+
+	// Load the embedded meow-llm-detector baseline packages up front so a corrupt
+	// package shows up in the startup log. Fingerprinting is optional: on failure the
+	// dilution test falls back to its legacy probes instead of blocking startup.
+	if err := modelfp.LoadMeowPackages(); err != nil {
+		common.SysError("failed to initialize model fingerprint baselines: " + err.Error())
+	} else {
+		common.SysLog("model fingerprint baselines initialized")
+	}
 
 	return nil
 }

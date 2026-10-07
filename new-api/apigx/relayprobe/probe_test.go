@@ -530,6 +530,27 @@ func TestRunDilutionTestFlagsSubstitutedRelay(t *testing.T) {
 	assert.Less(t, report.Score, 70)
 }
 
+// 推理型上游把整个预算花在思维链上、正文为空时，不能把它当成「答错」判成掺水。
+// 2026-10-04 实测到一个诚实中转的真实形态：结构约束 0/2、指令层级 0/2、逻辑题三连空，
+// 旧代码据此给出总体 mismatch。现在这些维度只能是证据不足。
+func TestRunDilutionTestTreatsTruncatedRepliesAsInconclusive(t *testing.T) {
+	server := httptest.NewServer(&fakeRelay{honest: true, reasoning: true, model: "deepseek-chat"})
+	t.Cleanup(server.Close)
+	report, err := runDilutionTest(context.Background(), auditTarget{client: server.Client(), base: server.URL, key: testRelayKey, model: "deepseek-chat"})
+	require.NoError(t, err)
+	byID := make(map[string]modelfp.Finding, len(report.Findings))
+	for _, finding := range report.Findings {
+		byID[finding.ID] = finding
+	}
+	for _, id := range []string{modelfp.DimLogic, modelfp.DimStructure, modelfp.DimHierarchy, modelfp.DimKnowledge, modelfp.DimFingerprint, modelfp.DimStreaming} {
+		assert.Equal(t, modelfp.VerdictInconclusive, byID[id].Verdict, id+"："+byID[id].Evidence)
+	}
+	for _, finding := range report.Findings {
+		assert.NotEqual(t, modelfp.VerdictMismatch, finding.Verdict, finding.ID+"："+finding.Evidence)
+	}
+	assert.Equal(t, modelfp.VerdictInconclusive, report.Verdict, "得分 %d 不应来自被截断的空正文", report.Score)
+}
+
 // 结构约束判定必须是严格的：字段缺失、枚举错、数组长度不对都算不达标。
 func TestStructureComplianceIsStrict(t *testing.T) {
 	assert.True(t, structureCompliant(`{"city":"Lyon","population":513275,"tier":"b","tags":["a","b"]}`))
@@ -552,6 +573,26 @@ func TestHierarchyComplianceChecksHighestPriorityRuleOnly(t *testing.T) {
 	assert.True(t, hierarchyCompliant("  Blue <<END>>\n"))
 	assert.False(t, hierarchyCompliant("Blue"))
 	assert.False(t, hierarchyCompliant("<<END>> Blue"))
+}
+
+// 逻辑题只认「独立整数」：复述题面里的 1.10、0.05 不是答案，写过程的回复把结论放在末尾。
+func TestLogicAnswerNumberIgnoresDecimalFragments(t *testing.T) {
+	for _, tc := range []struct{ content, want string }{
+		{"5", "5"},
+		{"5 cents", "5"},
+		{"The ball costs 5.", "5"},
+		{"Ball: 5, bat: 1.05", "5"},
+		{"x + (x+1) = 1.10, so x = 0.05 → 5", "5"},
+		{"10 cents", "10"},
+		{"founded in 1992, ball costs 5", "5"},
+		{"$0.05; total is 1.10", ""},
+		{"Let x be the ball: 2x = 0.10 → x = 0.05 dollars", "2"},
+		{"The answer is five cents", ""},
+		{"", ""},
+		{".05", ""},
+	} {
+		assert.Equal(t, tc.want, logicAnswerNumber(tc.content), tc.content)
+	}
 }
 
 // reasoning_tokens 既可能嵌在 completion_tokens_details 里，也可能平铺在顶层。
@@ -762,4 +803,42 @@ func TestBenchmarksTreatTruncatedRepliesAsInconclusive(t *testing.T) {
 		assert.Zero(t, report.Score, benchmark)
 		assert.Contains(t, report.Evidence, "截断", benchmark)
 	}
+}
+
+// 上游回 Retry-After 时必须照它等：2026-10-04 实测中转限流回的是 18 秒，而退避上限只有
+// 2 秒，每次重试都撞回同一个窗口，340 格的基准包丢四成样本。
+func TestWithRetryAfterHonoursUpstreamHint(t *testing.T) {
+	responseWith := func(value string) *chatResponse {
+		header := http.Header{}
+		if value != "" {
+			header.Set("Retry-After", value)
+		}
+		return &chatResponse{HTTPStatus: http.StatusTooManyRequests, Header: header}
+	}
+
+	assert.Equal(t, 2*time.Second, withRetryAfter(nil, 2*time.Second))
+	assert.Equal(t, 2*time.Second, withRetryAfter(responseWith(""), 2*time.Second))
+	assert.Equal(t, 18*time.Second, withRetryAfter(responseWith("18"), 2*time.Second))
+	// 上游给的比我们的退避还短时，取较大的退避，不缩短。
+	assert.Equal(t, 2*time.Second, withRetryAfter(responseWith("1"), 2*time.Second))
+	// 离谱的等待掐到上限，不能让一格把整条检测的预算睡光。
+	assert.Equal(t, retryAfterCeiling, withRetryAfter(responseWith("3600"), 2*time.Second))
+	// 非法值一律退回调用方的退避。
+	for _, raw := range []string{"-5", "0.5", "later", "\r\n injected"} {
+		assert.Equal(t, 2*time.Second, withRetryAfter(responseWith(raw), 2*time.Second), raw)
+	}
+
+	// HTTP-date 形式按距今的差值算，已经过去的时间点退回退避。
+	future := time.Now().Add(9 * time.Second).UTC().Format(http.TimeFormat)
+	assert.Greater(t, withRetryAfter(responseWith(future), 2*time.Second), 2*time.Second)
+	past := time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat)
+	assert.Equal(t, 2*time.Second, withRetryAfter(responseWith(past), 2*time.Second))
+}
+
+// 指数退避要封顶：移位不设界时 attempt 一大就溢出成 0，反而越试越快。
+func TestExponentialBackoffStaysBounded(t *testing.T) {
+	assert.Equal(t, time.Second, exponentialBackoff(0, time.Second, 2*time.Second))
+	assert.Equal(t, 2*time.Second, exponentialBackoff(3, time.Second, 2*time.Second))
+	assert.Equal(t, 6*time.Second, exponentialBackoff(3, 2*time.Second, 6*time.Second))
+	assert.Greater(t, exponentialBackoff(64, time.Second, 2*time.Second), time.Duration(0))
 }

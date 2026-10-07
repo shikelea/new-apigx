@@ -1,6 +1,7 @@
 package modelfp
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -45,12 +46,17 @@ type RegistryEntry struct {
 	// RequestNames 是常见的实际请求名。中转各家命名不一，这里只作为选择器的提示，
 	// 不参与判定：请求名由中转自己决定，天然不可信。
 	RequestNames []string `json:"request_names"`
-	// Profile 是确定性可核对事实。
+	// Profile 只随收录项一起展示，不参与判定：判定用的公开特征一律来自 profile.go 的
+	// profiles 表（Evaluate 走 LookupProfile，按实际请求名匹配）。在这里改这个字段不会
+	// 改变任何结论，两张表不一致时以 profiles 为准。
 	Profile Profile `json:"-"`
 	// BaselineState 是基准状态。
 	BaselineState string `json:"baseline_state"`
 	// BaselineMeta 仅在 BaselineStateReady 时有意义。
 	BaselineMeta BaselineMeta `json:"baseline_meta"`
+	// ReadyTiers 记录该型号已通过校准的档位（"low", "medium", "high"）。
+	// 前端据此做档位联动，未校准该档位的型号不在此档位下列出。
+	ReadyTiers []string `json:"ready_tiers,omitempty"`
 	// Baseline 是各题的实测答案分布，probe ID -> 答案计数。
 	Baseline map[string]ProbeCounts `json:"-"`
 	// Threshold 是给出强指向所需的最低 Confidence。基准越稀疏应当越保守。
@@ -111,29 +117,50 @@ var registry = []RegistryEntry{
 		RequestNames: []string{"deepseek-chat", "deepseek-v3"},
 		Profile: Profile{
 			Family: "DeepSeek V3", Hints: []string{"deepseek-chat", "deepseek-v3"},
-			IDPrefix: "chatcmpl-",
+		},
+		BaselineState: BaselineStatePending,
+	},
+	{
+		// 2026-09-28 那份分布原本记在 deepseek-chat 上，但采集时的请求名是 deepseek-flash，
+		// 也就是 flash 型号（正式名 deepseek-v4.1-flash），不是 V3。基准挂错型号会让所有
+		// 声称 deepseek-chat 的链路拿 flash 的偏好做参照，所以按真实型号重新归属。
+		//
+		// 请求名 deepseek-flash 归 Meow 基准包那条收录项（已校准、题量更大），这里刻意不
+		// 抢同一个名字，避免反查时两条互相遮蔽。
+		//
+		// 基准的时效要如实标注：它是 2026-09-28 在 max_tokens=32 下采的。2026-10-04 从同
+		// 一入口重测，32 的预算已采不到任何正文（该入口改为先输出思维链），512 预算下取到
+		// 的 179 份有效答案里 pick_letter / pick_weekday / pick_from_list 三题分布明显漂
+		// 移，整体判给「未建模来源」。所以这份只能当作当时的快照，重测落库前不宜视为权威。
+		//
+		// 响应 id 前缀不写：profile.go 对 DeepSeek 族刻意留空，实测到的 id 是 48 位十六进
+		// 制而非 chatcmpl-，没有依据断言任何一种前缀。
+		ID: "deepseek-v4.1-flash", DisplayName: "DeepSeek V4.1 Flash", Vendor: "DeepSeek",
+		RequestNames: []string{"deepseek-v4.1-flash"},
+		Profile: Profile{
+			Family: "DeepSeek V4.1 Flash", Hints: []string{"deepseek-v4.1-flash"},
 		},
 		BaselineState: BaselineStateReady,
 		BaselineMeta: BaselineMeta{
 			MeasuredAt:      "2026-09-28",
-			Source:          "官方 API",
+			Source:          "官方 API（经中转直连）",
 			SamplesPerProbe: 30,
 		},
 		Baseline: map[string]ProbeCounts{
-			"pick_color": {
+			ProbeColorPick: {
 				"blue": 29,
 				"red":  1,
 			},
-			"pick_from_list": {
+			ProbeListPosition: {
 				"charlie": 3,
 				"delta":   14,
 				"echo":    3,
 				"golf":    10,
 			},
-			"pick_fruit": {
+			ProbeFruitPick: {
 				"apple": 30,
 			},
-			"pick_integer_17_83": {
+			ProbeIntegerPick: {
 				"26": 1,
 				"41": 1,
 				"42": 19,
@@ -145,15 +172,16 @@ var registry = []RegistryEntry{
 				"53": 3,
 				"57": 1,
 			},
-			"pick_letter": {
+			ProbeLetterPick: {
 				"j": 1,
 				"k": 8,
 				"m": 3,
 				"q": 16,
 				"r": 2,
 			},
-			"pick_weekday": {
-				"":          1,
+			// 30 次里有 1 次返回空内容。实时采集丢弃空答案（见 collectLegacyProbes），
+			// 基准也必须丢，否则这里会多出一个观测侧永远打不中的类目，稀释该题的先验。
+			ProbeWeekdayPick: {
 				"thursday":  2,
 				"tuesday":   6,
 				"wednesday": 21,
@@ -165,7 +193,7 @@ var registry = []RegistryEntry{
 		RequestNames: []string{"deepseek-reasoner", "deepseek-r1"},
 		Profile: Profile{
 			Family: "DeepSeek R1", Hints: []string{"deepseek-reasoner", "deepseek-r1"},
-			IDPrefix: "chatcmpl-", Reasoning: true,
+			Reasoning: true,
 		},
 		BaselineState: BaselineStatePending,
 	},
@@ -211,8 +239,7 @@ var registry = []RegistryEntry{
 
 // Registry 返回收录名单的副本，按厂商与展示名排序，供接口与前端选择器使用。
 func Registry() []RegistryEntry {
-	out := make([]RegistryEntry, len(registry))
-	copy(out, registry)
+	out := allRegistry()
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Vendor == out[j].Vendor {
 			return out[i].DisplayName < out[j].DisplayName
@@ -224,7 +251,7 @@ func Registry() []RegistryEntry {
 
 // LookupRegistry 按内部 ID 精确查收录项。
 func LookupRegistry(id string) (RegistryEntry, bool) {
-	for _, entry := range registry {
+	for _, entry := range allRegistry() {
 		if entry.ID == id {
 			return entry, true
 		}
@@ -243,7 +270,7 @@ func ResolveRequestName(name string) (RegistryEntry, bool) {
 		return RegistryEntry{}, false
 	}
 	best, found, bestLen := RegistryEntry{}, false, 0
-	for _, entry := range registry {
+	for _, entry := range allRegistry() {
 		for _, candidate := range entry.RequestNames {
 			lowered := strings.ToLower(candidate)
 			if id != lowered && !strings.HasPrefix(id, lowered) {
@@ -288,7 +315,113 @@ func fingerprintCandidates() []Candidate {
 
 // BaselineReady 报告当前是否已有足够基准做分布指纹（至少两个已建模型号才谈得上比对）。
 func BaselineReady() bool {
-	return len(fingerprintCandidates()) >= 3
+	return len(loadedMeowPackages()) > 0 || len(fingerprintCandidates()) >= 3
+}
+
+// allRegistry 是手写收录名单加上由 Meow 基准包生成的收录项。
+func allRegistry() []RegistryEntry {
+	out := make([]RegistryEntry, 0, len(registry)+10)
+	out = append(out, registry...)
+	return append(out, meowRegistryEntries()...)
+}
+
+// meowRegistryEntries 从基准包直接生成收录项：型号 ID、请求名、实测日期、每题实测
+// 份数全部取自包本身，不手写，避免和基准脱节。确定性事实（id 前缀、截止年份等）包里
+// 没有，留给 profile.go 按型号名匹配。
+//
+// 同一型号可能同时出现在原生包和 Chat 兼容包里，这里按型号 ID 合并成一条，来源列出全部包。
+// 只有收录它的包里至少有一个档位通过校准，才标为 ready；否则仍按基准包采样，但评分
+// 只会给出「未校准、证据不足」，收录状态如实标为 pending。
+func meowRegistryEntries() []RegistryEntry {
+	entries := []RegistryEntry{}
+	index := map[string]int{}
+	for _, pkg := range loadedMeowPackages() {
+		measured := pkg.Metadata.CreatedAt
+		if len(measured) >= 10 {
+			measured = measured[:10]
+		}
+		source := meowSourceLabel(pkg)
+		calibrated := pkg.hasCalibratedTier()
+		var pkgReadyTiers []string
+		for _, t := range meowTierOrder {
+			if pkg.calibrated[t] {
+				pkgReadyTiers = append(pkgReadyTiers, t)
+			}
+		}
+		for _, model := range pkg.Models {
+			if model.ReferenceOnly || model.ID == MeowOtherID {
+				continue
+			}
+			samples := 0
+			for _, cell := range pkg.Fitted.Cells {
+				if n := cell.SourceSamples[model.ID]; samples == 0 || n < samples {
+					samples = n
+				}
+			}
+			if at, ok := index[model.ID]; ok {
+				if calibrated {
+					entries[at].BaselineState = BaselineStateReady
+				}
+				for _, t := range pkgReadyTiers {
+					if !slices.Contains(entries[at].ReadyTiers, t) {
+						entries[at].ReadyTiers = append(entries[at].ReadyTiers, t)
+					}
+				}
+				meta := &entries[at].BaselineMeta
+				if !strings.Contains(meta.Source, source) {
+					meta.Source += "、" + source
+				}
+				if measured > meta.MeasuredAt {
+					meta.MeasuredAt = measured
+				}
+				if samples > 0 && (meta.SamplesPerProbe == 0 || samples < meta.SamplesPerProbe) {
+					meta.SamplesPerProbe = samples
+				}
+				continue
+			}
+			state := BaselineStatePending
+			if calibrated {
+				state = BaselineStateReady
+			}
+			index[model.ID] = len(entries)
+			entries = append(entries, RegistryEntry{
+				ID: model.ID, DisplayName: model.Name, Vendor: meowVendor(model),
+				RequestNames:  []string{model.ID},
+				BaselineState: state,
+				BaselineMeta: BaselineMeta{MeasuredAt: measured,
+					Source: source, SamplesPerProbe: samples},
+				ReadyTiers: slices.Clone(pkgReadyTiers),
+			})
+		}
+	}
+	return entries
+}
+
+// meowSourceLabel 写明基准出处，所有嵌入包都是官方基准。
+func meowSourceLabel(pkg *meowPackage) string {
+	return "meow-llm-detector 官方基准 " + pkg.ID + " " + pkg.Version
+}
+
+// meowVendor 先看 request_model 的「vendor/」前缀，再按型号 ID 的系列前缀猜厂商。
+func meowVendor(model meowModel) string {
+	prefixes := map[string]string{"openai": "OpenAI", "anthropic": "Anthropic"}
+	if slash := strings.Index(model.RequestModel, "/"); slash > 0 {
+		if name, ok := prefixes[model.RequestModel[:slash]]; ok {
+			return name
+		}
+	}
+	families := []struct{ prefix, vendor string }{
+		// 与上面手写收录名单的厂商写法保持一致。
+		{"gpt-", "OpenAI"}, {"claude-", "Anthropic"}, {"qwen", "阿里云百炼"}, {"deepseek", "DeepSeek"},
+		{"glm-", "智谱 / Z.ai"}, {"mimo-", "小米 MiMo"}, {"kimi-", "Moonshot"},
+	}
+	id := strings.ToLower(model.ID)
+	for _, family := range families {
+		if strings.HasPrefix(id, family.prefix) {
+			return family.vendor
+		}
+	}
+	return "Meow"
 }
 
 func thresholdFor(entry RegistryEntry) float64 {

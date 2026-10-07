@@ -60,6 +60,10 @@ type Profile struct {
 	KnowledgeCutoffYear int
 	// Reasoning 表示这是推理型号，usage 里应当出现 reasoning_tokens。
 	Reasoning bool
+	// ReasoningOptional 表示该型号自己决定要不要推理（混合推理 / 自适应思维链）。这类型
+	// 号上报 reasoning_tokens 是常态，不上报也可能是把思维链折叠了，所以两个方向都不作为
+	// 掺水证据：命中时推理强度维度只在「有推理开销」时记相符，缺失时记证据不足。
+	ReasoningOptional bool
 	// TokenizerFamily 标记分词器族，用于解释 prompt_tokens 的量级差异。
 	TokenizerFamily string
 }
@@ -103,10 +107,44 @@ var profiles = []Profile{
 	{
 		Family: "Google Gemini", Hints: []string{"gemini"}, KnowledgeCutoffYear: 2024,
 	},
+	// R1 必须单独一条：判定用的是这里的 Reasoning，而不是收录表里那条（那里的 Profile
+	// 只用于展示，不参与计算）。少了这一条，deepseek-reasoner 会落到下面的通用 DeepSeek，
+	// 两个方向全错——诚实的 R1 中转因为返回 reasoning_tokens 被判「可能换成了推理模型」，
+	// 而把 R1 换成 V3 的中转因为「无推理开销」被判与该型号相符。
 	{
-		Family: "DeepSeek", Hints: []string{"deepseek"}, IDPrefix: "chatcmpl-", KnowledgeCutoffYear: 2024,
+		Family: "DeepSeek R1", Hints: []string{"deepseek-reasoner", "deepseek-r1"},
+		KnowledgeCutoffYear: 2024, Reasoning: true,
+	},
+	// v4 系（现役请求名 deepseek-flash，正式名 deepseek-v4.1-flash；官方文档说旧名
+	// deepseek-v4-flash 已下线，请求由 V4.1-Flash 承接）是可按需推理的型号：2026-10-04 从
+	// 官方入口（经中转）实测，同一道 Meow 题连采 12 次全部正常结束，每次都带
+	// reasoning_tokens=47～106。把它留在下面的通用 DeepSeek 条目里（Reasoning 为 false），
+	// 诚实的中转会因为「非推理型号却返回 reasoning_tokens」被判可能换成了推理模型——正是
+	// 最容易误伤正常链路的一条指控。
+	//
+	// 用 ReasoningOptional 而不是 Reasoning：第三方口径把 V4.1-Flash 记为 reasoning-focused，
+	// 但它同时接受 reasoning_effort 调节，中转也可能不支持该参数（采集端会退化成缺省强度），
+	// 这时「没有推理开销」是正常配置而不是换模型的证据。deepseek-v4-pro 会经
+	// 「deepseek-v4」提示落到同一条——目前只有 flash 的实测依据，但按「宁可少指控」的方向，
+	// 把整条 v4 线都当可推理是安全的一侧。
+	//
+	// 知识截止年份留空：2026-10-07 查过官方 API 文档（api-docs.deepseek.com）与各模型页，
+	// 都没有公布 v4 系的训练数据截止时间。没有出处就不要填年份，否则知识维度会拿猜的数字
+	// 去判 suspect。
+	{
+		Family: "DeepSeek V4", Hints: []string{"deepseek-flash", "deepseek-v4"},
+		ReasoningOptional: true,
+	},
+	{
+		// 不声明 IDPrefix：官方返回 chatcmpl- 开头的 id，但中转改写 id 很常见，断言前缀只会
+		// 把正常链路判成协议字段不符。
+		Family: "DeepSeek", Hints: []string{"deepseek"}, KnowledgeCutoffYear: 2024,
 	},
 }
+
+// containsHintFloor 是「允许按包含匹配」的最短提示长度。o1、o3 这类两字提示一旦允许
+// 包含匹配，任何恰好连着这两个字符的型号名都会被认成 o 系推理，所以短提示只按前缀匹配。
+const containsHintFloor = 5
 
 // LookupProfile 从模型 ID 推断公开特征；无法识别时返回 false，调用方应把相关维度
 // 记为证据不足而不是失败。
@@ -115,25 +153,20 @@ func LookupProfile(model string) (Profile, bool) {
 	if slash := strings.LastIndex(id, "/"); slash >= 0 {
 		id = id[slash+1:]
 	}
-	best, found := Profile{}, false
+	best, found, bestLen := Profile{}, false, 0
 	for _, profile := range profiles {
 		for _, hint := range profile.Hints {
-			if !strings.HasPrefix(id, hint) && !strings.Contains(id, hint) {
+			matched := strings.HasPrefix(id, hint) ||
+				(len(hint) >= containsHintFloor && strings.Contains(id, hint))
+			if !matched {
 				continue
 			}
-			// 更长的提示更具体（gpt-4.1 优于 gpt-4-），优先保留。
-			if !found || len(hint) > longestHint(best) {
-				best, found = profile, true
+			// 更长的提示更具体（gpt-4.1 优于 gpt-4-），优先保留。比的是「本次命中的提示」
+			// 长度，不能拿该族其它没命中的提示来比，否则一个更长的无关提示会挤掉正确型号。
+			if !found || len(hint) > bestLen {
+				best, found, bestLen = profile, true, len(hint)
 			}
 		}
 	}
 	return best, found
-}
-
-func longestHint(profile Profile) int {
-	longest := 0
-	for _, hint := range profile.Hints {
-		longest = max(longest, len(hint))
-	}
-	return longest
 }

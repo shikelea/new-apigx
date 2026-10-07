@@ -28,6 +28,11 @@ type Probe struct {
 	System string
 	Prompt string
 	// MaxTokens 给得比答案需要的多一些，留给会先说一句废话的模型。
+	//
+	// 预算必须容得下整段思维链：2026-10-04 实测，先推理后作答的型号在这几道题上要花
+	// 100～300 个 reasoning token，32 的旧预算会让 180 次采样全部返回空正文——分布指纹
+	// 就此采不到任何东西。512 是同一次实测里 179/180 份有效答案的预算。
+	// 对不推理的型号，这个值只影响上限，不影响首 token 的偏好分布，新旧观测仍可比。
 	MaxTokens int
 }
 
@@ -38,38 +43,38 @@ var Probes = []Probe{
 		ID:        ProbeIntegerPick,
 		System:    ".",
 		Prompt:    "Pick one integer between 17 and 83. Reply with the number only, nothing else.",
-		MaxTokens: 32,
+		MaxTokens: 512,
 	},
 	{
 		ID:        ProbeLetterPick,
 		System:    ".",
 		Prompt:    "Pick one letter of the English alphabet. Reply with the single letter only, nothing else.",
-		MaxTokens: 32,
+		MaxTokens: 512,
 	},
 	{
 		ID:        ProbeFruitPick,
 		System:    ".",
 		Prompt:    "Name one fruit. Reply with the fruit name only, nothing else.",
-		MaxTokens: 32,
+		MaxTokens: 512,
 	},
 	{
 		ID:        ProbeColorPick,
 		System:    ".",
 		Prompt:    "Name one colour. Reply with the colour name only, nothing else.",
-		MaxTokens: 32,
+		MaxTokens: 512,
 	},
 	{
 		ID:        ProbeWeekdayPick,
 		System:    ".",
 		Prompt:    "Pick one day of the week. Reply with the day only, nothing else.",
-		MaxTokens: 32,
+		MaxTokens: 512,
 	},
 	{
 		// 位置偏好：选项本身无意义，测的是模型偏向列表的哪个位置。
 		ID:        ProbeListPosition,
 		System:    ".",
 		Prompt:    "Choose one: alpha, bravo, charlie, delta, echo, foxtrot, golf. Reply with the chosen word only, nothing else.",
-		MaxTokens: 32,
+		MaxTokens: 512,
 	},
 }
 

@@ -23,6 +23,21 @@ func TestLookupProfilePrefersTheMoreSpecificHint(t *testing.T) {
 
 	_, ok = LookupProfile("neohorse-1-9b")
 	assert.False(t, ok)
+
+	// R1 要盖过通用 DeepSeek 那条，V3 不能被判成推理型号。
+	r1, ok := LookupProfile("deepseek-reasoner")
+	require.True(t, ok)
+	assert.Equal(t, "DeepSeek R1", r1.Family)
+	assert.True(t, r1.Reasoning)
+
+	chat, ok := LookupProfile("deepseek-chat")
+	require.True(t, ok)
+	assert.False(t, chat.Reasoning)
+
+	// o1、o3 这类短提示只按前缀匹配，否则名字里正好连着这两个字符的型号会被认成 o 系。
+	cosmo, ok := LookupProfile("cosmo3-7b")
+	assert.False(t, ok)
+	assert.Empty(t, cosmo.Family)
 }
 
 // 观测全部正常时，八个维度都应当判定为一致。
@@ -70,7 +85,7 @@ func TestEvaluateAcceptsAnHonestGPTRelay(t *testing.T) {
 
 // 收录名单里还没有任何实测基准，所以指纹维度只能报证据不足，且要说清原因。
 func TestEvaluateFingerprintWaitsForMeasuredBaselines(t *testing.T) {
-	require.False(t, BaselineReady(), "还没实测基准，BaselineReady 不应为真")
+	// gpt-4o 既没有手写基准，也不在 Meow 基准包里：指纹维度只能报证据不足。
 	finding := findingByID(t, Evaluate("gpt-4o", honestObservations()), DimFingerprint)
 	assert.Equal(t, VerdictInconclusive, finding.Verdict)
 	assert.Contains(t, finding.Evidence, "基准")
@@ -124,6 +139,30 @@ func TestEvaluateChecksReasoningEffortBothWays(t *testing.T) {
 
 	unexpected := findingByID(t, Evaluate("gpt-4o", obs), DimReasoning)
 	assert.Equal(t, VerdictSuspect, unexpected.Verdict, unexpected.Evidence)
+
+	// deepseek-reasoner 的推理特征只能从 profile.go 的公开特征表里取到：收录表那条的
+	// Profile 不参与判定。曾经因为表里缺这一条，两个方向都判反了。
+	obs = honestObservations()
+	obs.ReasoningPresent, obs.ReasoningTokens = true, 768
+	honestR1 := findingByID(t, Evaluate("deepseek-reasoner", obs), DimReasoning)
+	assert.Equal(t, VerdictMatch, honestR1.Verdict, honestR1.Evidence)
+
+	noOverhead := findingByID(t, Evaluate("deepseek-r1", honestObservations()), DimReasoning)
+	assert.Equal(t, VerdictMismatch, noOverhead.Verdict, noOverhead.Evidence)
+
+	// deepseek-chat 是非推理型号，多出推理开销只提示，不直接判掺水。
+	chat := findingByID(t, Evaluate("deepseek-chat", obs), DimReasoning)
+	assert.Equal(t, VerdictSuspect, chat.Verdict, chat.Evidence)
+
+	// flash 是混合推理型号：官方入口实测每次都上报 reasoning_tokens，所以「上报了」不能
+	// 当成换模型的证据；反过来「没上报」也不能反证，只能记证据不足。
+	flash := findingByID(t, Evaluate("deepseek-flash", obs), DimReasoning)
+	assert.Equal(t, VerdictMatch, flash.Verdict, flash.Evidence)
+	assert.Contains(t, flash.Evidence, "可推理型号")
+
+	quietFlash := findingByID(t, Evaluate("deepseek-v4.1-flash", honestObservations()), DimReasoning)
+	assert.Equal(t, VerdictInconclusive, quietFlash.Verdict, quietFlash.Evidence)
+	assert.Contains(t, quietFlash.Evidence, "未见推理开销")
 }
 
 // 中转覆盖采样参数时，分布指纹必须自动降级，而不是给出一个假结论。
@@ -156,6 +195,10 @@ func TestResolveRequestNamePrefersTheMoreSpecificName(t *testing.T) {
 func TestRegistryEntriesAreWellFormed(t *testing.T) {
 	entries := Registry()
 	require.NotEmpty(t, entries)
+	probeIDs := make(map[string]bool, len(Probes))
+	for _, probe := range Probes {
+		probeIDs[probe.ID] = true
+	}
 	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		assert.NotEmpty(t, entry.ID)
@@ -165,9 +208,19 @@ func TestRegistryEntriesAreWellFormed(t *testing.T) {
 		assert.False(t, seen[entry.ID], "重复的收录 ID：%s", entry.ID)
 		seen[entry.ID] = true
 		if entry.BaselineState == BaselineStateReady {
-			assert.NotEmpty(t, entry.Baseline, "%s 标为 ready 却没有基准", entry.ID)
+			// 基准要么手写在收录项里，要么来自嵌入的 Meow 基准包。
+			_, meow := PlanMeow(entry.ID, "")
+			assert.True(t, len(entry.Baseline) > 0 || meow, "%s 标为 ready 却没有基准", entry.ID)
 			assert.NotEmpty(t, entry.BaselineMeta.MeasuredAt, "%s 缺实测日期", entry.ID)
 			assert.Positive(t, entry.BaselineMeta.SamplesPerProbe, "%s 缺实测次数", entry.ID)
+			// 手写基准的题号必须是启用中的探针：拼错的题号在比对时会被整题跳过，看起来
+			// 却仍是「已实测」。空答案类目同理——那是一次没采到，不是模型偏好。
+			for probeID, counts := range entry.Baseline {
+				assert.True(t, probeIDs[probeID], "%s 基准含未知题目 %s", entry.ID, probeID)
+				for answer := range counts {
+					assert.NotEmpty(t, answer, "%s 基准 %s 含空答案类目", entry.ID, probeID)
+				}
+			}
 			continue
 		}
 		assert.Equal(t, BaselineStatePending, entry.BaselineState, entry.ID)

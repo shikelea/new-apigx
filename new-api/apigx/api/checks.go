@@ -43,11 +43,11 @@ func RegisterCrowdtestRoutes(r *gin.RouterGroup, db *gorm.DB) {
 		crowdtests.POST("/:publicID/publish", middleware.UserAuth(), h.publishCrowdtest)
 	}
 
-	tools := r.Group("/tools", middleware.UserAuth(), toolsGate)
+	tools := r.Group("/tools", toolsGate)
 	{
 		tools.GET("/dilution-models", h.listDilutionModels)
-		tools.POST("/speed-test", middleware.UserCriticalRateLimit("relay_speed_test"), h.runSpeedTest)
-		tools.POST("/dilution-test", middleware.UserCriticalRateLimit("relay_dilution_test"), h.runDilutionTest)
+		tools.POST("/speed-test", middleware.UserAuth(), middleware.UserCriticalRateLimit("relay_speed_test"), h.runSpeedTest)
+		tools.POST("/dilution-test", middleware.UserAuth(), middleware.UserCriticalRateLimit("relay_dilution_test"), h.runDilutionTest)
 	}
 }
 
@@ -64,6 +64,7 @@ func (h *handler) listDilutionModels(c *gin.Context) {
 			"request_names":  entry.RequestNames,
 			"baseline_state": entry.BaselineState,
 			"baseline_meta":  entry.BaselineMeta,
+			"ready_tiers":    entry.ReadyTiers,
 		})
 	}
 	ok(c, gin.H{
@@ -87,6 +88,8 @@ type probeTargetRequest struct {
 	Protocol           string `json:"protocol"`
 	Key                string `json:"key"`
 	Model              string `json:"model"`
+	Tier               string `json:"tier"`
+	Concurrency        int    `json:"concurrency"`
 }
 
 // resolvedTarget 只在内存里存在。key 从不回写响应，也从不入库。
@@ -326,7 +329,21 @@ func (h *handler) runDilutionTest(c *gin.Context) {
 	if !okTarget {
 		return
 	}
-	report, err := relayprobe.RunDilutionTest(c.Request.Context(), target.baseURL, target.protocol, target.key, target.model)
+	tier := strings.ToLower(strings.TrimSpace(req.Tier))
+	if tier == "" {
+		tier = modelfp.MeowDefaultTier
+	}
+	if !modelfp.ValidMeowTier(tier) {
+		fail(c, http.StatusBadRequest, "invalid_tier", "档位只能是 low、medium 或 high")
+		return
+	}
+	concurrency := req.Concurrency
+	if concurrency <= 0 {
+		concurrency = 2
+	} else if concurrency > 8 {
+		concurrency = 8
+	}
+	report, err := relayprobe.RunDilutionTestWith(c.Request.Context(), target.baseURL, target.protocol, target.key, target.model, tier, concurrency)
 	if err != nil {
 		fail(c, http.StatusBadRequest, "dilution_test_failed", err.Error())
 		return

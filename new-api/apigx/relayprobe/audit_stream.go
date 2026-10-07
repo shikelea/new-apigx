@@ -116,9 +116,21 @@ func (t auditTarget) stream(ctx context.Context) (*streamStats, int, error) {
 
 // streamPrompt 收集一次流式响应的格式与时序统计，供流式完整性与速度测试共用。
 func (t auditTarget) streamPrompt(ctx context.Context, prompt string, maxTokens int) (*streamStats, int, error) {
+	stats, status, err := t.streamPromptWithUsage(ctx, prompt, maxTokens, true)
+	if err == nil && status == http.StatusBadRequest {
+		// 部分中转或模型不支持 stream_options 参数（报 400），去掉后重试一次
+		stats, status, err = t.streamPromptWithUsage(ctx, prompt, maxTokens, false)
+	}
+	return stats, status, err
+}
+
+func (t auditTarget) streamPromptWithUsage(ctx context.Context, prompt string, maxTokens int, includeUsage bool) (*streamStats, int, error) {
 	payload := map[string]any{
-		"model": t.model, "stream": true, "stream_options": map[string]any{"include_usage": true},
+		"model": t.model, "stream": true,
 		"messages": userMessages("", prompt), "max_tokens": maxTokens, "temperature": 0,
+	}
+	if includeUsage {
+		payload["stream_options"] = map[string]any{"include_usage": true}
 	}
 	body, err := common.Marshal(payload)
 	if err != nil {

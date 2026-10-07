@@ -1,0 +1,7276 @@
+{
+"cases": [
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-astra",
+"counts": {
+"gpt__screen023": {
+"43": 11
+},
+"gpt__screen106": {
+"七万": 1,
+"七筒": 4,
+"三万": 4,
+"三筒": 2
+},
+"gpt__screen114": {
+"哗啦": 10
+}
+},
+"verdict": "match",
+"model": "gpt-6-astra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.7658005019417196,
+"gpt-6-sol": 0.13646628228351687,
+"gpt-5.6-terra": 0.1938273555842834,
+"gpt-6-luna": 0.13482622050688675,
+"other_known_external": 0.2341994980582805
+},
+"scores": {
+"gpt-6-astra": -0.5843209360893437,
+"gpt-6-sol": -2.429276312772113,
+"gpt-5.6-terra": -2.0096510115044848,
+"gpt-6-luna": -2.4432646302825707,
+"other_known_external": -1.769069322636807
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-astra",
+"counts": {
+"gpt__screen023": {
+"43": 11
+},
+"gpt__screen106": {
+"七万": 1,
+"七筒": 4,
+"三万": 4,
+"三筒": 2
+},
+"gpt__screen114": {
+"哗啦": 10
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-astra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.7658005019417196,
+"gpt-6-sol": 0.13646628228351687,
+"gpt-5.6-terra": 0.1938273555842834,
+"gpt-6-luna": 0.13482622050688675,
+"other_known_external": 0.2341994980582805
+},
+"scores": {
+"gpt-6-astra": -0.5843209360893437,
+"gpt-6-sol": -2.429276312772113,
+"gpt-5.6-terra": -2.0096510115044848,
+"gpt-6-luna": -2.4432646302825707,
+"other_known_external": -1.769069322636807
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 3,
+"47": 8
+},
+"gpt__screen106": {
+"一筒": 5,
+"三筒": 4,
+"五筒": 2
+},
+"gpt__screen114": {
+"叮咚": 2,
+"咚咚": 2,
+"啪嗒": 1,
+"喵。": 1,
+"喵呜": 1,
+"喵喵": 2,
+"喵喵。": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-sol",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.09012306458176952,
+"gpt-6-sol": 0.8019725288292227,
+"gpt-5.6-terra": 0.13518445777502014,
+"gpt-6-luna": 0.16471302463593007,
+"other_known_external": 0.19802747117077735
+},
+"scores": {
+"gpt-6-astra": -3.7693955679564572,
+"gpt-6-sol": -1.4572623339485502,
+"gpt-5.6-terra": -3.3131383724421752,
+"gpt-6-luna": -3.0808329677967516,
+"other_known_external": -2.85593092354093
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 3,
+"47": 8
+},
+"gpt__screen106": {
+"一筒": 5,
+"三筒": 4,
+"五筒": 2
+},
+"gpt__screen114": {
+"叮咚": 2,
+"咚咚": 2,
+"啪嗒": 1,
+"喵。": 1,
+"喵呜": 1,
+"喵喵": 2,
+"喵喵。": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-sol",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.09012306458176952,
+"gpt-6-sol": 0.8019725288292227,
+"gpt-5.6-terra": 0.13518445777502014,
+"gpt-6-luna": 0.16471302463593007,
+"other_known_external": 0.19802747117077735
+},
+"scores": {
+"gpt-6-astra": -3.7693955679564572,
+"gpt-6-sol": -1.4572623339485502,
+"gpt-5.6-terra": -3.3131383724421752,
+"gpt-6-luna": -3.0808329677967516,
+"other_known_external": -2.85593092354093
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "gpt-5.6-terra",
+"counts": {
+"gpt__screen023": {
+"42": 5,
+"47": 6
+},
+"gpt__screen106": {
+"三万": 5,
+"五万": 6
+},
+"gpt__screen114": {
+"哗啦": 1,
+"啪": 6,
+"啪嗒": 3
+}
+},
+"verdict": "mismatch",
+"model": "gpt-5.6-terra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.13124703161021656,
+"gpt-6-sol": 0.21485997472861898,
+"gpt-5.6-terra": 0.785140025271381,
+"gpt-6-luna": 0.14724888089526572,
+"other_known_external": 0.1899118460736014
+},
+"scores": {
+"gpt-6-astra": -2.8917112932801983,
+"gpt-6-sol": -2.297609306865022,
+"gpt-5.6-terra": -1.001733764468353,
+"gpt-6-luna": -2.758077275643556,
+"other_known_external": -2.4523168417606263
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-luna",
+"source": "gpt-5.6-terra",
+"counts": {
+"gpt__screen023": {
+"42": 5,
+"47": 6
+},
+"gpt__screen106": {
+"三万": 5,
+"五万": 6
+},
+"gpt__screen114": {
+"哗啦": 1,
+"啪": 6,
+"啪嗒": 3
+}
+},
+"verdict": "mismatch",
+"model": "gpt-5.6-terra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.13124703161021656,
+"gpt-6-sol": 0.21485997472861898,
+"gpt-5.6-terra": 0.785140025271381,
+"gpt-6-luna": 0.14724888089526572,
+"other_known_external": 0.1899118460736014
+},
+"scores": {
+"gpt-6-astra": -2.8917112932801983,
+"gpt-6-sol": -2.297609306865022,
+"gpt-5.6-terra": -1.001733764468353,
+"gpt-6-luna": -2.758077275643556,
+"other_known_external": -2.4523168417606263
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-luna",
+"counts": {
+"gpt__screen023": {
+"42": 6,
+"43": 2,
+"46": 3
+},
+"gpt__screen106": {
+"三筒": 2,
+"红中": 9
+},
+"gpt__screen114": {
+"哗啦": 1,
+"哗啦啦": 5,
+"喵喵": 2,
+"汪汪": 2
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-luna",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.14089553074403147,
+"gpt-6-sol": 0.15107927555126704,
+"gpt-5.6-terra": 0.1492995004237152,
+"gpt-6-luna": 0.7003858564497193,
+"other_known_external": 0.29961414355028076
+},
+"scores": {
+"gpt-6-astra": -3.005750558674692,
+"gpt-6-sol": -2.9240398298899573,
+"gpt-5.6-terra": -2.9379844946645775,
+"gpt-6-luna": -1.1978787258454626,
+"other_known_external": -2.047014673880051
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-luna",
+"counts": {
+"gpt__screen023": {
+"42": 6,
+"43": 2,
+"46": 3
+},
+"gpt__screen106": {
+"三筒": 2,
+"红中": 9
+},
+"gpt__screen114": {
+"哗啦": 1,
+"哗啦啦": 5,
+"喵喵": 2,
+"汪汪": 2
+}
+},
+"verdict": "match",
+"model": "gpt-6-luna",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.14089553074403147,
+"gpt-6-sol": 0.15107927555126704,
+"gpt-5.6-terra": 0.1492995004237152,
+"gpt-6-luna": 0.7003858564497193,
+"other_known_external": 0.29961414355028076
+},
+"scores": {
+"gpt-6-astra": -3.005750558674692,
+"gpt-6-sol": -2.9240398298899573,
+"gpt-5.6-terra": -2.9379844946645775,
+"gpt-6-luna": -1.1978787258454626,
+"other_known_external": -2.047014673880051
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "openai/gpt-5.6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 2,
+"43": 3,
+"47": 6
+},
+"gpt__screen106": {
+"七筒": 1,
+"三万": 1,
+"九万": 1,
+"九筒": 1,
+"五筒": 1,
+"八万": 1,
+"八筒": 2,
+"六筒": 2,
+"发财": 1
+},
+"gpt__screen114": {
+"咕咚": 5,
+"咚咚": 1,
+"哗啦": 3,
+"哗啦哗啦": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.19834014639481862,
+"gpt-6-sol": 0.17048543886148618,
+"gpt-5.6-terra": 0.16314726995452733,
+"gpt-6-luna": 0.11075603238994684,
+"other_known_external": 0.8016598536051813
+},
+"scores": {
+"gpt-6-astra": -3.302770397942626,
+"gpt-6-sol": -3.488260243673354,
+"gpt-5.6-terra": -3.541064286275575,
+"gpt-6-luna": -3.989111221735012,
+"other_known_external": -1.9060694705864156
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-luna",
+"source": "openai/gpt-5.6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 2,
+"43": 3,
+"47": 6
+},
+"gpt__screen106": {
+"七筒": 1,
+"三万": 1,
+"九万": 1,
+"九筒": 1,
+"五筒": 1,
+"八万": 1,
+"八筒": 2,
+"六筒": 2,
+"发财": 1
+},
+"gpt__screen114": {
+"咕咚": 5,
+"咚咚": 1,
+"哗啦": 3,
+"哗啦哗啦": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.19834014639481862,
+"gpt-6-sol": 0.17048543886148618,
+"gpt-5.6-terra": 0.16314726995452733,
+"gpt-6-luna": 0.11075603238994684,
+"other_known_external": 0.8016598536051813
+},
+"scores": {
+"gpt-6-astra": -3.302770397942626,
+"gpt-6-sol": -3.488260243673354,
+"gpt-5.6-terra": -3.541064286275575,
+"gpt-6-luna": -3.989111221735012,
+"other_known_external": -1.9060694705864156
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "openai/gpt-5.6-luna",
+"counts": {
+"gpt__screen023": {
+"43": 1,
+"47": 10
+},
+"gpt__screen106": {
+"东風": 2,
+"红中": 9
+},
+"gpt__screen114": {
+"哗啦啦": 6,
+"啪": 1,
+"喵喵": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.11886311704005408,
+"gpt-6-sol": 0.19408951515740733,
+"gpt-5.6-terra": 0.18457157234418461,
+"gpt-6-luna": 0.3180925402567961,
+"other_known_external": 0.6819074597432039
+},
+"scores": {
+"gpt-6-astra": -2.9688269926268793,
+"gpt-6-sol": -2.3892397649316433,
+"gpt-5.6-terra": -2.45126289954619,
+"gpt-6-luna": -1.7281381721298998,
+"other_known_external": -0.9655865605618559
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-luna",
+"source": "openai/gpt-5.6-luna",
+"counts": {
+"gpt__screen023": {
+"43": 1,
+"47": 10
+},
+"gpt__screen106": {
+"东風": 2,
+"红中": 9
+},
+"gpt__screen114": {
+"哗啦啦": 6,
+"啪": 1,
+"喵喵": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.11886311704005408,
+"gpt-6-sol": 0.19408951515740733,
+"gpt-5.6-terra": 0.18457157234418461,
+"gpt-6-luna": 0.3180925402567961,
+"other_known_external": 0.6819074597432039
+},
+"scores": {
+"gpt-6-astra": -2.9688269926268793,
+"gpt-6-sol": -2.3892397649316433,
+"gpt-5.6-terra": -2.45126289954619,
+"gpt-6-luna": -1.7281381721298998,
+"other_known_external": -0.9655865605618559
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "z-ai/glm-5.3",
+"counts": {
+"gpt__screen023": {
+"37": 9,
+"42": 1,
+"43": 1
+},
+"gpt__screen106": {
+"九万": 4,
+"五万": 3,
+"八万": 4
+},
+"gpt__screen114": {
+"叮咚": 1,
+"哗啦啦": 6,
+"轰隆": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.10495052479457531,
+"gpt-6-sol": 0.10780067389709268,
+"gpt-5.6-terra": 0.15412752755451903,
+"gpt-6-luna": 0.1401838344788224,
+"other_known_external": 0.8458724724454809
+},
+"scores": {
+"gpt-6-astra": -3.3746825881936333,
+"gpt-6-sol": -3.344698296119738,
+"gpt-5.6-terra": -2.9338808842891613,
+"gpt-6-luna": -3.045056579278767,
+"other_known_external": -1.2312926385663716
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-luna",
+"source": "z-ai/glm-5.3",
+"counts": {
+"gpt__screen023": {
+"37": 9,
+"42": 1,
+"43": 1
+},
+"gpt__screen106": {
+"九万": 4,
+"五万": 3,
+"八万": 4
+},
+"gpt__screen114": {
+"叮咚": 1,
+"哗啦啦": 6,
+"轰隆": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.10495052479457531,
+"gpt-6-sol": 0.10780067389709268,
+"gpt-5.6-terra": 0.15412752755451903,
+"gpt-6-luna": 0.1401838344788224,
+"other_known_external": 0.8458724724454809
+},
+"scores": {
+"gpt-6-astra": -3.3746825881936333,
+"gpt-6-sol": -3.344698296119738,
+"gpt-5.6-terra": -2.9338808842891613,
+"gpt-6-luna": -3.045056579278767,
+"other_known_external": -1.2312926385663716
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "partial",
+"counts": {
+"gpt__screen023": {
+"43": 4,
+"47": 1
+},
+"gpt__screen106": {
+"七筒": 2,
+"三万": 1,
+"三筒": 2
+},
+"gpt__screen114": {
+"哗啦": 5
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.7668346126412897,
+"gpt-6-sol": 0.11313341469603237,
+"gpt-5.6-terra": 0.1330699592724037,
+"gpt-6-luna": 0.09954553101690866,
+"other_known_external": 0.23316538735871037
+},
+"scores": {
+"gpt-6-astra": -0.7244534638740248,
+"gpt-6-sol": -2.7835802404069083,
+"gpt-5.6-terra": -2.598536746702385,
+"gpt-6-luna": -2.926737927624587,
+"other_known_external": -1.9149765943449826
+},
+"valid": 15,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "empty",
+"counts": {},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.5,
+"gpt-6-sol": 0.5,
+"gpt-5.6-terra": 0.5,
+"gpt-6-luna": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"gpt-6-astra": 0.0,
+"gpt-6-sol": 0.0,
+"gpt-5.6-terra": 0.0,
+"gpt-6-luna": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "junk",
+"counts": {
+"gpt__screen023": {
+"zzz-not-a-category": 11
+},
+"gpt__screen106": {
+"zzz-not-a-category": 11
+},
+"gpt__screen114": {
+"zzz-not-a-category": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.3905375565158008,
+"gpt-6-sol": 0.3905375565158008,
+"gpt-5.6-terra": 0.3905375565158008,
+"gpt-6-luna": 0.3905375565158008,
+"other_known_external": 0.6094624434841992
+},
+"scores": {
+"gpt-6-astra": -2.463864569052183,
+"gpt-6-sol": -2.463864569052183,
+"gpt-5.6-terra": -2.463864569052183,
+"gpt-6-luna": -2.463864569052183,
+"other_known_external": -2.0188113807068437
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "invalid",
+"counts": {
+"gpt__screen023": {
+"__INVALID_OUTPUT__": 11
+},
+"gpt__screen106": {
+"__INVALID_OUTPUT__": 11
+},
+"gpt__screen114": {
+"__INVALID_OUTPUT__": 10
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.5,
+"gpt-6-sol": 0.5,
+"gpt-5.6-terra": 0.5,
+"gpt-6-luna": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"gpt-6-astra": 0.0,
+"gpt-6-sol": 0.0,
+"gpt-5.6-terra": 0.0,
+"gpt-6-luna": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "gpt-6-astra",
+"source": "overfull",
+"counts": {
+"gpt__screen023": {
+"43": 14
+},
+"gpt__screen106": {
+"七条": 1,
+"七筒": 2,
+"三万": 2,
+"三筒": 4,
+"九万": 1,
+"九筒": 4
+},
+"gpt__screen114": {
+"哗啦": 13
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_exceed_plan"
+],
+"matches": {
+"gpt-6-astra": 0.7297530251225023,
+"gpt-6-sol": 0.14527208700262265,
+"gpt-5.6-terra": 0.16604111290303566,
+"gpt-6-luna": 0.14637686013749507,
+"other_known_external": 0.2702469748774977
+},
+"scores": {
+"gpt-6-astra": -0.7069016692653329,
+"gpt-6-sol": -2.479076410991666,
+"gpt-5.6-terra": -2.3208503485797434,
+"gpt-6-luna": -2.470206947575967,
+"other_known_external": -1.7002715617501842
+},
+"valid": 41,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "low",
+"claimed": "not-in-package",
+"source": "unknown-claimed",
+"counts": {
+"gpt__screen023": {
+"42": 1,
+"43": 9,
+"47": 1
+},
+"gpt__screen106": {
+"七筒": 4,
+"三万": 2,
+"三筒": 4,
+"九万": 1
+},
+"gpt__screen114": {
+"哗啦": 10
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"unknown_claimed_model"
+],
+"matches": {
+"gpt-6-astra": 0.7225265063847375,
+"gpt-6-sol": 0.17640427153617225,
+"gpt-5.6-terra": 0.19795444689681557,
+"gpt-6-luna": 0.16652415343422997,
+"other_known_external": 0.27747349361526247
+},
+"scores": {
+"gpt-6-astra": -0.8550024808027172,
+"gpt-6-sol": -2.3959039111849236,
+"gpt-5.6-terra": -2.254130948389184,
+"gpt-6-luna": -2.465466839677733,
+"other_known_external": -1.8120311770333029
+},
+"valid": 32,
+"planned": 32
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-astra",
+"counts": {
+"gpt__screen023": {
+"43": 22
+},
+"gpt__screen106": {
+"七万": 4,
+"七筒": 4,
+"三万": 8,
+"三筒": 4,
+"九筒": 1
+},
+"gpt__screen114": {
+"__UNSEEN_IN_TRAINING__": 2,
+"哗啦": 19
+}
+},
+"verdict": "match",
+"model": "gpt-6-astra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.706152096384332,
+"gpt-6-sol": 0.20654057932899372,
+"gpt-5.6-terra": 0.2579327494436329,
+"gpt-6-luna": 0.20087324858441505,
+"other_known_external": 0.29384790361566804
+},
+"scores": {
+"gpt-6-astra": -0.7779063058686125,
+"gpt-6-sol": -2.1238118016930496,
+"gpt-5.6-terra": -1.8346472892295402,
+"gpt-6-luna": -2.1587517715326463,
+"other_known_external": -1.654674655297069
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-astra",
+"counts": {
+"gpt__screen023": {
+"43": 22
+},
+"gpt__screen106": {
+"七万": 4,
+"七筒": 4,
+"三万": 8,
+"三筒": 4,
+"九筒": 1
+},
+"gpt__screen114": {
+"__UNSEEN_IN_TRAINING__": 2,
+"哗啦": 19
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-astra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.706152096384332,
+"gpt-6-sol": 0.20654057932899372,
+"gpt-5.6-terra": 0.2579327494436329,
+"gpt-6-luna": 0.20087324858441505,
+"other_known_external": 0.29384790361566804
+},
+"scores": {
+"gpt-6-astra": -0.7779063058686125,
+"gpt-6-sol": -2.1238118016930496,
+"gpt-5.6-terra": -1.8346472892295402,
+"gpt-6-luna": -2.1587517715326463,
+"other_known_external": -1.654674655297069
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 3,
+"47": 19
+},
+"gpt__screen106": {
+"一筒": 15,
+"三万": 1,
+"三筒": 3,
+"五筒": 2
+},
+"gpt__screen114": {
+"咚咚": 3,
+"咚！": 3,
+"啪嗒": 1,
+"喵。": 1,
+"喵呜": 4,
+"喵喵。": 3,
+"汪汪。": 1,
+"砰！": 5
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-sol",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.1506023048119813,
+"gpt-6-sol": 0.7549152845938202,
+"gpt-5.6-terra": 0.2035836847299347,
+"gpt-6-luna": 0.16852677107892722,
+"other_known_external": 0.24508471540617993
+},
+"scores": {
+"gpt-6-astra": -2.9599308867427507,
+"gpt-6-sol": -1.2300460017712598,
+"gpt-5.6-terra": -2.594090912501228,
+"gpt-6-luna": -2.82615048778054,
+"other_known_external": -2.3550476109430787
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 3,
+"47": 19
+},
+"gpt__screen106": {
+"一筒": 15,
+"三万": 1,
+"三筒": 3,
+"五筒": 2
+},
+"gpt__screen114": {
+"咚咚": 3,
+"咚！": 3,
+"啪嗒": 1,
+"喵。": 1,
+"喵呜": 4,
+"喵喵。": 3,
+"汪汪。": 1,
+"砰！": 5
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-sol",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.1506023048119813,
+"gpt-6-sol": 0.7549152845938202,
+"gpt-5.6-terra": 0.2035836847299347,
+"gpt-6-luna": 0.16852677107892722,
+"other_known_external": 0.24508471540617993
+},
+"scores": {
+"gpt-6-astra": -2.9599308867427507,
+"gpt-6-sol": -1.2300460017712598,
+"gpt-5.6-terra": -2.594090912501228,
+"gpt-6-luna": -2.82615048778054,
+"other_known_external": -2.3550476109430787
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "gpt-5.6-terra",
+"counts": {
+"gpt__screen023": {
+"42": 8,
+"43": 5,
+"47": 9
+},
+"gpt__screen106": {
+"一万": 2,
+"三万": 9,
+"九筒": 2,
+"五万": 7,
+"红中": 1
+},
+"gpt__screen114": {
+"哗啦": 1,
+"啪": 8,
+"啪嗒": 10,
+"啪！": 1,
+"轰隆": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-5.6-terra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2227025758868408,
+"gpt-6-sol": 0.2613588478547218,
+"gpt-5.6-terra": 0.7313150046334858,
+"gpt-6-luna": 0.21201452122935274,
+"other_known_external": 0.2686849953665142
+},
+"scores": {
+"gpt-6-astra": -2.6478807985773374,
+"gpt-6-sol": -2.4368127353249993,
+"gpt-5.6-terra": -1.3978948770558137,
+"gpt-6-luna": -2.7107197700967496,
+"other_known_external": -2.3991994943974646
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-luna",
+"source": "gpt-5.6-terra",
+"counts": {
+"gpt__screen023": {
+"42": 8,
+"43": 5,
+"47": 9
+},
+"gpt__screen106": {
+"一万": 2,
+"三万": 9,
+"九筒": 2,
+"五万": 7,
+"红中": 1
+},
+"gpt__screen114": {
+"哗啦": 1,
+"啪": 8,
+"啪嗒": 10,
+"啪！": 1,
+"轰隆": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-5.6-terra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2227025758868408,
+"gpt-6-sol": 0.2613588478547218,
+"gpt-5.6-terra": 0.7313150046334858,
+"gpt-6-luna": 0.21201452122935274,
+"other_known_external": 0.2686849953665142
+},
+"scores": {
+"gpt-6-astra": -2.6478807985773374,
+"gpt-6-sol": -2.4368127353249993,
+"gpt-5.6-terra": -1.3978948770558137,
+"gpt-6-luna": -2.7107197700967496,
+"other_known_external": -2.3991994943974646
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-luna",
+"counts": {
+"gpt__screen023": {
+"37": 1,
+"42": 11,
+"46": 9,
+"47": 1
+},
+"gpt__screen106": {
+"红中": 21
+},
+"gpt__screen114": {
+"叮咚": 1,
+"哗啦": 2,
+"哗啦啦": 5,
+"喵呜": 2,
+"喵喵": 6,
+"喵嗷": 1,
+"汪汪": 4
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-luna",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.15216675277248023,
+"gpt-6-sol": 0.20315990647654458,
+"gpt-5.6-terra": 0.1919791661287032,
+"gpt-6-luna": 0.6755854418849087,
+"other_known_external": 0.32441455811509134
+},
+"scores": {
+"gpt-6-astra": -2.795232546790708,
+"gpt-6-sol": -2.4441861875801463,
+"gpt-5.6-terra": -2.514726536276766,
+"gpt-6-luna": -1.0775255499877414,
+"other_known_external": -1.811082987980924
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-luna",
+"counts": {
+"gpt__screen023": {
+"37": 1,
+"42": 11,
+"46": 9,
+"47": 1
+},
+"gpt__screen106": {
+"红中": 21
+},
+"gpt__screen114": {
+"叮咚": 1,
+"哗啦": 2,
+"哗啦啦": 5,
+"喵呜": 2,
+"喵喵": 6,
+"喵嗷": 1,
+"汪汪": 4
+}
+},
+"verdict": "match",
+"model": "gpt-6-luna",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.15216675277248023,
+"gpt-6-sol": 0.20315990647654458,
+"gpt-5.6-terra": 0.1919791661287032,
+"gpt-6-luna": 0.6755854418849087,
+"other_known_external": 0.32441455811509134
+},
+"scores": {
+"gpt-6-astra": -2.795232546790708,
+"gpt-6-sol": -2.4441861875801463,
+"gpt-5.6-terra": -2.514726536276766,
+"gpt-6-luna": -1.0775255499877414,
+"other_known_external": -1.811082987980924
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "openai/gpt-5.6-sol",
+"counts": {
+"gpt__screen023": {
+"43": 4,
+"47": 18
+},
+"gpt__screen106": {
+"一筒": 1,
+"三万": 1,
+"九万": 2,
+"九筒": 4,
+"五万": 1,
+"五筒": 8,
+"六筒": 4
+},
+"gpt__screen114": {
+"叮咚": 2,
+"咕咚": 2,
+"咚咚": 1,
+"哗啦": 10,
+"哗啦哗啦": 2,
+"哗啦啦": 3,
+"喵喵": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2574929268840194,
+"gpt-6-sol": 0.2781055253816787,
+"gpt-5.6-terra": 0.2266500277605585,
+"gpt-6-luna": 0.20191059957241392,
+"other_known_external": 0.7218944746183213
+},
+"scores": {
+"gpt-6-astra": -2.5557583008589226,
+"gpt-6-sol": -2.450596497263443,
+"gpt-5.6-terra": -2.724042747179003,
+"gpt-6-luna": -2.871113754184936,
+"other_known_external": -1.4967181554602642
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-luna",
+"source": "openai/gpt-5.6-sol",
+"counts": {
+"gpt__screen023": {
+"43": 4,
+"47": 18
+},
+"gpt__screen106": {
+"一筒": 1,
+"三万": 1,
+"九万": 2,
+"九筒": 4,
+"五万": 1,
+"五筒": 8,
+"六筒": 4
+},
+"gpt__screen114": {
+"叮咚": 2,
+"咕咚": 2,
+"咚咚": 1,
+"哗啦": 10,
+"哗啦哗啦": 2,
+"哗啦啦": 3,
+"喵喵": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2574929268840194,
+"gpt-6-sol": 0.2781055253816787,
+"gpt-5.6-terra": 0.2266500277605585,
+"gpt-6-luna": 0.20191059957241392,
+"other_known_external": 0.7218944746183213
+},
+"scores": {
+"gpt-6-astra": -2.5557583008589226,
+"gpt-6-sol": -2.450596497263443,
+"gpt-5.6-terra": -2.724042747179003,
+"gpt-6-luna": -2.871113754184936,
+"other_known_external": -1.4967181554602642
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "openai/gpt-5.6-luna",
+"counts": {
+"gpt__screen023": {
+"43": 11,
+"46": 4,
+"47": 7
+},
+"gpt__screen106": {
+"三万": 3,
+"發白": 2,
+"红中": 14,
+"🀄 東風牌": 2
+},
+"gpt__screen114": {
+"哐当": 1,
+"哗啦哗啦": 2,
+"哗啦啦": 5,
+"喵喵": 13
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.21223525003167873,
+"gpt-6-sol": 0.21394759209895195,
+"gpt-5.6-terra": 0.22062533885338506,
+"gpt-6-luna": 0.32285236326884215,
+"other_known_external": 0.6771476367311579
+},
+"scores": {
+"gpt-6-astra": -2.50729547043466,
+"gpt-6-sol": -2.497083673831816,
+"gpt-5.6-terra": -2.4578172132950566,
+"gpt-6-luna": -1.9364854802081481,
+"other_known_external": -1.1957912952023926
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-luna",
+"source": "openai/gpt-5.6-luna",
+"counts": {
+"gpt__screen023": {
+"43": 11,
+"46": 4,
+"47": 7
+},
+"gpt__screen106": {
+"三万": 3,
+"發白": 2,
+"红中": 14,
+"🀄 東風牌": 2
+},
+"gpt__screen114": {
+"哐当": 1,
+"哗啦哗啦": 2,
+"哗啦啦": 5,
+"喵喵": 13
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.21223525003167873,
+"gpt-6-sol": 0.21394759209895195,
+"gpt-5.6-terra": 0.22062533885338506,
+"gpt-6-luna": 0.32285236326884215,
+"other_known_external": 0.6771476367311579
+},
+"scores": {
+"gpt-6-astra": -2.50729547043466,
+"gpt-6-sol": -2.497083673831816,
+"gpt-5.6-terra": -2.4578172132950566,
+"gpt-6-luna": -1.9364854802081481,
+"other_known_external": -1.1957912952023926
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "z-ai/glm-5.3",
+"counts": {
+"gpt__screen023": {
+"37": 13,
+"42": 8,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"gpt__screen106": {
+"一万": 1,
+"七筒": 1,
+"九万": 10,
+"九条": 1,
+"九筒": 4,
+"五万": 3,
+"八万": 1
+},
+"gpt__screen114": {
+"叮咚": 4,
+"哗啦啦": 12,
+"轰隆": 2,
+"轰隆隆": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.16914490098860024,
+"gpt-6-sol": 0.16398631005855485,
+"gpt-5.6-terra": 0.21020014338823637,
+"gpt-6-luna": 0.20746104673450627,
+"other_known_external": 0.7897998566117637
+},
+"scores": {
+"gpt-6-astra": -2.982793177148176,
+"gpt-6-sol": -3.019955556172078,
+"gpt-5.6-terra": -2.714812943489039,
+"gpt-6-luna": -2.7313915782423983,
+"other_known_external": -1.3910935167806409
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-luna",
+"source": "z-ai/glm-5.3",
+"counts": {
+"gpt__screen023": {
+"37": 13,
+"42": 8,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"gpt__screen106": {
+"一万": 1,
+"七筒": 1,
+"九万": 10,
+"九条": 1,
+"九筒": 4,
+"五万": 3,
+"八万": 1
+},
+"gpt__screen114": {
+"叮咚": 4,
+"哗啦啦": 12,
+"轰隆": 2,
+"轰隆隆": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.16914490098860024,
+"gpt-6-sol": 0.16398631005855485,
+"gpt-5.6-terra": 0.21020014338823637,
+"gpt-6-luna": 0.20746104673450627,
+"other_known_external": 0.7897998566117637
+},
+"scores": {
+"gpt-6-astra": -2.982793177148176,
+"gpt-6-sol": -3.019955556172078,
+"gpt-5.6-terra": -2.714812943489039,
+"gpt-6-luna": -2.7313915782423983,
+"other_known_external": -1.3910935167806409
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "partial",
+"counts": {
+"gpt__screen023": {
+"43": 11
+},
+"gpt__screen106": {
+"七筒": 2,
+"三万": 1,
+"三筒": 5,
+"九筒": 2
+},
+"gpt__screen114": {
+"哗啦": 10
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.7552377242687264,
+"gpt-6-sol": 0.13507079021061913,
+"gpt-5.6-terra": 0.1478976745672006,
+"gpt-6-luna": 0.13500392305147915,
+"other_known_external": 0.24476227573127363
+},
+"scores": {
+"gpt-6-astra": -0.5296112095263964,
+"gpt-6-sol": -2.386459861781529,
+"gpt-5.6-terra": -2.2807971828317775,
+"gpt-6-luna": -2.3870323434715695,
+"other_known_external": -1.6563563394381893
+},
+"valid": 31,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "empty",
+"counts": {},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.5,
+"gpt-6-sol": 0.5,
+"gpt-5.6-terra": 0.5,
+"gpt-6-luna": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"gpt-6-astra": 0.0,
+"gpt-6-sol": 0.0,
+"gpt-5.6-terra": 0.0,
+"gpt-6-luna": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "junk",
+"counts": {
+"gpt__screen023": {
+"zzz-not-a-category": 22
+},
+"gpt__screen106": {
+"zzz-not-a-category": 21
+},
+"gpt__screen114": {
+"zzz-not-a-category": 21
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.40641728754282813,
+"gpt-6-sol": 0.40641728754282813,
+"gpt-5.6-terra": 0.40641728754282813,
+"gpt-6-luna": 0.40641728754282813,
+"other_known_external": 0.593582712457172
+},
+"scores": {
+"gpt-6-astra": -1.787741223800408,
+"gpt-6-sol": -1.787741223800408,
+"gpt-5.6-terra": -1.787741223800408,
+"gpt-6-luna": -1.787741223800408,
+"other_known_external": -1.408945089195071
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "invalid",
+"counts": {
+"gpt__screen023": {
+"__INVALID_OUTPUT__": 22
+},
+"gpt__screen106": {
+"__INVALID_OUTPUT__": 21
+},
+"gpt__screen114": {
+"__INVALID_OUTPUT__": 21
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.5,
+"gpt-6-sol": 0.5,
+"gpt-5.6-terra": 0.5,
+"gpt-6-luna": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"gpt-6-astra": 0.0,
+"gpt-6-sol": 0.0,
+"gpt-5.6-terra": 0.0,
+"gpt-6-luna": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "gpt-6-astra",
+"source": "overfull",
+"counts": {
+"gpt__screen023": {
+"43": 25
+},
+"gpt__screen106": {
+"七万": 5,
+"七筒": 8,
+"三万": 1,
+"三筒": 6,
+"九万": 1,
+"九条": 3
+},
+"gpt__screen114": {
+"哗啦": 20,
+"哗啦啦": 3,
+"啪嗒": 1
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_exceed_plan"
+],
+"matches": {
+"gpt-6-astra": 0.6869552736764202,
+"gpt-6-sol": 0.2167311257710836,
+"gpt-5.6-terra": 0.25420978352039947,
+"gpt-6-luna": 0.23106979243680412,
+"other_known_external": 0.3130447263235798
+},
+"scores": {
+"gpt-6-astra": -0.9324532657750291,
+"gpt-6-sol": -2.2172717591058464,
+"gpt-5.6-terra": -2.008737769771703,
+"gpt-6-luna": -2.1347336771166665,
+"other_known_external": -1.7183763761250985
+},
+"valid": 73,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "medium",
+"claimed": "not-in-package",
+"source": "unknown-claimed",
+"counts": {
+"gpt__screen023": {
+"43": 21,
+"47": 1
+},
+"gpt__screen106": {
+"七万": 4,
+"七筒": 3,
+"三万": 4,
+"三筒": 4,
+"九万": 2,
+"九筒": 3,
+"八筒": 1
+},
+"gpt__screen114": {
+"哗啦": 21
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"unknown_claimed_model"
+],
+"matches": {
+"gpt-6-astra": 0.6733731426923076,
+"gpt-6-sol": 0.1993551947827921,
+"gpt-5.6-terra": 0.24159911915444532,
+"gpt-6-luna": 0.19361981878312187,
+"other_known_external": 0.32662685730769236
+},
+"scores": {
+"gpt-6-astra": -0.8357676069219016,
+"gpt-6-sol": -2.2260968843702473,
+"gpt-5.6-terra": -1.979699899144416,
+"gpt-6-luna": -2.2624263877224173,
+"other_known_external": -1.5592488195260124
+},
+"valid": 64,
+"planned": 64
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-astra",
+"counts": {
+"gpt__screen023": {
+"43": 39,
+"46": 3,
+"47": 1
+},
+"gpt__screen106": {
+"七万": 2,
+"七条": 1,
+"七筒": 9,
+"三万": 11,
+"三筒": 13,
+"九万": 2,
+"九条": 1,
+"九筒": 4
+},
+"gpt__screen114": {
+"咔嚓": 4,
+"哗啦": 37,
+"喵呜": 1
+}
+},
+"verdict": "match",
+"model": "gpt-6-astra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.6455857285307239,
+"gpt-6-sol": 0.28264988674963315,
+"gpt-5.6-terra": 0.3032239750295632,
+"gpt-6-luna": 0.2771348828792034,
+"other_known_external": 0.354414271469276
+},
+"scores": {
+"gpt-6-astra": -0.976502939206858,
+"gpt-6-sol": -1.9078579811767697,
+"gpt-5.6-terra": -1.8084952328617194,
+"gpt-6-luna": -1.9352212544904133,
+"other_known_external": -1.5761944628698215
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-astra",
+"counts": {
+"gpt__screen023": {
+"43": 39,
+"46": 3,
+"47": 1
+},
+"gpt__screen106": {
+"七万": 2,
+"七条": 1,
+"七筒": 9,
+"三万": 11,
+"三筒": 13,
+"九万": 2,
+"九条": 1,
+"九筒": 4
+},
+"gpt__screen114": {
+"咔嚓": 4,
+"哗啦": 37,
+"喵呜": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-astra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.6455857285307239,
+"gpt-6-sol": 0.28264988674963315,
+"gpt-5.6-terra": 0.3032239750295632,
+"gpt-6-luna": 0.2771348828792034,
+"other_known_external": 0.354414271469276
+},
+"scores": {
+"gpt-6-astra": -0.976502939206858,
+"gpt-6-sol": -1.9078579811767697,
+"gpt-5.6-terra": -1.8084952328617194,
+"gpt-6-luna": -1.9352212544904133,
+"other_known_external": -1.5761944628698215
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 7,
+"43": 2,
+"47": 34
+},
+"gpt__screen106": {
+"一筒": 22,
+"三万": 5,
+"三筒": 13,
+"东風": 1,
+"九筒": 1,
+"五筒": 1
+},
+"gpt__screen114": {
+"咚咚": 9,
+"咚！": 3,
+"喵。": 5,
+"喵呜": 9,
+"喵喵。": 1,
+"汪汪。": 4,
+"砰！": 11
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-sol",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2729871038803786,
+"gpt-6-sol": 0.6672339449414623,
+"gpt-5.6-terra": 0.29809975241600184,
+"gpt-6-luna": 0.2688350417616111,
+"other_known_external": 0.33276605505853774
+},
+"scores": {
+"gpt-6-astra": -2.346879765458433,
+"gpt-6-sol": -1.3673601048014825,
+"gpt-5.6-terra": -2.223723231128201,
+"gpt-6-luna": -2.367901236309604,
+"other_known_external": -2.0630611255389875
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-sol",
+"counts": {
+"gpt__screen023": {
+"42": 7,
+"43": 2,
+"47": 34
+},
+"gpt__screen106": {
+"一筒": 22,
+"三万": 5,
+"三筒": 13,
+"东風": 1,
+"九筒": 1,
+"五筒": 1
+},
+"gpt__screen114": {
+"咚咚": 9,
+"咚！": 3,
+"喵。": 5,
+"喵呜": 9,
+"喵喵。": 1,
+"汪汪。": 4,
+"砰！": 11
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-sol",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2729871038803786,
+"gpt-6-sol": 0.6672339449414623,
+"gpt-5.6-terra": 0.29809975241600184,
+"gpt-6-luna": 0.2688350417616111,
+"other_known_external": 0.33276605505853774
+},
+"scores": {
+"gpt-6-astra": -2.346879765458433,
+"gpt-6-sol": -1.3673601048014825,
+"gpt-5.6-terra": -2.223723231128201,
+"gpt-6-luna": -2.367901236309604,
+"other_known_external": -2.0630611255389875
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "gpt-5.6-terra",
+"counts": {
+"gpt__screen023": {
+"42": 17,
+"43": 15,
+"47": 11
+},
+"gpt__screen106": {
+"一万": 3,
+"三万": 24,
+"五万": 16
+},
+"gpt__screen114": {
+"哗啦": 2,
+"啪": 15,
+"啪嗒": 20,
+"啪！": 1,
+"轰隆": 3,
+"轰隆隆": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-5.6-terra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2967354591023794,
+"gpt-6-sol": 0.31407289255724813,
+"gpt-5.6-terra": 0.663887556691494,
+"gpt-6-luna": 0.275657661341286,
+"other_known_external": 0.33611244330850604
+},
+"scores": {
+"gpt-6-astra": -2.02140116444046,
+"gpt-6-sol": -1.9396553362026765,
+"gpt-5.6-terra": -1.158509072364143,
+"gpt-6-luna": -2.1246134580678393,
+"other_known_external": -1.839176108485093
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-luna",
+"source": "gpt-5.6-terra",
+"counts": {
+"gpt__screen023": {
+"42": 17,
+"43": 15,
+"47": 11
+},
+"gpt__screen106": {
+"一万": 3,
+"三万": 24,
+"五万": 16
+},
+"gpt__screen114": {
+"哗啦": 2,
+"啪": 15,
+"啪嗒": 20,
+"啪！": 1,
+"轰隆": 3,
+"轰隆隆": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-5.6-terra",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2967354591023794,
+"gpt-6-sol": 0.31407289255724813,
+"gpt-5.6-terra": 0.663887556691494,
+"gpt-6-luna": 0.275657661341286,
+"other_known_external": 0.33611244330850604
+},
+"scores": {
+"gpt-6-astra": -2.02140116444046,
+"gpt-6-sol": -1.9396553362026765,
+"gpt-5.6-terra": -1.158509072364143,
+"gpt-6-luna": -2.1246134580678393,
+"other_known_external": -1.839176108485093
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "gpt-6-luna",
+"counts": {
+"gpt__screen023": {
+"37": 1,
+"42": 33,
+"43": 2,
+"46": 7
+},
+"gpt__screen106": {
+"三筒": 3,
+"五万": 1,
+"五筒": 2,
+"红中": 37
+},
+"gpt__screen114": {
+"叮咚": 2,
+"哐当": 1,
+"哗啦": 13,
+"哗啦啦": 7,
+"喵呜": 4,
+"喵喵": 14,
+"喵嗷": 1
+}
+},
+"verdict": "mismatch",
+"model": "gpt-6-luna",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.28635461127339656,
+"gpt-6-sol": 0.30585660236398227,
+"gpt-5.6-terra": 0.2903556753110269,
+"gpt-6-luna": 0.6180267214589001,
+"other_known_external": 0.38197327854109986
+},
+"scores": {
+"gpt-6-astra": -2.0261834922983333,
+"gpt-6-sol": -1.9325904417217754,
+"gpt-5.6-terra": -2.0066855054140875,
+"gpt-6-luna": -1.1130282501134752,
+"other_known_external": -1.5942092905462708
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-luna",
+"source": "gpt-6-luna",
+"counts": {
+"gpt__screen023": {
+"37": 1,
+"42": 33,
+"43": 2,
+"46": 7
+},
+"gpt__screen106": {
+"三筒": 3,
+"五万": 1,
+"五筒": 2,
+"红中": 37
+},
+"gpt__screen114": {
+"叮咚": 2,
+"哐当": 1,
+"哗啦": 13,
+"哗啦啦": 7,
+"喵呜": 4,
+"喵喵": 14,
+"喵嗷": 1
+}
+},
+"verdict": "match",
+"model": "gpt-6-luna",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.28635461127339656,
+"gpt-6-sol": 0.30585660236398227,
+"gpt-5.6-terra": 0.2903556753110269,
+"gpt-6-luna": 0.6180267214589001,
+"other_known_external": 0.38197327854109986
+},
+"scores": {
+"gpt-6-astra": -2.0261834922983333,
+"gpt-6-sol": -1.9325904417217754,
+"gpt-5.6-terra": -2.0066855054140875,
+"gpt-6-luna": -1.1130282501134752,
+"other_known_external": -1.5942092905462708
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "openai/gpt-5.6-sol",
+"counts": {
+"gpt__screen023": {
+"37": 1,
+"43": 11,
+"47": 31
+},
+"gpt__screen106": {
+"一筒": 4,
+"七筒": 2,
+"三万": 5,
+"九万": 10,
+"九筒": 1,
+"五筒": 10,
+"八万": 5,
+"八筒": 4,
+"红中": 1,
+"🀄 一筒": 1
+},
+"gpt__screen114": {
+"叮咚": 3,
+"咔嚓": 1,
+"咕咚": 5,
+"咚咚": 2,
+"哗啦": 24,
+"哗啦哗啦": 6,
+"哗啦啦": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.34900656870552155,
+"gpt-6-sol": 0.3311345514100547,
+"gpt-5.6-terra": 0.2888943059758445,
+"gpt-6-luna": 0.26197532372563964,
+"other_known_external": 0.6509934312944785
+},
+"scores": {
+"gpt-6-astra": -2.156709147688015,
+"gpt-6-sol": -2.236358463448518,
+"gpt-5.6-terra": -2.4340605154905046,
+"gpt-6-luna": -2.569027284894308,
+"other_known_external": -1.5333003392389015
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-luna",
+"source": "openai/gpt-5.6-sol",
+"counts": {
+"gpt__screen023": {
+"37": 1,
+"43": 11,
+"47": 31
+},
+"gpt__screen106": {
+"一筒": 4,
+"七筒": 2,
+"三万": 5,
+"九万": 10,
+"九筒": 1,
+"五筒": 10,
+"八万": 5,
+"八筒": 4,
+"红中": 1,
+"🀄 一筒": 1
+},
+"gpt__screen114": {
+"叮咚": 3,
+"咔嚓": 1,
+"咕咚": 5,
+"咚咚": 2,
+"哗啦": 24,
+"哗啦哗啦": 6,
+"哗啦啦": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.34900656870552155,
+"gpt-6-sol": 0.3311345514100547,
+"gpt-5.6-terra": 0.2888943059758445,
+"gpt-6-luna": 0.26197532372563964,
+"other_known_external": 0.6509934312944785
+},
+"scores": {
+"gpt-6-astra": -2.156709147688015,
+"gpt-6-sol": -2.236358463448518,
+"gpt-5.6-terra": -2.4340605154905046,
+"gpt-6-luna": -2.569027284894308,
+"other_known_external": -1.5333003392389015
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "openai/gpt-5.6-luna",
+"counts": {
+"gpt__screen023": {
+"43": 18,
+"46": 6,
+"47": 19
+},
+"gpt__screen106": {
+"三万": 5,
+"红中": 38
+},
+"gpt__screen114": {
+"哐当": 7,
+"哗啦哗啦": 5,
+"哗啦啦": 16,
+"喵喵": 14
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.29391179792802685,
+"gpt-6-sol": 0.30202960337237883,
+"gpt-5.6-terra": 0.3052108036210959,
+"gpt-6-luna": 0.38530512052588306,
+"other_known_external": 0.6146948794741169
+},
+"scores": {
+"gpt-6-astra": -1.8760284568105998,
+"gpt-6-sol": -1.837219663459535,
+"gpt-5.6-terra": -1.8221737980002106,
+"gpt-6-luna": -1.4666584827885187,
+"other_known_external": -0.9995680102874848
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-luna",
+"source": "openai/gpt-5.6-luna",
+"counts": {
+"gpt__screen023": {
+"43": 18,
+"46": 6,
+"47": 19
+},
+"gpt__screen106": {
+"三万": 5,
+"红中": 38
+},
+"gpt__screen114": {
+"哐当": 7,
+"哗啦哗啦": 5,
+"哗啦啦": 16,
+"喵喵": 14
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.29391179792802685,
+"gpt-6-sol": 0.30202960337237883,
+"gpt-5.6-terra": 0.3052108036210959,
+"gpt-6-luna": 0.38530512052588306,
+"other_known_external": 0.6146948794741169
+},
+"scores": {
+"gpt-6-astra": -1.8760284568105998,
+"gpt-6-sol": -1.837219663459535,
+"gpt-5.6-terra": -1.8221737980002106,
+"gpt-6-luna": -1.4666584827885187,
+"other_known_external": -0.9995680102874848
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "z-ai/glm-5.3",
+"counts": {
+"gpt__screen023": {
+"37": 24,
+"42": 7,
+"43": 8,
+"46": 3,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"gpt__screen106": {
+"七万": 2,
+"九万": 15,
+"九条": 5,
+"九筒": 10,
+"五万": 10,
+"八万": 1
+},
+"gpt__screen114": {
+"__UNSEEN_IN_TRAINING__": 1,
+"叮咚": 5,
+"哗啦啦": 25,
+"嗡嗡": 3,
+"汪汪": 1,
+"轰隆": 7
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2785680136043629,
+"gpt-6-sol": 0.2466514146696578,
+"gpt-5.6-terra": 0.297885560512395,
+"gpt-6-luna": 0.29036324831094,
+"other_known_external": 0.702114439487605
+},
+"scores": {
+"gpt-6-astra": -2.450407697666214,
+"gpt-6-sol": -2.6153838206257225,
+"gpt-5.6-terra": -2.356218856746871,
+"gpt-6-luna": -2.392452336653287,
+"other_known_external": -1.4988318344168161
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-luna",
+"source": "z-ai/glm-5.3",
+"counts": {
+"gpt__screen023": {
+"37": 24,
+"42": 7,
+"43": 8,
+"46": 3,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"gpt__screen106": {
+"七万": 2,
+"九万": 15,
+"九条": 5,
+"九筒": 10,
+"五万": 10,
+"八万": 1
+},
+"gpt__screen114": {
+"__UNSEEN_IN_TRAINING__": 1,
+"叮咚": 5,
+"哗啦啦": 25,
+"嗡嗡": 3,
+"汪汪": 1,
+"轰隆": 7
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.2785680136043629,
+"gpt-6-sol": 0.2466514146696578,
+"gpt-5.6-terra": 0.297885560512395,
+"gpt-6-luna": 0.29036324831094,
+"other_known_external": 0.702114439487605
+},
+"scores": {
+"gpt-6-astra": -2.450407697666214,
+"gpt-6-sol": -2.6153838206257225,
+"gpt-5.6-terra": -2.356218856746871,
+"gpt-6-luna": -2.392452336653287,
+"other_known_external": -1.4988318344168161
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "partial",
+"counts": {
+"gpt__screen023": {
+"43": 21
+},
+"gpt__screen106": {
+"七筒": 8,
+"三万": 1,
+"三筒": 6,
+"九条": 1,
+"九筒": 4,
+"红中": 1
+},
+"gpt__screen114": {
+"哗啦": 21
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.703406209573055,
+"gpt-6-sol": 0.18978601114511268,
+"gpt-5.6-terra": 0.20446049757399748,
+"gpt-6-luna": 0.21256236291998354,
+"other_known_external": 0.296593790426945
+},
+"scores": {
+"gpt-6-astra": -0.6385788638524478,
+"gpt-6-sol": -2.0899800800746773,
+"gpt-5.6-terra": -1.9972245768259305,
+"gpt-6-luna": -1.9481276225325093,
+"other_known_external": -1.5021499181585884
+},
+"valid": 63,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "empty",
+"counts": {},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.5,
+"gpt-6-sol": 0.5,
+"gpt-5.6-terra": 0.5,
+"gpt-6-luna": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"gpt-6-astra": 0.0,
+"gpt-6-sol": 0.0,
+"gpt-5.6-terra": 0.0,
+"gpt-6-luna": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "junk",
+"counts": {
+"gpt__screen023": {
+"zzz-not-a-category": 43
+},
+"gpt__screen106": {
+"zzz-not-a-category": 43
+},
+"gpt__screen114": {
+"zzz-not-a-category": 42
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"gpt-6-astra": 0.4250010010416469,
+"gpt-6-sol": 0.4250010010416469,
+"gpt-5.6-terra": 0.4250010010416469,
+"gpt-6-luna": 0.4250010010416469,
+"other_known_external": 0.574998998958353
+},
+"scores": {
+"gpt-6-astra": -1.242592152519265,
+"gpt-6-sol": -1.242592152519265,
+"gpt-5.6-terra": -1.242592152519265,
+"gpt-6-luna": -1.242592152519265,
+"other_known_external": -0.9403153769791778
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "invalid",
+"counts": {
+"gpt__screen023": {
+"__INVALID_OUTPUT__": 43
+},
+"gpt__screen106": {
+"__INVALID_OUTPUT__": 43
+},
+"gpt__screen114": {
+"__INVALID_OUTPUT__": 42
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"gpt-6-astra": 0.5,
+"gpt-6-sol": 0.5,
+"gpt-5.6-terra": 0.5,
+"gpt-6-luna": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"gpt-6-astra": 0.0,
+"gpt-6-sol": 0.0,
+"gpt-5.6-terra": 0.0,
+"gpt-6-luna": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "gpt-6-astra",
+"source": "overfull",
+"counts": {
+"gpt__screen023": {
+"43": 42,
+"46": 1,
+"47": 3
+},
+"gpt__screen106": {
+"一万": 1,
+"七条": 2,
+"七筒": 11,
+"三万": 2,
+"三筒": 21,
+"九万": 3,
+"九筒": 5,
+"二筒": 1
+},
+"gpt__screen114": {
+"哗啦": 44,
+"喵呜": 1
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_exceed_plan"
+],
+"matches": {
+"gpt-6-astra": 0.6301503631546977,
+"gpt-6-sol": 0.30124938768580006,
+"gpt-5.6-terra": 0.3055129820457546,
+"gpt-6-luna": 0.29074474766497754,
+"other_known_external": 0.3698496368453022
+},
+"scores": {
+"gpt-6-astra": -0.8197060486421933,
+"gpt-6-sol": -1.661061497185968,
+"gpt-5.6-terra": -1.6408872458811643,
+"gpt-6-luna": -1.7114758013265954,
+"other_known_external": -1.3525679750881971
+},
+"valid": 137,
+"planned": 128
+},
+{
+"package": "meow-gpt-other-cap98-efficient",
+"tier": "high",
+"claimed": "not-in-package",
+"source": "unknown-claimed",
+"counts": {
+"gpt__screen023": {
+"43": 39,
+"46": 2,
+"47": 2
+},
+"gpt__screen106": {
+"七万": 3,
+"七条": 2,
+"七筒": 6,
+"三万": 10,
+"三筒": 11,
+"九条": 5,
+"九筒": 6
+},
+"gpt__screen114": {
+"哗啦": 42
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"unknown_claimed_model"
+],
+"matches": {
+"gpt-6-astra": 0.6576996599231831,
+"gpt-6-sol": 0.27795589557617617,
+"gpt-5.6-terra": 0.30773382268689126,
+"gpt-6-luna": 0.27134363502905023,
+"other_known_external": 0.3423003400768169
+},
+"scores": {
+"gpt-6-astra": -0.8289261535790087,
+"gpt-6-sol": -1.7835499249677313,
+"gpt-5.6-terra": -1.6396614872630026,
+"gpt-6-luna": -1.8167423522619215,
+"other_known_external": -1.4819859977755578
+},
+"valid": 128,
+"planned": 128
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "claude-fable-5.1",
+"counts": {
+"claude__screen008": {
+"叮": 4,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 3,
+"禾": 8
+},
+"claude__screen023": {
+"37": 2,
+"42": 5,
+"43": 1,
+"47": 14
+},
+"claude__screen048": {
+"五万": 8,
+"五条": 1,
+"五萬": 1
+}
+},
+"verdict": "match",
+"model": "claude-fable-5.1",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.6517617137413272,
+"claude-opus-5.5": 0.3262235417019336,
+"claude-sonnet-5": 0.25230488647462274,
+"claude-haiku-4.5": 0.1362813582703284,
+"other_known_external": 0.34823828625867276
+},
+"scores": {
+"claude-fable-5.1": -0.8817130052490735,
+"claude-opus-5.5": -1.6070285397857953,
+"claude-sonnet-5": -1.9680700747174094,
+"claude-haiku-4.5": -2.7282385153675754,
+"other_known_external": -1.5085050545717145
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "claude-fable-5.1",
+"counts": {
+"claude__screen008": {
+"叮": 4,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 3,
+"禾": 8
+},
+"claude__screen023": {
+"37": 2,
+"42": 5,
+"43": 1,
+"47": 14
+},
+"claude__screen048": {
+"五万": 8,
+"五条": 1,
+"五萬": 1
+}
+},
+"verdict": "mismatch",
+"model": "claude-fable-5.1",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.6517617137413272,
+"claude-opus-5.5": 0.3262235417019336,
+"claude-sonnet-5": 0.25230488647462274,
+"claude-haiku-4.5": 0.1362813582703284,
+"other_known_external": 0.34823828625867276
+},
+"scores": {
+"claude-fable-5.1": -0.8817130052490735,
+"claude-opus-5.5": -1.6070285397857953,
+"claude-sonnet-5": -1.9680700747174094,
+"claude-haiku-4.5": -2.7282385153675754,
+"other_known_external": -1.5085050545717145
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "claude-opus-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 4,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 10,
+"序": 1
+},
+"claude__screen023": {
+"37": 4,
+"42": 17,
+"43": 1
+},
+"claude__screen048": {
+"三万": 1,
+"五万": 7,
+"五条": 1,
+"六筒": 1
+}
+},
+"verdict": "mismatch",
+"model": "claude-opus-5.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3439026142356628,
+"claude-opus-5.5": 0.6560973857643372,
+"claude-sonnet-5": 0.21089650121404968,
+"claude-haiku-4.5": 0.18729593205752873,
+"other_known_external": 0.3402592980930639
+},
+"scores": {
+"claude-fable-5.1": -1.5203528027214182,
+"claude-opus-5.5": -0.8744020900278787,
+"claude-sonnet-5": -2.1939320818785615,
+"claude-haiku-4.5": -2.342079242886601,
+"other_known_external": -1.5365410035566367
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "claude-opus-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 4,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 10,
+"序": 1
+},
+"claude__screen023": {
+"37": 4,
+"42": 17,
+"43": 1
+},
+"claude__screen048": {
+"三万": 1,
+"五万": 7,
+"五条": 1,
+"六筒": 1
+}
+},
+"verdict": "mismatch",
+"model": "claude-opus-5.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3439026142356628,
+"claude-opus-5.5": 0.6560973857643372,
+"claude-sonnet-5": 0.21089650121404968,
+"claude-haiku-4.5": 0.18729593205752873,
+"other_known_external": 0.3402592980930639
+},
+"scores": {
+"claude-fable-5.1": -1.5203528027214182,
+"claude-opus-5.5": -0.8744020900278787,
+"claude-sonnet-5": -2.1939320818785615,
+"claude-haiku-4.5": -2.342079242886601,
+"other_known_external": -1.5365410035566367
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "claude-sonnet-5",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"宁": 6,
+"序": 2,
+"禾": 3
+},
+"claude__screen023": {
+"43": 19,
+"47": 2,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"claude__screen048": {
+"七万": 1,
+"九万": 2,
+"八万": 5,
+"八筒": 2
+}
+},
+"verdict": "mismatch",
+"model": "claude-sonnet-5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2658081258437802,
+"claude-opus-5.5": 0.21908435282756605,
+"claude-sonnet-5": 0.5952350324924299,
+"claude-haiku-4.5": 0.1250837243429632,
+"other_known_external": 0.4047649675075701
+},
+"scores": {
+"claude-fable-5.1": -2.0711524843289912,
+"claude-opus-5.5": -2.326167107466513,
+"claude-sonnet-5": -1.055156798026317,
+"claude-haiku-4.5": -3.0003016870088275,
+"other_known_external": -1.4408065666575656
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "claude-sonnet-5",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"宁": 6,
+"序": 2,
+"禾": 3
+},
+"claude__screen023": {
+"43": 19,
+"47": 2,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"claude__screen048": {
+"七万": 1,
+"九万": 2,
+"八万": 5,
+"八筒": 2
+}
+},
+"verdict": "mismatch",
+"model": "claude-sonnet-5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2658081258437802,
+"claude-opus-5.5": 0.21908435282756605,
+"claude-sonnet-5": 0.5952350324924299,
+"claude-haiku-4.5": 0.1250837243429632,
+"other_known_external": 0.4047649675075701
+},
+"scores": {
+"claude-fable-5.1": -2.0711524843289912,
+"claude-opus-5.5": -2.326167107466513,
+"claude-sonnet-5": -1.055156798026317,
+"claude-haiku-4.5": -3.0003016870088275,
+"other_known_external": -1.4408065666575656
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "claude-haiku-4.5",
+"counts": {
+"claude__screen008": {
+"当": 4,
+"铛": 1
+},
+"claude__screen021": {
+"川": 11
+},
+"claude__screen023": {
+"42": 15,
+"45": 6,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"claude__screen048": {
+"东风": 1,
+"白板": 2,
+"筒子五": 7
+}
+},
+"verdict": "mismatch",
+"model": "claude-haiku-4.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.13879395586016938,
+"claude-opus-5.5": 0.1941907916666944,
+"claude-sonnet-5": 0.10959958496006891,
+"claude-haiku-4.5": 0.6089765862257606,
+"other_known_external": 0.3910234137742395
+},
+"scores": {
+"claude-fable-5.1": -2.5849912124862895,
+"claude-opus-5.5": -2.1826537924706906,
+"claude-sonnet-5": -2.8544856086353056,
+"claude-haiku-4.5": -0.7596479301926334,
+"other_known_external": -1.2026603109322627
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "claude-haiku-4.5",
+"counts": {
+"claude__screen008": {
+"当": 4,
+"铛": 1
+},
+"claude__screen021": {
+"川": 11
+},
+"claude__screen023": {
+"42": 15,
+"45": 6,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"claude__screen048": {
+"东风": 1,
+"白板": 2,
+"筒子五": 7
+}
+},
+"verdict": "match",
+"model": "claude-haiku-4.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.13879395586016938,
+"claude-opus-5.5": 0.1941907916666944,
+"claude-sonnet-5": 0.10959958496006891,
+"claude-haiku-4.5": 0.6089765862257606,
+"other_known_external": 0.3910234137742395
+},
+"scores": {
+"claude-fable-5.1": -2.5849912124862895,
+"claude-opus-5.5": -2.1826537924706906,
+"claude-sonnet-5": -2.8544856086353056,
+"claude-haiku-4.5": -0.7596479301926334,
+"other_known_external": -1.2026603109322627
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-opus-5",
+"counts": {
+"claude__screen008": {
+"叮": 2,
+"咚": 2,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 1,
+"序": 2,
+"禾": 8
+},
+"claude__screen023": {
+"42": 1,
+"44": 5,
+"45": 9,
+"47": 7
+},
+"claude__screen048": {
+"五万": 2,
+"五筒": 3,
+"五萬": 5
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.39777837779167075,
+"claude-opus-5.5": 0.22914918716580143,
+"claude-sonnet-5": 0.23417790862743493,
+"claude-haiku-4.5": 0.17932686898885114,
+"other_known_external": 0.6022216222083293
+},
+"scores": {
+"claude-fable-5.1": -1.7316991486180067,
+"claude-opus-5.5": -2.5300902311188693,
+"claude-sonnet-5": -2.501837404636502,
+"claude-haiku-4.5": -2.8378833090010307,
+"other_known_external": -1.3169686383262666
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-opus-5",
+"counts": {
+"claude__screen008": {
+"叮": 2,
+"咚": 2,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 1,
+"序": 2,
+"禾": 8
+},
+"claude__screen023": {
+"42": 1,
+"44": 5,
+"45": 9,
+"47": 7
+},
+"claude__screen048": {
+"五万": 2,
+"五筒": 3,
+"五萬": 5
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.39777837779167075,
+"claude-opus-5.5": 0.22914918716580143,
+"claude-sonnet-5": 0.23417790862743493,
+"claude-haiku-4.5": 0.17932686898885114,
+"other_known_external": 0.6022216222083293
+},
+"scores": {
+"claude-fable-5.1": -1.7316991486180067,
+"claude-opus-5.5": -2.5300902311188693,
+"claude-sonnet-5": -2.501837404636502,
+"claude-haiku-4.5": -2.8378833090010307,
+"other_known_external": -1.3169686383262666
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "x-ai/grok-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 2,
+"当": 3
+},
+"claude__screen021": {
+"宁": 1,
+"川": 10
+},
+"claude__screen023": {
+"42": 21,
+"45": 1
+},
+"claude__screen048": {
+"一万": 1,
+"三万": 1,
+"东风": 1,
+"九条": 4,
+"二万": 1,
+"五条": 1,
+"五萬": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2152418525215103,
+"claude-opus-5.5": 0.3342441798773268,
+"claude-sonnet-5": 0.16782374199332267,
+"claude-haiku-4.5": 0.359547664659484,
+"other_known_external": 0.6404523353405159
+},
+"scores": {
+"claude-fable-5.1": -2.373767599798469,
+"claude-opus-5.5": -1.7692054767397043,
+"claude-sonnet-5": -2.681284306322824,
+"claude-haiku-4.5": -1.6574822595508223,
+"other_known_external": -1.0801543132260985
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "x-ai/grok-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 2,
+"当": 3
+},
+"claude__screen021": {
+"宁": 1,
+"川": 10
+},
+"claude__screen023": {
+"42": 21,
+"45": 1
+},
+"claude__screen048": {
+"一万": 1,
+"三万": 1,
+"东风": 1,
+"九条": 4,
+"二万": 1,
+"五条": 1,
+"五萬": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2152418525215103,
+"claude-opus-5.5": 0.3342441798773268,
+"claude-sonnet-5": 0.16782374199332267,
+"claude-haiku-4.5": 0.359547664659484,
+"other_known_external": 0.6404523353405159
+},
+"scores": {
+"claude-fable-5.1": -2.373767599798469,
+"claude-opus-5.5": -1.7692054767397043,
+"claude-sonnet-5": -2.681284306322824,
+"claude-haiku-4.5": -1.6574822595508223,
+"other_known_external": -1.0801543132260985
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "moonshotai/kimi-k3",
+"counts": {
+"claude__screen008": {
+"叮": 4,
+"铛": 1
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 1,
+"宁": 1,
+"川": 1,
+"禾": 8
+},
+"claude__screen023": {
+"37": 12,
+"47": 10
+},
+"claude__screen048": {
+"红中": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3021485710342243,
+"claude-opus-5.5": 0.20074186345342446,
+"claude-sonnet-5": 0.2458662172669328,
+"claude-haiku-4.5": 0.14047219138777126,
+"other_known_external": 0.6978514289657757
+},
+"scores": {
+"claude-fable-5.1": -1.5728147704946316,
+"claude-opus-5.5": -2.1173915431961894,
+"claude-sonnet-5": -1.8565096235394847,
+"claude-haiku-4.5": -2.5471010319314202,
+"other_known_external": -0.7357273963437594
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "moonshotai/kimi-k3",
+"counts": {
+"claude__screen008": {
+"叮": 4,
+"铛": 1
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 1,
+"宁": 1,
+"川": 1,
+"禾": 8
+},
+"claude__screen023": {
+"37": 12,
+"47": 10
+},
+"claude__screen048": {
+"红中": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3021485710342243,
+"claude-opus-5.5": 0.20074186345342446,
+"claude-sonnet-5": 0.2458662172669328,
+"claude-haiku-4.5": 0.14047219138777126,
+"other_known_external": 0.6978514289657757
+},
+"scores": {
+"claude-fable-5.1": -1.5728147704946316,
+"claude-opus-5.5": -2.1173915431961894,
+"claude-sonnet-5": -1.8565096235394847,
+"claude-haiku-4.5": -2.5471010319314202,
+"other_known_external": -0.7357273963437594
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "qwen/qwen3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"宁": 2,
+"川": 3,
+"禾": 6
+},
+"claude__screen023": {
+"42": 17,
+"45": 5
+},
+"claude__screen048": {
+"发财": 6,
+"白板": 4
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.24727450238903328,
+"claude-opus-5.5": 0.27102831117969467,
+"claude-sonnet-5": 0.20632608574327793,
+"claude-haiku-4.5": 0.323332111665307,
+"other_known_external": 0.676667888334693
+},
+"scores": {
+"claude-fable-5.1": -1.9743715996518372,
+"claude-opus-5.5": -1.8505816594612308,
+"claude-sonnet-5": -2.2083848803617876,
+"claude-haiku-4.5": -1.599670632884429,
+"other_known_external": -0.8611700485650671
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "qwen/qwen3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"宁": 2,
+"川": 3,
+"禾": 6
+},
+"claude__screen023": {
+"42": 17,
+"45": 5
+},
+"claude__screen048": {
+"发财": 6,
+"白板": 4
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.24727450238903328,
+"claude-opus-5.5": 0.27102831117969467,
+"claude-sonnet-5": 0.20632608574327793,
+"claude-haiku-4.5": 0.323332111665307,
+"other_known_external": 0.676667888334693
+},
+"scores": {
+"claude-fable-5.1": -1.9743715996518372,
+"claude-opus-5.5": -1.8505816594612308,
+"claude-sonnet-5": -2.2083848803617876,
+"claude-haiku-4.5": -1.599670632884429,
+"other_known_external": -0.8611700485650671
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "z-ai/glm-5.3",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 3,
+"铛": 1
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 1,
+"宁": 1,
+"川": 2,
+"禾": 7
+},
+"claude__screen023": {
+"37": 9,
+"42": 4,
+"47": 9
+},
+"claude__screen048": {
+"七万": 2,
+"九万": 1,
+"九筒": 2,
+"五筒": 3,
+"八万": 2
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.32276813186775904,
+"claude-opus-5.5": 0.2386975392176073,
+"claude-sonnet-5": 0.24698940658890312,
+"claude-haiku-4.5": 0.15974404718083224,
+"other_known_external": 0.6772318681322409
+},
+"scores": {
+"claude-fable-5.1": -2.1423718192353705,
+"claude-opus-5.5": -2.561125825315731,
+"claude-sonnet-5": -2.516026167428692,
+"claude-haiku-4.5": -3.061426040798461,
+"other_known_external": -1.401292318856938
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "z-ai/glm-5.3",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 3,
+"铛": 1
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 1,
+"宁": 1,
+"川": 2,
+"禾": 7
+},
+"claude__screen023": {
+"37": 9,
+"42": 4,
+"47": 9
+},
+"claude__screen048": {
+"七万": 2,
+"九万": 1,
+"九筒": 2,
+"五筒": 3,
+"八万": 2
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.32276813186775904,
+"claude-opus-5.5": 0.2386975392176073,
+"claude-sonnet-5": 0.24698940658890312,
+"claude-haiku-4.5": 0.15974404718083224,
+"other_known_external": 0.6772318681322409
+},
+"scores": {
+"claude-fable-5.1": -2.1423718192353705,
+"claude-opus-5.5": -2.561125825315731,
+"claude-sonnet-5": -2.516026167428692,
+"claude-haiku-4.5": -3.061426040798461,
+"other_known_external": -1.401292318856938
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "deepseek/deepseek-v4-flash-0731",
+"counts": {
+"claude__screen008": {
+"咚": 1,
+"当": 3,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 1,
+"川": 6,
+"禾": 4
+},
+"claude__screen023": {
+"42": 22
+},
+"claude__screen048": {
+"九条": 3,
+"九筒": 4,
+"红中": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.20143015056551397,
+"claude-opus-5.5": 0.26332194840567597,
+"claude-sonnet-5": 0.14951161348026248,
+"claude-haiku-4.5": 0.29426965592024484,
+"other_known_external": 0.7057303440797551
+},
+"scores": {
+"claude-fable-5.1": -2.125800223071833,
+"claude-opus-5.5": -1.7771939958267655,
+"claude-sonnet-5": -2.486857142306573,
+"claude-haiku-4.5": -1.6231571290639095,
+"other_known_external": -0.7484204574054191
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "deepseek/deepseek-v4-flash-0731",
+"counts": {
+"claude__screen008": {
+"咚": 1,
+"当": 3,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 1,
+"川": 6,
+"禾": 4
+},
+"claude__screen023": {
+"42": 22
+},
+"claude__screen048": {
+"九条": 3,
+"九筒": 4,
+"红中": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.20143015056551397,
+"claude-opus-5.5": 0.26332194840567597,
+"claude-sonnet-5": 0.14951161348026248,
+"claude-haiku-4.5": 0.29426965592024484,
+"other_known_external": 0.7057303440797551
+},
+"scores": {
+"claude-fable-5.1": -2.125800223071833,
+"claude-opus-5.5": -1.7771939958267655,
+"claude-sonnet-5": -2.486857142306573,
+"claude-haiku-4.5": -1.6231571290639095,
+"other_known_external": -0.7484204574054191
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "google/gemini-3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"宁": 1,
+"川": 5,
+"禾": 5
+},
+"claude__screen023": {
+"42": 18,
+"43": 2,
+"45": 2
+},
+"claude__screen048": {
+"八万": 2,
+"发财": 8
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23687204521283192,
+"claude-opus-5.5": 0.2611334619481759,
+"claude-sonnet-5": 0.24573020142278132,
+"claude-haiku-4.5": 0.27241298477158354,
+"other_known_external": 0.7275870152284165
+},
+"scores": {
+"claude-fable-5.1": -1.965340870207705,
+"claude-opus-5.5": -1.8355209366305332,
+"claude-sonnet-5": -1.916951190281133,
+"claude-haiku-4.5": -1.7778496144010678,
+"other_known_external": -0.7954352551166061
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "google/gemini-3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"宁": 1,
+"川": 5,
+"禾": 5
+},
+"claude__screen023": {
+"42": 18,
+"43": 2,
+"45": 2
+},
+"claude__screen048": {
+"八万": 2,
+"发财": 8
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23687204521283192,
+"claude-opus-5.5": 0.2611334619481759,
+"claude-sonnet-5": 0.24573020142278132,
+"claude-haiku-4.5": 0.27241298477158354,
+"other_known_external": 0.7275870152284165
+},
+"scores": {
+"claude-fable-5.1": -1.965340870207705,
+"claude-opus-5.5": -1.8355209366305332,
+"claude-sonnet-5": -1.916951190281133,
+"claude-haiku-4.5": -1.7778496144010678,
+"other_known_external": -0.7954352551166061
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-sonnet-4.6",
+"counts": {
+"claude__screen008": {
+"铛": 5
+},
+"claude__screen021": {
+"宁": 8,
+"禾": 3
+},
+"claude__screen023": {
+"37": 1,
+"42": 18,
+"47": 3
+},
+"claude__screen048": {
+"七筒": 2,
+"八万": 2,
+"六万": 3,
+"六筒": 1,
+"六饼": 2
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23431014893720145,
+"claude-opus-5.5": 0.285854242302831,
+"claude-sonnet-5": 0.23436930643225887,
+"claude-haiku-4.5": 0.17378900724983443,
+"other_known_external": 0.7141457576971689
+},
+"scores": {
+"claude-fable-5.1": -2.107606121866507,
+"claude-opus-5.5": -1.8390796341884845,
+"claude-sonnet-5": -2.1072764151885757,
+"claude-haiku-4.5": -2.482482807521819,
+"other_known_external": -0.9234745888604037
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-sonnet-4.6",
+"counts": {
+"claude__screen008": {
+"铛": 5
+},
+"claude__screen021": {
+"宁": 8,
+"禾": 3
+},
+"claude__screen023": {
+"37": 1,
+"42": 18,
+"47": 3
+},
+"claude__screen048": {
+"七筒": 2,
+"八万": 2,
+"六万": 3,
+"六筒": 1,
+"六饼": 2
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23431014893720145,
+"claude-opus-5.5": 0.285854242302831,
+"claude-sonnet-5": 0.23436930643225887,
+"claude-haiku-4.5": 0.17378900724983443,
+"other_known_external": 0.7141457576971689
+},
+"scores": {
+"claude-fable-5.1": -2.107606121866507,
+"claude-opus-5.5": -1.8390796341884845,
+"claude-sonnet-5": -2.1072764151885757,
+"claude-haiku-4.5": -2.482482807521819,
+"other_known_external": -0.9234745888604037
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "openai/gpt-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"川": 7,
+"禾": 4
+},
+"claude__screen023": {
+"42": 16,
+"45": 3,
+"47": 3
+},
+"claude__screen048": {
+"三万": 6,
+"三筒": 3,
+"五筒": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.25685259999305027,
+"claude-opus-5.5": 0.2955029097201768,
+"claude-sonnet-5": 0.18857100234250138,
+"claude-haiku-4.5": 0.28982239603907745,
+"other_known_external": 0.7044970902798232
+},
+"scores": {
+"claude-fable-5.1": -2.000904375165961,
+"claude-opus-5.5": -1.8073178622350887,
+"claude-sonnet-5": -2.3978346263874637,
+"claude-haiku-4.5": -1.8347591219222477,
+"other_known_external": -0.9385123446632209
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "openai/gpt-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"川": 7,
+"禾": 4
+},
+"claude__screen023": {
+"42": 16,
+"45": 3,
+"47": 3
+},
+"claude__screen048": {
+"三万": 6,
+"三筒": 3,
+"五筒": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.25685259999305027,
+"claude-opus-5.5": 0.2955029097201768,
+"claude-sonnet-5": 0.18857100234250138,
+"claude-haiku-4.5": 0.28982239603907745,
+"other_known_external": 0.7044970902798232
+},
+"scores": {
+"claude-fable-5.1": -2.000904375165961,
+"claude-opus-5.5": -1.8073178622350887,
+"claude-sonnet-5": -2.3978346263874637,
+"claude-haiku-4.5": -1.8347591219222477,
+"other_known_external": -0.9385123446632209
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-opus-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"序": 11
+},
+"claude__screen023": {
+"44": 1,
+"45": 20,
+"47": 1
+},
+"claude__screen048": {
+"六万": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.14823356833730278,
+"claude-opus-5.5": 0.1423389084746036,
+"claude-sonnet-5": 0.19000331375697482,
+"claude-haiku-4.5": 0.18270225701914944,
+"other_known_external": 0.8099966862430252
+},
+"scores": {
+"claude-fable-5.1": -2.0187556663517037,
+"claude-opus-5.5": -2.0662306423886885,
+"claude-sonnet-5": -1.7202211563249683,
+"claude-haiku-4.5": -1.7683781585248124,
+"other_known_external": -0.27023251255942576
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-opus-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 5
+},
+"claude__screen021": {
+"序": 11
+},
+"claude__screen023": {
+"44": 1,
+"45": 20,
+"47": 1
+},
+"claude__screen048": {
+"六万": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.14823356833730278,
+"claude-opus-5.5": 0.1423389084746036,
+"claude-sonnet-5": 0.19000331375697482,
+"claude-haiku-4.5": 0.18270225701914944,
+"other_known_external": 0.8099966862430252
+},
+"scores": {
+"claude-fable-5.1": -2.0187556663517037,
+"claude-opus-5.5": -2.0662306423886885,
+"claude-sonnet-5": -1.7202211563249683,
+"claude-haiku-4.5": -1.7683781585248124,
+"other_known_external": -0.27023251255942576
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "partial",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 1,
+"禾": 4
+},
+"claude__screen023": {
+"44": 1,
+"47": 10
+},
+"claude__screen048": {
+"五万": 3,
+"五条": 1,
+"五萬": 1
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.5979573524002583,
+"claude-opus-5.5": 0.18514788875193383,
+"claude-sonnet-5": 0.18651546904958066,
+"claude-haiku-4.5": 0.06213358938767535,
+"other_known_external": 0.40204264759974156
+},
+"scores": {
+"claude-fable-5.1": -0.8217375049856946,
+"claude-opus-5.5": -2.303589238781127,
+"claude-sonnet-5": -2.294550236427551,
+"claude-haiku-4.5": -3.5360582898383024,
+"other_known_external": -1.2186987677881207
+},
+"valid": 23,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "empty",
+"counts": {},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.5,
+"claude-opus-5.5": 0.5,
+"claude-sonnet-5": 0.5,
+"claude-haiku-4.5": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"claude-fable-5.1": 0.0,
+"claude-opus-5.5": 0.0,
+"claude-sonnet-5": 0.0,
+"claude-haiku-4.5": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "junk",
+"counts": {
+"claude__screen008": {
+"zzz-not-a-category": 5
+},
+"claude__screen021": {
+"zzz-not-a-category": 11
+},
+"claude__screen023": {
+"zzz-not-a-category": 22
+},
+"claude__screen048": {
+"zzz-not-a-category": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3732202653954398,
+"claude-opus-5.5": 0.3732202653954398,
+"claude-sonnet-5": 0.3732202653954398,
+"claude-haiku-4.5": 0.3732202653954398,
+"other_known_external": 0.6267797346045602
+},
+"scores": {
+"claude-fable-5.1": -2.1842342678994533,
+"claude-opus-5.5": -2.1842342678994533,
+"claude-sonnet-5": -2.1842342678994533,
+"claude-haiku-4.5": -2.1842342678994533,
+"other_known_external": -1.6658078586597782
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "invalid",
+"counts": {
+"claude__screen008": {
+"__INVALID_OUTPUT__": 5
+},
+"claude__screen021": {
+"__INVALID_OUTPUT__": 11
+},
+"claude__screen023": {
+"__INVALID_OUTPUT__": 22
+},
+"claude__screen048": {
+"__INVALID_OUTPUT__": 10
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.5,
+"claude-opus-5.5": 0.5,
+"claude-sonnet-5": 0.5,
+"claude-haiku-4.5": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"claude-fable-5.1": 0.0,
+"claude-opus-5.5": 0.0,
+"claude-sonnet-5": 0.0,
+"claude-haiku-4.5": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "claude-fable-5.1",
+"source": "overfull",
+"counts": {
+"claude__screen008": {
+"__UNSEEN_IN_TRAINING__": 1,
+"叮": 2,
+"咚": 5
+},
+"claude__screen021": {
+"宁": 6,
+"序": 1,
+"禾": 7
+},
+"claude__screen023": {
+"42": 2,
+"43": 2,
+"47": 21
+},
+"claude__screen048": {
+"五万": 8,
+"五条": 1,
+"五筒": 2,
+"五萬": 2
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_exceed_plan"
+],
+"matches": {
+"claude-fable-5.1": 0.6243224938376053,
+"claude-opus-5.5": 0.3117178636591851,
+"claude-sonnet-5": 0.27175603278305616,
+"claude-haiku-4.5": 0.13873723270954585,
+"other_known_external": 0.3756775061623947
+},
+"scores": {
+"claude-fable-5.1": -0.9450989399170007,
+"claude-opus-5.5": -1.7371992801252758,
+"claude-sonnet-5": -1.9308303262685171,
+"claude-haiku-4.5": -2.770916854389865,
+"other_known_external": -1.453034912848646
+},
+"valid": 60,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "low",
+"claimed": "not-in-package",
+"source": "unknown-claimed",
+"counts": {
+"claude__screen008": {
+"叮": 4,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 4,
+"禾": 7
+},
+"claude__screen023": {
+"37": 1,
+"42": 2,
+"47": 19
+},
+"claude__screen048": {
+"五万": 8,
+"五萬": 2
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"unknown_claimed_model"
+],
+"matches": {
+"claude-fable-5.1": 0.6264990884200563,
+"claude-opus-5.5": 0.2842184643728641,
+"claude-sonnet-5": 0.2548844404145581,
+"claude-haiku-4.5": 0.13113517265047597,
+"other_known_external": 0.3735009115799437
+},
+"scores": {
+"claude-fable-5.1": -0.6418639821978869,
+"claude-opus-5.5": -1.565495801564716,
+"claude-sonnet-5": -1.7145930344872884,
+"claude-haiku-4.5": -2.5328229022076427,
+"other_known_external": -1.1590908562848141
+},
+"valid": 48,
+"planned": 48
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "claude-fable-5.1",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 2,
+"当": 1
+},
+"claude__screen021": {
+"宁": 9,
+"禾": 10
+},
+"claude__screen023": {
+"42": 1,
+"43": 1,
+"47": 32
+},
+"claude__screen048": {
+"中": 1,
+"二筒": 1,
+"五万": 4,
+"五条": 2,
+"五筒": 3,
+"五萬": 4
+}
+},
+"verdict": "match",
+"model": "claude-fable-5.1",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.5860829693248654,
+"claude-opus-5.5": 0.3220304795950416,
+"claude-sonnet-5": 0.3015194740178993,
+"claude-haiku-4.5": 0.17889488601751807,
+"other_known_external": 0.4139170306751347
+},
+"scores": {
+"claude-fable-5.1": -0.9428921659896541,
+"claude-opus-5.5": -1.6873482995724443,
+"claude-sonnet-5": -1.782964860007931,
+"claude-haiku-4.5": -2.4667448944921984,
+"other_known_external": -1.2906879866794536
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "claude-fable-5.1",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 2,
+"当": 1
+},
+"claude__screen021": {
+"宁": 9,
+"禾": 10
+},
+"claude__screen023": {
+"42": 1,
+"43": 1,
+"47": 32
+},
+"claude__screen048": {
+"中": 1,
+"二筒": 1,
+"五万": 4,
+"五条": 2,
+"五筒": 3,
+"五萬": 4
+}
+},
+"verdict": "mismatch",
+"model": "claude-fable-5.1",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.5860829693248654,
+"claude-opus-5.5": 0.3220304795950416,
+"claude-sonnet-5": 0.3015194740178993,
+"claude-haiku-4.5": 0.17889488601751807,
+"other_known_external": 0.4139170306751347
+},
+"scores": {
+"claude-fable-5.1": -0.9428921659896541,
+"claude-opus-5.5": -1.6873482995724443,
+"claude-sonnet-5": -1.782964860007931,
+"claude-haiku-4.5": -2.4667448944921984,
+"other_known_external": -1.2906879866794536
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "claude-opus-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"当": 1
+},
+"claude__screen021": {
+"宁": 19
+},
+"claude__screen023": {
+"37": 2,
+"42": 32
+},
+"claude__screen048": {
+"三万": 1,
+"五万": 10,
+"五条": 1,
+"五筒": 3
+}
+},
+"verdict": "mismatch",
+"model": "claude-opus-5.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3486099577816054,
+"claude-opus-5.5": 0.6332429247247399,
+"claude-sonnet-5": 0.2130509985520421,
+"claude-haiku-4.5": 0.2343583539408264,
+"other_known_external": 0.3667570752752601
+},
+"scores": {
+"claude-fable-5.1": -1.0793415826462518,
+"claude-opus-5.5": -0.4541866744024801,
+"claude-sonnet-5": -1.76081855263801,
+"claude-haiku-4.5": -1.6380495386741944,
+"other_known_external": -1.0003410816067115
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "claude-opus-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"当": 1
+},
+"claude__screen021": {
+"宁": 19
+},
+"claude__screen023": {
+"37": 2,
+"42": 32
+},
+"claude__screen048": {
+"三万": 1,
+"五万": 10,
+"五条": 1,
+"五筒": 3
+}
+},
+"verdict": "mismatch",
+"model": "claude-opus-5.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3486099577816054,
+"claude-opus-5.5": 0.6332429247247399,
+"claude-sonnet-5": 0.2130509985520421,
+"claude-haiku-4.5": 0.2343583539408264,
+"other_known_external": 0.3667570752752601
+},
+"scores": {
+"claude-fable-5.1": -1.0793415826462518,
+"claude-opus-5.5": -0.4541866744024801,
+"claude-sonnet-5": -1.76081855263801,
+"claude-haiku-4.5": -1.6380495386741944,
+"other_known_external": -1.0003410816067115
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "claude-sonnet-5",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"宁": 8,
+"序": 4,
+"禾": 7
+},
+"claude__screen023": {
+"43": 27,
+"47": 7
+},
+"claude__screen048": {
+"一万": 2,
+"二万": 2,
+"八万": 10,
+"筒子五": 1
+}
+},
+"verdict": "mismatch",
+"model": "claude-sonnet-5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.30414830716539243,
+"claude-opus-5.5": 0.2327784386117375,
+"claude-sonnet-5": 0.647225454040299,
+"claude-haiku-4.5": 0.16755216472766551,
+"other_known_external": 0.35277454595970104
+},
+"scores": {
+"claude-fable-5.1": -1.7093177562838875,
+"claude-opus-5.5": -2.0743851718784505,
+"claude-sonnet-5": -0.8816966386256606,
+"claude-haiku-4.5": -2.484772464193055,
+"other_known_external": -1.4885621601883665
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "claude-sonnet-5",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"宁": 8,
+"序": 4,
+"禾": 7
+},
+"claude__screen023": {
+"43": 27,
+"47": 7
+},
+"claude__screen048": {
+"一万": 2,
+"二万": 2,
+"八万": 10,
+"筒子五": 1
+}
+},
+"verdict": "mismatch",
+"model": "claude-sonnet-5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.30414830716539243,
+"claude-opus-5.5": 0.2327784386117375,
+"claude-sonnet-5": 0.647225454040299,
+"claude-haiku-4.5": 0.16755216472766551,
+"other_known_external": 0.35277454595970104
+},
+"scores": {
+"claude-fable-5.1": -1.7093177562838875,
+"claude-opus-5.5": -2.0743851718784505,
+"claude-sonnet-5": -0.8816966386256606,
+"claude-haiku-4.5": -2.484772464193055,
+"other_known_external": -1.4885621601883665
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "claude-haiku-4.5",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 1,
+"当": 2
+},
+"claude__screen021": {
+"川": 16,
+"禾": 3
+},
+"claude__screen023": {
+"42": 19,
+"45": 15
+},
+"claude__screen048": {
+"白板": 3,
+"筒子五": 12
+}
+},
+"verdict": "mismatch",
+"model": "claude-haiku-4.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2177821641193075,
+"claude-opus-5.5": 0.24228324777089721,
+"claude-sonnet-5": 0.17989664359500906,
+"claude-haiku-4.5": 0.5778644372461952,
+"other_known_external": 0.4221355627538049
+},
+"scores": {
+"claude-fable-5.1": -2.010366575605263,
+"claude-opus-5.5": -1.8719307783492443,
+"claude-sonnet-5": -2.2487765203823664,
+"claude-haiku-4.5": -0.7317286273936803,
+"other_known_external": -1.0457414297184815
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "claude-haiku-4.5",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 1,
+"当": 2
+},
+"claude__screen021": {
+"川": 16,
+"禾": 3
+},
+"claude__screen023": {
+"42": 19,
+"45": 15
+},
+"claude__screen048": {
+"白板": 3,
+"筒子五": 12
+}
+},
+"verdict": "match",
+"model": "claude-haiku-4.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2177821641193075,
+"claude-opus-5.5": 0.24228324777089721,
+"claude-sonnet-5": 0.17989664359500906,
+"claude-haiku-4.5": 0.5778644372461952,
+"other_known_external": 0.4221355627538049
+},
+"scores": {
+"claude-fable-5.1": -2.010366575605263,
+"claude-opus-5.5": -1.8719307783492443,
+"claude-sonnet-5": -2.2487765203823664,
+"claude-haiku-4.5": -0.7317286273936803,
+"other_known_external": -1.0457414297184815
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-opus-5",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"铛": 3
+},
+"claude__screen021": {
+"禾": 19
+},
+"claude__screen023": {
+"37": 3,
+"44": 5,
+"45": 15,
+"47": 11
+},
+"claude__screen048": {
+"三万": 2,
+"二筒": 1,
+"五万": 4,
+"五筒": 1,
+"五萬": 6,
+"東": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.35309891721550957,
+"claude-opus-5.5": 0.22529588921070123,
+"claude-sonnet-5": 0.2381439786122415,
+"claude-haiku-4.5": 0.1928572878239724,
+"other_known_external": 0.6469010827844904
+},
+"scores": {
+"claude-fable-5.1": -1.7028629404435824,
+"claude-opus-5.5": -2.3324843425073762,
+"claude-sonnet-5": -2.260299926619843,
+"claude-haiku-4.5": -2.528967801433666,
+"other_known_external": -1.0974177800101665
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-opus-5",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"铛": 3
+},
+"claude__screen021": {
+"禾": 19
+},
+"claude__screen023": {
+"37": 3,
+"44": 5,
+"45": 15,
+"47": 11
+},
+"claude__screen048": {
+"三万": 2,
+"二筒": 1,
+"五万": 4,
+"五筒": 1,
+"五萬": 6,
+"東": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.35309891721550957,
+"claude-opus-5.5": 0.22529588921070123,
+"claude-sonnet-5": 0.2381439786122415,
+"claude-haiku-4.5": 0.1928572878239724,
+"other_known_external": 0.6469010827844904
+},
+"scores": {
+"claude-fable-5.1": -1.7028629404435824,
+"claude-opus-5.5": -2.3324843425073762,
+"claude-sonnet-5": -2.260299926619843,
+"claude-haiku-4.5": -2.528967801433666,
+"other_known_external": -1.0974177800101665
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "x-ai/grok-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"当": 1
+},
+"claude__screen021": {
+"宁": 3,
+"川": 16
+},
+"claude__screen023": {
+"42": 30,
+"45": 3,
+"47": 1
+},
+"claude__screen048": {
+"一万": 2,
+"三万": 2,
+"三筒": 3,
+"九万": 2,
+"二条": 5,
+"红中": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.22651834003410387,
+"claude-opus-5.5": 0.31457271837645334,
+"claude-sonnet-5": 0.22121126562506857,
+"claude-haiku-4.5": 0.3499145531167195,
+"other_known_external": 0.6500854468832805
+},
+"scores": {
+"claude-fable-5.1": -2.1709583256785225,
+"claude-opus-5.5": -1.721709423672204,
+"claude-sonnet-5": -2.2015038895856267,
+"claude-haiku-4.5": -1.5622970997637298,
+"other_known_external": -0.9428822794959039
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "x-ai/grok-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"当": 1
+},
+"claude__screen021": {
+"宁": 3,
+"川": 16
+},
+"claude__screen023": {
+"42": 30,
+"45": 3,
+"47": 1
+},
+"claude__screen048": {
+"一万": 2,
+"三万": 2,
+"三筒": 3,
+"九万": 2,
+"二条": 5,
+"红中": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.22651834003410387,
+"claude-opus-5.5": 0.31457271837645334,
+"claude-sonnet-5": 0.22121126562506857,
+"claude-haiku-4.5": 0.3499145531167195,
+"other_known_external": 0.6500854468832805
+},
+"scores": {
+"claude-fable-5.1": -2.1709583256785225,
+"claude-opus-5.5": -1.721709423672204,
+"claude-sonnet-5": -2.2015038895856267,
+"claude-haiku-4.5": -1.5622970997637298,
+"other_known_external": -0.9428822794959039
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "moonshotai/kimi-k3",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 3,
+"川": 2,
+"禾": 14
+},
+"claude__screen023": {
+"37": 9,
+"42": 5,
+"43": 1,
+"45": 2,
+"47": 17
+},
+"claude__screen048": {
+"红中": 15
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3797530641939395,
+"claude-opus-5.5": 0.2779207953246828,
+"claude-sonnet-5": 0.2946960033418191,
+"claude-haiku-4.5": 0.2267382909438058,
+"other_known_external": 0.6202469358060605
+},
+"scores": {
+"claude-fable-5.1": -1.4657071335389764,
+"claude-opus-5.5": -1.9299093321056762,
+"claude-sonnet-5": -1.8477952445948924,
+"claude-haiku-4.5": -2.2019317667130145,
+"other_known_external": -0.9751106616556472
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "moonshotai/kimi-k3",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 3,
+"川": 2,
+"禾": 14
+},
+"claude__screen023": {
+"37": 9,
+"42": 5,
+"43": 1,
+"45": 2,
+"47": 17
+},
+"claude__screen048": {
+"红中": 15
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3797530641939395,
+"claude-opus-5.5": 0.2779207953246828,
+"claude-sonnet-5": 0.2946960033418191,
+"claude-haiku-4.5": 0.2267382909438058,
+"other_known_external": 0.6202469358060605
+},
+"scores": {
+"claude-fable-5.1": -1.4657071335389764,
+"claude-opus-5.5": -1.9299093321056762,
+"claude-sonnet-5": -1.8477952445948924,
+"claude-haiku-4.5": -2.2019317667130145,
+"other_known_external": -0.9751106616556472
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "qwen/qwen3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"宁": 3,
+"川": 12,
+"序": 1,
+"禾": 3
+},
+"claude__screen023": {
+"42": 27,
+"45": 7
+},
+"claude__screen048": {
+"五万": 1,
+"发财": 1,
+"白板": 5,
+"红中": 8
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2524078227389698,
+"claude-opus-5.5": 0.2994352533215456,
+"claude-sonnet-5": 0.21266137349207156,
+"claude-haiku-4.5": 0.36576482808390437,
+"other_known_external": 0.6342351719160956
+},
+"scores": {
+"claude-fable-5.1": -1.9868458157341609,
+"claude-opus-5.5": -1.751022906737025,
+"claude-sonnet-5": -2.209991653765893,
+"claude-haiku-4.5": -1.4514635662348492,
+"other_known_external": -0.9010343276161225
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "qwen/qwen3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"宁": 3,
+"川": 12,
+"序": 1,
+"禾": 3
+},
+"claude__screen023": {
+"42": 27,
+"45": 7
+},
+"claude__screen048": {
+"五万": 1,
+"发财": 1,
+"白板": 5,
+"红中": 8
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2524078227389698,
+"claude-opus-5.5": 0.2994352533215456,
+"claude-sonnet-5": 0.21266137349207156,
+"claude-haiku-4.5": 0.36576482808390437,
+"other_known_external": 0.6342351719160956
+},
+"scores": {
+"claude-fable-5.1": -1.9868458157341609,
+"claude-opus-5.5": -1.751022906737025,
+"claude-sonnet-5": -2.209991653765893,
+"claude-haiku-4.5": -1.4514635662348492,
+"other_known_external": -0.9010343276161225
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "z-ai/glm-5.3",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"宁": 2,
+"川": 8,
+"禾": 9
+},
+"claude__screen023": {
+"37": 6,
+"42": 4,
+"43": 4,
+"47": 20
+},
+"claude__screen048": {
+"七万": 3,
+"三万": 5,
+"五筒": 3,
+"八万": 3,
+"八筒": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.37112036165774387,
+"claude-opus-5.5": 0.29907398550986936,
+"claude-sonnet-5": 0.3253956096059482,
+"claude-haiku-4.5": 0.22303501886138144,
+"other_known_external": 0.6288796383422561
+},
+"scores": {
+"claude-fable-5.1": -1.8566794052062552,
+"claude-opus-5.5": -2.180977308445703,
+"claude-sonnet-5": -2.0583506841052124,
+"claude-haiku-4.5": -2.5773324413978482,
+"other_known_external": -1.3292659557497257
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "z-ai/glm-5.3",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"宁": 2,
+"川": 8,
+"禾": 9
+},
+"claude__screen023": {
+"37": 6,
+"42": 4,
+"43": 4,
+"47": 20
+},
+"claude__screen048": {
+"七万": 3,
+"三万": 5,
+"五筒": 3,
+"八万": 3,
+"八筒": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.37112036165774387,
+"claude-opus-5.5": 0.29907398550986936,
+"claude-sonnet-5": 0.3253956096059482,
+"claude-haiku-4.5": 0.22303501886138144,
+"other_known_external": 0.6288796383422561
+},
+"scores": {
+"claude-fable-5.1": -1.8566794052062552,
+"claude-opus-5.5": -2.180977308445703,
+"claude-sonnet-5": -2.0583506841052124,
+"claude-haiku-4.5": -2.5773324413978482,
+"other_known_external": -1.3292659557497257
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "deepseek/deepseek-v4-flash-0731",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 1,
+"当": 2
+},
+"claude__screen021": {
+"宁": 7,
+"川": 5,
+"序": 2,
+"禾": 5
+},
+"claude__screen023": {
+"37": 1,
+"42": 33
+},
+"claude__screen048": {
+"九万": 2,
+"九筒": 1,
+"红中": 12
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.26019317978113254,
+"claude-opus-5.5": 0.31865703717331517,
+"claude-sonnet-5": 0.23496554734427277,
+"claude-haiku-4.5": 0.28147804026120943,
+"other_known_external": 0.6813429628266848
+},
+"scores": {
+"claude-fable-5.1": -1.7557668639182475,
+"claude-opus-5.5": -1.4707525098568182,
+"claude-sonnet-5": -1.8912840924583538,
+"claude-haiku-4.5": -1.647943953400536,
+"other_known_external": -0.7108021198452854
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "deepseek/deepseek-v4-flash-0731",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 1,
+"当": 2
+},
+"claude__screen021": {
+"宁": 7,
+"川": 5,
+"序": 2,
+"禾": 5
+},
+"claude__screen023": {
+"37": 1,
+"42": 33
+},
+"claude__screen048": {
+"九万": 2,
+"九筒": 1,
+"红中": 12
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.26019317978113254,
+"claude-opus-5.5": 0.31865703717331517,
+"claude-sonnet-5": 0.23496554734427277,
+"claude-haiku-4.5": 0.28147804026120943,
+"other_known_external": 0.6813429628266848
+},
+"scores": {
+"claude-fable-5.1": -1.7557668639182475,
+"claude-opus-5.5": -1.4707525098568182,
+"claude-sonnet-5": -1.8912840924583538,
+"claude-haiku-4.5": -1.647943953400536,
+"other_known_external": -0.7108021198452854
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "google/gemini-3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"咚": 1
+},
+"claude__screen021": {
+"川": 17,
+"禾": 2
+},
+"claude__screen023": {
+"42": 34
+},
+"claude__screen048": {
+"东风": 2,
+"二筒": 3,
+"发财": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23782088069374435,
+"claude-opus-5.5": 0.28956625931293284,
+"claude-sonnet-5": 0.2103558201358868,
+"claude-haiku-4.5": 0.34656665688966687,
+"other_known_external": 0.6534333431103332
+},
+"scores": {
+"claude-fable-5.1": -1.6803541405856874,
+"claude-opus-5.5": -1.4131818760732036,
+"claude-sonnet-5": -1.838472296304253,
+"claude-haiku-4.5": -1.1498556919392255,
+"other_known_external": -0.5156903360132438
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "google/gemini-3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"咚": 1
+},
+"claude__screen021": {
+"川": 17,
+"禾": 2
+},
+"claude__screen023": {
+"42": 34
+},
+"claude__screen048": {
+"东风": 2,
+"二筒": 3,
+"发财": 10
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23782088069374435,
+"claude-opus-5.5": 0.28956625931293284,
+"claude-sonnet-5": 0.2103558201358868,
+"claude-haiku-4.5": 0.34656665688966687,
+"other_known_external": 0.6534333431103332
+},
+"scores": {
+"claude-fable-5.1": -1.6803541405856874,
+"claude-opus-5.5": -1.4131818760732036,
+"claude-sonnet-5": -1.838472296304253,
+"claude-haiku-4.5": -1.1498556919392255,
+"other_known_external": -0.5156903360132438
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-sonnet-4.6",
+"counts": {
+"claude__screen008": {
+"铛": 4
+},
+"claude__screen021": {
+"宁": 7,
+"禾": 12
+},
+"claude__screen023": {
+"37": 6,
+"42": 28
+},
+"claude__screen048": {
+"一万": 3,
+"七筒": 2,
+"五万": 1,
+"八万": 2,
+"六万": 4,
+"六筒": 1,
+"六饼": 1,
+"東": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2815657928558394,
+"claude-opus-5.5": 0.32699424921907305,
+"claude-sonnet-5": 0.2772350599568258,
+"claude-haiku-4.5": 0.22161634396042146,
+"other_known_external": 0.673005750780927
+},
+"scores": {
+"claude-fable-5.1": -1.9927826154350177,
+"claude-opus-5.5": -1.7778859168627743,
+"claude-sonnet-5": -2.0142929400691365,
+"claude-haiku-4.5": -2.312346453815209,
+"other_known_external": -1.056074626517201
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-sonnet-4.6",
+"counts": {
+"claude__screen008": {
+"铛": 4
+},
+"claude__screen021": {
+"宁": 7,
+"禾": 12
+},
+"claude__screen023": {
+"37": 6,
+"42": 28
+},
+"claude__screen048": {
+"一万": 3,
+"七筒": 2,
+"五万": 1,
+"八万": 2,
+"六万": 4,
+"六筒": 1,
+"六饼": 1,
+"東": 1
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2815657928558394,
+"claude-opus-5.5": 0.32699424921907305,
+"claude-sonnet-5": 0.2772350599568258,
+"claude-haiku-4.5": 0.22161634396042146,
+"other_known_external": 0.673005750780927
+},
+"scores": {
+"claude-fable-5.1": -1.9927826154350177,
+"claude-opus-5.5": -1.7778859168627743,
+"claude-sonnet-5": -2.0142929400691365,
+"claude-haiku-4.5": -2.312346453815209,
+"other_known_external": -1.056074626517201
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "openai/gpt-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"川": 14,
+"禾": 5
+},
+"claude__screen023": {
+"42": 34
+},
+"claude__screen048": {
+"三万": 1,
+"三筒": 8,
+"红中": 6
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23089777707945525,
+"claude-opus-5.5": 0.28227290858233295,
+"claude-sonnet-5": 0.19774017339839575,
+"claude-haiku-4.5": 0.3135065504100719,
+"other_known_external": 0.6864934495899282
+},
+"scores": {
+"claude-fable-5.1": -1.6609942283669785,
+"claude-opus-5.5": -1.3909604645192941,
+"claude-sonnet-5": -1.8582240424815548,
+"claude-haiku-4.5": -1.2415218562436392,
+"other_known_external": -0.4577454271339175
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "openai/gpt-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"川": 14,
+"禾": 5
+},
+"claude__screen023": {
+"42": 34
+},
+"claude__screen048": {
+"三万": 1,
+"三筒": 8,
+"红中": 6
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23089777707945525,
+"claude-opus-5.5": 0.28227290858233295,
+"claude-sonnet-5": 0.19774017339839575,
+"claude-haiku-4.5": 0.3135065504100719,
+"other_known_external": 0.6864934495899282
+},
+"scores": {
+"claude-fable-5.1": -1.6609942283669785,
+"claude-opus-5.5": -1.3909604645192941,
+"claude-sonnet-5": -1.8582240424815548,
+"claude-haiku-4.5": -1.2415218562436392,
+"other_known_external": -0.4577454271339175
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-opus-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 1,
+"序": 17,
+"禾": 1
+},
+"claude__screen023": {
+"37": 1,
+"42": 1,
+"43": 1,
+"45": 28,
+"47": 3
+},
+"claude__screen048": {
+"九筒": 1,
+"六万": 14
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2324660193631652,
+"claude-opus-5.5": 0.21090834091017216,
+"claude-sonnet-5": 0.25778153866752845,
+"claude-haiku-4.5": 0.24057752125413728,
+"other_known_external": 0.7422184613324716
+},
+"scores": {
+"claude-fable-5.1": -1.8799766837560066,
+"claude-opus-5.5": -2.004996841387349,
+"claude-sonnet-5": -1.7430691371370042,
+"claude-haiku-4.5": -1.8350538686198614,
+"other_known_external": -0.6855379918986226
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-opus-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 4
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 1,
+"序": 17,
+"禾": 1
+},
+"claude__screen023": {
+"37": 1,
+"42": 1,
+"43": 1,
+"45": 28,
+"47": 3
+},
+"claude__screen048": {
+"九筒": 1,
+"六万": 14
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2324660193631652,
+"claude-opus-5.5": 0.21090834091017216,
+"claude-sonnet-5": 0.25778153866752845,
+"claude-haiku-4.5": 0.24057752125413728,
+"other_known_external": 0.7422184613324716
+},
+"scores": {
+"claude-fable-5.1": -1.8799766837560066,
+"claude-opus-5.5": -2.004996841387349,
+"claude-sonnet-5": -1.7430691371370042,
+"claude-haiku-4.5": -1.8350538686198614,
+"other_known_external": -0.6855379918986226
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "partial",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 5,
+"禾": 4
+},
+"claude__screen023": {
+"42": 3,
+"43": 1,
+"47": 13
+},
+"claude__screen048": {
+"五万": 3,
+"五筒": 3,
+"五萬": 1
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.6339976226904249,
+"claude-opus-5.5": 0.29827287389804885,
+"claude-sonnet-5": 0.23349097461566903,
+"claude-haiku-4.5": 0.10627518396797991,
+"other_known_external": 0.3660023773095751
+},
+"scores": {
+"claude-fable-5.1": -0.886729262614604,
+"claude-opus-5.5": -1.74226513007291,
+"claude-sonnet-5": -2.075432311904955,
+"claude-haiku-4.5": -3.0160953730601583,
+"other_known_external": -1.4361346385835307
+},
+"valid": 35,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "empty",
+"counts": {},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.5,
+"claude-opus-5.5": 0.5,
+"claude-sonnet-5": 0.5,
+"claude-haiku-4.5": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"claude-fable-5.1": 0.0,
+"claude-opus-5.5": 0.0,
+"claude-sonnet-5": 0.0,
+"claude-haiku-4.5": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "junk",
+"counts": {
+"claude__screen008": {
+"zzz-not-a-category": 4
+},
+"claude__screen021": {
+"zzz-not-a-category": 19
+},
+"claude__screen023": {
+"zzz-not-a-category": 34
+},
+"claude__screen048": {
+"zzz-not-a-category": 15
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3865307328723297,
+"claude-opus-5.5": 0.3865307328723297,
+"claude-sonnet-5": 0.3865307328723297,
+"claude-haiku-4.5": 0.3865307328723297,
+"other_known_external": 0.6134692671276702
+},
+"scores": {
+"claude-fable-5.1": -1.7683560419235276,
+"claude-opus-5.5": -1.7683560419235276,
+"claude-sonnet-5": -1.7683560419235276,
+"claude-haiku-4.5": -1.7683560419235276,
+"other_known_external": -1.306437254065449
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "invalid",
+"counts": {
+"claude__screen008": {
+"__INVALID_OUTPUT__": 4
+},
+"claude__screen021": {
+"__INVALID_OUTPUT__": 19
+},
+"claude__screen023": {
+"__INVALID_OUTPUT__": 34
+},
+"claude__screen048": {
+"__INVALID_OUTPUT__": 15
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.5,
+"claude-opus-5.5": 0.5,
+"claude-sonnet-5": 0.5,
+"claude-haiku-4.5": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"claude-fable-5.1": 0.0,
+"claude-opus-5.5": 0.0,
+"claude-sonnet-5": 0.0,
+"claude-haiku-4.5": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "claude-fable-5.1",
+"source": "overfull",
+"counts": {
+"claude__screen008": {
+"叮": 5,
+"咚": 2
+},
+"claude__screen021": {
+"宁": 8,
+"川": 1,
+"禾": 13
+},
+"claude__screen023": {
+"37": 1,
+"42": 1,
+"43": 3,
+"47": 32
+},
+"claude__screen048": {
+"五万": 10,
+"五筒": 6,
+"五萬": 2
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_exceed_plan"
+],
+"matches": {
+"claude-fable-5.1": 0.5823777174401022,
+"claude-opus-5.5": 0.3334343920063653,
+"claude-sonnet-5": 0.3221213050083663,
+"claude-haiku-4.5": 0.18475958427692488,
+"other_known_external": 0.4176222825598978
+},
+"scores": {
+"claude-fable-5.1": -0.8100430760395534,
+"claude-opus-5.5": -1.5027355270287934,
+"claude-sonnet-5": -1.5540832338006938,
+"claude-haiku-4.5": -2.2944706989079937,
+"other_known_external": -1.1425849185348138
+},
+"valid": 84,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "medium",
+"claimed": "not-in-package",
+"source": "unknown-claimed",
+"counts": {
+"claude__screen008": {
+"叮": 2,
+"咚": 1,
+"当": 1
+},
+"claude__screen021": {
+"宁": 6,
+"禾": 13
+},
+"claude__screen023": {
+"37": 1,
+"43": 6,
+"47": 27
+},
+"claude__screen048": {
+"三条": 1,
+"五万": 10,
+"五筒": 3,
+"五萬": 1
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"unknown_claimed_model"
+],
+"matches": {
+"claude-fable-5.1": 0.5847143430548676,
+"claude-opus-5.5": 0.3116659486821594,
+"claude-sonnet-5": 0.33189983033294956,
+"claude-haiku-4.5": 0.16692914059811706,
+"other_known_external": 0.4152856569451324
+},
+"scores": {
+"claude-fable-5.1": -0.8864505277900405,
+"claude-opus-5.5": -1.6787928506689684,
+"claude-sonnet-5": -1.586055437149523,
+"claude-haiku-4.5": -2.4939998170703936,
+"other_known_external": -1.228607339864573
+},
+"valid": 72,
+"planned": 72
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "claude-fable-5.1",
+"counts": {
+"claude__screen008": {
+"叮": 19,
+"咚": 8,
+"当": 2,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 13,
+"禾": 17
+},
+"claude__screen023": {
+"42": 1,
+"43": 1,
+"47": 28
+},
+"claude__screen048": {
+"五万": 23,
+"五条": 4,
+"五筒": 1,
+"五萬": 2
+}
+},
+"verdict": "match",
+"model": "claude-fable-5.1",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.5941519884771521,
+"claude-opus-5.5": 0.38245109305096303,
+"claude-sonnet-5": 0.3387043436423098,
+"claude-haiku-4.5": 0.2175988201604676,
+"other_known_external": 0.4058480115228478
+},
+"scores": {
+"claude-fable-5.1": -0.7412669053240784,
+"claude-opus-5.5": -1.220424388439871,
+"claude-sonnet-5": -1.4103403474498075,
+"claude-haiku-4.5": -2.020981439107998,
+"other_known_external": -1.122423331155973
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "claude-fable-5.1",
+"counts": {
+"claude__screen008": {
+"叮": 19,
+"咚": 8,
+"当": 2,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 13,
+"禾": 17
+},
+"claude__screen023": {
+"42": 1,
+"43": 1,
+"47": 28
+},
+"claude__screen048": {
+"五万": 23,
+"五条": 4,
+"五筒": 1,
+"五萬": 2
+}
+},
+"verdict": "mismatch",
+"model": "claude-fable-5.1",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.5941519884771521,
+"claude-opus-5.5": 0.38245109305096303,
+"claude-sonnet-5": 0.3387043436423098,
+"claude-haiku-4.5": 0.2175988201604676,
+"other_known_external": 0.4058480115228478
+},
+"scores": {
+"claude-fable-5.1": -0.7412669053240784,
+"claude-opus-5.5": -1.220424388439871,
+"claude-sonnet-5": -1.4103403474498075,
+"claude-haiku-4.5": -2.020981439107998,
+"other_known_external": -1.122423331155973
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "claude-opus-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 22,
+"咚": 2,
+"当": 1,
+"铛": 5
+},
+"claude__screen021": {
+"宁": 29,
+"序": 1
+},
+"claude__screen023": {
+"37": 5,
+"42": 22,
+"43": 1,
+"47": 2
+},
+"claude__screen048": {
+"三万": 6,
+"五万": 13,
+"五条": 8,
+"五筒": 2,
+"筒子七": 1
+}
+},
+"verdict": "mismatch",
+"model": "claude-opus-5.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3928250155744328,
+"claude-opus-5.5": 0.6071749844255672,
+"claude-sonnet-5": 0.3051030812422031,
+"claude-haiku-4.5": 0.25760260915222805,
+"other_known_external": 0.3925957090242787
+},
+"scores": {
+"claude-fable-5.1": -1.3119602059683635,
+"claude-opus-5.5": -0.8765074387041769,
+"claude-sonnet-5": -1.699621264140719,
+"claude-haiku-4.5": -1.934973982811485,
+"other_known_external": -1.31292170364324
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "claude-opus-5.5",
+"counts": {
+"claude__screen008": {
+"叮": 22,
+"咚": 2,
+"当": 1,
+"铛": 5
+},
+"claude__screen021": {
+"宁": 29,
+"序": 1
+},
+"claude__screen023": {
+"37": 5,
+"42": 22,
+"43": 1,
+"47": 2
+},
+"claude__screen048": {
+"三万": 6,
+"五万": 13,
+"五条": 8,
+"五筒": 2,
+"筒子七": 1
+}
+},
+"verdict": "mismatch",
+"model": "claude-opus-5.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3928250155744328,
+"claude-opus-5.5": 0.6071749844255672,
+"claude-sonnet-5": 0.3051030812422031,
+"claude-haiku-4.5": 0.25760260915222805,
+"other_known_external": 0.3925957090242787
+},
+"scores": {
+"claude-fable-5.1": -1.3119602059683635,
+"claude-opus-5.5": -0.8765074387041769,
+"claude-sonnet-5": -1.699621264140719,
+"claude-haiku-4.5": -1.934973982811485,
+"other_known_external": -1.31292170364324
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "claude-sonnet-5",
+"counts": {
+"claude__screen008": {
+"叮": 25,
+"咚": 1,
+"铛": 4
+},
+"claude__screen021": {
+"宁": 12,
+"序": 2,
+"禾": 16
+},
+"claude__screen023": {
+"43": 18,
+"47": 12
+},
+"claude__screen048": {
+"一万": 5,
+"三条": 2,
+"九万": 3,
+"二万": 1,
+"八万": 15,
+"六万": 4
+}
+},
+"verdict": "mismatch",
+"model": "claude-sonnet-5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.35431351664703825,
+"claude-opus-5.5": 0.2928048843278895,
+"claude-sonnet-5": 0.5904775113124809,
+"claude-haiku-4.5": 0.20333517092457604,
+"other_known_external": 0.409522488687519
+},
+"scores": {
+"claude-fable-5.1": -1.5968629148175486,
+"claude-opus-5.5": -1.8785311514911471,
+"claude-sonnet-5": -0.9967310101595387,
+"claude-haiku-4.5": -2.3623093540220474,
+"other_known_external": -1.3626707417118553
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "claude-sonnet-5",
+"counts": {
+"claude__screen008": {
+"叮": 25,
+"咚": 1,
+"铛": 4
+},
+"claude__screen021": {
+"宁": 12,
+"序": 2,
+"禾": 16
+},
+"claude__screen023": {
+"43": 18,
+"47": 12
+},
+"claude__screen048": {
+"一万": 5,
+"三条": 2,
+"九万": 3,
+"二万": 1,
+"八万": 15,
+"六万": 4
+}
+},
+"verdict": "mismatch",
+"model": "claude-sonnet-5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.35431351664703825,
+"claude-opus-5.5": 0.2928048843278895,
+"claude-sonnet-5": 0.5904775113124809,
+"claude-haiku-4.5": 0.20333517092457604,
+"other_known_external": 0.409522488687519
+},
+"scores": {
+"claude-fable-5.1": -1.5968629148175486,
+"claude-opus-5.5": -1.8785311514911471,
+"claude-sonnet-5": -0.9967310101595387,
+"claude-haiku-4.5": -2.3623093540220474,
+"other_known_external": -1.3626707417118553
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "claude-haiku-4.5",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"当": 20,
+"铛": 7
+},
+"claude__screen021": {
+"川": 30
+},
+"claude__screen023": {
+"42": 16,
+"45": 14
+},
+"claude__screen048": {
+"中": 4,
+"九条": 2,
+"八筒": 1,
+"白板": 4,
+"筒子五": 19
+}
+},
+"verdict": "mismatch",
+"model": "claude-haiku-4.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.22485340556044991,
+"claude-opus-5.5": 0.2702745003381685,
+"claude-sonnet-5": 0.21012654189063318,
+"claude-haiku-4.5": 0.5949756849045049,
+"other_known_external": 0.4050243150954951
+},
+"scores": {
+"claude-fable-5.1": -2.0248875798065518,
+"claude-opus-5.5": -1.780514398353587,
+"claude-sonnet-5": -2.1114468966007416,
+"claude-haiku-4.5": -0.7872840732485612,
+"other_known_external": -1.1718575096752493
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "claude-haiku-4.5",
+"counts": {
+"claude__screen008": {
+"叮": 3,
+"当": 20,
+"铛": 7
+},
+"claude__screen021": {
+"川": 30
+},
+"claude__screen023": {
+"42": 16,
+"45": 14
+},
+"claude__screen048": {
+"中": 4,
+"九条": 2,
+"八筒": 1,
+"白板": 4,
+"筒子五": 19
+}
+},
+"verdict": "match",
+"model": "claude-haiku-4.5",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.22485340556044991,
+"claude-opus-5.5": 0.2702745003381685,
+"claude-sonnet-5": 0.21012654189063318,
+"claude-haiku-4.5": 0.5949756849045049,
+"other_known_external": 0.4050243150954951
+},
+"scores": {
+"claude-fable-5.1": -2.0248875798065518,
+"claude-opus-5.5": -1.780514398353587,
+"claude-sonnet-5": -2.1114468966007416,
+"claude-haiku-4.5": -0.7872840732485612,
+"other_known_external": -1.1718575096752493
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-opus-5",
+"counts": {
+"claude__screen008": {
+"叮": 13,
+"咚": 2,
+"铛": 15
+},
+"claude__screen021": {
+"川": 1,
+"禾": 29
+},
+"claude__screen023": {
+"44": 1,
+"45": 9,
+"47": 20
+},
+"claude__screen048": {
+"二筒": 9,
+"五万": 4,
+"五筒": 9,
+"五萬": 5,
+"東": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3942711598539491,
+"claude-opus-5.5": 0.27940116916118163,
+"claude-sonnet-5": 0.3132650831465399,
+"claude-haiku-4.5": 0.24240541654102143,
+"other_known_external": 0.605728840146051
+},
+"scores": {
+"claude-fable-5.1": -1.3661991587704496,
+"claude-opus-5.5": -1.8842395713792395,
+"claude-sonnet-5": -1.7217042454336375,
+"claude-haiku-4.5": -2.0763424197352855,
+"other_known_external": -0.9368056269061
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-opus-5",
+"counts": {
+"claude__screen008": {
+"叮": 13,
+"咚": 2,
+"铛": 15
+},
+"claude__screen021": {
+"川": 1,
+"禾": 29
+},
+"claude__screen023": {
+"44": 1,
+"45": 9,
+"47": 20
+},
+"claude__screen048": {
+"二筒": 9,
+"五万": 4,
+"五筒": 9,
+"五萬": 5,
+"東": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3942711598539491,
+"claude-opus-5.5": 0.27940116916118163,
+"claude-sonnet-5": 0.3132650831465399,
+"claude-haiku-4.5": 0.24240541654102143,
+"other_known_external": 0.605728840146051
+},
+"scores": {
+"claude-fable-5.1": -1.3661991587704496,
+"claude-opus-5.5": -1.8842395713792395,
+"claude-sonnet-5": -1.7217042454336375,
+"claude-haiku-4.5": -2.0763424197352855,
+"other_known_external": -0.9368056269061
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "x-ai/grok-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 3,
+"当": 25,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 9,
+"川": 21
+},
+"claude__screen023": {
+"42": 30
+},
+"claude__screen048": {
+"七万": 2,
+"三万": 3,
+"三筒": 1,
+"东风": 1,
+"九万": 7,
+"二条": 1,
+"五万": 3,
+"五条": 1,
+"四条": 8,
+"红中": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2715202639254048,
+"claude-opus-5.5": 0.3449084953561012,
+"claude-sonnet-5": 0.23200230133205232,
+"claude-haiku-4.5": 0.35335973626464995,
+"other_known_external": 0.64664026373535
+},
+"scores": {
+"claude-fable-5.1": -1.9815134746371943,
+"claude-opus-5.5": -1.636086215486312,
+"claude-sonnet-5": -2.1916298843268387,
+"claude-haiku-4.5": -1.598893951218561,
+"other_known_external": -0.994590438861586
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "x-ai/grok-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 1,
+"咚": 3,
+"当": 25,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 9,
+"川": 21
+},
+"claude__screen023": {
+"42": 30
+},
+"claude__screen048": {
+"七万": 2,
+"三万": 3,
+"三筒": 1,
+"东风": 1,
+"九万": 7,
+"二条": 1,
+"五万": 3,
+"五条": 1,
+"四条": 8,
+"红中": 3
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2715202639254048,
+"claude-opus-5.5": 0.3449084953561012,
+"claude-sonnet-5": 0.23200230133205232,
+"claude-haiku-4.5": 0.35335973626464995,
+"other_known_external": 0.64664026373535
+},
+"scores": {
+"claude-fable-5.1": -1.9815134746371943,
+"claude-opus-5.5": -1.636086215486312,
+"claude-sonnet-5": -2.1916298843268387,
+"claude-haiku-4.5": -1.598893951218561,
+"other_known_external": -0.994590438861586
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "moonshotai/kimi-k3",
+"counts": {
+"claude__screen008": {
+"叮": 29,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 6,
+"川": 1,
+"禾": 23
+},
+"claude__screen023": {
+"37": 10,
+"43": 1,
+"45": 3,
+"47": 16
+},
+"claude__screen048": {
+"红中": 30
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.37640193028687835,
+"claude-opus-5.5": 0.299602366605766,
+"claude-sonnet-5": 0.34817722048440636,
+"claude-haiku-4.5": 0.22766702489730453,
+"other_known_external": 0.6235980697131217
+},
+"scores": {
+"claude-fable-5.1": -1.0470201702855397,
+"claude-opus-5.5": -1.3913637351249275,
+"claude-sonnet-5": -1.1692327744900426,
+"claude-haiku-4.5": -1.763703292029779,
+"other_known_external": -0.542171664483543
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "moonshotai/kimi-k3",
+"counts": {
+"claude__screen008": {
+"叮": 29,
+"咚": 1
+},
+"claude__screen021": {
+"宁": 6,
+"川": 1,
+"禾": 23
+},
+"claude__screen023": {
+"37": 10,
+"43": 1,
+"45": 3,
+"47": 16
+},
+"claude__screen048": {
+"红中": 30
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.37640193028687835,
+"claude-opus-5.5": 0.299602366605766,
+"claude-sonnet-5": 0.34817722048440636,
+"claude-haiku-4.5": 0.22766702489730453,
+"other_known_external": 0.6235980697131217
+},
+"scores": {
+"claude-fable-5.1": -1.0470201702855397,
+"claude-opus-5.5": -1.3913637351249275,
+"claude-sonnet-5": -1.1692327744900426,
+"claude-haiku-4.5": -1.763703292029779,
+"other_known_external": -0.542171664483543
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "qwen/qwen3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 24,
+"咚": 5,
+"当": 1
+},
+"claude__screen021": {
+"宁": 8,
+"川": 14,
+"禾": 8
+},
+"claude__screen023": {
+"42": 26,
+"43": 1,
+"45": 2,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"claude__screen048": {
+"九筒": 2,
+"发财": 10,
+"白板": 11,
+"红中": 7
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3317783682400548,
+"claude-opus-5.5": 0.352268117972371,
+"claude-sonnet-5": 0.3043980328188858,
+"claude-haiku-4.5": 0.3473832208927307,
+"other_known_external": 0.647731882027629
+},
+"scores": {
+"claude-fable-5.1": -1.727111313073417,
+"claude-opus-5.5": -1.6360428549345991,
+"claude-sonnet-5": -1.8534000379782232,
+"claude-haiku-4.5": -1.6575201324009963,
+"other_known_external": -1.026958590946554
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "qwen/qwen3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 24,
+"咚": 5,
+"当": 1
+},
+"claude__screen021": {
+"宁": 8,
+"川": 14,
+"禾": 8
+},
+"claude__screen023": {
+"42": 26,
+"43": 1,
+"45": 2,
+"__UNSEEN_IN_TRAINING__": 1
+},
+"claude__screen048": {
+"九筒": 2,
+"发财": 10,
+"白板": 11,
+"红中": 7
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3317783682400548,
+"claude-opus-5.5": 0.352268117972371,
+"claude-sonnet-5": 0.3043980328188858,
+"claude-haiku-4.5": 0.3473832208927307,
+"other_known_external": 0.647731882027629
+},
+"scores": {
+"claude-fable-5.1": -1.727111313073417,
+"claude-opus-5.5": -1.6360428549345991,
+"claude-sonnet-5": -1.8534000379782232,
+"claude-haiku-4.5": -1.6575201324009963,
+"other_known_external": -1.026958590946554
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "z-ai/glm-5.3",
+"counts": {
+"claude__screen008": {
+"叮": 25,
+"咚": 1,
+"铛": 4
+},
+"claude__screen021": {
+"宁": 10,
+"川": 8,
+"禾": 12
+},
+"claude__screen023": {
+"37": 5,
+"42": 15,
+"43": 4,
+"47": 6
+},
+"claude__screen048": {
+"七万": 2,
+"三条": 4,
+"九万": 6,
+"九筒": 4,
+"五筒": 8,
+"八万": 6
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3719435804299423,
+"claude-opus-5.5": 0.371450151943635,
+"claude-sonnet-5": 0.39316888137572364,
+"claude-haiku-4.5": 0.27112857359158155,
+"other_known_external": 0.6068311186242764
+},
+"scores": {
+"claude-fable-5.1": -1.8179651420538951,
+"claude-opus-5.5": -1.8200779797721371,
+"claude-sonnet-5": -1.728088602958396,
+"claude-haiku-4.5": -2.2829815137794127,
+"other_known_external": -1.2940773168012272
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "z-ai/glm-5.3",
+"counts": {
+"claude__screen008": {
+"叮": 25,
+"咚": 1,
+"铛": 4
+},
+"claude__screen021": {
+"宁": 10,
+"川": 8,
+"禾": 12
+},
+"claude__screen023": {
+"37": 5,
+"42": 15,
+"43": 4,
+"47": 6
+},
+"claude__screen048": {
+"七万": 2,
+"三条": 4,
+"九万": 6,
+"九筒": 4,
+"五筒": 8,
+"八万": 6
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3719435804299423,
+"claude-opus-5.5": 0.371450151943635,
+"claude-sonnet-5": 0.39316888137572364,
+"claude-haiku-4.5": 0.27112857359158155,
+"other_known_external": 0.6068311186242764
+},
+"scores": {
+"claude-fable-5.1": -1.8179651420538951,
+"claude-opus-5.5": -1.8200779797721371,
+"claude-sonnet-5": -1.728088602958396,
+"claude-haiku-4.5": -2.2829815137794127,
+"other_known_external": -1.2940773168012272
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "deepseek/deepseek-v4-flash-0731",
+"counts": {
+"claude__screen008": {
+"咚": 2,
+"当": 26,
+"铛": 2
+},
+"claude__screen021": {
+"宁": 3,
+"川": 14,
+"禾": 13
+},
+"claude__screen023": {
+"42": 28,
+"43": 2
+},
+"claude__screen048": {
+"七筒": 1,
+"九条": 3,
+"九筒": 1,
+"红中": 25
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2812561987876843,
+"claude-opus-5.5": 0.3011305696114623,
+"claude-sonnet-5": 0.25140443236833565,
+"claude-haiku-4.5": 0.3530784264808208,
+"other_known_external": 0.6469215735191792
+},
+"scores": {
+"claude-fable-5.1": -1.6428539868634693,
+"claude-opus-5.5": -1.546534985742903,
+"claude-sonnet-5": -1.7957509604332245,
+"claude-haiku-4.5": -1.3101498805812553,
+"other_known_external": -0.7046150125990943
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "deepseek/deepseek-v4-flash-0731",
+"counts": {
+"claude__screen008": {
+"咚": 2,
+"当": 26,
+"铛": 2
+},
+"claude__screen021": {
+"宁": 3,
+"川": 14,
+"禾": 13
+},
+"claude__screen023": {
+"42": 28,
+"43": 2
+},
+"claude__screen048": {
+"七筒": 1,
+"九条": 3,
+"九筒": 1,
+"红中": 25
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2812561987876843,
+"claude-opus-5.5": 0.3011305696114623,
+"claude-sonnet-5": 0.25140443236833565,
+"claude-haiku-4.5": 0.3530784264808208,
+"other_known_external": 0.6469215735191792
+},
+"scores": {
+"claude-fable-5.1": -1.6428539868634693,
+"claude-opus-5.5": -1.546534985742903,
+"claude-sonnet-5": -1.7957509604332245,
+"claude-haiku-4.5": -1.3101498805812553,
+"other_known_external": -0.7046150125990943
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "google/gemini-3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 14,
+"咚": 12,
+"当": 2,
+"铛": 2
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 4,
+"宁": 2,
+"川": 16,
+"禾": 8
+},
+"claude__screen023": {
+"42": 29,
+"45": 1
+},
+"claude__screen048": {
+"八万": 4,
+"发财": 26
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3148672614025641,
+"claude-opus-5.5": 0.32772596259427156,
+"claude-sonnet-5": 0.2950944127288916,
+"claude-haiku-4.5": 0.33566897180884786,
+"other_known_external": 0.6643310281911522
+},
+"scores": {
+"claude-fable-5.1": -1.5669371079516465,
+"claude-opus-5.5": -1.5079639390054995,
+"claude-sonnet-5": -1.6602441939241315,
+"claude-haiku-4.5": -1.4721307574288478,
+"other_known_external": -0.7894756671298871
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "google/gemini-3.8-flash",
+"counts": {
+"claude__screen008": {
+"叮": 14,
+"咚": 12,
+"当": 2,
+"铛": 2
+},
+"claude__screen021": {
+"__UNSEEN_IN_TRAINING__": 4,
+"宁": 2,
+"川": 16,
+"禾": 8
+},
+"claude__screen023": {
+"42": 29,
+"45": 1
+},
+"claude__screen048": {
+"八万": 4,
+"发财": 26
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.3148672614025641,
+"claude-opus-5.5": 0.32772596259427156,
+"claude-sonnet-5": 0.2950944127288916,
+"claude-haiku-4.5": 0.33566897180884786,
+"other_known_external": 0.6643310281911522
+},
+"scores": {
+"claude-fable-5.1": -1.5669371079516465,
+"claude-opus-5.5": -1.5079639390054995,
+"claude-sonnet-5": -1.6602441939241315,
+"claude-haiku-4.5": -1.4721307574288478,
+"other_known_external": -0.7894756671298871
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-sonnet-4.6",
+"counts": {
+"claude__screen008": {
+"__UNSEEN_IN_TRAINING__": 1,
+"铛": 29
+},
+"claude__screen021": {
+"宁": 9,
+"序": 3,
+"禾": 18
+},
+"claude__screen023": {
+"37": 8,
+"42": 20,
+"45": 2
+},
+"claude__screen048": {
+"七万": 1,
+"七筒": 8,
+"六万": 12,
+"六筒": 9
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2820296333526942,
+"claude-opus-5.5": 0.3055602248234925,
+"claude-sonnet-5": 0.28191573335799763,
+"claude-haiku-4.5": 0.2600911255955818,
+"other_known_external": 0.6944397751765075
+},
+"scores": {
+"claude-fable-5.1": -1.8342541683022826,
+"claude-opus-5.5": -1.720796567590642,
+"claude-sonnet-5": -1.8348167371821658,
+"claude-haiku-4.5": -1.945333003661191,
+"other_known_external": -0.8998380204130095
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-sonnet-4.6",
+"counts": {
+"claude__screen008": {
+"__UNSEEN_IN_TRAINING__": 1,
+"铛": 29
+},
+"claude__screen021": {
+"宁": 9,
+"序": 3,
+"禾": 18
+},
+"claude__screen023": {
+"37": 8,
+"42": 20,
+"45": 2
+},
+"claude__screen048": {
+"七万": 1,
+"七筒": 8,
+"六万": 12,
+"六筒": 9
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.2820296333526942,
+"claude-opus-5.5": 0.3055602248234925,
+"claude-sonnet-5": 0.28191573335799763,
+"claude-haiku-4.5": 0.2600911255955818,
+"other_known_external": 0.6944397751765075
+},
+"scores": {
+"claude-fable-5.1": -1.8342541683022826,
+"claude-opus-5.5": -1.720796567590642,
+"claude-sonnet-5": -1.8348167371821658,
+"claude-haiku-4.5": -1.945333003661191,
+"other_known_external": -0.8998380204130095
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "openai/gpt-5.5",
+"counts": {
+"claude__screen008": {
+"__UNSEEN_IN_TRAINING__": 3,
+"叮": 26,
+"当": 1
+},
+"claude__screen021": {
+"川": 21,
+"序": 2,
+"禾": 7
+},
+"claude__screen023": {
+"42": 18,
+"44": 1,
+"47": 11
+},
+"claude__screen048": {
+"__UNSEEN_IN_TRAINING__": 1,
+"三万": 6,
+"三筒": 9,
+"中": 4,
+"五筒": 8,
+"红中": 2
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.336857387467499,
+"claude-opus-5.5": 0.33561728350282216,
+"claude-sonnet-5": 0.29226601658643403,
+"claude-haiku-4.5": 0.31830470853247067,
+"other_known_external": 0.6631426125325011
+},
+"scores": {
+"claude-fable-5.1": -1.788494369616181,
+"claude-opus-5.5": -1.7940508490253697,
+"claude-sonnet-5": -1.9955678490942443,
+"claude-haiku-4.5": -1.8727376032696952,
+"other_known_external": -1.111163958898747
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "openai/gpt-5.5",
+"counts": {
+"claude__screen008": {
+"__UNSEEN_IN_TRAINING__": 3,
+"叮": 26,
+"当": 1
+},
+"claude__screen021": {
+"川": 21,
+"序": 2,
+"禾": 7
+},
+"claude__screen023": {
+"42": 18,
+"44": 1,
+"47": 11
+},
+"claude__screen048": {
+"__UNSEEN_IN_TRAINING__": 1,
+"三万": 6,
+"三筒": 9,
+"中": 4,
+"五筒": 8,
+"红中": 2
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.336857387467499,
+"claude-opus-5.5": 0.33561728350282216,
+"claude-sonnet-5": 0.29226601658643403,
+"claude-haiku-4.5": 0.31830470853247067,
+"other_known_external": 0.6631426125325011
+},
+"scores": {
+"claude-fable-5.1": -1.788494369616181,
+"claude-opus-5.5": -1.7940508490253697,
+"claude-sonnet-5": -1.9955678490942443,
+"claude-haiku-4.5": -1.8727376032696952,
+"other_known_external": -1.111163958898747
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "anthropic/claude-opus-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 30
+},
+"claude__screen021": {
+"序": 30
+},
+"claude__screen023": {
+"45": 30
+},
+"claude__screen048": {
+"六万": 30
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23527264536377046,
+"claude-opus-5.5": 0.2396855407643793,
+"claude-sonnet-5": 0.27485000736963705,
+"claude-haiku-4.5": 0.24589777085148554,
+"other_known_external": 0.725149992630363
+},
+"scores": {
+"claude-fable-5.1": -1.210050364506006,
+"claude-opus-5.5": -1.1856803205042519,
+"claude-sonnet-5": -1.0014290267740897,
+"claude-haiku-4.5": -1.1518880853766313,
+"other_known_external": -0.03127602805071928
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-haiku-4.5",
+"source": "anthropic/claude-opus-4.6",
+"counts": {
+"claude__screen008": {
+"叮": 30
+},
+"claude__screen021": {
+"序": 30
+},
+"claude__screen023": {
+"45": 30
+},
+"claude__screen048": {
+"六万": 30
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.23527264536377046,
+"claude-opus-5.5": 0.2396855407643793,
+"claude-sonnet-5": 0.27485000736963705,
+"claude-haiku-4.5": 0.24589777085148554,
+"other_known_external": 0.725149992630363
+},
+"scores": {
+"claude-fable-5.1": -1.210050364506006,
+"claude-opus-5.5": -1.1856803205042519,
+"claude-sonnet-5": -1.0014290267740897,
+"claude-haiku-4.5": -1.1518880853766313,
+"other_known_external": -0.03127602805071928
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "partial",
+"counts": {
+"claude__screen008": {
+"叮": 7,
+"咚": 6,
+"当": 1,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 4,
+"禾": 11
+},
+"claude__screen023": {
+"37": 1,
+"42": 1,
+"47": 13
+},
+"claude__screen048": {
+"五万": 8,
+"五条": 2,
+"五筒": 3,
+"五萬": 2
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.6052250346203558,
+"claude-opus-5.5": 0.3285809090506684,
+"claude-sonnet-5": 0.2515528847375777,
+"claude-haiku-4.5": 0.1413902997866482,
+"other_known_external": 0.3947749653796442
+},
+"scores": {
+"claude-fable-5.1": -0.9339279018411067,
+"claude-opus-5.5": -1.648538314443421,
+"claude-sonnet-5": -2.0242752041914214,
+"claude-haiku-4.5": -2.7377182053938864,
+"other_known_external": -1.3612123541065977
+},
+"valid": 60,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "empty",
+"counts": {},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.5,
+"claude-opus-5.5": 0.5,
+"claude-sonnet-5": 0.5,
+"claude-haiku-4.5": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"claude-fable-5.1": 0.0,
+"claude-opus-5.5": 0.0,
+"claude-sonnet-5": 0.0,
+"claude-haiku-4.5": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "junk",
+"counts": {
+"claude__screen008": {
+"zzz-not-a-category": 30
+},
+"claude__screen021": {
+"zzz-not-a-category": 30
+},
+"claude__screen023": {
+"zzz-not-a-category": 30
+},
+"claude__screen048": {
+"zzz-not-a-category": 30
+}
+},
+"verdict": "mismatch",
+"model": "other_known_external",
+"reasons": [],
+"matches": {
+"claude-fable-5.1": 0.39535856650504164,
+"claude-opus-5.5": 0.39535856650504164,
+"claude-sonnet-5": 0.39535856650504164,
+"claude-haiku-4.5": 0.39535856650504164,
+"other_known_external": 0.6046414334949584
+},
+"scores": {
+"claude-fable-5.1": -1.4773552813619903,
+"claude-opus-5.5": -1.4773552813619903,
+"claude-sonnet-5": -1.4773552813619903,
+"claude-haiku-4.5": -1.4773552813619903,
+"other_known_external": -1.0525127873768192
+},
+"valid": 120,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "invalid",
+"counts": {
+"claude__screen008": {
+"__INVALID_OUTPUT__": 30
+},
+"claude__screen021": {
+"__INVALID_OUTPUT__": 30
+},
+"claude__screen023": {
+"__INVALID_OUTPUT__": 30
+},
+"claude__screen048": {
+"__INVALID_OUTPUT__": 30
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"no_valid_samples",
+"samples_incomplete"
+],
+"matches": {
+"claude-fable-5.1": 0.5,
+"claude-opus-5.5": 0.5,
+"claude-sonnet-5": 0.5,
+"claude-haiku-4.5": 0.5,
+"other_known_external": 0.5
+},
+"scores": {
+"claude-fable-5.1": 0.0,
+"claude-opus-5.5": 0.0,
+"claude-sonnet-5": 0.0,
+"claude-haiku-4.5": 0.0,
+"other_known_external": 0.0
+},
+"valid": 0,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "claude-fable-5.1",
+"source": "overfull",
+"counts": {
+"claude__screen008": {
+"叮": 21,
+"咚": 5,
+"当": 6,
+"铛": 1
+},
+"claude__screen021": {
+"宁": 10,
+"禾": 23
+},
+"claude__screen023": {
+"37": 1,
+"42": 2,
+"43": 2,
+"47": 28
+},
+"claude__screen048": {
+"九万": 1,
+"五万": 18,
+"五条": 1,
+"五筒": 4,
+"五萬": 9
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"samples_exceed_plan"
+],
+"matches": {
+"claude-fable-5.1": 0.572843420531196,
+"claude-opus-5.5": 0.3809548666765523,
+"claude-sonnet-5": 0.35607572404252164,
+"claude-haiku-4.5": 0.24124912082205127,
+"other_known_external": 0.427156579468804
+},
+"scores": {
+"claude-fable-5.1": -0.9371280892442845,
+"claude-opus-5.5": -1.4226253646126772,
+"claude-sonnet-5": -1.5295658083006425,
+"claude-haiku-4.5": -2.082971494384672,
+"other_known_external": -1.2305898633576422
+},
+"valid": 132,
+"planned": 120
+},
+{
+"package": "meow-claude-other-cap98-efficient",
+"tier": "high",
+"claimed": "not-in-package",
+"source": "unknown-claimed",
+"counts": {
+"claude__screen008": {
+"叮": 15,
+"咚": 13,
+"当": 2
+},
+"claude__screen021": {
+"宁": 17,
+"禾": 13
+},
+"claude__screen023": {
+"37": 1,
+"42": 3,
+"43": 1,
+"47": 25
+},
+"claude__screen048": {
+"五万": 14,
+"五条": 2,
+"五筒": 7,
+"五萬": 5,
+"白板": 1,
+"筒子七": 1
+}
+},
+"verdict": "insufficient",
+"model": "",
+"reasons": [
+"unknown_claimed_model"
+],
+"matches": {
+"claude-fable-5.1": 0.5976321627513865,
+"claude-opus-5.5": 0.396079187220123,
+"claude-sonnet-5": 0.3254707166300655,
+"claude-haiku-4.5": 0.23158736356962914,
+"other_known_external": 0.40236783724861347
+},
+"scores": {
+"claude-fable-5.1": -1.0186936766350907,
+"claude-opus-5.5": -1.4405226023146767,
+"claude-sonnet-5": -1.7474362729385366,
+"claude-haiku-4.5": -2.218063369747917,
+"other_known_external": -1.4143024405939733
+},
+"valid": 120,
+"planned": 120
+}
+]
+}
