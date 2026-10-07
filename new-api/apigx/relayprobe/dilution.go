@@ -22,7 +22,10 @@ const (
 	// dilutionMeowTimeout 是 Meow 基准采样单独的预算。高档计划约 340 次请求，2 并发下
 	// 实测要 3～7 分钟，和其余维度共用时限会把后面的维度饿死；采样结束后其余维度的
 	// 时限重新起算。
-	dilutionMeowTimeout  = 540 * time.Second
+	//
+	// 2026-10-07 从 540 秒提到 720 秒：撞限流之后请求间隔会自动拉开（见 meowGate），
+	// 340 份请求在中转限流下要 1.5～2 秒一份才不再被拒，540 秒不够跑完整份计划。
+	dilutionMeowTimeout  = 720 * time.Second
 	dilutionLogicSamples = 3
 	dilutionRatioTries   = 2
 	// dilutionProbeRepeats 是每道探针题的重复次数。分布判定的分辨力直接取决于它：

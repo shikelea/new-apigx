@@ -55,9 +55,19 @@ func evaluateMeowFingerprint(obs MeowObservation) Finding {
 	head := fmt.Sprintf("Meow 官方基准 %s（%s，%s），有效样本 %d/%d", obs.PackageVersion, meowModeName(obs.Mode), tierName,
 		result.ValidSamples, result.PlannedSamples)
 	if obs.Failed > 0 {
-		head += fmt.Sprintf("，%d 次请求失败", obs.Failed)
+		// 说清失败是哪一类：没轮到是时限不够，重试过了还不行是中转真的坏，处理方式相反。
+		if obs.TimedOut > 0 && obs.TimedOut < obs.Failed {
+			head += fmt.Sprintf("，%d 次请求失败（其中 %d 次是采样时限到了还没轮出去）", obs.Failed, obs.TimedOut)
+		} else if obs.TimedOut > 0 {
+			head += fmt.Sprintf("，%d 次请求在采样时限内没轮出去", obs.TimedOut)
+		} else {
+			head += fmt.Sprintf("，%d 次请求失败", obs.Failed)
+		}
 	}
 	var tail []string
+	if obs.RateLimited > 0 {
+		tail = append(tail, fmt.Sprintf("中转限流 %d 次，已自动拉开请求间隔并重试", obs.RateLimited))
+	}
 	if obs.NativeFallback != "" {
 		tail = append(tail, "中转不支持"+meowModeName(obs.NativeFallback)+"，已改用 Chat 兼容基准")
 	}

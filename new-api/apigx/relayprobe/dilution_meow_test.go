@@ -20,6 +20,8 @@ type meowUpstream struct {
 	bodies   []map[string]any
 	answer   func(body map[string]any, n int) (status int, content, finish string)
 	requests int
+	// retryAfter 非空时，非 2xx 响应带上这个 Retry-After 头（模拟中转限流）。
+	retryAfter string
 }
 
 func (u *meowUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +34,9 @@ func (u *meowUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.mu.Unlock()
 	status, content, finish := u.answer(body, n)
 	w.Header().Set("Content-Type", "application/json")
+	if u.retryAfter != "" && status != http.StatusOK {
+		w.Header().Set("Retry-After", u.retryAfter)
+	}
 	w.WriteHeader(status)
 	if status != http.StatusOK {
 		_, _ = w.Write([]byte(content))
@@ -45,8 +50,20 @@ func (u *meowUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(payload)
 }
 
+// compressMeowPacing 把限流闸门的节奏压到亚毫秒。这些用例一个计划要发几百份请求，验证的是
+// 「撞了限流还采得满」这套逻辑，不是真的等时间；闸门自身的加减速由 TestMeowGate… 单独验证。
+func compressMeowPacing(t *testing.T) {
+	t.Helper()
+	base, ceiling, after := meowPaceBase, meowPaceCeiling, retryAfterCeiling
+	meowPaceBase, meowPaceCeiling, retryAfterCeiling = time.Microsecond, 2*time.Microsecond, 2*time.Millisecond
+	t.Cleanup(func() {
+		meowPaceBase, meowPaceCeiling, retryAfterCeiling = base, ceiling, after
+	})
+}
+
 func meowTarget(t *testing.T, upstream *meowUpstream, model string) (auditTarget, modelfp.MeowPlan) {
 	t.Helper()
+	compressMeowPacing(t)
 	server := httptest.NewServer(upstream)
 	t.Cleanup(server.Close)
 	plan, ok := modelfp.PlanMeow(model, modelfp.MeowDefaultTier)
@@ -112,6 +129,68 @@ func TestCollectMeowDropsRejectedReasoningEffort(t *testing.T) {
 	valid, _ := totalCounts(obs)
 	assert.Equal(t, len(plan.Jobs), valid)
 	assert.Zero(t, obs.Failed)
+}
+
+// 中转限流时一个样本都不该丢：撞 429 的格子退回队尾，等整座闸门过了 Retry-After 的窗口
+// 再试。2026-10-07 实测某中转在 340 格的计划上丢了 73 格，根子是限流重试和「答案不可用」
+// 在抢同一份 retry_budget，额度一烧光，后面的 429 就一次都不再试、直接记失败。这里让前
+// 200 份请求全部限流——比 retry_budget(170) 还多，旧实现必然丢格子。
+func TestCollectMeowRetriesRateLimitedWithoutLosingSamples(t *testing.T) {
+	const limitedRequests = 200
+	upstream := &meowUpstream{retryAfter: "18"}
+	upstream.answer = func(_ map[string]any, n int) (int, string, string) {
+		if n <= limitedRequests {
+			return http.StatusTooManyRequests, `{"error":{"message":"Too many requests"}}`, ""
+		}
+		return 200, "37", "stop"
+	}
+	target, plan := meowTarget(t, upstream, "gpt-6-sol")
+	require.Greater(t, limitedRequests, (len(plan.Jobs)+1)/2)
+
+	obs := collectMeow(context.Background(), target, plan, func(*chatResponse) {})
+	assert.Equal(t, len(plan.Jobs)+limitedRequests, upstream.requests)
+	assert.Equal(t, limitedRequests, obs.RateLimited)
+	assert.Zero(t, obs.Failed)
+	assert.Zero(t, obs.TimedOut)
+	valid, invalid := totalCounts(obs)
+	assert.Equal(t, len(plan.Jobs), valid)
+	assert.Zero(t, invalid)
+	result, ok := modelfp.ScoreMeow(*obs)
+	require.True(t, ok)
+	assert.Equal(t, len(plan.Jobs), result.ValidSamples)
+}
+
+// 限流闸门的加减速：撞一次限流就把请求间隔拉到「窗口长度 ÷ 这个窗口里成功发出的份数」，
+// 也就是照中转能接受的频率发，而不是把整座闸门冻在窗口里睡 18 秒（2026-10-07 实测那样
+// 340 份请求永远采不完，21 个窗口就把采样时限睡光了）。间隔翻倍、有上限，攒够 meowPaceRestore
+// 份干净响应放回一半；等待也随时限中止——宁可这一格失败，不能把整条检测睡过去。
+func TestMeowGateSlowsOnLimitAndRecovers(t *testing.T) {
+	g := &meowGate{pace: 50 * time.Millisecond}
+	for range 15 {
+		g.clean()
+	}
+	g.limited(18 * time.Second)
+	assert.Equal(t, 18*time.Second/15, g.pace)
+	assert.Equal(t, 1, g.count())
+
+	// 恢复期的第一手信息不可靠（窗口里一份都没发出去就又被拒），按翻倍走并撞到上限。
+	g.limited(18 * time.Second)
+	assert.Equal(t, meowPaceCeiling, g.pace)
+
+	for range meowPaceRestore {
+		g.clean()
+	}
+	assert.Equal(t, meowPaceCeiling/2, g.pace)
+
+	g.nextAllowed = time.Now().Add(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	started := time.Now()
+	assert.False(t, g.hold(ctx))
+	assert.Less(t, time.Since(started), time.Second)
 }
 
 // 空答案先重试，共享重试预算 (计划份数+1)/2 用完后计为 __INVALID_OUTPUT__；被截断的

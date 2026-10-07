@@ -199,7 +199,9 @@ export async function runDilutionTest(input: ProbeTargetInput) {
     '/api/tools/dilution-test',
     input,
     {
-      timeout: 1200000, // 20min：后端 Meow 采样 540s + 其余维度重新起算 600s（见 relayprobe/dilution.go）
+      timeout: 1380000, // 23min：后端 Meow 采样 720s + 其余维度重新起算 600s = 最坏 1320s
+      // （见 relayprobe/dilution.go）。2026-10-07 撞限流时请求间隔会自动拉开，采样预算从
+      // 540s 提到 720s；比后端还短的客户端超时会把还在正常跑的检测掐成「网络错误」。
     }
   )
   return res.data

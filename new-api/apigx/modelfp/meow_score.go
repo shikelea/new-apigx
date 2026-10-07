@@ -42,6 +42,12 @@ type MeowObservation struct {
 	Counts         map[string]map[string]int
 	// Failed 是重试后仍未拿到可用响应的请求数（网络错误、非 2xx、异常截断），它们不计入样本。
 	Failed int
+	// TimedOut 是 Failed 里「采样时限到了还没轮到发出去」的那一部分。它和「重试过了还是失败」
+	// 的处理方式相反：前者是时限不够，后者是中转真的坏。
+	TimedOut int
+	// RateLimited 是采样中遇到上游限流（HTTP 429）的次数。每次都按上游给的窗口拉开了请求
+	// 间隔再重试，所以这个数字反映中转有多挤，不表示样本丢了。
+	RateLimited int
 	// ReasoningEffortDropped 表示上游拒收推理强度参数（chat 的 reasoning_effort、gpt 的
 	// reasoning、claude 的 thinking/output_config），后续请求去掉了这些字段。
 	ReasoningEffortDropped bool

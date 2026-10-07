@@ -88,6 +88,7 @@ func (u *nativeUpstream) paths() map[string]int {
 
 func nativeTarget(t *testing.T, upstream *nativeUpstream, model string) (auditTarget, []modelfp.MeowPlan) {
 	t.Helper()
+	compressMeowPacing(t)
 	server := httptest.NewServer(upstream)
 	t.Cleanup(server.Close)
 	plans := modelfp.PlanMeowAll(model, modelfp.MeowDefaultTier)
