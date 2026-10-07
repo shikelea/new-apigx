@@ -159,23 +159,27 @@ export const toolsQueryKeys = {
   modelRegistry: ['apigx-model-registry'] as const,
 }
 
-export async function listModelRegistry(): Promise<Envelope<ModelRegistryEntry[]>> {
-  try {
-    const res = await api.get<any>('/api/tools/dilution-models')
-    const models = res.data?.data?.models || res.data?.data
-    if (Array.isArray(models) && models.length > 0) {
-      return { success: true, data: models }
-    }
-  } catch {
-    // fallback to apigx endpoint
-  }
-  try {
-    const res = await api.get<any>('/api/apigx/model-registry')
-    const models = Array.isArray(res.data?.data) ? res.data.data : []
-    return { success: true, data: models }
-  } catch {
-    return { success: false, data: [] }
-  }
+export async function listModelRegistry(): Promise<ModelRegistryEntry[]> {
+  const res = await api.get<Envelope<{ models: ModelRegistryEntry[] }>>(
+    '/api/tools/dilution-models'
+  )
+  const models = res.data?.data?.models
+  return Array.isArray(models) ? models : []
+}
+
+// listTargetModels 问目标接口「你提供哪些型号名」。掺水检测能测的型号要同时满足两个条件：
+// 我们测过它的基准，并且这台中转真的提供这个名字。只看前者就会摆出一堆点了必然全部失败的
+// 卡片——2026-10-07 实测某国产中转，界面上的 gpt-6-sol／claude-sonnet-5 一律回「模型不可用」。
+export async function listTargetModels(
+  input: Omit<ProbeTargetInput, 'model'>
+): Promise<string[]> {
+  const res = await api.post<Envelope<{ models: string[] }>>(
+    '/api/tools/target-models',
+    input,
+    { timeout: 20000 }
+  )
+  const models = res.data?.data?.models
+  return Array.isArray(models) ? models : []
 }
 
 export async function runSpeedTest(input: ProbeTargetInput) {

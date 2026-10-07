@@ -34,7 +34,7 @@ import {
   Sparkles,
   XCircle,
 } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 
@@ -54,6 +54,7 @@ import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 
 import {
   listModelRegistry,
+  listTargetModels,
   toolsQueryKeys,
   type DilutionReport,
   type DilutionVerdict,
@@ -61,6 +62,7 @@ import {
   type RelayOption,
 } from '../api'
 import {
+  PROBE_SOURCE_RELAY,
   PROBE_TARGET_DEFAULTS,
   probeTargetSchema,
   toProbeTarget,
@@ -96,58 +98,6 @@ const MODEL_CN_MAP: Record<string, string> = {
   'qwen3.8-max': '通义千问 Qwen 3.8 Max',
 }
 
-// 仅收录具备实测特征基线的已知模型（无基准的模型不展示）
-const FALLBACK_MODEL_GROUPS: {
-  vendor: string
-  models: { id: string; name: string; request: string; ready: boolean; ready_tiers: string[] }[]
-}[] = [
-  {
-    vendor: 'DeepSeek (深度求索)',
-    models: [
-      { id: 'deepseek-flash', name: 'DeepSeek Flash', request: 'deepseek-flash', ready: true, ready_tiers: ['high'] },
-      // deepseek-v3（请求名 deepseek-chat）没有实测基准，后端按 baseline_state 过滤时不会
-      // 出现，这里的兜底名单也不能宣称它有基准。
-      { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', request: 'deepseek-v4.1-flash', ready: true, ready_tiers: ['high'] },
-    ],
-  },
-  {
-    vendor: 'OpenAI',
-    models: [
-      { id: 'gpt-6-sol', name: 'GPT-6 Sol', request: 'gpt-6-sol', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-      { id: 'gpt-6-luna', name: 'GPT-6 Luna', request: 'gpt-6-luna', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-      { id: 'gpt-6-astra', name: 'GPT-6 Astra', request: 'gpt-6-astra', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-      { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', request: 'gpt-5.6-terra', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-    ],
-  },
-  {
-    vendor: 'Anthropic',
-    models: [
-      { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', request: 'claude-sonnet-5', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-      { id: 'claude-haiku-4.5', name: 'Claude Haiku 4.5', request: 'claude-haiku-4.5', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-      { id: 'claude-opus-5.5', name: 'Claude Opus 5.5', request: 'claude-opus-5.5', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-      { id: 'claude-fable-5.1', name: 'Claude Fable 5.1', request: 'claude-fable-5.1', ready: true, ready_tiers: ['low', 'medium', 'high'] },
-    ],
-  },
-  {
-    vendor: '阿里云百炼 (通义千问)',
-    models: [
-      { id: 'qwen3.8-max', name: '通义千问 Qwen 3.8 Max', request: 'qwen3.8-max', ready: true, ready_tiers: ['high'] },
-    ],
-  },
-  {
-    vendor: '智谱 AI (GLM)',
-    models: [
-      { id: 'glm-5.3', name: '智谱 GLM-5.3', request: 'glm-5.3', ready: true, ready_tiers: ['high'] },
-    ],
-  },
-  {
-    vendor: '月之暗面 (Kimi)',
-    models: [
-      { id: 'kimi-k3', name: 'Kimi K3', request: 'kimi-k3', ready: true, ready_tiers: ['high'] },
-    ],
-  },
-]
-
 export function DilutionForm({
   relays,
   pending,
@@ -170,72 +120,100 @@ export function DilutionForm({
   })
   const source = form.watch('source')
   const selectedTier = form.watch('tier') || 'high'
+  const relayID = form.watch('relay_share_public_id')
+  const baseURL = form.watch('base_url')
+  const manualKey = form.watch('key')
 
-  // 获取收录的特征注册表
+  // 收录名单一律问后端：前端自备副本会和基准脱节，之前正是这么长出十几张「点了必然全部失败」
+  // 的卡片的。后端只列该档确有校准基准的型号。
   const registryQuery = useQuery({
     queryKey: toolsQueryKeys.modelRegistry,
     queryFn: listModelRegistry,
   })
 
-  // 按厂商归类收录项：根据当前选择的档位动态过滤，仅保留在该档位具有有效实测基准的模型
-  const vendorGroups = useMemo(() => {
-    const raw = registryQuery.data?.data
-    const allGroups = (() => {
-      if (!raw || raw.length === 0) {
-        return FALLBACK_MODEL_GROUPS
-      }
-      const map = new Map<string, { id: string; name: string; request: string; ready: boolean; ready_tiers: string[] }[]>()
-      for (const item of raw) {
-        // 只有 baseline_state 为 ready 的模型才收录展示，未通过或无基准的一律忽略
-        if (item.baseline_state !== 'ready') {
-          continue
-        }
-        const rawVendor = item.vendor || '其他'
-        const vendor = VENDOR_CN_MAP[rawVendor] || rawVendor
-        if (!map.has(vendor)) {
-          map.set(vendor, [])
-        }
-        const names = item.request_names && item.request_names.length > 0 ? item.request_names : [item.id]
-        const readyTiers = item.ready_tiers && item.ready_tiers.length > 0 ? item.ready_tiers : ['high']
-        for (const req of names) {
-          const displayName = MODEL_CN_MAP[req] || MODEL_CN_MAP[item.id] || item.display_name || item.id
-          map.get(vendor)!.push({
-            id: `${item.id}-${req}`,
-            name: displayName,
-            request: req,
-            ready: true,
-            ready_tiers: readyTiers,
-          })
-        }
-      }
-      const groups = Array.from(map.entries())
-        .filter(([_, models]) => models.length > 0)
-        .map(([vendor, models]) => ({
-          vendor,
-          models,
-        }))
-      return groups.length > 0 ? groups : FALLBACK_MODEL_GROUPS
-    })()
+  // 目标接口实际提供的型号名。地址填全了才去问，且要等输入停下 600ms 再问：边打字边查会
+  // 让每敲一个字符都真的打到上游一次。缓存键里不放 Key，它不该出现在 QueryClient 的键里。
+  const targetSignature =
+    source === PROBE_SOURCE_RELAY ? `relay:${relayID}` : `url:${baseURL.trim()}`
+  const [settledSignature, setSettledSignature] = useState('')
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledSignature(targetSignature), 600)
+    return () => clearTimeout(timer)
+  }, [targetSignature])
+  const targetComplete =
+    source === PROBE_SOURCE_RELAY ? !!relayID : !!baseURL.trim() && !!manualKey.trim()
+  const targetReady = targetComplete && settledSignature === targetSignature
+  const servedQuery = useQuery({
+    queryKey: ['apigx-target-models', targetSignature],
+    queryFn: () =>
+      listTargetModels(
+        source === PROBE_SOURCE_RELAY
+          ? { relay_share_public_id: relayID }
+          : { base_url: baseURL.trim(), key: manualKey.trim() }
+      ),
+    enabled: targetReady,
+    retry: 0,
+    staleTime: 5 * 60 * 1000,
+  })
 
-    // 联动过滤：只保留支持当前所选档位的模型
-    return allGroups
-      .map((g) => ({
-        vendor: g.vendor,
-        models: g.models.filter((m) => m.ready_tiers.includes(selectedTier)),
+  // 可选型号 = 有校准基准 ∩ 该中转真的提供，再按所选档位过滤。
+  const vendorGroups = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; request: string; ready_tiers: string[] }[]>()
+    for (const item of registryQuery.data ?? []) {
+      if (item.baseline_state !== 'ready') {
+        continue
+      }
+      const rawVendor = item.vendor || '其他'
+      const vendor = VENDOR_CN_MAP[rawVendor] || rawVendor
+      if (!map.has(vendor)) {
+        map.set(vendor, [])
+      }
+      const names = item.request_names && item.request_names.length > 0 ? item.request_names : [item.id]
+      const readyTiers = item.ready_tiers && item.ready_tiers.length > 0 ? item.ready_tiers : []
+      for (const req of names) {
+        const displayName = MODEL_CN_MAP[req] || MODEL_CN_MAP[item.id] || item.display_name || item.id
+        map.get(vendor)!.push({
+          id: `${item.id}-${req}`,
+          name: displayName,
+          request: req,
+          ready_tiers: readyTiers,
+        })
+      }
+    }
+    // 拿到了清单就取交集：有基准但这台中转不提供的名字，点了只会几百次全部失败。没拿到
+    // （中转不支持 /models）时不清空列表，后端开跑前那一次探测会给出明确原因。
+    const served = servedQuery.data
+    const servedSet =
+      served && served.length > 0
+        ? new Set(served.map((name) => name.trim().toLowerCase()))
+        : null
+    return Array.from(map.entries())
+      .map(([vendor, models]) => ({
+        vendor,
+        models: models.filter(
+          (m) =>
+            m.ready_tiers.includes(selectedTier) &&
+            (servedSet === null || servedSet.has(m.request.trim().toLowerCase()))
+        ),
       }))
-      .filter((g) => g.models.length > 0)
-  }, [registryQuery.data, selectedTier])
+      .filter((group) => group.models.length > 0)
+  }, [registryQuery.data, servedQuery.data, selectedTier])
+
+  const selectableModels = useMemo(
+    () => vendorGroups.flatMap((group) => group.models),
+    [vendorGroups]
+  )
 
   // 保证当前所选 model 字段不为空且在当前挡位有效列表内，否则自适应切到该档位首选可用模型
   useEffect(() => {
     const current = form.getValues('model')
-    const allModels = vendorGroups.flatMap((g) => g.models.map((m) => m.request))
+    const allModels = selectableModels.map((m) => m.request)
     if (!current || (allModels.length > 0 && !allModels.includes(current))) {
-      if (vendorGroups.length > 0 && vendorGroups[0].models.length > 0) {
-        form.setValue('model', vendorGroups[0].models[0].request)
+      if (allModels.length > 0) {
+        form.setValue('model', allModels[0])
       }
     }
-  }, [form, vendorGroups])
+  }, [form, selectableModels])
 
   return (
     <Form {...form}>
@@ -334,14 +312,24 @@ export function DilutionForm({
                 </NativeSelect>
               </FormControl>
               <FormDescription className='text-xs'>
-                仅展示具备实测特征基准的模型。系统将逐项比对目标地址的返回是否符合该型号特征。
+                {targetReady && servedQuery.isFetching
+                  ? '正在读取该目标的型号清单…'
+                  : selectableModels.length === 0
+                    ? targetReady
+                      ? '这个中转没有提供「既有实测基准、又确实存在」的型号，换一个型号名或换一台目标再试。'
+                      : '填好检测目标后，这里只会列出该目标确实提供、且我们采过基准的型号。'
+                    : `按 ${selectedTier} 档可比对的型号有 ${selectableModels.length} 个；不在列表里的名字一律测不出结论，因为缺少同协议同档位的基准数据。`}
               </FormDescription>
               <FormMessage />
             </FormItem>
           )}
         />
 
-        <Button type='submit' disabled={pending} className='w-full sm:w-auto'>
+        <Button
+          type='submit'
+          disabled={pending || selectableModels.length === 0}
+          className='w-full sm:w-auto'
+        >
           {pending ? <Loader2 className='size-4 animate-spin' /> : <FlaskConical className='size-4' />}
           {pending
             ? (t('Checking, up to 10 minutes') || '正在进行全项检测，至多需要数分钟...')

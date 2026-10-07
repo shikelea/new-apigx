@@ -3,7 +3,9 @@ package relayprobe
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -129,6 +131,9 @@ func runDilutionTestWith(parent context.Context, target auditTarget, tier string
 	}
 	ctx, cancel := withProbeTimeout(parent, dilutionTotalTimeout)
 	defer func() { cancel() }()
+	if err := dilutionPreflight(ctx, target); err != nil {
+		return modelfp.Report{}, err
+	}
 	obs := modelfp.Observations{TemperatureHonored: true}
 	requests := 0
 	record := func(resp *chatResponse) {
@@ -253,9 +258,88 @@ func runDilutionTestWith(parent context.Context, target auditTarget, tier string
 	}
 
 	if requests == 0 {
-		return modelfp.Report{}, fmt.Errorf("所有检测请求均未成功")
+		return modelfp.Report{}, fmt.Errorf("所有检测请求均未成功（中转限流、超时或上游异常），本次不给出判定")
 	}
 	return modelfp.Evaluate(target.model, obs), nil
+}
+
+// dilutionPreflight 先花一次最小请求确认「这个中转提供这个型号名」。型号名不存在时上游会
+// 稳定回 4xx，之后几百次采样全部失败，最后只剩一句「所有检测请求均未成功」——用户分不清是
+// 自己填错了名字还是中转坏了，而这两件事的处理方式正好相反。2026-10-07 实测：界面给的
+// gpt-6-sol、claude-sonnet-5 等型号在该中转一律回 HTTP 400「模型不可用：gpt-6-sol」，
+// 一次检测白烧几百次请求。
+//
+// 只有能确定归因于「型号名/凭据」的响应才中断；限流、超时和其它 4xx 交给后面的采样重试。
+func dilutionPreflight(ctx context.Context, target auditTarget) error {
+	resp, err := target.chat(ctx, map[string]any{
+		"messages":    userMessages("", "reply OK"),
+		"max_tokens":  1,
+		"temperature": 0,
+	})
+	if err == nil || resp == nil {
+		return nil
+	}
+	switch {
+	case resp.HTTPStatus == http.StatusUnauthorized, resp.HTTPStatus == http.StatusForbidden:
+		return fmt.Errorf("中转凭据无效或没有该型号的权限（HTTP %d）", resp.HTTPStatus)
+	case modelUnavailable(resp):
+		return fmt.Errorf("该中转不提供型号「%s」%s", target.model, upstreamReasonSuffix(resp.Body))
+	}
+	return nil
+}
+
+// modelUnavailablePhrases 是各家网关「型号不存在/不可用」的常见写法。只按状态码判断不够：
+// 参数错误也回 400，把它当成型号不存在会把可用的型号判成不可测。
+var modelUnavailablePhrases = []string{
+	"model_not_available", "model not found", "model not exist", "does not exist",
+	"no such model", "unknown model", "unsupported model", "invalid model",
+	"model is not available", "model is unavailable",
+	"模型不可用", "模型不存在", "没有该模型", "不支持的模型",
+}
+
+func modelUnavailable(resp *chatResponse) bool {
+	// 404 按「这个名字在这台网关上没有路由」处理；400/422 要看文案，因为参数错误同样回 400。
+	// 429 不在此列：限流的 body 里也可能出现 not available 字样，那是暂时的，中断反而把还能
+	// 测的检测掐死。
+	if resp.HTTPStatus == http.StatusNotFound {
+		return true
+	}
+	if resp.HTTPStatus != http.StatusBadRequest && resp.HTTPStatus != http.StatusUnprocessableEntity {
+		return false
+	}
+	body := strings.ToLower(string(resp.Body))
+	return slices.ContainsFunc(modelUnavailablePhrases, func(phrase string) bool {
+		return strings.Contains(body, phrase)
+	})
+}
+
+// upstreamReasonSuffix 取上游自己给的原因，原样带进错误里，长度受限并去掉控制字符。
+func upstreamReasonSuffix(body []byte) string {
+	var payload struct {
+		Message string `json:"message"`
+		Error   struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = common.Unmarshal(body, &payload)
+	reason := strings.TrimSpace(payload.Message)
+	if reason == "" {
+		reason = strings.TrimSpace(payload.Error.Message)
+	}
+	if reason == "" {
+		return ""
+	}
+	reason = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, reason)
+	reason = strings.Join(strings.Fields(reason), " ")
+	if runes := []rune(reason); len(runes) > 120 {
+		reason = string(runes[:120]) + "…"
+	}
+	return "：" + reason
 }
 
 // structureCompliant 严格按题面校验：字段集合、类型、枚举、数组长度全部对上才算达标。

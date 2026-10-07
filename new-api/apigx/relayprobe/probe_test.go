@@ -842,3 +842,71 @@ func TestExponentialBackoffStaysBounded(t *testing.T) {
 	assert.Equal(t, 6*time.Second, exponentialBackoff(3, 2*time.Second, 6*time.Second))
 	assert.Greater(t, exponentialBackoff(64, time.Second, 2*time.Second), time.Duration(0))
 }
+
+// TestModelUnavailableReadsUpstreamRefusal 钉住「型号不存在」的识别：参数错误也回 400，
+// 把它当成型号不可用会把可用的型号判成不可测；反过来认不出型号不可用，用户就要等几百次
+// 失败请求才知道自己选了一个中转根本没有的名字。
+func TestModelUnavailableReadsUpstreamRefusal(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"relay refusal with chinese message", http.StatusBadRequest, `{"code":"MODEL_NOT_AVAILABLE","message":"模型不可用：gpt-6-sol"}`, true},
+		{"openai style error", http.StatusBadRequest, `{"error":{"message":"The model 'gpt-6-sol' does not exist"}}`, true},
+		{"not found", http.StatusNotFound, `{"error":{"message":"no route"}}`, true},
+		{"parameter error is not a missing model", http.StatusBadRequest, `{"error":{"message":"temperature must be between 0 and 1"}}`, false},
+		{"rate limit is not a missing model", http.StatusTooManyRequests, `{"message":"model not available right now"}`, false},
+		{"maintenance wording is not a missing model", http.StatusBadRequest, `{"message":"The service is temporarily unavailable"}`, false},
+		{"server error is not a missing model", http.StatusInternalServerError, `{"message":"model_not_available"}`, false},
+		{"success", http.StatusOK, `{"id":"chatcmpl-1"}`, false},
+	}
+	for _, tc := range cases {
+		got := modelUnavailable(&chatResponse{HTTPStatus: tc.status, Body: []byte(tc.body)})
+		assert.Equal(t, tc.want, got, tc.name)
+	}
+}
+
+func TestUpstreamReasonSuffix(t *testing.T) {
+	assert.Equal(t, "：模型不可用：gpt-6-sol",
+		upstreamReasonSuffix([]byte(`{"message":"模型不可用：gpt-6-sol"}`)))
+	assert.Equal(t, "：no such model",
+		upstreamReasonSuffix([]byte(`{"error":{"message":"no such\r\nmodel"}}`)))
+	assert.Empty(t, upstreamReasonSuffix([]byte(`{"code":"MODEL_NOT_AVAILABLE"}`)))
+	assert.Empty(t, upstreamReasonSuffix([]byte(`not json at all`)))
+	long := upstreamReasonSuffix([]byte(`{"message":"` + strings.Repeat("问", 200) + `"}`))
+	assert.Equal(t, "："+strings.Repeat("问", 120)+"…", long, "reason must stay short enough to render")
+}
+
+// TestDilutionStopsOnUnavailableModel 钉住「一次请求就停」：型号在这台中转上不存在时必须
+// 立刻带着上游的原因失败，而不是把几百次采样全部撞墙之后只剩一句「所有检测请求均未成功」。
+func TestDilutionStopsOnUnavailableModel(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":"MODEL_NOT_AVAILABLE","message":"模型不可用：gpt-6-sol"}`))
+	}))
+	t.Cleanup(server.Close)
+	target := auditTarget{client: server.Client(), base: server.URL, key: testRelayKey, model: "gpt-6-sol"}
+	_, err := runDilutionTestWith(context.Background(), target, "high", 2)
+	require.ErrorContains(t, err, "该中转不提供型号「gpt-6-sol」")
+	require.ErrorContains(t, err, "模型不可用：gpt-6-sol")
+	require.Equal(t, int32(1), atomic.LoadInt32(&hits), "must stop at the first refusal")
+}
+
+// TestDilutionStopsOnInvalidCredential 凭据无效同理：后面每次请求都会回同样的 401。
+func TestDilutionStopsOnInvalidCredential(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid api key"}}`))
+	}))
+	t.Cleanup(server.Close)
+	target := auditTarget{client: server.Client(), base: server.URL, key: testRelayKey, model: "deepseek-flash"}
+	_, err := runDilutionTestWith(context.Background(), target, "high", 2)
+	require.ErrorContains(t, err, "中转凭据无效")
+	require.Equal(t, int32(1), atomic.LoadInt32(&hits))
+}

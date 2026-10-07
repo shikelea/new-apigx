@@ -513,3 +513,25 @@ func TestUncalibratedOnlyModelIsPending(t *testing.T) {
 		}
 	}
 }
+
+// TestMeowReadyTiers 钉住型号名单的可选项：只列「该档有校准基准」的型号和档位。
+// 名单是前端唯一能选的集合，写错就会摆出一张点了必然测不出来的卡片。
+func TestMeowReadyTiers(t *testing.T) {
+	for name, want := range map[string][]string{
+		// 官方请求名，只有高档采过。低/中档会升档跑成几百次高档题量，不能列为可选。
+		"deepseek-flash": {"high"},
+		"qwen3.8-max":    {"high"},
+		// 参考项目的官方基准包三档都过校准。
+		"gpt-6-sol":        {"low", "medium", "high"},
+		"claude-haiku-4.5": {"low", "medium", "high"},
+		// 只出现在未校准包里 / 根本没有基准包（旧手填基准）的名字一律不可选。
+		"glm-5.3-flash":       nil,
+		"deepseek-v4.1-flash": nil,
+		"deepseek-chat":       nil,
+		"gpt-4o":              nil,
+	} {
+		if got := MeowReadyTiers(name); !slices.Equal(got, want) {
+			t.Errorf("MeowReadyTiers(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

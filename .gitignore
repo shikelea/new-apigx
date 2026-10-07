@@ -39,3 +39,6 @@ tmp/
 # 本地浏览器与验证输出
 /.playwright-cli/
 /output/
+
+# 参照实现（meow-llm-detector）的本地克隆，只用来对照行为，不入库
+/meow-reference/

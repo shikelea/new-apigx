@@ -82,6 +82,29 @@ func PlanMeowAll(requestName, tier string) []MeowPlan {
 	return plans
 }
 
+// MeowReadyTiers 返回该请求名「按原档位就有校准基准」的档位，供型号名单使用。
+//
+// 不能用「PlanMeowAll 非空」来判定：低档没有校准包时 selectMeowPackages 会升档，名字仍然
+// 出计划，但跑的其实是高档题量（几百次请求）。名单里写上低档，用户选低档却烧掉高档的额度，
+// 结果和自己选的档位无关。同理，只有一人手填旧基准（没有对应基准包）的名字在这里也是空的
+// ——它进不了分布指纹的候选集，标成可选等于承诺一个永远出不了结论的检测。
+func MeowReadyTiers(requestName string) []string {
+	pkgs, claimed := resolveMeowModels(requestName)
+	var tiers []string
+	for _, tier := range meowTierOrder {
+		for _, pkg := range pkgs {
+			if !pkg.calibrated[tier] {
+				continue
+			}
+			if _, ok := pkg.plan(tier, claimed); ok {
+				tiers = append(tiers, tier)
+				break
+			}
+		}
+	}
+	return tiers
+}
+
 // meowTierOrder 是档位从低到高的顺序，用于在请求档位未校准时向上升档。
 var meowTierOrder = []string{"low", "medium", "high"}
 

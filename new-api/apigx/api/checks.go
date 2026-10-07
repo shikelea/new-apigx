@@ -15,6 +15,7 @@ package apigxapi
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -46,6 +47,7 @@ func RegisterCrowdtestRoutes(r *gin.RouterGroup, db *gorm.DB) {
 	tools := r.Group("/tools", toolsGate)
 	{
 		tools.GET("/dilution-models", h.listDilutionModels)
+		tools.POST("/target-models", middleware.UserAuth(), middleware.UserCriticalRateLimit("relay_target_models"), h.listTargetModels)
 		tools.POST("/speed-test", middleware.UserAuth(), middleware.UserCriticalRateLimit("relay_speed_test"), h.runSpeedTest)
 		tools.POST("/dilution-test", middleware.UserAuth(), middleware.UserCriticalRateLimit("relay_dilution_test"), h.runDilutionTest)
 	}
@@ -53,18 +55,45 @@ func RegisterCrowdtestRoutes(r *gin.RouterGroup, db *gorm.DB) {
 
 // listDilutionModels 返回掺水检测的收录型号名单。前端据此渲染型号卡片选择器，而不是让
 // 用户自由填一个我们根本没有基准的型号名。
+//
+// 可选档位一律按基准包现算（MeowReadyTiers），不信收录项里写的那份：写死的名单会和基准脱节，
+// 展开不出计划的型号（只有旧手填基准的那些）就会变成点了必然测不出来的卡片。
 func (h *handler) listDilutionModels(c *gin.Context) {
 	entries := modelfp.Registry()
 	models := make([]gin.H, 0, len(entries))
 	for _, entry := range entries {
+		names := make([]string, 0, len(entry.RequestNames))
+		var tiers []string
+		for _, name := range entry.RequestNames {
+			avail := modelfp.MeowReadyTiers(name)
+			if len(avail) == 0 {
+				continue
+			}
+			names = append(names, name)
+			if tiers == nil {
+				tiers = avail
+				continue
+			}
+			// 一条收录项有多个请求名时取交集：宁可少列一档，也不给某个名字承诺它没有的档位。
+			shared := make([]string, 0, len(tiers))
+			for _, tier := range tiers {
+				if slices.Contains(avail, tier) {
+					shared = append(shared, tier)
+				}
+			}
+			tiers = shared
+		}
+		if len(names) == 0 || len(tiers) == 0 {
+			continue
+		}
 		models = append(models, gin.H{
 			"id":             entry.ID,
 			"display_name":   entry.DisplayName,
 			"vendor":         entry.Vendor,
-			"request_names":  entry.RequestNames,
+			"request_names":  names,
 			"baseline_state": entry.BaselineState,
 			"baseline_meta":  entry.BaselineMeta,
-			"ready_tiers":    entry.ReadyTiers,
+			"ready_tiers":    tiers,
 		})
 	}
 	ok(c, gin.H{
@@ -103,6 +132,10 @@ type resolvedTarget struct {
 
 // resolveProbeTarget 解析检测目标并做输入校验。失败时已经写好响应，调用方直接 return。
 func (h *handler) resolveProbeTarget(c *gin.Context, owner int64, req probeTargetRequest) (*resolvedTarget, bool) {
+	target, okBase := h.resolveProbeBase(c, owner, req)
+	if !okBase {
+		return nil, false
+	}
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
 		fail(c, http.StatusBadRequest, "invalid_argument", "model is required")
@@ -112,6 +145,13 @@ func (h *handler) resolveProbeTarget(c *gin.Context, owner int64, req probeTarge
 		fail(c, http.StatusBadRequest, "invalid_argument", "model is too long")
 		return nil, false
 	}
+	target.model = model
+	return target, true
+}
+
+// resolveProbeBase 只解析「地址 + 凭据」这一半：查型号清单不需要型号名，其余校验与检测
+// 目标一致，不该抄第二份。
+func (h *handler) resolveProbeBase(c *gin.Context, owner int64, req probeTargetRequest) (*resolvedTarget, bool) {
 	if publicID := strings.TrimSpace(req.RelaySharePublicID); publicID != "" {
 		share, err := h.getOwnedRelayByPublicID(owner, publicID)
 		if err != nil {
@@ -128,7 +168,7 @@ func (h *handler) resolveProbeTarget(c *gin.Context, owner int64, req probeTarge
 			fail(c, http.StatusServiceUnavailable, "credential_unavailable", "检测凭据不可用")
 			return nil, false
 		}
-		return &resolvedTarget{baseURL: share.BaseURL, protocol: share.Protocol, key: key, model: model, shareID: share.ID}, true
+		return &resolvedTarget{baseURL: share.BaseURL, protocol: share.Protocol, key: key, shareID: share.ID}, true
 	}
 	baseURL := strings.TrimSpace(req.BaseURL)
 	key := strings.TrimSpace(req.Key)
@@ -143,7 +183,37 @@ func (h *handler) resolveProbeTarget(c *gin.Context, owner int64, req probeTarge
 	// 这里只做长度与协议白名单校验；SSRF 判定统一交给 relayprobe.ValidateBaseURL，
 	// 避免两处规则各自演化。
 	// 协议留空即视为 OpenAI 兼容；relayprobe 自己会拒掉不支持的协议。
-	return &resolvedTarget{baseURL: baseURL, protocol: strings.TrimSpace(req.Protocol), key: key, model: model}, true
+	return &resolvedTarget{baseURL: baseURL, protocol: strings.TrimSpace(req.Protocol), key: key}, true
+}
+
+// listTargetModels 返回该目标实际提供的型号名。掺水检测的型号卡片要同时满足两个条件才能点：
+// 我们测过这个型号的基准，且这个中转真的提供这个名字。只看前者会摆出一堆点了必然全部失败
+// 的卡片——2026-10-07 实测，某中转只提供国产型号，界面里的 gpt-6-sol／claude-sonnet-5
+// 一律回「模型不可用」。
+func (h *handler) listTargetModels(c *gin.Context) {
+	owner, valid := h.ownerID(c)
+	if !valid {
+		return
+	}
+	var req probeTargetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, "invalid_body", "invalid request body")
+		return
+	}
+	target, okTarget := h.resolveProbeBase(c, owner, req)
+	if !okTarget {
+		return
+	}
+	result := relayprobe.Probe(c.Request.Context(), target.baseURL, target.protocol, target.key)
+	if len(result.Models) == 0 {
+		reason := strings.TrimSpace(result.Reason)
+		if reason == "" {
+			reason = "目标接口没有返回型号清单"
+		}
+		fail(c, http.StatusBadRequest, "target_models_unavailable", reason)
+		return
+	}
+	ok(c, gin.H{"models": result.Models})
 }
 
 type crowdtestRequest struct {
