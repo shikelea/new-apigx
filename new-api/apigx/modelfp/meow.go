@@ -46,11 +46,10 @@ var meowFiles = map[string]string{
 	// 原生协议包：拟合、档位、型号与对应的 Chat 兼容包相同，只是采集协议不同。
 	"meowdata/meow-gpt-other-cap98-efficient--4.5.4-predictive.20260924.2.meow.json":    "98f8d12c83100352addf44db15d8b57aa183338a4fb5f83ba30ffdbc06d78612",
 	"meowdata/meow-claude-other-cap98-efficient--4.5.4-predictive.20260924.1.meow.json": "df005a15ef72cc805b57fd0caf8c8f6b99496ca37d73c6cc759adaa43158ef8c",
-	// 自采集基准包：经 tokenrhythm.studio/v1 中转采集。两个包的 id、version 相同，靠文件名区分。
-	// A 包（f44a29d558ce6899）只保留了通过校准的 high 档；B 包（ab763b91fa29b8a6）三档都未通过
-	// 校准（target_not_met），并已从型号与阈值里删除 mimo-v2.6-pro / mimo-v2.6-flash。
+	// 自采集基准包：经 tokenrhythm.studio/v1 中转采集，只保留了通过校准的 high 档。
+	// 同一批采集里三档都是 target_not_met 的那份（ab763b91fa29b8a6）已删除：它名下的型号
+	// 一个都进不了可选名单，留着只会让「收录了却永远测不出结论」的型号混进名单。
 	"meowdata/f44a29d558ce6899.meow.json": "ecc1cbdd37c524c01bd87446f58fb4f45358c89b968dbefaf9307eee154ec97a",
-	"meowdata/ab763b91fa29b8a6.meow.json": "fead40a6ec89ef871f990f33f43103abbedddefd75441d5361b49fb823c09b9c",
 }
 
 // 基准包的采集协议，对应参考项目 protocol.build_payload 的 mode。

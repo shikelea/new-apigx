@@ -42,3 +42,7 @@ tmp/
 
 # 参照实现（meow-llm-detector）的本地克隆，只用来对照行为，不入库
 /meow-reference/
+
+# 本地开发流程与任务记录
+/whisper-note-dev-flow/
+/apigx.env

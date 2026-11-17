@@ -184,8 +184,9 @@ export function ProbeTargetFields<T extends FieldValues>({
                     <option value='gpt-4o-mini' />
                     <option value='claude-3-7-sonnet' />
                     <option value='claude-3-5-sonnet-20241022' />
-                    <option value='glm-4.6' />
-                    <option value='mimo-v2.6-pro' />
+                    <option value='glm-5.3' />
+                    <option value='kimi-k3' />
+                    <option value='qwen3.8-max' />
                     <option value='qwen-max' />
                   </datalist>
                 </div>

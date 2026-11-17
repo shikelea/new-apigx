@@ -129,6 +129,9 @@ export type ProbeTargetInput = {
   protocol?: string
   key?: string
   model: string
+  // baseline 是掺水检测的基准型号（收录名单里的规范型号 ID）。中转把同一个型号叫成别的
+  // 名字时，model 填中转实际用的名字，baseline 填我们测过基准的那个型号。
+  baseline?: string
   tier?: string
   concurrency?: number
 }
@@ -138,6 +141,8 @@ export type ModelRegistryEntry = {
   display_name: string
   vendor: string
   request_names: string[]
+  // aliases 是同一个型号在别处的请求名（例如 deepseek-v4.1-flash 之于 deepseek-flash）。
+  aliases?: string[]
   baseline_state: 'ready' | 'pending'
   baseline_meta?: {
     measured_at: string

@@ -256,3 +256,24 @@ func TestChatMapsRefusalAndToolCalls(t *testing.T) {
 		})
 	}
 }
+
+// 中转把同一个型号叫成别名时：请求体里发的是用户填的请求名，计划与判定用规范型号的基准。
+// 别名折算（deepseek-v4.1-flash → deepseek-flash）与 claimedModel 的分流串起来验一次。
+func TestCollectMeowSendsRequestNameAndJudgesByBaseline(t *testing.T) {
+	upstream := &meowUpstream{answer: func(map[string]any, int) (int, string, string) { return 200, " 37\n", "stop" }}
+	target, _ := meowTarget(t, upstream, "deepseek-v4.1-flash")
+	target.baseline = "deepseek-flash"
+
+	plans := modelfp.PlanMeowAll(target.claimedModel(), modelfp.MeowDefaultTier)
+	require.Len(t, plans, 1)
+	require.Equal(t, "deepseek-flash", plans[0].ClaimedModel)
+
+	obs := collectMeowPlans(context.Background(), target, plans, func(*chatResponse) {}, func() {})
+	require.NotNil(t, obs)
+	require.Len(t, upstream.bodies, len(plans[0].Jobs))
+	for _, body := range upstream.bodies {
+		assert.Equal(t, "deepseek-v4.1-flash", body["model"], "请求名按用户填的那个发")
+	}
+	assert.Equal(t, "deepseek-flash", obs.ClaimedModel)
+	assert.Equal(t, "meowdata/f44a29d558ce6899.meow.json", obs.PackageFile)
+}

@@ -36,6 +36,9 @@ export type ProbeTargetValues = {
   base_url: string
   key: string
   model: string
+  // baseline 只在掺水检测里用：选中的基准型号（收录名单里的规范型号 ID）。为空时后端按
+  // 请求名 model 判定。
+  baseline?: string
   tier?: string
   concurrency?: number
 }
@@ -66,6 +69,8 @@ export function probeTargetSchema(t: (key: string) => string) {
         .trim()
         .min(1, t('Enter a model ID'))
         .max(191, t('Model ID is too long')),
+      // 掺水检测的基准型号（收录名单里的规范型号 ID）；其余工具不填。
+      baseline: z.string().optional(),
       tier: z.string().optional(),
       concurrency: z.number().min(1).max(8).optional(),
     })
@@ -104,6 +109,7 @@ export function toProbeTarget(values: ProbeTargetValues): ProbeTargetInput {
     ...(typeof values.concurrency === 'number'
       ? { concurrency: values.concurrency }
       : {}),
+    ...(values.baseline?.trim() ? { baseline: values.baseline.trim() } : {}),
   }
   if (values.source === PROBE_SOURCE_RELAY) {
     return {
@@ -118,4 +124,25 @@ export function toProbeTarget(values: ProbeTargetValues): ProbeTargetInput {
     model: values.model.trim(),
     ...extra,
   }
+}
+
+/**
+ * 该基准型号在这台目标上实际该发的请求名。
+ *
+ * 中转给同一个型号换名字很常见：型号卡片仍按「我们测过基准的那个型号」列出，但发出去的
+ * 名字要跟着目标实际提供的那个走（规范名或其别名之一）。目标清单读不到（未提供 /v1/models）
+ * 时用规范名，由开跑前那一次预检给出明确原因；一个名字都不提供时返回 null，这张卡片不该出现。
+ */
+export function requestNameForTarget(
+  model: { request: string; aliases?: string[] },
+  served: string[] | null
+): string | null {
+  const candidates = [model.request, ...(model.aliases ?? [])]
+  if (!served || served.length === 0) {
+    return model.request
+  }
+  const offered = new Set(served.map((name) => name.trim().toLowerCase()))
+  return (
+    candidates.find((name) => offered.has(name.trim().toLowerCase())) ?? null
+  )
 }

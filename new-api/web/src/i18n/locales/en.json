@@ -7422,6 +7422,14 @@
     "Scores that testers published themselves. An entry carries the model, the score and any notes, but never the address or the key.": "Scores that testers published themselves. An entry carries the model, the score and any notes, but never the address or the key.",
     "I understand the audit sends about 10 small requests and will use a little upstream quota.": "I understand the audit sends about 10 small requests and will use a little upstream quota.",
     "Post a share": "Post a share",
-    "Your own posts and where each one stands. A share goes live once an admin approves it.": "Your own posts and where each one stands. A share goes live once an admin approves it."
+    "Your own posts and where each one stands. A share goes live once an admin approves it.": "Your own posts and where each one stands. A share goes live once an admin approves it.",
+    "Baseline model": "Baseline model",
+    "Request model name": "Request model name",
+    "The name sent upstream. Change it when this relay serves the model under a different name; detection still follows the baseline model.": "The name sent upstream. Change it when this relay serves the model under a different name; detection still follows the baseline model.",
+    "Reading the model list of this target…": "Reading the model list of this target…",
+    "Could not read the model list of this target (no /v1/models, or too many requests). The list was not filtered by what it actually serves; one preflight request will still confirm the name you picked.": "Could not read the model list of this target (no /v1/models, or too many requests). The list was not filtered by what it actually serves; one preflight request will still confirm the name you picked.",
+    "This target serves no model we have a calibrated baseline for (aliases included). Try another model name or another target.": "This target serves no model we have a calibrated baseline for (aliases included). Try another model name or another target.",
+    "Fill in the target first: only models it really serves and we have a baseline for will be listed.": "Fill in the target first: only models it really serves and we have a baseline for will be listed.",
+    "Baseline models comparable at tier {{tier}}: {{count}}. Names outside this list cannot produce a verdict, because there is no baseline for the same protocol and tier.": "Baseline models comparable at tier {{tier}}: {{count}}. Names outside this list cannot produce a verdict, because there is no baseline for the same protocol and tier."
   }
 }

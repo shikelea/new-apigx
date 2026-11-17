@@ -18,8 +18,9 @@ import "strings"
 type Dimension struct {
 	ID   string
 	Name string
-	// Weight 决定它在总体判定里的分量：协议字段这类客观项权重高，
-	// 依赖模型自身能力波动的项权重低。
+	// Weight 决定它在总体判定里的分量：权重 3 是「客观可核对或高样本量实测」的维度
+	// （协议字段、结构约束、推理强度、型号指纹），单项不符即可定论；权重 2 是依赖单次
+	// 采样或模型能力波动的维度，只作辅助信号。
 	Weight int
 }
 
@@ -37,7 +38,7 @@ const (
 // Dimensions 按展示顺序列出八个维度。
 var Dimensions = []Dimension{
 	{DimKnowledge, "知识时效核验", 3},
-	{DimFingerprint, "型号指纹匹配", 2},
+	{DimFingerprint, "型号指纹匹配", 3},
 	{DimLogic, "逻辑求解稳定性", 2},
 	{DimStructure, "结构约束遵循", 3},
 	{DimHierarchy, "指令层级遵循", 2},

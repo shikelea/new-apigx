@@ -91,6 +91,7 @@ func (h *handler) listDilutionModels(c *gin.Context) {
 			"display_name":   entry.DisplayName,
 			"vendor":         entry.Vendor,
 			"request_names":  names,
+			"aliases":        modelfp.MeowAliases(entry.ID),
 			"baseline_state": entry.BaselineState,
 			"baseline_meta":  entry.BaselineMeta,
 			"ready_tiers":    tiers,
@@ -117,8 +118,11 @@ type probeTargetRequest struct {
 	Protocol           string `json:"protocol"`
 	Key                string `json:"key"`
 	Model              string `json:"model"`
-	Tier               string `json:"tier"`
-	Concurrency        int    `json:"concurrency"`
+	// Baseline 是掺水检测的基准型号（收录名单里的规范型号 ID）。中转把同一个型号叫成别的
+	// 名字时，Model 填中转实际用的名字，Baseline 填我们测过基准的那个型号；留空则按 Model 判定。
+	Baseline    string `json:"baseline"`
+	Tier        string `json:"tier"`
+	Concurrency int    `json:"concurrency"`
 }
 
 // resolvedTarget 只在内存里存在。key 从不回写响应，也从不入库。
@@ -127,6 +131,7 @@ type resolvedTarget struct {
 	protocol string
 	key      string
 	model    string
+	baseline string
 	shareID  int64
 }
 
@@ -146,6 +151,13 @@ func (h *handler) resolveProbeTarget(c *gin.Context, owner int64, req probeTarge
 		return nil, false
 	}
 	target.model = model
+	// 基准型号与请求名同样是用户可控的型号名，长度同界；是否存在基准由掺水检测接口按档位判。
+	baseline := strings.TrimSpace(req.Baseline)
+	if utf8.RuneCountInString(baseline) > checkModelMaxRunes {
+		fail(c, http.StatusBadRequest, "invalid_argument", "baseline is too long")
+		return nil, false
+	}
+	target.baseline = baseline
 	return target, true
 }
 
@@ -407,13 +419,23 @@ func (h *handler) runDilutionTest(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "invalid_tier", "档位只能是 low、medium 或 high")
 		return
 	}
+	// 基准型号必须是收录名单里该档位确实可测的那个型号：前端卡片就是从这份名单来的，
+	// 服务端用同一份名单校验，才不会出现「界面上没有、接口却接受」的型号。
+	if target.baseline != "" {
+		entry, listed := modelfp.LookupRegistry(target.baseline)
+		if !listed || !slices.Contains(modelfp.MeowReadyTiers(entry.ID), tier) {
+			fail(c, http.StatusBadRequest, "invalid_baseline", "该基准型号在所选档位没有校准基准，请换一个档位或型号")
+			return
+		}
+	}
 	concurrency := req.Concurrency
 	if concurrency <= 0 {
 		concurrency = 2
 	} else if concurrency > 8 {
 		concurrency = 8
 	}
-	report, err := relayprobe.RunDilutionTestWith(c.Request.Context(), target.baseURL, target.protocol, target.key, target.model, tier, concurrency)
+	report, err := relayprobe.RunDilutionTestWith(c.Request.Context(), target.baseURL, target.protocol, target.key,
+		target.model, target.baseline, tier, concurrency)
 	if err != nil {
 		fail(c, http.StatusBadRequest, "dilution_test_failed", err.Error())
 		return

@@ -65,6 +65,7 @@ import {
   PROBE_SOURCE_RELAY,
   PROBE_TARGET_DEFAULTS,
   probeTargetSchema,
+  requestNameForTarget,
   toProbeTarget,
   type ProbeTargetValues,
 } from '../lib/probe-target'
@@ -98,6 +99,17 @@ const MODEL_CN_MAP: Record<string, string> = {
   'qwen3.8-max': '通义千问 Qwen 3.8 Max',
 }
 
+// 一张卡片就是一个基准型号：判定按 baseline 走，发出去的请求名是 requestName（该目标
+// 实际提供的规范名或别名之一）。candidates 用于请求名输入框的备选提示。
+type DilutionModelOption = {
+  baseline: string
+  name: string
+  request: string
+  requestName: string
+  candidates: string[]
+  ready_tiers: string[]
+}
+
 export function DilutionForm({
   relays,
   pending,
@@ -113,16 +125,21 @@ export function DilutionForm({
     resolver: zodResolver(schema),
     defaultValues: {
       ...PROBE_TARGET_DEFAULTS,
-      model: 'deepseek-flash', // 默认选中已收录基准的代表型号
+      baseline: 'deepseek-flash', // 默认选中已收录基准的代表型号
+      model: 'deepseek-flash',
       tier: 'high',
       concurrency: 2,
     },
   })
   const source = form.watch('source')
   const selectedTier = form.watch('tier') || 'high'
+  const selectedBaseline = form.watch('baseline')
   const relayID = form.watch('relay_share_public_id')
   const baseURL = form.watch('base_url')
   const manualKey = form.watch('key')
+  // 请求名可以手改：改过之后就不再被「基准型号的默认名」覆盖，否则用户填的中转名会被
+  // 每次重渲染冲掉。
+  const [nameDirty, setNameDirty] = useState(false)
 
   // 收录名单一律问后端：前端自备副本会和基准脱节，之前正是这么长出十几张「点了必然全部失败」
   // 的卡片的。后端只列该档确有校准基准的型号。
@@ -158,58 +175,51 @@ export function DilutionForm({
     staleTime: 5 * 60 * 1000,
   })
 
-  // 可选型号 = 有校准基准 ∩ 该中转真的提供，再按所选档位过滤。
+  // 可选型号 = 有校准基准 ∩ 该中转真的提供（规范名或别名），再按所选档位过滤。
   const vendorGroups = useMemo(() => {
-    const map = new Map<
-      string,
-      { id: string; name: string; request: string; ready_tiers: string[] }[]
-    >()
+    const served = servedQuery.data
+    const servedList = served && served.length > 0 ? served : null
+    const map = new Map<string, DilutionModelOption[]>()
     for (const item of registryQuery.data ?? []) {
       if (item.baseline_state !== 'ready') {
         continue
       }
-      const rawVendor = item.vendor || '其他'
-      const vendor = VENDOR_CN_MAP[rawVendor] || rawVendor
-      const bucket = map.get(vendor) ?? []
+      const readyTiers =
+        item.ready_tiers && item.ready_tiers.length > 0 ? item.ready_tiers : []
+      if (!readyTiers.includes(selectedTier)) {
+        continue
+      }
       const names =
         item.request_names && item.request_names.length > 0
           ? item.request_names
           : [item.id]
-      const readyTiers =
-        item.ready_tiers && item.ready_tiers.length > 0 ? item.ready_tiers : []
-      for (const req of names) {
-        const displayName =
-          MODEL_CN_MAP[req] ||
+      const candidates = [...names.slice(1), ...(item.aliases ?? [])]
+      const requestName = requestNameForTarget(
+        { request: names[0], aliases: candidates },
+        servedList
+      )
+      // 该目标一个名字都不提供（规范名和别名都没有）时，这张卡片点了只会几百次全部失败。
+      if (requestName === null) {
+        continue
+      }
+      const vendor = VENDOR_CN_MAP[item.vendor] || item.vendor || '其他'
+      const bucket = map.get(vendor) ?? []
+      bucket.push({
+        baseline: item.id,
+        name:
+          MODEL_CN_MAP[names[0]] ||
           MODEL_CN_MAP[item.id] ||
           item.display_name ||
-          item.id
-        bucket.push({
-          id: `${item.id}-${req}`,
-          name: displayName,
-          request: req,
-          ready_tiers: readyTiers,
-        })
-      }
+          item.id,
+        request: names[0],
+        requestName,
+        candidates: [names[0], ...candidates],
+        ready_tiers: readyTiers,
+      })
       map.set(vendor, bucket)
     }
-    // 拿到了清单就取交集：有基准但这台中转不提供的名字，点了只会几百次全部失败。没拿到
-    // （中转不支持 /models）时不清空列表，后端开跑前那一次探测会给出明确原因。
-    const served = servedQuery.data
-    const servedSet =
-      served && served.length > 0
-        ? new Set(served.map((name) => name.trim().toLowerCase()))
-        : null
-    return [...map.entries()]
-      .map(([vendor, models]) => ({
-        vendor,
-        models: models.filter(
-          (m) =>
-            m.ready_tiers.includes(selectedTier) &&
-            (servedSet === null ||
-              servedSet.has(m.request.trim().toLowerCase()))
-        ),
-      }))
-      .filter((group) => group.models.length > 0)
+    // 读不到目标清单（中转不支持 /models）时不清空列表：开跑前那一次预检会给明确原因。
+    return [...map.entries()].map(([vendor, models]) => ({ vendor, models }))
   }, [registryQuery.data, servedQuery.data, selectedTier])
 
   const selectableModels = useMemo(
@@ -217,32 +227,59 @@ export function DilutionForm({
     [vendorGroups]
   )
 
-  // 保证当前所选 model 字段不为空且在当前挡位有效列表内，否则自适应切到该档位首选可用模型
+  const pickedModel = selectableModels.find(
+    (item) => item.baseline === selectedBaseline
+  )
+
+  // 型号卡片选基准，请求名跟着基准的默认名走；用户手改过就不再覆盖。当前所选不在有效
+  // 列表内（换了档位、换了目标）时自适应切到该档位首选。
   useEffect(() => {
-    const current = form.getValues('model')
-    const allModels = selectableModels.map((m) => m.request)
-    if (!current || (allModels.length > 0 && !allModels.includes(current))) {
-      if (allModels.length > 0) {
-        form.setValue('model', allModels[0])
-      }
+    if (selectableModels.length === 0) {
+      return
     }
-  }, [form, selectableModels])
+    const picked =
+      selectableModels.find(
+        (item) => item.baseline === form.getValues('baseline')
+      ) ?? selectableModels[0]
+    if (picked.baseline !== form.getValues('baseline')) {
+      form.setValue('baseline', picked.baseline)
+      form.setValue('model', picked.requestName)
+      return
+    }
+    if (!nameDirty) {
+      form.setValue('model', picked.requestName)
+    }
+  }, [form, selectableModels, selectedBaseline, nameDirty])
 
   // 一句人话告诉用户「为什么这个能选／为什么现在一个都选不了」。读不到目标清单时不能假装
   // 筛过了——列表此时只按基准过滤，真正兜底的是开跑前那一次预检。
   let modelHint: string
   if (targetReady && servedQuery.isFetching) {
-    modelHint = '正在读取该目标的型号清单…'
+    modelHint = t('Reading the model list of this target…')
   } else if (servedQuery.isError) {
-    modelHint =
-      '读不到该目标的型号清单（目标不提供 /v1/models，或请求过于频繁）。列表没能按它实际提供什么来过滤，开跑前仍会先用一次请求确认你选的这个型号在不在。'
+    modelHint = t(
+      'Could not read the model list of this target (no /v1/models, or too many requests). The list was not filtered by what it actually serves; one preflight request will still confirm the name you picked.'
+    )
   } else if (selectableModels.length === 0) {
     modelHint = targetReady
-      ? '这个中转没有提供「既有实测基准、又确实存在」的型号，换一个型号名或换一台目标再试。'
-      : '填好检测目标后，这里只会列出该目标确实提供、且我们采过基准的型号。'
+      ? t(
+          'This target serves no model we have a calibrated baseline for (aliases included). Try another model name or another target.'
+        )
+      : t(
+          'Fill in the target first: only models it really serves and we have a baseline for will be listed.'
+        )
   } else {
-    modelHint = `按 ${selectedTier} 档可比对的型号有 ${selectableModels.length} 个；不在列表里的名字一律测不出结论，因为缺少同协议同档位的基准数据。`
+    modelHint = t(
+      'Baseline models comparable at tier {{tier}}: {{count}}. Names outside this list cannot produce a verdict, because there is no baseline for the same protocol and tier.',
+      { tier: selectedTier, count: selectableModels.length }
+    )
   }
+
+  // 请求名默认跟着所选基准型号走；中转把这个型号叫成别的名字时，用户可以直接改成它实际
+  // 提供的名字（判定仍按基准型号）。备选来自基准的规范名与别名。
+  const requestNameHint = t(
+    'The name sent upstream. Change it when this relay serves the model under a different name; detection still follows the baseline model.'
+  )
 
   return (
     <Form {...form}>
@@ -324,19 +361,26 @@ export function DilutionForm({
           />
         </div>
 
-        {/* 模型选择器：仅从已收录并具备实测特征基线的模型中选择 */}
+        {/* 基准型号卡片：判定按它走；请求名单独可编辑，因为中转常把同一个型号叫成别的名字 */}
         <FormField
           control={form.control}
-          name='model'
+          name='baseline'
           render={({ field }) => (
             <FormItem>
-              <FormLabel>选择检测目标模型</FormLabel>
+              <FormLabel>{t('Baseline model')}</FormLabel>
               <FormControl>
-                <NativeSelect className='w-full' {...field}>
+                <NativeSelect
+                  className='w-full'
+                  {...field}
+                  onChange={(event) => {
+                    field.onChange(event)
+                    setNameDirty(false)
+                  }}
+                >
                   {vendorGroups.map((group) => (
                     <optgroup key={group.vendor} label={group.vendor}>
                       {group.models.map((m) => (
-                        <NativeSelectOption key={m.id} value={m.request}>
+                        <NativeSelectOption key={m.baseline} value={m.baseline}>
                           {m.name} ({m.request})
                         </NativeSelectOption>
                       ))}
@@ -345,6 +389,39 @@ export function DilutionForm({
                 </NativeSelect>
               </FormControl>
               <FormDescription className='text-xs'>{modelHint}</FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name='model'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>{t('Request model name')}</FormLabel>
+              <FormControl>
+                <div>
+                  <Input
+                    autoComplete='off'
+                    list='dilution-request-names'
+                    placeholder={t('e.g. gpt-4o')}
+                    {...field}
+                    onChange={(event) => {
+                      field.onChange(event)
+                      setNameDirty(true)
+                    }}
+                  />
+                  <datalist id='dilution-request-names'>
+                    {(pickedModel?.candidates ?? []).map((name) => (
+                      <option key={name} value={name} />
+                    ))}
+                  </datalist>
+                </div>
+              </FormControl>
+              <FormDescription className='text-xs'>
+                {requestNameHint}
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}

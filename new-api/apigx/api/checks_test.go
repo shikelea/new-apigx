@@ -110,6 +110,37 @@ func TestResolveProbeTargetRequiresModelAndCredential(t *testing.T) {
 	assert.Equal(t, "gpt-4o", target.model)
 	assert.Equal(t, "sk-plain", target.key)
 	assert.Zero(t, target.shareID, "an ad-hoc target is not attached to any share")
+
+	// 基准型号与请求名分开解析：中转把同一个型号叫成别的名字时，请求名照填，基准填规范型号。
+	c, _ = newProbeContext(7, "{}")
+	_, okTarget = h.resolveProbeTarget(c, 7, probeTargetRequest{Model: "gpt-4o", Baseline: strings.Repeat("b", checkModelMaxRunes+1), BaseURL: "https://relay.example", Key: "sk-x"})
+	assert.False(t, okTarget, "over-long baseline must be rejected before any request")
+
+	c, _ = newProbeContext(7, "{}")
+	target, okTarget = h.resolveProbeTarget(c, 7, probeTargetRequest{Model: " deepseek-v4.1-flash ", Baseline: " deepseek-flash ", BaseURL: "https://relay.example", Key: "sk-x"})
+	require.True(t, okTarget)
+	assert.Equal(t, "deepseek-v4.1-flash", target.model)
+	assert.Equal(t, "deepseek-flash", target.baseline)
+}
+
+// 基准型号在所选档位没有校准基准时必须在发请求之前拦下来：否则几百次采样只换来一句
+// 「证据不足」，用户还以为测过了。
+func TestRunDilutionTestRejectsUnusableBaseline(t *testing.T) {
+	env := newTestEnv(t, true)
+	h := &handler{db: env.db}
+
+	// deepseek-flash 只有 high 档通过校准，low 档必须拒绝。
+	c, rec := newProbeContext(7, `{"model":"deepseek-v4.1-flash","baseline":"deepseek-flash","tier":"low","base_url":"https://relay.example","key":"sk-x"}`)
+	h.runDilutionTest(c)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_baseline")
+
+	// 基准必须是收录名单里的型号 ID：能前缀命中 glm-5.3 的别型号名不能拿来当基准，
+	// 否则等于用另一个型号的基准给出的判定。
+	c, rec = newProbeContext(7, `{"model":"glm-5.3-flash","baseline":"glm-5.3-flash","tier":"high","base_url":"https://relay.example","key":"sk-x"}`)
+	h.runDilutionTest(c)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_baseline")
 }
 
 func TestResolveProbeTargetRefusesAnotherOwnersRelay(t *testing.T) {

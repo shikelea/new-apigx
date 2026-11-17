@@ -67,6 +67,19 @@ type auditTarget struct {
 	base   string
 	key    string
 	model  string
+	// baseline 是用户显式选定的基准型号（收录名单里的规范型号 ID）。为空时按 model 判定。
+	// 中转常把同一个型号叫成别的名字，所以「发请求用哪个名字」与「按哪个型号的基准判定」
+	// 必须能分开：前者是 model，后者是 baseline。
+	baseline string
+}
+
+// claimedModel 是本次检测用来判定「是不是这个型号」的名字：显式选了基准型号就按它判定，
+// 否则按请求名。只用于基准与公开特征，发出去的请求名始终是 model。
+func (t auditTarget) claimedModel() string {
+	if t.baseline != "" {
+		return t.baseline
+	}
+	return t.model
 }
 
 type auditSpec struct {

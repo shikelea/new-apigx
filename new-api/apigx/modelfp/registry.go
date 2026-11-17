@@ -68,174 +68,15 @@ type RegistryEntry struct {
 // 答案都要明显更支持首选候选」才给结论。首次校准前刻意取保守值：宁可多报证据不足。
 const defaultThreshold = 0.62
 
-// registry 是收录名单。分布基准全部留空，等实测数据落库后再逐条填。
+// registry 是手写收录名单。2026-10 清空了原来的 11 条记录：10 条从来没有实测基准，
+// 唯一有基准的那条（deepseek-v4.1-flash）采于 2026-09-28、max_tokens=32，重测时
+// pick_letter / pick_weekday / pick_from_list 三题分布已明显漂移。它又是 deepseek-flash
+// 的正式名，同一型号已有题量更大且通过校准的 Meow 高档基准，两条并存只会互相遮蔽。
+// 自采基准由 cmd/fingerprint 产出后填回这里。
 //
-// 确定性事实的出处：OpenAI 的 system_fingerprint 与 max_completion_tokens 行为、o 系
-// 拒绝 temperature 的报错、Anthropic 的 msg_ 前缀与 stop_reason 取值、智谱 GLM 不返回
-// system_fingerprint 且用 reasoning_content 暴露思维链。拿不准的一律留零值。
-var registry = []RegistryEntry{
-	{
-		ID: "openai-gpt-4o", DisplayName: "GPT-4o", Vendor: "OpenAI",
-		RequestNames: []string{"gpt-4o", "gpt-4o-2024-11-20", "chatgpt-4o-latest"},
-		Profile: Profile{
-			Family: "OpenAI GPT-4o", Hints: []string{"gpt-4o", "chatgpt-4o"},
-			IDPrefix: "chatcmpl-", SystemFingerprint: true,
-			KnowledgeCutoffYear: 2023, TokenizerFamily: "o200k_base",
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		ID: "openai-gpt-4-1", DisplayName: "GPT-4.1", Vendor: "OpenAI",
-		RequestNames: []string{"gpt-4.1", "gpt-4.1-2025-04-14"},
-		Profile: Profile{
-			Family: "OpenAI GPT-4.1", Hints: []string{"gpt-4.1"},
-			IDPrefix: "chatcmpl-", SystemFingerprint: true,
-			KnowledgeCutoffYear: 2024, TokenizerFamily: "o200k_base",
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		ID: "anthropic-claude-sonnet", DisplayName: "Claude Sonnet", Vendor: "Anthropic",
-		RequestNames: []string{"claude-3-7-sonnet", "claude-sonnet-4", "claude-sonnet-4-5"},
-		Profile: Profile{
-			Family: "Anthropic Claude Sonnet", Hints: []string{"claude-3-7-sonnet", "claude-sonnet"},
-			IDPrefix: "msg_", KnowledgeCutoffYear: 2024,
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		ID: "anthropic-claude-opus", DisplayName: "Claude Opus", Vendor: "Anthropic",
-		RequestNames: []string{"claude-opus-4", "claude-opus-4-1", "claude-3-opus"},
-		Profile: Profile{
-			Family: "Anthropic Claude Opus", Hints: []string{"claude-opus", "claude-3-opus"},
-			IDPrefix: "msg_", KnowledgeCutoffYear: 2024,
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		ID: "deepseek-chat", DisplayName: "DeepSeek V3", Vendor: "DeepSeek",
-		RequestNames: []string{"deepseek-chat", "deepseek-v3"},
-		Profile: Profile{
-			Family: "DeepSeek V3", Hints: []string{"deepseek-chat", "deepseek-v3"},
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		// 2026-09-28 那份分布原本记在 deepseek-chat 上，但采集时的请求名是 deepseek-flash，
-		// 也就是 flash 型号（正式名 deepseek-v4.1-flash），不是 V3。基准挂错型号会让所有
-		// 声称 deepseek-chat 的链路拿 flash 的偏好做参照，所以按真实型号重新归属。
-		//
-		// 请求名 deepseek-flash 归 Meow 基准包那条收录项（已校准、题量更大），这里刻意不
-		// 抢同一个名字，避免反查时两条互相遮蔽。
-		//
-		// 基准的时效要如实标注：它是 2026-09-28 在 max_tokens=32 下采的。2026-10-04 从同
-		// 一入口重测，32 的预算已采不到任何正文（该入口改为先输出思维链），512 预算下取到
-		// 的 179 份有效答案里 pick_letter / pick_weekday / pick_from_list 三题分布明显漂
-		// 移，整体判给「未建模来源」。所以这份只能当作当时的快照，重测落库前不宜视为权威。
-		//
-		// 响应 id 前缀不写：profile.go 对 DeepSeek 族刻意留空，实测到的 id 是 48 位十六进
-		// 制而非 chatcmpl-，没有依据断言任何一种前缀。
-		ID: "deepseek-v4.1-flash", DisplayName: "DeepSeek V4.1 Flash", Vendor: "DeepSeek",
-		RequestNames: []string{"deepseek-v4.1-flash"},
-		Profile: Profile{
-			Family: "DeepSeek V4.1 Flash", Hints: []string{"deepseek-v4.1-flash"},
-		},
-		BaselineState: BaselineStateReady,
-		BaselineMeta: BaselineMeta{
-			MeasuredAt:      "2026-09-28",
-			Source:          "官方 API（经中转直连）",
-			SamplesPerProbe: 30,
-		},
-		Baseline: map[string]ProbeCounts{
-			ProbeColorPick: {
-				"blue": 29,
-				"red":  1,
-			},
-			ProbeListPosition: {
-				"charlie": 3,
-				"delta":   14,
-				"echo":    3,
-				"golf":    10,
-			},
-			ProbeFruitPick: {
-				"apple": 30,
-			},
-			ProbeIntegerPick: {
-				"26": 1,
-				"41": 1,
-				"42": 19,
-				"46": 1,
-				"47": 1,
-				"49": 1,
-				"51": 1,
-				"52": 1,
-				"53": 3,
-				"57": 1,
-			},
-			ProbeLetterPick: {
-				"j": 1,
-				"k": 8,
-				"m": 3,
-				"q": 16,
-				"r": 2,
-			},
-			// 30 次里有 1 次返回空内容。实时采集丢弃空答案（见 collectLegacyProbes），
-			// 基准也必须丢，否则这里会多出一个观测侧永远打不中的类目，稀释该题的先验。
-			ProbeWeekdayPick: {
-				"thursday":  2,
-				"tuesday":   6,
-				"wednesday": 21,
-			},
-		},
-	},
-	{
-		ID: "deepseek-reasoner", DisplayName: "DeepSeek R1", Vendor: "DeepSeek",
-		RequestNames: []string{"deepseek-reasoner", "deepseek-r1"},
-		Profile: Profile{
-			Family: "DeepSeek R1", Hints: []string{"deepseek-reasoner", "deepseek-r1"},
-			Reasoning: true,
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		// GLM 的确定性事实出处最完整：官方 OpenAPI spec 里明确没有 system_fingerprint，
-		// 思维链走 reasoning_content，finish_reason 额外有 sensitive 等取值。
-		ID: "zhipu-glm-4-6", DisplayName: "GLM-4.6", Vendor: "智谱 / Z.ai",
-		RequestNames: []string{"glm-4.6"},
-		Profile: Profile{
-			Family: "Zhipu GLM-4.6", Hints: []string{"glm-4.6"},
-			SystemFingerprint: false, TokenizerFamily: "chatglm-151552",
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		ID: "zhipu-glm-4-5", DisplayName: "GLM-4.5", Vendor: "智谱 / Z.ai",
-		RequestNames: []string{"glm-4.5", "glm-4.5-air"},
-		Profile: Profile{
-			Family: "Zhipu GLM-4.5", Hints: []string{"glm-4.5"},
-			SystemFingerprint: false, TokenizerFamily: "chatglm-151552",
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		ID: "moonshot-kimi-k2", DisplayName: "Kimi K2", Vendor: "Moonshot",
-		RequestNames: []string{"kimi-k2", "moonshot-v1-128k"},
-		Profile: Profile{
-			Family: "Moonshot Kimi K2", Hints: []string{"kimi-k2", "moonshot-v1"},
-			IDPrefix: "chatcmpl-",
-		},
-		BaselineState: BaselineStatePending,
-	},
-	{
-		ID: "qwen-max", DisplayName: "Qwen Max", Vendor: "阿里云百炼",
-		RequestNames: []string{"qwen-max", "qwen-plus"},
-		Profile: Profile{
-			Family: "Qwen Max", Hints: []string{"qwen-max", "qwen-plus"},
-			IDPrefix: "chatcmpl-",
-		},
-		BaselineState: BaselineStatePending,
-	},
-}
+// 现在有基准的型号全部来自嵌入的 Meow 基准包（见 meowRegistryEntries），所以
+// fingerprintCandidates 在填回自采基准之前是空集，旧探针路径只会如实报「缺少实测基准」。
+var registry = []RegistryEntry{}
 
 // Registry 返回收录名单的副本，按厂商与展示名排序，供接口与前端选择器使用。
 func Registry() []RegistryEntry {
@@ -269,6 +110,8 @@ func ResolveRequestName(name string) (RegistryEntry, bool) {
 	if id == "" {
 		return RegistryEntry{}, false
 	}
+	// 别名按规范型号反查：同一个型号在中转上叫什么，不该决定它能不能被认出来。
+	id = canonicalMeowName(id)
 	best, found, bestLen := RegistryEntry{}, false, 0
 	for _, entry := range allRegistry() {
 		for _, candidate := range entry.RequestNames {
@@ -276,7 +119,7 @@ func ResolveRequestName(name string) (RegistryEntry, bool) {
 			if id != lowered && !strings.HasPrefix(id, lowered) {
 				continue
 			}
-			// 更长的请求名更具体（glm-4.6 优于 glm-4），优先保留。
+			// 更长的请求名更具体（deepseek-v4.1-flash 优于 deepseek-v4.1），优先保留。
 			if !found || len(lowered) > bestLen {
 				best, found, bestLen = entry, true, len(lowered)
 			}
@@ -313,9 +156,9 @@ func fingerprintCandidates() []Candidate {
 	return append(candidates, reference)
 }
 
-// BaselineReady 报告当前是否已有足够基准做分布指纹（至少两个已建模型号才谈得上比对）。
+// BaselineReady 报告当前是否已有足够基准做分布指纹（至少一个已建模型号与一个兜底候选才谈得上比对）。
 func BaselineReady() bool {
-	return len(loadedMeowPackages()) > 0 || len(fingerprintCandidates()) >= 3
+	return len(loadedMeowPackages()) > 0 || len(fingerprintCandidates()) >= 2
 }
 
 // allRegistry 是手写收录名单加上由 Meow 基准包生成的收录项。

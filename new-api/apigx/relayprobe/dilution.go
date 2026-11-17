@@ -102,11 +102,14 @@ const DilutionDisclaimer = modelfp.Disclaimer
 
 // RunDilutionTest 对一个中转上声称的型号做掺水检测（缺省高档，并发2）。
 func RunDilutionTest(ctx context.Context, baseURL, protocol, key, model string) (modelfp.Report, error) {
-	return RunDilutionTestWith(ctx, baseURL, protocol, key, model, modelfp.MeowDefaultTier, 2)
+	return RunDilutionTestWith(ctx, baseURL, protocol, key, model, "", modelfp.MeowDefaultTier, 2)
 }
 
 // RunDilutionTestWith 允许指定挡位和并发数对一个中转上声称的型号做掺水检测。
-func RunDilutionTestWith(ctx context.Context, baseURL, protocol, key, model, tier string, concurrency int) (modelfp.Report, error) {
+//
+// baseline 是收录名单里的基准型号：为空时按请求名 model 判定；不为空时请求名只用于向上游
+// 发请求，判定与基准一律按 baseline（中转给同一个型号换了名字时用）。
+func RunDilutionTestWith(ctx context.Context, baseURL, protocol, key, model, baseline, tier string, concurrency int) (modelfp.Report, error) {
 	base, err := ValidateBaseURL(baseURL)
 	if err != nil {
 		return modelfp.Report{}, fmt.Errorf("目标地址未通过安全校验")
@@ -120,7 +123,8 @@ func RunDilutionTestWith(ctx context.Context, baseURL, protocol, key, model, tie
 	if concurrency <= 0 {
 		concurrency = 2
 	}
-	target := auditTarget{client: service.GetSSRFProtectedHTTPClient(), base: base, key: strings.TrimSpace(key), model: strings.TrimSpace(model)}
+	target := auditTarget{client: service.GetSSRFProtectedHTTPClient(), base: base, key: strings.TrimSpace(key),
+		model: strings.TrimSpace(model), baseline: strings.TrimSpace(baseline)}
 	return runDilutionTestWith(ctx, target, tier, concurrency)
 }
 
@@ -249,7 +253,7 @@ func runDilutionTestWith(parent context.Context, target auditTarget, tier string
 	// 2026-10-04 实测，340 格的高档包在并发 2 下就有 137 次请求失败，而它后面的逻辑/结构/
 	// 层级/流式四组只拿到 1 个样本——前面采集的维度被饿死，报告里三条「未采集到样本」全是
 	// 这个顺序造成的。先采便宜的维度，最坏也只是指纹一项证据不足。
-	if plans := modelfp.PlanMeowAll(target.model, tier); len(plans) > 0 {
+	if plans := modelfp.PlanMeowAll(target.claimedModel(), tier); len(plans) > 0 {
 		meowCtx, meowCancel := context.WithTimeout(parent, dilutionMeowTimeout)
 		obs.Meow = collectMeowPlansWith(meowCtx, target, plans, record, func() { requests++ }, concurrency)
 		meowCancel()
@@ -263,7 +267,9 @@ func runDilutionTestWith(parent context.Context, target auditTarget, tier string
 	if requests == 0 {
 		return modelfp.Report{}, fmt.Errorf("所有检测请求均未成功（中转限流、超时或上游异常），本次不给出判定")
 	}
-	return modelfp.Evaluate(target.model, obs), nil
+	// 判定按基准型号走：报告里的型号与「是不是它」都指用户选定（或请求名对应的）那个型号，
+	// 而请求名只决定上游收到什么名字。
+	return modelfp.Evaluate(target.claimedModel(), obs), nil
 }
 
 // dilutionPreflight 先花一次最小请求确认「这个中转提供这个型号名」。型号名不存在时上游会

@@ -10,6 +10,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // testdata/meow_parity.json 由参考实现 gpt56_vnext.predictive.score_counts 与
@@ -74,8 +77,8 @@ func TestMeowPackagesLoadAndCalibrated(t *testing.T) {
 	for _, pkg := range loadedMeowPackages() {
 		modes[pkg.Mode]++
 	}
-	if modes[MeowModeChat] != 4 || modes[MeowModeGPT] != 1 || modes[MeowModeClaude] != 1 {
-		t.Fatalf("expect 4 chat, 1 gpt, 1 claude packages, got modes %v", modes)
+	if modes[MeowModeChat] != 3 || modes[MeowModeGPT] != 1 || modes[MeowModeClaude] != 1 {
+		t.Fatalf("expect 3 chat, 1 gpt, 1 claude packages, got modes %v", modes)
 	}
 	// 官方包（4 个）要求所有档位都校准过；自采集包不做此要求。
 	officialPkgs := []string{
@@ -457,8 +460,19 @@ func TestSelectMeowPackagesKeepsModeOrder(t *testing.T) {
 	}
 }
 
-// 自采集的两个包 id、version 相同，评分必须落到计划选中的那个包上，不能按 id + version
-// 碰到哪个算哪个。qwen3.8-max 两个包都收录：A 包 high 档已校准，B 包各档都未校准。
+// withExtraPackages 在已加载的真实基准包之后再挂几个合成包，用例结束后恢复。三档全未通过
+// 校准的包、id + version 重复的包都不该再留在仓库里（那份未通过校准的采集包 2026-10 已删），
+// 这些分支只能用合成包钉住。
+func withExtraPackages(t *testing.T, pkgs ...*meowPackage) {
+	t.Helper()
+	require.NoError(t, LoadMeowPackages())
+	original := meowPackages
+	meowPackages = append(append([]*meowPackage{}, original...), pkgs...)
+	t.Cleanup(func() { meowPackages = original })
+}
+
+// 收录项里每个型号只出现一次，且评分必须落到计划选中的那个包上——不能按 id + version
+// 碰到哪个算哪个。
 func TestSelfCollectedPackagesScoreTheirOwnPlan(t *testing.T) {
 	files := map[string]bool{}
 	for _, pkg := range loadedMeowPackages() {
@@ -468,30 +482,35 @@ func TestSelfCollectedPackagesScoreTheirOwnPlan(t *testing.T) {
 		files[pkg.file] = true
 	}
 	plans := PlanMeowAll("qwen3.8-max", MeowDefaultTier)
-	if len(plans) != 1 {
-		t.Fatalf("want 1 plan, got %d", len(plans))
-	}
+	require.Len(t, plans, 1)
 	plan := plans[0]
-	if plan.PackageFile != "meowdata/f44a29d558ce6899.meow.json" || plan.Tier != "high" {
-		t.Fatalf("want A package high tier, got %s %s", plan.PackageFile, plan.Tier)
-	}
+	require.Equal(t, "meowdata/f44a29d558ce6899.meow.json", plan.PackageFile)
+	require.Equal(t, "high", plan.Tier)
 	result, ok := ScoreMeow(MeowObservation{PackageFile: plan.PackageFile, PackageID: plan.PackageID,
 		PackageVersion: plan.PackageVersion, Tier: plan.Tier, ClaimedModel: plan.ClaimedModel})
-	if !ok || !result.Calibrated {
-		t.Fatalf("scoring should use the calibrated A package, got ok=%v calibrated=%v", ok, result.Calibrated)
-	}
-	// 没有 PackageFile 时 id + version 对应两个包，宁可不评也不能拿错包。
-	if _, ok := ScoreMeow(MeowObservation{PackageID: plan.PackageID, PackageVersion: plan.PackageVersion, Tier: plan.Tier}); ok {
-		t.Fatal("ambiguous id+version must not be scored")
-	}
+	require.True(t, ok)
+	require.True(t, result.Calibrated)
+
+	// 再挂一个 id、version 相同、只是文件名不同的包：没有 PackageFile 时两个包都命中，
+	// 宁可不评也不能拿错包。
+	dup := *meowPackageByID(t, plan.PackageID)
+	dup.file = "meowdata/duplicate-of-f44a29d558ce6899.meow.json"
+	withExtraPackages(t, &dup)
+	_, ok = ScoreMeow(MeowObservation{PackageID: plan.PackageID, PackageVersion: plan.PackageVersion, Tier: plan.Tier})
+	require.False(t, ok, "id + version 指向两个包时必须拒绝评分")
 }
 
-// 只在未校准的 B 包里的型号：仍按 B 包采样（评分如实报未校准），但收录状态不能标 ready。
+// 只在未通过校准的包里的型号：仍按该包采样（评分如实报未校准），但收录状态不能标 ready，
+// 也就不会出现在可选名单里。
 func TestUncalibratedOnlyModelIsPending(t *testing.T) {
-	plans := PlanMeowAll("qwen3.8-flash", MeowDefaultTier)
-	if len(plans) != 1 || plans[0].PackageFile != "meowdata/ab763b91fa29b8a6.meow.json" || plans[0].Tier != MeowDefaultTier {
-		t.Fatalf("unexpected plans %+v", plans)
-	}
+	pkg := fakeMeowPackage(MeowModeChat, "apigx-cn-uncal", 2)
+	withExtraPackages(t, pkg)
+
+	plans := PlanMeowAll("apigx-cn-uncal-m0", MeowDefaultTier)
+	require.Len(t, plans, 1)
+	require.Equal(t, pkg.file, plans[0].PackageFile)
+	require.Equal(t, MeowDefaultTier, plans[0].Tier)
+
 	states := map[string]string{}
 	for _, entry := range meowRegistryEntries() {
 		states[entry.ID] = entry.BaselineState
@@ -500,35 +519,65 @@ func TestUncalibratedOnlyModelIsPending(t *testing.T) {
 		}
 	}
 	for id, want := range map[string]string{
-		"qwen3.8-flash": BaselineStatePending, "glm-5.3-flash": BaselineStatePending,
-		"qwen3.8-max": BaselineStateReady, "kimi-k3": BaselineStateReady,
+		"apigx-cn-uncal-m0": BaselineStatePending, "apigx-cn-uncal-m1": BaselineStatePending,
+		"deepseek-flash": BaselineStateReady, "kimi-k3": BaselineStateReady,
+		"glm-5.3": BaselineStateReady, "qwen3.8-max": BaselineStateReady,
 	} {
 		if states[id] != want {
 			t.Errorf("%s baseline state = %q, want %q", id, states[id], want)
 		}
 	}
-	for id := range states {
-		if strings.HasPrefix(id, "mimo-") {
-			t.Errorf("mimo model %s should have been removed", id)
+	// 已删除的未通过校准采集包名下的型号，不该再从名单里冒出来。
+	for _, gone := range []string{"mimo-v2.6-pro", "mimo-v2.6-flash", "glm-5.3-flash", "qwen3.8-flash"} {
+		if _, ok := states[gone]; ok {
+			t.Errorf("model %s should have been removed", gone)
 		}
 	}
+}
+
+// 别名请求名按规范型号的基准包判定：中转换名字不换型号。
+func TestMeowAliasResolvesToCanonicalModel(t *testing.T) {
+	require.Equal(t, []string{"high"}, MeowReadyTiers("deepseek-v4.1-flash"))
+
+	plans := PlanMeowAll("deepseek-v4.1-flash", "high")
+	require.Len(t, plans, 1)
+	assert.Equal(t, "deepseek-flash", plans[0].ClaimedModel)
+	assert.Equal(t, "meowdata/f44a29d558ce6899.meow.json", plans[0].PackageFile)
+
+	// 带「vendor/」前缀的别名同样认。
+	prefixed := PlanMeowAll("apigx/deepseek-v4.1-flash", "high")
+	require.Len(t, prefixed, 1)
+	assert.Equal(t, "deepseek-flash", prefixed[0].ClaimedModel)
+
+	// 别名反过来要能查到收录项，并如实告诉前端这个型号还可能叫什么。
+	entry, ok := ResolveRequestName("deepseek-v4.1-flash")
+	require.True(t, ok)
+	assert.Equal(t, "deepseek-flash", entry.ID)
+	assert.Equal(t, []string{"deepseek-v4.1-flash"}, MeowAliases("deepseek-flash"))
+
+	// 名字相近但没有基准的型号不能蒙对。
+	assert.Empty(t, MeowReadyTiers("deepseek-v4.2-flash"))
+	assert.Empty(t, MeowAliases("gpt-6-sol"))
 }
 
 // TestMeowReadyTiers 钉住型号名单的可选项：只列「该档有校准基准」的型号和档位。
 // 名单是前端唯一能选的集合，写错就会摆出一张点了必然测不出来的卡片。
 func TestMeowReadyTiers(t *testing.T) {
 	for name, want := range map[string][]string{
-		// 官方请求名，只有高档采过。低/中档会升档跑成几百次高档题量，不能列为可选。
+		// 自采集包只有高档通过校准。
 		"deepseek-flash": {"high"},
 		"qwen3.8-max":    {"high"},
+		// 别名按规范型号的基准判定，档位与规范名一致。
+		"deepseek-v4.1-flash": {"high"},
 		// 参考项目的官方基准包三档都过校准。
 		"gpt-6-sol":        {"low", "medium", "high"},
 		"claude-haiku-4.5": {"low", "medium", "high"},
-		// 只出现在未校准包里 / 根本没有基准包（旧手填基准）的名字一律不可选。
-		"glm-5.3-flash":       nil,
-		"deepseek-v4.1-flash": nil,
-		"deepseek-chat":       nil,
-		"gpt-4o":              nil,
+		// 带快照后缀的请求名按最长型号 ID 前缀匹配，落在同一型号的基准上。
+		"gpt-6-sol-2026-01": {"low", "medium", "high"},
+		// 没有任何型号 ID 前缀命中的名字一律不可选（含已删除的未通过校准包里的型号）。
+		"qwen3.8-flash": nil,
+		"deepseek-chat": nil,
+		"gpt-4o":        nil,
 	} {
 		if got := MeowReadyTiers(name); !slices.Equal(got, want) {
 			t.Errorf("MeowReadyTiers(%q) = %v, want %v", name, got, want)

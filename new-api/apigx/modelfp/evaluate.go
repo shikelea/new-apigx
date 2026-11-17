@@ -189,7 +189,8 @@ func evaluateKnowledge(profile Profile, known bool, obs Observations) Finding {
 // 偏好分布。把观测分布拿去和各型号基准算 Dirichlet-multinomial 预测证据，谁的证据最高
 // 就最像谁——但只有当首选唯一、且相对次优候选的优势过判定线时才给结论。
 //
-// 这一维只在有实测基准时才工作。没测过基准就明确说没有，不拿空基准硬算。
+// 这一维只在有实测基准时才工作。没测过基准就明确说没有，不拿空基准硬算；只有一份基准时
+// 只确认「像」，不指控「不像」。
 func evaluateFingerprint(model string, obs Observations) Finding {
 	if obs.Meow != nil {
 		return evaluateMeowFingerprint(*obs.Meow)
@@ -204,19 +205,30 @@ func evaluateFingerprint(model string, obs Observations) Finding {
 	if !listed {
 		return Finding{Verdict: VerdictInconclusive, Evidence: "目标型号不在收录名单内，没有可比对的实测基准"}
 	}
-	candidates := fingerprintCandidates()
-	if len(candidates) < 3 {
-		return Finding{Verdict: VerdictInconclusive, Evidence: "收录名单里已实测基准的型号不足两个，暂时无法做分布比对"}
-	}
 	if entry.BaselineState != BaselineStateReady {
 		return Finding{
 			Verdict:  VerdictInconclusive,
 			Evidence: fmt.Sprintf("%s 尚无实测基准，本维度暂不支持该型号", entry.DisplayName),
 		}
 	}
+	candidates := fingerprintCandidates()
+	if len(candidates) < 2 {
+		return Finding{Verdict: VerdictInconclusive, Evidence: "收录名单里缺少实测基准，暂时无法做分布比对"}
+	}
 	outcome, ok := ScoreFingerprint(obs.ProbeAnswers, candidates)
 	if !ok {
 		return Finding{Verdict: VerdictInconclusive, Evidence: "有效答案过少，无法算出分布证据"}
+	}
+	// 只有这一个型号测过基准时，候选集里除它以外只剩合成的「未建模来源」。那是一个平坦的
+	// 兜底分布，不是实测出来的另一个型号：这种比对可以确认「像」，不足以指控「不像」——
+	// 指控必须拿两份实测基准互相印证，否则任何分布没基准那么尖的诚实链路都会「最像别人」。
+	if len(candidates) == 2 && outcome.Best == referenceCandidate {
+		return Finding{
+			Verdict: VerdictInconclusive,
+			Evidence: fmt.Sprintf(
+				"%d 份有效答案：与 %s 的实测基准偏离较大（优势 %.3f），但收录名单里只有这一个型号测过基准，无法确认换成了哪个型号，需人工复核",
+				outcome.Samples, entry.DisplayName, outcome.Confidence),
+		}
 	}
 	verdict, evidence := describeOutcome(entry.ID, outcome, thresholdFor(entry))
 	return Finding{Verdict: verdict, Evidence: evidence}
@@ -313,7 +325,7 @@ func evaluateReasoning(profile Profile, known bool, obs Observations) Finding {
 }
 
 // aggregate 用维度权重折算总体判定。任一高权重维度 mismatch 即整体 mismatch：
-// 协议字段、结构约束、推理强度这三项都是客观可核对的，不该被其他项平均掉。
+// 协议字段、结构约束、推理强度、型号指纹这几项权重为 3，客观或高样本量实锤不该被其他项平均掉。
 func aggregate(findings []Finding) (string, int) {
 	earned, possible, mismatchWeight, evaluated := 0, 0, 0, 0
 	for _, finding := range findings {

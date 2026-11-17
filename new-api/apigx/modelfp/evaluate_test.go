@@ -83,12 +83,22 @@ func TestEvaluateAcceptsAnHonestGPTRelay(t *testing.T) {
 	assert.NotEmpty(t, report.Disclaimer)
 }
 
-// 收录名单里还没有任何实测基准，所以指纹维度只能报证据不足，且要说清原因。
+// 没有实测基准时指纹维度只能报证据不足，并且要说清是哪一个原因：名单外的型号与
+// 名单内但还没有基准的型号，提示不能混为一谈。
 func TestEvaluateFingerprintWaitsForMeasuredBaselines(t *testing.T) {
-	// gpt-4o 既没有手写基准，也不在 Meow 基准包里：指纹维度只能报证据不足。
-	finding := findingByID(t, Evaluate("gpt-4o", honestObservations()), DimFingerprint)
-	assert.Equal(t, VerdictInconclusive, finding.Verdict)
-	assert.Contains(t, finding.Evidence, "基准")
+	// gpt-4o 既不在 Meow 基准包里，也没有手写基准：连收录名单都没进。
+	unlisted := findingByID(t, Evaluate("gpt-4o", honestObservations()), DimFingerprint)
+	assert.Equal(t, VerdictInconclusive, unlisted.Verdict)
+	assert.Contains(t, unlisted.Evidence, "不在收录名单")
+
+	// 收录了但还没有基准的型号只能是「尚无实测基准」。
+	withRegistry(t, []RegistryEntry{{
+		ID: "test-pending", DisplayName: "待测型号", Vendor: "测试",
+		RequestNames: []string{"test-pending"}, BaselineState: BaselineStatePending,
+	}})
+	pending := findingByID(t, Evaluate("test-pending", honestObservations()), DimFingerprint)
+	assert.Equal(t, VerdictInconclusive, pending.Verdict)
+	assert.Contains(t, pending.Evidence, "尚无实测基准")
 }
 
 // 不在收录名单里的型号，指纹维度不参与判定。
@@ -174,15 +184,26 @@ func TestEvaluateDropsFingerprintWhenTemperatureIsOverridden(t *testing.T) {
 	assert.Contains(t, finding.Evidence, "采样参数")
 }
 
-// 请求名反查：更长更具体的名字优先，带厂商前缀也要能认出来。
+// 请求名反查：更长更具体的名字优先，带厂商前缀和别名都要能认出来。
 func TestResolveRequestNamePrefersTheMoreSpecificName(t *testing.T) {
-	glm, ok := ResolveRequestName("glm-4.6")
+	// 厂商前缀不影响反查。
+	prefixed, ok := ResolveRequestName("openai/gpt-6-sol")
 	require.True(t, ok)
-	assert.Equal(t, "zhipu-glm-4-6", glm.ID)
+	assert.Equal(t, "gpt-6-sol", prefixed.ID)
 
-	prefixed, ok := ResolveRequestName("openai/gpt-4o-2024-08-06")
+	// 别名折算到规范型号（deepseek-flash 的正式名）。
+	aliased, ok := ResolveRequestName("deepseek-v4.1-flash")
 	require.True(t, ok)
-	assert.Equal(t, "openai-gpt-4o", prefixed.ID)
+	assert.Equal(t, "deepseek-flash", aliased.ID)
+
+	// 一个名字同时命中两条收录项时取更长的那条。
+	withRegistry(t, []RegistryEntry{
+		{ID: "test-model", DisplayName: "测试型号", Vendor: "测试", RequestNames: []string{"test-model"}},
+		{ID: "test-model-pro", DisplayName: "测试型号 Pro", Vendor: "测试", RequestNames: []string{"test-model-pro"}},
+	})
+	specific, ok := ResolveRequestName("test-model-pro-2026-01")
+	require.True(t, ok)
+	assert.Equal(t, "test-model-pro", specific.ID)
 
 	_, ok = ResolveRequestName("neohorse-1-9b")
 	assert.False(t, ok)
@@ -247,6 +268,53 @@ func TestEvaluateFlagsKnowledgeBeyondCutoff(t *testing.T) {
 	assert.Equal(t, VerdictSuspect, finding.Verdict, finding.Evidence)
 }
 
+// 型号指纹是核心维度（权重 3）：Meow 判定出「更像别的型号」时必须一票否决，直接给出
+// 总体不符，不能被协议字段这类容易伪装的维度平均成「可疑」。
+func TestEvaluateFingerprintMismatchTriggersOverallMismatch(t *testing.T) {
+	verdict, score := aggregate([]Finding{
+		{ID: DimProtocol, Verdict: VerdictMatch, Weight: 3},
+		{ID: DimKnowledge, Verdict: VerdictMatch, Weight: 3},
+		{ID: DimFingerprint, Verdict: VerdictMismatch, Weight: 3},
+	})
+	assert.Equal(t, VerdictMismatch, verdict)
+	assert.Equal(t, 66, score)
+}
+
+// 只有一份实测基准时，「最像未建模来源」不足以指控换型号：合成的兜底候选只是一个平坦
+// 分布，任何没基准那么尖的诚实链路都会赢过它。此路只报证据不足并提示复核。
+func TestEvaluateFingerprintSoleBaselineCannotAccuse(t *testing.T) {
+	withRegistry(t, []RegistryEntry{{
+		ID: "test-sole", DisplayName: "单独基准型号", Vendor: "测试",
+		RequestNames: []string{"test-sole"}, BaselineState: BaselineStateReady,
+		BaselineMeta: BaselineMeta{MeasuredAt: "2026-01-01", Source: "测试", SamplesPerProbe: 30},
+		Baseline:     map[string]ProbeCounts{ProbeFruitPick: {"apple": 30}},
+	}})
+	require.Equal(t, 2, len(fingerprintCandidates()),
+		"本用例的前提是收录名单里只有一份实测基准；新增基准后请改测「两份实测基准互相印证」的指控路径")
+	obs := honestObservations()
+	// 基准里 pick_fruit 是 apple 30/30；观测六次全是基准外的 banana，会判给兜底候选。
+	obs.ProbeAnswers = map[string]ProbeCounts{ProbeFruitPick: {"banana": 6}}
+	finding := findingByID(t, Evaluate("test-sole", obs), DimFingerprint)
+	assert.Equal(t, VerdictInconclusive, finding.Verdict, finding.Evidence)
+	assert.Contains(t, finding.Evidence, "只有这一个型号测过基准")
+}
+
+// 归一化：思维链、客套引导句、markdown 围栏都不能被当成答案。
+func TestNormalizeAnswerHandlesThinkingAndGreetings(t *testing.T) {
+	assert.Equal(t, "apple", NormalizeAnswer("apple"))
+	assert.Equal(t, "apple", NormalizeAnswer("Apple\nBecause it is red."))
+	assert.Equal(t, "apple", NormalizeAnswer("Sure! Here is the fruit:\nApple"))
+	assert.Equal(t, "apple", NormalizeAnswer("```\napple\n```"))
+	assert.Equal(t, "apple", NormalizeAnswer("```apple```"))
+	assert.Equal(t, "42", NormalizeAnswer("<think>Thinking about 17 to 83...</think>\n42"))
+	assert.Equal(t, "42", NormalizeAnswer("<think>\nThinking...\n</think>\n42\nNothing else."))
+	assert.Equal(t, "banana", NormalizeAnswer("I choose:\nbanana"))
+	assert.Equal(t, "42", NormalizeAnswer("42:"))
+	// 思维链没闭合（预算被思考吃光）：这次没采到答案，不能记成一个类目。
+	assert.Equal(t, "", NormalizeAnswer("<think>incomplete thinking without close tag"))
+	assert.Equal(t, "", NormalizeAnswer("   "))
+}
+
 func findingByID(t *testing.T, report Report, id string) Finding {
 	t.Helper()
 	for _, finding := range report.Findings {
@@ -256,4 +324,13 @@ func findingByID(t *testing.T, report Report, id string) Finding {
 	}
 	require.FailNowf(t, "missing finding", "%s", id)
 	return Finding{}
+}
+
+// withRegistry 临时替换手写收录名单，用例结束后恢复。这些分支依赖具体基准数据，而仓库里
+// 已经没有手写基准（见 registry.go 的说明），只能用注入的收录项钉住。
+func withRegistry(t *testing.T, entries []RegistryEntry) {
+	t.Helper()
+	original := registry
+	registry = entries
+	t.Cleanup(func() { registry = original })
 }

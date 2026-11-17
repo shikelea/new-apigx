@@ -7437,6 +7437,14 @@
     "High / Accurate (Recommended)": "高档 / 精准 (推荐)",
     "Medium / Balanced": "中档 / 平衡",
     "Low / Fast": "低档 / 快速",
-    "Concurrency": "并发数"
+    "Concurrency": "并发数",
+    "Baseline model": "基准型号",
+    "Request model name": "请求名（发给中转的型号名）",
+    "The name sent upstream. Change it when this relay serves the model under a different name; detection still follows the baseline model.": "实际发给上游的型号名。中转让同一个型号换名字时改这里，判定仍按所选的基准型号走。",
+    "Reading the model list of this target…": "正在读取该目标的型号清单…",
+    "Could not read the model list of this target (no /v1/models, or too many requests). The list was not filtered by what it actually serves; one preflight request will still confirm the name you picked.": "读不到该目标的型号清单（目标不提供 /v1/models，或请求过于频繁）。列表没能按它实际提供什么来过滤，开跑前仍会先用一次请求确认你填的名字在不在。",
+    "This target serves no model we have a calibrated baseline for (aliases included). Try another model name or another target.": "这个中转没有提供「既有实测基准、又确实存在」的型号（含别名）。换一个型号名或换一台目标再试。",
+    "Fill in the target first: only models it really serves and we have a baseline for will be listed.": "填好检测目标后，这里只会列出该目标确实提供、且我们采过基准的型号。",
+    "Baseline models comparable at tier {{tier}}: {{count}}. Names outside this list cannot produce a verdict, because there is no baseline for the same protocol and tier.": "按 {{tier}} 档可比对的基准型号有 {{count}} 个；不在列表里的名字一律测不出结论，因为缺少同协议同档位的基准数据。"
   }
 }

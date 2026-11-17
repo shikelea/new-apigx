@@ -1,6 +1,9 @@
 package modelfp
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // 分布探针。每道题都必须满足四个条件，否则不能用来做指纹：
 //
@@ -78,19 +81,40 @@ var Probes = []Probe{
 	},
 }
 
-// NormalizeAnswer 把一次回答折成类目。只做保守处理：去空白、去包裹标点、转小写。
+// NormalizeAnswer 把一次回答折成类目。只做保守处理：剥掉思维链、逐行跳过客套引导句、
+// 去包裹标点、转小写。取不到答案时返回空串，调用方按「这次没采到样本」丢弃（见
+// relayprobe.collectLegacyProbes），不要把它当成一个类目。
 //
-// 不做同义词合并（"crimson" 不并进 "red"）：合并靠的是我们的主观判断，会把两个型号
-// 的真实差异抹平，而抹平的方向恰好是「让不同模型看起来一样」，正是我们要避免的。
+// 不做同义词合并（"crimson" 不并进 "red"）：合并靠的是我们的主观判断，会把两个型号的
+// 真实差异抹平，而抹平的方向恰好是「让不同模型看起来一样」，正是我们要避免的。
+//
+// 逐行找而不是只看第一行：先推理的型号把答案放在思维链之后，爱客套的型号会先写一句
+// 引导语，上一版直接截第一行，于是 "<think>" 或 "Sure, here you go:" 本身被当成答案，
+// 真实选项全部落进未见类目，分布指纹被这批脏类目污染。
 func NormalizeAnswer(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return ""
 	}
-	// 只取第一行：有些模型会在答案后面另起一行解释。
-	if newline := strings.IndexAny(trimmed, "\r\n"); newline >= 0 {
-		trimmed = trimmed[:newline]
+	lower := strings.ToLower(trimmed)
+	if end := strings.Index(lower, "</think>"); end >= 0 {
+		trimmed = strings.TrimSpace(trimmed[end+len("</think>"):])
+	} else if strings.HasPrefix(lower, "<think>") {
+		// 思维链没有闭合：这次采样全花在思考上，正文为空。空正文不是「答了别的」。
+		return ""
 	}
-	trimmed = strings.Trim(trimmed, " \t\"'`*.,!?:;()[]{}“”‘’「」。，、")
-	return strings.ToLower(strings.TrimSpace(trimmed))
+	// 引导句不是答案，继续看下一行。markdown 围栏与引号由下面的包裹标点一并剥掉
+	// （"```42```" 会得到 "42"，单独一行的 "```" 会变成空行被跳过）。
+	leadIns := []string{"sure", "here is", "here's", "the answer is", "i choose", "i pick", "my choice", "i would pick"}
+	for line := range strings.SplitSeq(trimmed, "\n") {
+		answer := strings.ToLower(strings.Trim(strings.TrimSpace(line), " \t\r`\"'*.,!?:;()[]{}“”‘’「」。，、"))
+		if answer == "" {
+			continue
+		}
+		if slices.ContainsFunc(leadIns, func(prefix string) bool { return strings.HasPrefix(answer, prefix) }) {
+			continue
+		}
+		return answer
+	}
+	return ""
 }

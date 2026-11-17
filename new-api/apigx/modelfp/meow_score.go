@@ -242,6 +242,37 @@ func (pkg *meowPackage) plan(tier, claimed string) (MeowPlan, bool) {
 	return plan, true
 }
 
+// meowAliases 是同一型号在中转上的另一个请求名。上游换名字不换型号：别名不折算到规范
+// 型号，用户填了中转实际用的名字就只会得到「没有实测基准」，而基准包里明明有它。
+// 键是小写、已去掉「vendor/」前缀的别名，值是基准包里的型号 ID。
+var meowAliases = map[string]string{
+	// deepseek-flash 的正式名，2026-10 起中转普遍直接用它。
+	"deepseek-v4.1-flash": "deepseek-flash",
+}
+
+// canonicalMeowName 把别名折算成基准包里的型号 ID；不是别名时原样返回（调用方已小写
+// 并去掉「vendor/」前缀）。
+func canonicalMeowName(name string) string {
+	if canonical, ok := meowAliases[name]; ok {
+		return canonical
+	}
+	return name
+}
+
+// MeowAliases 返回某型号的别名请求名，供接口与前端知道「同一个型号还可能叫什么」：
+// 中转只提供别名时，型号卡片仍然可选，请求名预填那个别名。顺序稳定，便于测试与展示。
+func MeowAliases(modelID string) []string {
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	aliases := make([]string, 0, len(meowAliases))
+	for alias, canonical := range meowAliases {
+		if canonical == id {
+			aliases = append(aliases, alias)
+		}
+	}
+	slices.Sort(aliases)
+	return aliases
+}
+
 // resolveMeowModel 在所有基准包的非参照型号里找与请求名对应的那个。请求名去掉
 // 「vendor/」前缀并小写后，要么与型号 ID 完全相同，要么以型号 ID 开头且下一个字符是
 // 分隔符（gpt-6-sol-2026 对应 gpt-6-sol，但 gpt-6-solar 不对应）。多个命中取最长的。
@@ -263,6 +294,7 @@ func resolveMeowModels(requestName string) ([]*meowPackage, string) {
 	if name == "" {
 		return nil, ""
 	}
+	name = canonicalMeowName(name)
 	bestID := ""
 	for _, pkg := range loadedMeowPackages() {
 		for _, model := range pkg.Models {

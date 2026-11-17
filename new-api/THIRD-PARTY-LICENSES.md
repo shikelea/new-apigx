@@ -152,7 +152,7 @@ Not code dependencies, but they ship inside the binary the same way, so they are
 | Area   | Scope     | Ecosystem   | Data set                                              | Version                                | License                   |
 |--------|-----------|-------------|-------------------------------------------------------|----------------------------------------|---------------------------|
 | backend | embedded | JSON (go:embed) | `meow-llm-detector` official baseline packages (`apigx/modelfp/meowdata/meow-*.meow.json`) | `4.5.4-chat.20260924.1`, `4.5.4-chat.20260924.2`, `4.5.4-predictive.20260924.1`, `4.5.4-predictive.20260924.2` | PolyForm-Noncommercial-1.0.0 |
-| backend | embedded | JSON (go:embed) | self-collected baseline packages (`apigx/modelfp/meowdata/{ab763b91fa29b8a6,f44a29d558ce6899}*`) | `0.1.0-formal-main` | Project-owned, measured through the relay |
+| backend | embedded | JSON (go:embed) | self-collected baseline package and its calibration report (`apigx/modelfp/meowdata/f44a29d558ce6899*`) | `0.1.0-formal-main` | Project-owned, measured through the relay |
 
 The four `meow-*` packages are the reference project's published GPT and Claude
 behavioural baselines (author `chen-006`, declared in each file's `metadata.license`).
@@ -160,8 +160,8 @@ They are used only as comparison data by the model fingerprint dimension. Becaus
 PolyForm-Noncommercial permits distribution only for noncommercial purposes, a build
 that ships these files must stay noncommercial, or the packages must be replaced with
 self-collected equivalents (the CLI is `cmd/fingerprint`) before any commercial release.
-The self-collected packages cover the DeepSeek, Qwen, GLM and Kimi request names and
-carry no third-party restriction.
+The self-collected package covers the DeepSeek, Qwen, GLM and Kimi request names
+and carries no third-party restriction.
 
 ## License Texts
 
